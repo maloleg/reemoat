@@ -63,6 +63,22 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Fixed
 
+- The startup prune deletes only inactive sessions, never below fifty, and says
+  what it removed. It read `created_at`, so a conversation older than seven days
+  from the day it was *opened* was deleted at the next restart however much it
+  was in use — on 2026-09-04 one deploy's restart deleted five of the six
+  conversations it had just stopped, with their transcripts (~50 MB), and the
+  journal held nothing but `restored 1 session(s)`. A session is now swept only
+  when it was ended by a person or by the agent, never started, or given up on
+  because the agent no longer holds the conversation (only a manual Resume
+  tries again) — never a live one, and never one the daemon ended on its own
+  restart or shutdown and is still coming back to, at any age and under any
+  cap — and only once untouched for seven days by its last write; a prune
+  never leaves fewer than fifty rows (`REEMOAT_MIN_SESSIONS`) — the ones it
+  never sweeps first, then pins, then the most recently touched, whatever
+  their age; the two-hundred cap is on the rows nobody is coming back to and
+  takes the least recently touched of them, pins last; and every id that went
+  is printed at startup on its own `store:` line.
 - A valid API-key request no longer answers a plain-text 500 when the
   `last_used_at` bookkeeping write meets a busy database: the write is guarded
   the way the session one already was, so a request that could not record its

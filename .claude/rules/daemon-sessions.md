@@ -100,7 +100,7 @@ the bug fix nothing. The exception is **`resourceNotFound` (-32002) on a resume*
 *agent's* disk, costing no retry budget and gating both automatic paths. The caveat
 is written at the constant — `claude-agent-acp` maps *two* SDK failures onto this
 code and one is a transport hiccup, so a recoverable session can be stranded and the
-way back is one manual `resume`. Q2.6.
+way back is one manual `resume`, until the startup prune takes the row (Q2.222). Q2.6.
 
 **`/clear` breaks resume for that session, and it is not fixed.** Our ACP session id
 does not change and claude forks *underneath* the protocol, so the stored id keeps
@@ -419,8 +419,8 @@ non-goal, with the numbers, at Q7.113.
 
 | | |
 |---|---|
-| Event log | **Unbounded per session.** 128 KiB per event (truncated visibly at the store boundary). `REEMOAT_LOG_EVENTS`/`REEMOAT_LOG_BYTES` still bound it. What bounds the database is whole sessions: 7 days / 200, pruned at startup — which bounds **rows**. Bytes are bounded by `reclaim()`, which `VACUUM`s after a prune once a quarter of the file is free: `auto_vacuum` defaults to NONE and cannot be enabled on an existing database, so without it every deleted transcript kept its pages for ever |
-| Sessions on disk | 7 days / 200. `GET /sessions` unbounded by default, takes `?limit=`, reorders blocked-first so a cut drops only rows nobody waits on |
+| Event log | **Unbounded per session.** 128 KiB per event (truncated visibly at the store boundary). What bounds the database is whole sessions, `prune()` at startup — the next row, every id reported. Q2.222. That bounds **rows**; bytes, by `reclaim()`, which `VACUUM`s once a quarter of the file is free |
+| Sessions on disk | Inactive — ended by a person or the agent, never started, or given up on; never a live or daemon-ended row otherwise — idle 7 days / 200 of them; never under 50. `GET /sessions` unbounded by default, takes `?limit=`, reorders blocked-first so a cut drops only rows nobody waits on |
 | Sessions running | **64 live, and 16 creations then one per 2 min.** Both are needed: the ceiling bounds what is running, the burst bounds create-and-stop, which walks past a ceiling while still writing the rows the prune deletes. `429` before the cwd is resolved, so a refusal costs no filesystem probe. **Resume is deliberately outside it** — putting an agent back in front of an existing conversation is not manufacturing a session. In memory; `REEMOAT_MAX_LIVE_SESSIONS` and friends move them. Q2.100 |
 | WS outbound queue | 8000 events / 16 MiB, with **`ATTACH_REPLAY_MAX` 2000** under the *event* half only — at 128 KiB an event a full replay is 250 MiB, so the byte ceiling still collapses an attach and reports the same `lagged{backlog}` rather than `slow_consumer`. The socket is bounded, the transcript is not |
 | `Session.EventQueue` | 2000, evicting only `agent_log`/`other`. Never drop-oldest: dropping `text` or `file_change` yields a contiguous log missing content. **What it bounds is narrow**: a `ManagedSession` attaches a reader between turns, so the unread window is the gap between `adopt` and `onStarted`, plus any bare `Session` (`harness`, the Session-level drivers) where nothing drains between turns at all. Q2.104 |

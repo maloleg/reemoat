@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 123 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 298 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 130 | `###` |
-| | | **859** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 131 | `###` |
+| | | **861** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 859 rather than the 452
+dividers. So the count is over **both** depths, and it says 861 rather than the 454
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -4682,7 +4682,8 @@ They are in memory; `REEMOAT_MAX_LIVE_SESSIONS` and its siblings move them.
 
 **Why.** `create()` had no bound of any kind, and the only thing counting sessions
 anywhere was the startup prune — which counts in order to **delete**, keeping the
-newest 200 and taking every other transcript with it at the next boot. So the sole
+newest 200 by creation and taking every other transcript with it at the next boot
+(only inactive rows now, and never under fifty — Q2.222 — but still a deletion). So the sole
 consequence of creating sessions without limit was that somebody else's
 conversations disappeared. `sqlite.ts`'s own comment beside that cap had already
 written the precondition down — *"with one person there is nobody to take it
@@ -5567,6 +5568,237 @@ printed *no sign-in needed* and `pnpm client agents recheck` printed *cannot che
 for the same harness in the same state.
 
 **Status.** Fixed.
+
+### Q2.222 — A restart deleted five of the six conversations it was stopping
+
+**Question.** What may the startup prune delete, and when may it delete anything
+at all?
+
+**Measured, 2026-09-04, host `cloud-09fce7b571`, read-only from the prod session.**
+The daemon restarted at 14:46:18 UTC for the v0.6.0 deploy. The journal holds
+`SIGTERM: stopping 6 session(s)` at 14:46:17 and `restored 1 session(s)` at
+14:46:20, and nothing between them. The database now holds one row —
+`s_bd274666`, opened 2026-08-31, last written 14:46:41 — and the file is
+51,060,736 bytes on disk against `page_count × page_size` of 0.6 MB: the shape of
+~50 MB of transcripts deleted in one operation and then vacuumed, which is
+`reclaim()`'s trigger met in one boot. `reclaim()` runs only from `prune()`, after
+its COMMIT, and `prune()` runs only from `openStores`. So the five were not lost on
+the resume path. They were deleted by the store, in the three seconds between the
+two journal lines, before `restore()` ever saw them.
+
+**Root.** The age sweep read `SELECT id FROM sessions WHERE created_at < ? AND
+pinned = 0` with `cutoff = now − 7d`. A conversation was condemned by the date it
+was *opened*, however much it had been used since. Five of the six live sessions
+had been opened before 2026-08-28 14:46; every one of them had been written to
+seconds earlier by `doStop` under SIGTERM, carrying `daemon_shutdown` — the
+daemon's own record that it meant to bring them back — and every one went with its
+transcript. Nothing was logged: the ids `prune()` returns went up to `daemon.ts`
+only to sweep upload directories, and the one `console.error` in the method fired
+for the cap alone.
+
+**Decision. Three rules, and a floor.** The owner's requirement, 2026-09-05: the
+prune deletes *only inactive sessions*; a session the daemon itself stopped and
+meant to restore is never deleted at any age; and nothing at all is deleted while
+the table holds fewer than fifty. **And D27, the owner, 2026-09-05, after the
+verification round**: the fix round's two calls stand — the floor is *kept*, a
+prune never leaving fewer than `minSessions` rows ranked active first, then pins,
+then most recently touched; and the cap bounds *inactive* rows only, so a live or
+daemon-ended row is cut by neither sweep and the table may exceed the cap by its
+active rows — and the hole those two left is closed: a row the daemon has
+given up restoring on its own (`resume_gave_up` holding a value this build
+honours) is not active, whatever its exit says — once it has one.
+
+1. **Only an inactive session is ever deleted, by either rule.** A row is
+   *active* — and the prune never touches it, at any age, under any cap — when
+   it is live (no `exit_json`), when its exit `endedWithDaemon` (the daemon's own
+   promise to bring it back), or when its exit cannot be read: not JSON, not an
+   object, or a `reason` `isExitReason` cannot vouch for. `isExitReason` is new,
+   a `Record<ExitReason, true>` so that a reason a newer build wrote is a value
+   this one may not act on — `compatibility.md`'s rule for which way an unknown
+   must fail, applied to a deletion. Unless the daemon has given it up: a row
+   whose `resume_gave_up` holds a value this build honours (`isPersistedGiveUp`,
+   beside `isExitReason` and for its reason — one it cannot name keeps the row)
+   is one the daemon will not put an agent back on by itself — the column is
+   written only when the agent says it no longer holds the conversation, the
+   one give-up `resumeGiveUpPersists` lets outlive a restart, and
+   `resumeSettled` keeps such a row out of the boot pass and the prompt route
+   alike; only a manual `POST /sessions/:id/resume` still can, and it clears
+   the column when it succeeds — so once it has an exit it is inactive whatever
+   that exit says, while a live row carrying the column is read as live first,
+   since the next boot comes back to it; the promise was the daemon's, and this
+   is the daemon recording that it cannot be kept on its own (D27).
+   `isActiveRow` is the one predicate, for both sweeps, reading both columns in
+   that order, and `DAEMON_EXIT_REASONS` has no copy in SQL. Every other reason
+   is inactive by decision rather than by remainder: `stopped` and
+   `agent_signed_out` were ended by a person (the sign-out has one writer,
+   `signOutSessions` under the logout route, so signing in again is that person
+   asking), `agent_exited` by the agent, `start_failed` and `start_timeout`
+   never had a conversation, and `agent_kill_failed` is a legacy value
+   `autoResumable` brings back on no trigger, so no promise is broken by taking
+   it. The age sweep takes an inactive, unpinned row whose `updated_at`, which
+   `put` stamps on every write that changes the row, is older than `retainMs`.
+   Activity, never creation.
+2. **A prune leaves at least `DEFAULT_MIN_SESSIONS` rows.** Fifty. Rows are
+   ranked active first, then pins, then most recently touched first, and a row
+   within the floor is taken by neither sweep — so a table under fifty loses
+   nothing, and one over it keeps at least fifty: its active rows first, then
+   its pins, then the most recently touched of the rest, however stale.
+   The orphan sweeps still run, since they delete nothing anybody can see, and
+   `reclaim()` still runs, since its trigger — `freelist_count` against
+   `page_count` — counts pages freed by any delete since the last `VACUUM`, not
+   what the prune just took. `REEMOAT_MIN_SESSIONS` moves it, through
+   `positiveInt`, so `1` is the nearest thing to off and `0` reads as unset.
+3. **The cap bounds the rows nobody is coming back to, and never the others.**
+   Among inactive rows, pins first, then most recently touched first, and the
+   rank past `maxSessions` goes: the least recently touched inactive row, a pin
+   only once every unpinned inactive row is gone, a live row or one the daemon
+   is still coming back to never. The table may exceed the cap by exactly its
+   active rows, since no cap could bound those without breaking rule 1. It used
+   to rank by `created_at`, so the newest-*opened* two hundred survived and a
+   conversation opened a month ago and used this morning was cut before an
+   empty one opened yesterday.
+
+**And it says so.** One sentence through `onPruned` after the COMMIT — the count,
+the split between idle and over-the-cap, every id, and that the transcripts went —
+and nothing when nothing was removed. Its own callback rather than `onDegraded`,
+because a prune is the store doing what it was configured to do: `daemon.ts`
+prints one as `store degraded:` on stderr and this as `store:` on stdout with the
+other facts about the boot, and the driver that collects degradations must not
+find a routine deletion among them. Said outside the transaction's `try` and
+guarded on its own, so a sink that throws cannot turn a committed deletion into
+an empty list.
+
+**Why fifty.** A quarter of `DEFAULT_MAX_SESSIONS`, and since the floor is kept
+rather than gated the two bounds never meet whatever either is set to — a floor
+above the cap leaves the cap nothing to cut. ~8 MB per session measured here, so
+fifty is ~0.4 GB — what the floor lets sit on a disk, and nothing beside the
+working trees those sessions were about. One person's dense week is 20–40
+sessions, so a machine in ordinary use stays under it and the sweeps never run
+across the list somebody is still scrolling. Below fifty a list *is* scrolled and
+pruned by hand from the row's own menu; the sweeps are for the tail nobody will
+scroll to.
+
+**What still bounds the file.** The cap, on the rows nobody is coming back to:
+two hundred, pins last, and it is still a deletion — the creation bound in
+`registry.ts` is what keeps a loop from filling it. The rows the daemon is coming
+back to sit outside every bound here, which is rule 1 and cannot be otherwise —
+and the rows it has *given up* coming back to sit inside them, which is D27 and
+closes the one class rule 1 had left unbounded. So the file holds at most the cap
+in inactive rows plus the active ones, and those have bounds of their own: a live
+row counts against `MAX_LIVE_SESSIONS`, and a daemon-ended row was a live one
+under that ceiling, which the next boot restores or gives up. At ~8 MB a session
+the cap is ~1.6 GB of transcripts nobody is coming back to, and the floor's
+~0.4 GB is the part of that which may sit there however stale. And `reclaim()`,
+on bytes, whose condition is independent of what the prune removed and says so in
+its docblock.
+
+**Read back, 2026-09-05, the verification round.** Three verifiers drove the first
+cut of these rules against stores of their own and found the code short of the
+sentences in four places, each of which is a pin now — and the owner's read of
+the fix round found a fifth, and the follow-up's own verifiers a sixth:
+
+- *The cap cut what rule 1 kept.* It ranked `pinned DESC, active DESC` across the
+  whole table and cut past two hundred regardless, so "cut last" was "cut": two
+  hundred pins put every live row and every row the daemon had just stopped over
+  the cap at the next boot, and a hundred and fifty interrupted rows beside
+  fifty-one live ones cut the least recently touched interrupted row. And its
+  `active` was a SQL `CASE` — `json_valid`, then a reason list — so a reason this
+  build cannot name, `null`, a bare string, `{}` and `{"reason":null}` all ranked
+  inactive and were cut while the sweep kept them. The cap ranks inactive rows
+  only now, through the sweep's own predicate, and nothing reads the JSON in SQL.
+- *The floor was a gate.* `count >= minSessions` before any delete: a table of
+  exactly fifty lost forty-nine in one boot, and a cap set under the floor cut
+  under it, while the rule file said "never under 50 rows" and the constant's
+  docblock said the two bounds "never meet". A floor that is *kept* implies the
+  gate and not the other way round, so it is the floor.
+- *`onPruned` was called inside the transaction's `try`.* A sink that threw ran
+  ROLLBACK against a committed transaction, skipped `reclaim()` and returned
+  `[]` over rows that were gone — the list `daemon.ts` sweeps upload directories
+  from. Latent, since `console.log` does not throw.
+- *Four of the nine reasons were swept with nothing saying so*, and the replay
+  was not row for row: its sixth row was live and eight days idle where the
+  incident's was a `daemon_shutdown` opened four days before. Both read as
+  stated above now.
+- *A row the daemon had given up on was active for ever.* Found after the fix
+  round, and closed by the owner's decision D27 (2026-09-05) that kept that
+  round's two calls — the floor kept rather than gated, the cap on inactive
+  rows only — and named the hole they left. `isActiveRow` read `exit_json`
+  alone, so a `daemon_shutdown` row whose next boot wrote `resume_gave_up` (the
+  agent said it no longer held the conversation, the one give-up
+  `resumeGiveUpPersists` keeps across a restart, after which `resumeSettled`
+  takes the row out of both automatic paths) still read as the daemon's promise
+  to come back: swept by no age, counted under no cap, a class nothing bounded
+  and one that grew by a row for every conversation an agent forgot.
+  `isActiveRow` reads both columns now — `resume_gave_up` non-NULL is inactive
+  whatever the exit says — and is driven under both sweeps beside a twin with
+  the column NULL. The one such row the boot pass does still touch is a
+  conversation `conversationKnownEmpty`, which it recreates rather than
+  restores, since the conversation the agent is asked for is empty by
+  construction; what a deletion loses there is the empty conversation the pass
+  would have reopened under the same title and worktree and, for the cleared
+  arm, the events before the marker, which `/clear` truncates nothing of —
+  they go with the row as every inactive row's log does.
+- *Two rows the column alone misread, and a sentence half pinned on nothing.*
+  Found by the follow-up's verifiers, the same day. A live row carrying the
+  column — the shape `doResume` leaves on disk for the length of every
+  recreate, exit cleared and column not yet — was inactive, so a crash inside
+  that window left a row the next boot's prune deleted under the sentence
+  saying a live session never is; `isActiveRow` reads live first now. And any
+  non-NULL value was inactive, on the argument that the store may not read the
+  registry's vocabulary, while the registry reads a value it cannot name as
+  "not given up" and restores the row at boot — so a downgrade from a build
+  persisting a second value would have deleted exactly what the boot pass was
+  coming back to, the rollback case `isExitReason` exists for on the other
+  column. `isPersistedGiveUp` sits in `events.ts` beside it now, and both
+  readers go through it. And the floor half of the one sentence the journal
+  carries was pinned on nothing, so the wording it replaced came back green
+  under a mutation; it is pinned. Both rows are driven under both sweeps.
+
+**Alternatives taken out.**
+
+- *Keying the age sweep on `last_event_at`.* It is NULL for a session that never
+  produced an event and does not move on a rename, a pin or a stop, all of which
+  are somebody touching the conversation. `updated_at` moves on every `put` that
+  changes the row.
+- *Filtering the daemon exits in SQL with `json_extract` in the `WHERE`.* A second
+  copy of `DAEMON_EXIT_REASONS`, and one malformed `exit_json` would have thrown
+  the whole prune into `ROLLBACK`, orphan sweeps included. The cap's ranking read
+  the JSON that way for one commit, guarded by `json_valid` and parameterised from
+  the constant, and that guarded copy is the one that disagreed (above).
+- *Ranking active rows first under the cap and cutting past two hundred
+  regardless.* Bounds the table to exactly two hundred, and makes whether a pin
+  survives depend on how many sessions were live at the last restart — and it is
+  a cap that deletes what rule 1 says is never deleted.
+- *Clamping `REEMOAT_MAX_SESSIONS` up to `REEMOAT_MIN_SESSIONS`.* Unneeded once
+  the floor is kept: a row within it is taken by neither rule, whatever the cap
+  says.
+- *Reporting through `onDegraded`.* The prefix would have read `store degraded:
+  pruned 5 session(s)` over the store doing exactly what it was told, and the
+  `degraded` array `daemoncheck` asserts on would have carried a routine line.
+- *Skipping `reclaim()` under the floor.* Its trigger is about the file, not the
+  transaction; a quarter of the file can be free from `DELETE /sessions/:id` on
+  any day since the last `VACUUM`.
+
+**Driven.** `daemoncheck`, in `daemoncheck.store-and-worktrees.ts`, against a
+store of its own: the incident replayed row for row (five opened eight days ago
+and one four days ago, all six written a minute ago with `daemon_shutdown` — none
+pruned, with and without the floor); every `ExitReason` under a floor of zero, off
+a `Record<ExitReason, "swept" | "kept">` so a tenth reason is a compile error until
+it is placed; forty-nine stale rows under a floor of fifty, then the fiftieth, then
+sixty; a cap under the floor and a floor above the cap; two hundred and eight rows
+whose `updated_at` and `created_at` run in opposite directions, beside eight the
+cap may not touch and each touched less recently than any of them; more active
+rows than the cap, and more pins than the cap; a `daemon_shutdown` row the daemon
+has given up on, under the age sweep and under the cap, each time beside its twin
+with `resume_gave_up` NULL, a live row carrying the column, and a
+`daemon_shutdown` row carrying a value this build cannot name; the one sentence,
+its split and its floor half; a
+sink that throws; the floor and the window through `openStores` with neither
+option given; and the daemon's wiring off the entry script's text. Every pin was
+proven red against the old statement, against the first cut's store, or under a
+one-line mutation.
+
+**Status.** Fixed, 2026-09-05.
 
 ## The web client
 
@@ -16971,8 +17203,7 @@ sanctioned exceptions, and both are places where no callback exists to report
 through:
 
 1. `store/sqlite.ts`'s v6 migration prints when it destroys something — a
-   dropped forge account, a collapsed credential, sessions cut by a cap that
-   used to be per-person.
+   dropped forge account, a collapsed credential.
 2. `src/plugins/runner.ts`'s `unhandledRejection` handler writes to the child's
    own stderr.
 
@@ -16989,9 +17220,12 @@ shows — so the write *is* the report, arriving by the only route there is.
 Deliberately not fatal: a floated promise in one hook must not take a plugin's
 screens down with it.
 
-**Status.** Current — amended when the plugin subsystem landed. The count is
-stated here rather than only in `CLAUDE.md` because a rule with a number in it
-is a rule that goes stale silently, and this is the sentence people quote.
+**Status.** Current — amended when the plugin subsystem landed, and again when
+the migration's third print, sessions cut by a cap that used to be per-person,
+became `onPruned` (Q2.222): the prune reports through a callback of its own now,
+and the migration prints twice. The count is stated here rather than only in
+`CLAUDE.md` because a rule with a number in it is a rule that goes stale
+silently, and this is the sentence people quote.
 
 ### Q4.30 — What is a comment required to say?
 
@@ -18920,8 +19154,10 @@ already records as the untested path.
 #### Q5.49 — Which two log bounds survive, and why are they a different act?
 
 **Rule.** `truncateEvent` still shortens a single oversized event at 128 KiB and
-says so in the text it leaves behind; `SqliteSessionStore.prune` still keeps
-7 days / 200 sessions, removing a session *entire*, with its events.
+says so in the text it leaves behind; `SqliteSessionStore.prune` removes an
+inactive session untouched for 7 days, or one past the 200 cap — never a live or
+daemon-ended one, never under 50 rows (Q2.222) — and removes it *entire*, with
+its events.
 
 **Why.** A local, visible cut is not the removal of something a person wrote.
 The line is: a conversation is kept whole or not at all, never trimmed to a
@@ -19593,8 +19829,8 @@ a clock.
 
 | | |
 |---|---|
-| Event log | **Unbounded per session — a conversation is never truncated.** 128 KiB per event stands (truncated at the store boundary, visibly: one oversized event shortened with `…[truncated N bytes]` left in it, not the removal of anything somebody wrote). `REEMOAT_LOG_EVENTS`/`REEMOAT_LOG_BYTES` still bound it for an operator who wants that, and `daemoncheck` drives eviction with `maxEventsPerSession: 8`, so the path stays exercised. What bounds the database is whole sessions instead — 7 days / 200, pruned at startup: kept whole or not at all, never trimmed to a suffix |
-| Sessions on disk | 7 days / 200 sessions, pruned at startup. `GET /sessions` is unbounded by default and takes `?limit=`, which reorders blocked-first so a cut drops only rows nobody waits on — asserted at both ends of the rank: a pinned row beating other **terminal** rows on restored fixtures (`rowFor` hardcodes `status: "exited"`, so none of that fixture set is live), and a *blocked* row beating a pinned one where a session genuinely blocks, since a restored row can never hold a pending permission |
+| Event log | **Unbounded per session — a conversation is never truncated.** 128 KiB per event stands (truncated at the store boundary, visibly: one oversized event shortened with `…[truncated N bytes]` left in it, not the removal of anything somebody wrote). `REEMOAT_LOG_EVENTS`/`REEMOAT_LOG_BYTES` still bound it for an operator who wants that, and `daemoncheck` drives eviction with `maxEventsPerSession: 8`, so the path stays exercised. What bounds the database is whole sessions instead — inactive ones idle 7 days, or past a cap of 200, pruned at startup, never under 50 rows and never a live or daemon-ended row (Q2.222): kept whole or not at all, never trimmed to a suffix |
+| Sessions on disk | Inactive sessions idle 7 days, or past 200 of them, pruned at startup; never under 50 rows, never a live or daemon-ended one, every id reported (Q2.222). `GET /sessions` is unbounded by default and takes `?limit=`, which reorders blocked-first so a cut drops only rows nobody waits on — asserted at both ends of the rank: a pinned row beating other **terminal** rows on restored fixtures (`rowFor` hardcodes `status: "exited"`, so none of that fixture set is live), and a *blocked* row beating a pinned one where a session genuinely blocks, since a restored row can never hold a pending permission |
 | Changes API | 2000 files, 512 KiB per diff, both reported as `truncated` rather than silently short |
 | git calls | 5s structural, 10s list, 15s status/diff, **120s** `worktree add`. That line said "hooks, LFS smudge" at 30s while both were disabled on this path; they are live now, and a few hundred MB of LFS content would have 504'd the first session |
 | WS outbound queue | 8000 events / 16 MiB, and **`ATTACH_REPLAY_MAX` 2000** under the *event* half only. The queue used to be sized above the log so a `since=0` attach could not overflow; with no log window there is nothing to be larger than, so the *attach* is bounded instead of the history. Past the cap the socket replays the newest 2000 and sends `lagged{reason:"backlog"}`, the one lagged reason that is not a loss: those events are on disk and `GET /sessions/:id/events` serves them. 2000 events can still be 250 MiB against a 16 MiB queue, so the byte ceiling collapses an attach too — and reports the same `backlog` (Q5.48) |
@@ -25719,8 +25955,8 @@ older than a horizon, **and** no sessions left at all. `updated_at` moves only w
 key is *pasted* — nothing touches it on read, and neither `envFor` nor
 `SqliteSystemCredentialStore.get` writes — so the age half is permanently true of any
 key in real use. What was left binding was `NOT EXISTS (SELECT 1 FROM sessions)`,
-which unpinned sessions reach after seven days. **Eight idle days and a restart, and
-the paste is gone**, with nothing on any screen connecting the two. The horizon was
+which unpinned sessions reached after seven days then, by creation (Q2.222 reads
+activity and the exit now). **Eight idle days and a restart, and the paste is gone**, with nothing on any screen connecting the two. The horizon was
 also the *session* horizon, so "how long to keep transcripts" and "how long a secret
 may sit unused" were one number by accident.
 
@@ -26001,3 +26237,58 @@ rehash — the two other writers Q1.629 names as leaving it `NULL` — have to
 be argued about one at a time.
 
 **Status.** Open. An owner semantic; the review deferred it on purpose.
+### Q7.131 — A resume deferred for a missing CLI is never pruned, and that class is unbounded by choice
+
+**Question.** Q2.222 made the startup prune keep every row the daemon ended
+and still means to bring back. One kind of such row never stops being one: a
+resume deferred because the harness's binary is absent. `deferResume` is
+reached from the boot pass through an `AgentUnavailableError` whose
+`installable` bit is set, spends no attempt and reaches no verdict — its
+docblock says why, and Q4.113 measured the day three sessions were marked
+`attempts_exhausted` five minutes before the binary arrived — and it calls
+`touchSafe()`, so `updated_at` is fresh after every boot and after every
+completed agent update that re-drives the pass. Such a row never reaches
+`resume_gave_up`, so under Q2.222 it is active for ever: the inactivity sweep
+does not take it, the cap does not rank it, and the floor counts it. On a
+machine whose CLI is not coming back — a firewalled one where `--source npm`
+is refused too, a binary somebody removed, a plugin harness that is gone —
+every restart turns up to `MAX_LIVE_SESSIONS` live rows into more of them,
+each holding its whole transcript, and the table has no bound there. Measured
+on production, 2026-09-04 14:46:20 UTC: `auto-resume s_bd274666: agent_missing
+— claude is not on this daemon's PATH`, resolved twenty seconds later when
+`deploy/agents.sh` installed claude; the same journal line on a machine where
+the install never lands is this entry.
+
+**Decision, the owner's, asked twice (D28 and D28.1, 2026-09-05).** Keep
+"never". A session the daemon stopped and still means to restore is not
+deleted at any age, deferred or not, and the unbounded class on a machine that
+lost its CLI for good is accepted rather than bounded. The reasoning: the one
+thing the prune exists to never do is delete a conversation the daemon could
+still have put an agent back on, and a machine in that state has a louder
+problem than its database.
+
+**What would bound it, if a bound is wanted later.** Proposed by the
+production session during the review and recorded here as the first
+candidate. An additive column on `sessions`, in `resume_gave_up`'s shape —
+say resume_deferred_since, set at the first deferral and cleared by a
+successful resume — read by the boot pass and **not** by `prune()`: a row
+deferred for longer than `DEFAULT_RETAIN_MS` with the binary still absent gets
+`abandonResume` with a new `ResumeGiveUp` reason, after which Q2.222's rule
+makes it inactive at the boot after. Not `prune()`, because it runs inside
+`openStores` before the pass and knows nothing of any CLI: a clock read there
+would delete, at the first boot after an eight-day sleep, a session the pass
+would have restored a second later — the case the "machine off for a week"
+pin in `daemoncheck` exists for. Under the pass's own hand, nothing is deleted
+before the daemon has looked at it with today's knowledge of the binary, and
+`deferResume`'s "not an attempt and not a verdict" stays literally true: a
+timeout is neither. Cost: one column, one reason, and three pins — the
+`agent_missing` path itself, the clearing on a successful resume, and a
+machine back with its CLI after a long absence losing nothing. The
+alternative, counting a deferral as an attempt after some number of daemon
+lives, needs the same persisted state and breaks that docblock's sentence on
+purpose, so it is the second candidate, not the first.
+
+**Status.** Open by choice. The report `prune()` prints names what was
+removed, so the day this class grows on a machine it will be visible as a
+table that never shrinks rather than as transcripts that vanished.
+

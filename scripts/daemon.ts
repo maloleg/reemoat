@@ -232,12 +232,20 @@ try {
     maxBytesPerSession: positiveInt(process.env["REEMOAT_LOG_BYTES"]),
     retainSessionsMs: (positiveInt(process.env["REEMOAT_SESSION_TTL_DAYS"]) ?? 7) * DAY_MS,
     maxSessions: positiveInt(process.env["REEMOAT_MAX_SESSIONS"]),
+    minSessions: positiveInt(process.env["REEMOAT_MIN_SESSIONS"]),
     // Nothing in src/ prints. This is the only way an operator hears that a store
     // stopped answering — the disk refusing writes, or a row this build cannot read.
     // ⚠ **One sink, four subjects now**: the event log, a session row, a stored key
     // and an assembled agent. Each store's own message names its own subject, so the
     // prefix may not name one — it read "the log is now lossy" over a dropped preset.
     onDegraded: (detail) => console.error(`store degraded: ${detail}`),
+    // What the startup prune deleted, by id, on its own line and on stdout with
+    // the other facts about this boot — it is the store doing what it was told,
+    // not the store degrading, and a sentence beginning "store degraded" over a
+    // routine deletion would read as a fault. Said only when something went: on
+    // 2026-09-04 a restart deleted five of six live conversations and the journal
+    // held nothing but `restored 1 session(s)`, which is the silence this ends.
+    onPruned: (detail) => console.log(`store: ${detail}`),
   });
 } catch (error) {
   console.error(

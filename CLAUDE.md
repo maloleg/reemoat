@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 859 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 861 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -377,9 +377,9 @@ teardown is returned as an unsubscribe function; idempotent shutdown is
 
 **Nothing in `src/` writes to stdout or stderr**, with two sanctioned exceptions.
 `store/sqlite.ts`'s v6 migration prints when it destroys something (a dropped
-forge account, a collapsed credential, sessions cut by a cap that used to be
-per-person). Those happen inside `openStores`, before any callback the daemon
-could have wired, so it is the only moment anybody can be told. And
+forge account, a collapsed credential). Those happen inside `openStores`, before
+any callback the daemon could have wired, so it is the only moment anybody can
+be told. And
 `src/plugins/runner.ts` is the *child* process's entry point rather than the daemon's:
 its `unhandledRejection` handler writes to the stderr `runtime.ts` already
 captures into the ring shown on the plugin's failure row, which is the whole of

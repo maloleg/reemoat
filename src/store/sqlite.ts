@@ -15,9 +15,13 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_EVENTS,
   DEFAULT_MAX_EVENT_BYTES,
+  endedWithDaemon,
   estimateBytes,
+  isExitReason,
+  isPersistedGiveUp,
   truncateEvent,
   type AgentHandle,
+  type ExitReason,
   type EventStore,
   type EventStoreStats,
   type PersistedSession,
@@ -112,8 +116,57 @@ const EVICT_CHUNK = 512;
  */
 const EVICT_MAX_ROUNDS = 8;
 
-const DEFAULT_RETAIN_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_RETAIN_MS = 7 * DAY_MS;
+/**
+ * The most *inactive* rows a startup prune leaves in the table, past the floor
+ * below — and, with that floor, what bounds the file.
+ *
+ * The file holds at most this many inactive rows (or the floor's, where
+ * `REEMOAT_MIN_SESSIONS` is set above it: the floor is kept, and the cap cuts
+ * only past it) plus the active ones, and the active ones have bounds of their
+ * own rather than this one: a live row counts
+ * against `MAX_LIVE_SESSIONS` in `registry.ts`, and a daemon-ended row was a
+ * live one under that ceiling, which the next boot puts an agent back on or
+ * gives up — on its own account, and then it is inactive here (`resume_gave_up`,
+ * D27) unless somebody presses Resume first, or for that boot only, and then it
+ * waits for the next. At the 2026-09-04
+ * incident's ~8 MB a session (Q2.222) two hundred inactive rows is ~1.6 GB of
+ * transcripts nobody is coming back to, and the floor's ~0.4 GB is the part of
+ * that which may sit there however stale. `REEMOAT_MAX_SESSIONS` moves it.
+ */
 const DEFAULT_MAX_SESSIONS = 200;
+/**
+ * The fewest rows a startup prune may leave in the table.
+ *
+ * A floor under both sweeps: rows are ranked active first, then pins, then
+ * most recently touched first, and a row within the floor is taken by neither
+ * rule, whatever its age. So the two bounds never meet, whatever either is set
+ * to — `REEMOAT_MIN_SESSIONS` above `REEMOAT_MAX_SESSIONS` leaves the cap
+ * nothing to cut rather than letting it cut under the floor, which the gate
+ * this replaced allowed: the verification round measured a table of sixty cut
+ * to thirty under a floor of fifty, and a table of exactly fifty cut to one.
+ *
+ * Four numbers put it at fifty. It is a quarter of `DEFAULT_MAX_SESSIONS`. The
+ * 2026-09-04 incident database (Q2.222) held ~50 MB for six sessions, ~8 MB
+ * each, so fifty of them is ~0.4 GB — what the floor lets sit on a disk, and
+ * nothing beside the working trees they were about. One person's dense week is
+ * 20–40 sessions, so a machine in ordinary use stays under it and the sweeps
+ * never run across the conversations somebody is still scrolling through. And
+ * below fifty a list *is* scrolled, and pruned by hand from the row's own
+ * menu; the sweeps are for the tail nobody will ever scroll to, not for the
+ * list they are looking at.
+ *
+ * `REEMOAT_MIN_SESSIONS` moves it. Read through `positiveInt`, so `0` is not a
+ * way to switch it off — `1` is the nearest thing to off. The floor then
+ * protects one row, and since it ranks active rows first that row is an active
+ * one whenever there is any, which rule 1 keeps regardless: with a session live
+ * the floor adds nothing, and only an all-inactive table keeps its most recently
+ * touched row by it. ⚠ `.env.example` and this docblock said `1` keeps "the
+ * newest row", which the ranking above does not promise while anything is
+ * active.
+ */
+export const DEFAULT_MIN_SESSIONS = 50;
 
 
 export interface OpenStoresOptions {
@@ -125,6 +178,8 @@ export interface OpenStoresOptions {
   maxEventBytes?: number | undefined;
   retainSessionsMs?: number | undefined;
   maxSessions?: number | undefined;
+  /** The fewest rows the startup prune leaves in the table. See `DEFAULT_MIN_SESSIONS`. */
+  minSessions?: number | undefined;
   /**
    * Fired once, on the transition into degraded.
    *
@@ -132,6 +187,18 @@ export interface OpenStoresOptions {
    * way an operator hears that the disk stopped accepting writes.
    */
   onDegraded?: ((detail: string) => void) | undefined;
+  /**
+   * What the startup prune removed, as one sentence, and only when it removed
+   * something.
+   *
+   * Its own sink rather than `onDegraded`, because a prune is the store doing
+   * what it was configured to do and not the store failing: `daemon.ts` prints
+   * the one as `store degraded:` and this as `store:`, and a driver collecting
+   * degradations must not find a routine deletion among them. It exists because
+   * the 2026-09-04 incident deleted five conversations with nothing in the
+   * journal but a resume count that did not add up (Q2.222).
+   */
+  onPruned?: ((detail: string) => void) | undefined;
 }
 
 export interface StoreBundle {
@@ -242,10 +309,11 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   // this build has run against this file".
   stampSchemaVersion(db);
 
-  const sessions = new SqliteSessionStore(db, options.onDegraded);
+  const sessions = new SqliteSessionStore(db, options.onDegraded, options.onPruned);
   const prunedSessions = sessions.prune({
     retainMs: options.retainSessionsMs ?? DEFAULT_RETAIN_MS,
     maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,
+    minSessions: options.minSessions ?? DEFAULT_MIN_SESSIONS,
   });
 
   const events = new SqliteEventStore(db, {
@@ -524,8 +592,11 @@ function migrateCredentialsToV6(db: DatabaseSync): void {
   }
 
   // Counted before it is dropped, because after the DROP there is nothing left to
-  // count and nobody to tell. This is the one place in `src/` that prints, and it
-  // earns the exception: the alternative is destroying a credential somebody
+  // count and nobody to tell. This is one of the two prints in this file — the
+  // collapsed-credential one above is the other — and together they are one of
+  // the two sanctioned exceptions in `src/`, `src/plugins/runner.ts`'s stderr
+  // write being the other (Q4.29); it earns the exception: the alternative is
+  // destroying a credential somebody
   // minted, silently, on an upgrade they did not know did that.
   const forgeRows = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='forge_accounts'").all();
   if (forgeRows.length > 0) {
@@ -977,8 +1048,19 @@ function decodeRow(row: Record<string, unknown>): StoredEvent {
  * ------------------------------------------------------------------------- */
 
 export interface PruneOptions {
+  /** How long an *inactive* session may go untouched before the age sweep may take it. */
   retainMs: number;
+  /**
+   * The most rows nobody is coming back to that the table may hold after a
+   * prune. Live rows, and the ones the daemon is still coming back to, sit
+   * outside it, so the table may exceed it by exactly those.
+   */
   maxSessions: number;
+  /**
+   * The fewest rows a prune may leave. Ranked active first, then pins, then
+   * most recently touched first; a row within it is taken by neither sweep.
+   */
+  minSessions: number;
 }
 
 export class SqliteSessionStore implements SessionStore {
@@ -1004,6 +1086,12 @@ export class SqliteSessionStore implements SessionStore {
      * in `src/`. An agent that outlived the daemon's death then keeps running.
      */
     private readonly onDegraded: ((detail: string) => void) | undefined = undefined,
+    /**
+     * Where `prune()` says what it removed. See `OpenStoresOptions.onPruned` for
+     * why it is not `onDegraded`; it fires after the COMMIT, so the sentence is
+     * never about a deletion that rolled back, and not at all when nothing went.
+     */
+    private readonly onPruned: ((detail: string) => void) | undefined = undefined,
   ) {
     // `agent`, `created_at` and the workspace's identity are absent from the DO
     // UPDATE clause on purpose: they are immutable identity, and an upsert that
@@ -1115,10 +1203,94 @@ export class SqliteSessionStore implements SessionStore {
   }
 
   /**
-   * Drops sessions past either bound, then sweeps events belonging to no session.
+   * Drops sessions nobody is coming back to, past a bound, then sweeps events
+   * belonging to no session — and says what it did.
    *
    * Without this `registry.list()` grows without limit and `GET /sessions` ends
    * up serializing every session the machine has ever run.
+   *
+   * ⚠ **Three rules, and each is the 2026-09-04 incident read back.** On host
+   * `cloud-09fce7b571`, the restart at 14:46:18 UTC for the v0.6.0 deploy logged
+   * `SIGTERM: stopping 6 session(s)` at 14:46:17 and `restored 1 session(s)` at
+   * 14:46:20. The five in between were not lost on the resume path: **this
+   * method deleted them**, with their transcripts, inside `openStores`, in the
+   * three seconds between those two lines. The age sweep read `created_at < ?
+   * AND pinned = 0` with a seven-day cutoff, so a conversation was condemned by
+   * the date it was *opened*, however much it had been used since — five of the
+   * six had been opened before 2026-08-28 14:46, and every one of the five had
+   * been written seconds earlier by the daemon's own SIGTERM handler, carrying
+   * `daemon_shutdown` and every intention of restoring it. Nothing was logged:
+   * the ids went up to `daemon.ts` only to sweep upload directories. What was
+   * left was one row (`s_bd274666`, opened 2026-08-31) and a file of 51,060,736
+   * bytes on disk against 0.6 MB of pages — the shape of ~50 MB of transcripts
+   * deleted in one operation and vacuumed by `reclaim()`. Q2.222.
+   *
+   *   1. **Only an inactive session is ever deleted, by either rule.** A row is
+   *      *active* — and nothing here touches it, at any age, under any cap —
+   *      when it is live (no `exit_json`), when its exit `endedWithDaemon` (the
+   *      daemon's own promise to bring it back: a machine put down for a week
+   *      must come back holding its conversations), or when its exit cannot be
+   *      read — not JSON, not an object, or a `reason` this build cannot name
+   *      (`isExitReason`) — because a deletion may not be decided from a value
+   *      it cannot read. **Unless the daemon has given it up**: a row whose
+   *      `resume_gave_up` holds a value this build honours (`isPersistedGiveUp`
+   *      — one it cannot name keeps the row, as an exit it cannot read does) is
+   *      one the daemon will not put an agent back on by itself — the column is
+   *      written only when the agent says it no longer holds the conversation,
+   *      and `resumeSettled` keeps such a row out of the boot pass and the
+   *      prompt route alike; only a manual `POST /sessions/:id/resume` still
+   *      can, and it clears the column when it succeeds — so once it has an
+   *      exit it is inactive whatever that exit says, and a live row carrying
+   *      the column is still live: the next boot comes back to it first. The
+   *      promise above was the daemon's, and this is the daemon recording that
+   *      it cannot be kept on its own; without it a
+   *      `daemon_shutdown` row the next boot gave up on was active for ever,
+   *      never swept and never counted under the cap, an unbounded class (D27,
+   *      2026-09-05). Everything else is inactive, and that is a decision per
+   *      reason rather than a remainder: `stopped` and `agent_signed_out` were
+   *      ended by a person (the sign-out has one writer, the explicit logout
+   *      route), `agent_exited` by the agent, `start_failed` and
+   *      `start_timeout` never had a conversation, and `agent_kill_failed` is
+   *      a legacy value `autoResumable` answers `no` to on both triggers, so
+   *      no promise is broken by taking it. `isActiveRow` is that predicate, in
+   *      one place for both sweeps, read *here* in TypeScript off both columns
+   *      so that `DAEMON_EXIT_REASONS` has no second copy in SQL. The age sweep
+   *      takes an inactive, unpinned row whose `updated_at` — which `put`
+   *      stamps on every write that changes the row — is older than
+   *      `retainMs`: activity, never creation.
+   *   2. **A prune leaves at least `minSessions` rows, whatever their age.**
+   *      Rows are ranked active first (never cut), then pins, then most
+   *      recently touched first, and a row ranked within the floor is taken by
+   *      neither sweep — so a table under fifty rows loses nothing at all, and
+   *      one over it keeps at least fifty: its active rows first, then its
+   *      pins, then the most recently touched of the rest, however stale. Fifty
+   *      sessions is a list somebody scrolls and prunes by hand; the sweeps are
+   *      for the tail nobody will. The orphan sweeps below run regardless,
+   *      since they delete nothing anybody can see. ⚠ **This was a gate on the
+   *      count before any delete, and the verification round read it back as a
+   *      floor bypass**: fifty rows let the sweep run, and it could take
+   *      forty-nine of them in one boot, while the rule file said "never under
+   *      50 rows". A floor that is *kept* implies the gate, and not the other
+   *      way round, so it is the floor.
+   *   3. **The cap bounds the rows nobody is coming back to, and never the
+   *      others.** Among inactive rows: pins first, then most recently touched
+   *      first, and the rank past `maxSessions` goes — so what it cuts is the
+   *      least recently touched inactive row, a pin only once every unpinned
+   *      inactive row is gone, and a live row, or one the daemon is still
+   *      coming back to, never. The table may therefore exceed the cap by
+   *      exactly its active rows, since no cap could bound those without
+   *      breaking rule 1. ⚠ **It ranked `pinned
+   *      DESC, active DESC` across the whole table and cut past the cap
+   *      regardless, and the docblock called that "cut last".** Measured in
+   *      the verification round: two hundred pins put every live row and every
+   *      row the daemon had just stopped over the cap at the next boot, and the
+   *      SQL `CASE` behind `active` ranked a reason this build cannot name as
+   *      inactive — the rollback case `isExitReason` exists for — so the cap
+   *      cut what rule 1 kept.
+   *
+   * **And it says so.** One sentence through `onPruned` — the count, the split
+   * between idle and over-the-cap, every id, and that the transcripts went with
+   * them — and nothing at all when nothing was removed.
    *
    * **Returns the ids it removed**, which is not bookkeeping for its own sake:
    * a pruned session's staged uploads are *files*, and the SQL below can only
@@ -1126,86 +1298,109 @@ export class SqliteSessionStore implements SessionStore {
    * exists, so the directories have to be swept by somebody who is handed this
    * list rather than by moving the call — moving it would break the ordering that
    * docblock spends four paragraphs establishing. Empty on a rollback, which is
-   * the honest answer: nothing was deleted, so nothing should be swept.
+   * the honest answer: nothing was deleted, so nothing should be swept — and
+   * never empty because the *sink* threw, which is why the sentence is said
+   * outside the transaction's `try` below.
    */
   prune(options: PruneOptions): string[] {
     const cutoff = Date.now() - options.retainMs;
+    const stale: string[] = [];
+    const excess: string[] = [];
     // One transaction, not for atomicity — each statement is already atomic — but
     // so the WAL takes one commit instead of several.
     this.db.exec("BEGIN");
     try {
       /*
-       * **A pin survives the age sweep**, and it did not.
+       * The whole table, read once and classified in TypeScript. Off the table
+       * rather than through `list()`, because a row `fromRow` drops is still a
+       * row on disk and still a conversation somebody could roll back to — the
+       * floor is about what the file holds, and so is the cap. Two hundred rows
+       * once per boot; ranking in SQL bought nothing but a second copy of the
+       * classification, which is the copy that disagreed (rule 3 above).
        *
-       * `server.ts`'s `listRank` already treats a pin as durable, with the reason
-       * written out: "a `?limit=` cut that dropped it would make the pin a lie".
-       * This statement made it a lie by a slower route — the API cut kept a pinned
-       * session and the startup prune deleted it, with its whole transcript, at
-       * seven days. Two halves of one system disagreeing about what a pin means,
-       * and the disagreeing half was the destructive one.
+       * Rule 1. **A pin survives the inactivity sweep**, and once it did not
+       * survive the age sweep this replaced.
        *
-       * The bound is not lost, it moves to the count cap below: pins rank first
-       * there, so a tenant can hold at most `maxSessions` of them and the table
-       * stays as bounded as it was. Unbounded retention would be the other way to
-       * read "keep this", and it is the one that lets one person's bookmarks
-       * become everyone's disk.
+       * `server.ts`'s `listRank` already treats a pin as durable, with the
+       * reason written out: "a `?limit=` cut that dropped it would make the
+       * pin a lie". The old statement made it a lie by a slower route — the API
+       * cut kept a pinned session and the startup prune deleted it, with its
+       * whole transcript, at seven days. Two halves of one system disagreeing
+       * about what a pin means, and the disagreeing half was the destructive
+       * one.
+       *
+       * A pin survives the inactivity sweep, not the cap. Under the cap it
+       * ranks first among the *inactive* rows, so it goes only after every
+       * unpinned inactive row has gone — and the cap bounds inactive rows
+       * only, while the table exceeds it by its active ones (rule 3). So what
+       * "keep this" buys is a place at the head of the queue, never a place
+       * outside it: unbounded retention would be the other way to read it, and
+       * it is the one that lets one person's bookmarks become everyone's disk.
+       *
+       * Rule 3. A plain cap across the table again. It was partitioned by owner
+       * while one daemon served several people, because a global bound is a
+       * *shared* one and somebody creating sessions in a loop would silently
+       * delete everybody else's transcripts.
+       *
+       * ⚠ **That sentence used to end "with one person there is nobody to take
+       * it from", and it was the bug report.** A grant is `(user_id,
+       * machine_id)` and `POST /v1/tokens` mints for any holder, so the moment
+       * a machine is shared there is somebody to take it from — and the loop it
+       * describes was reachable, because `registry.create()` had no bound of
+       * any kind. Restoring the partition is not the repair and cannot be:
+       * `owner_subject` is no longer written (see the note by `putStmt`), so
+       * partitioning by it yields one group, i.e. exactly this statement. What
+       * was missing was a bound on *creation*, and it now lives at the only
+       * place that can hold one — `MAX_LIVE_SESSIONS` and
+       * `SESSION_CREATE_BURST` in `registry.ts`, refusing with 429 before a
+       * worktree exists. This cap stays what it always was: the bound on the
+       * table's inactive rows, not a defence against whoever filled it.
+       *
+       * **The ranking is pins, then activity, then recency — and it used to be
+       * pins then `created_at`.** Ranked by creation, the cap kept the
+       * newest-*opened* two hundred, so a conversation opened a month ago and
+       * used this morning was cut before an empty one opened yesterday. Now
+       * `updated_at DESC` — activity, which `put` stamps on every write that
+       * changes the row — with `created_at DESC` only as the tie-break that
+       * makes the cut deterministic, and `id` under that so it is total. ⚠ For
+       * one round the `id` term was this sentence and not a term in the
+       * comparator. The order held anyway — the rows arrive `ORDER BY id` and
+       * the sort is stable — but a total order that rests on how the rows
+       * happened to arrive is a claim the comparator should make itself. For
+       * the same two reasons the term is unobservable while the SELECT keeps
+       * `ORDER BY id`: the rows arrive in the order it would impose, so no
+       * input can make it change one, and no driver is spent on it. It is here
+       * so that the order is total on the comparator's own terms, whatever the
+       * query becomes.
        */
-      const stale = this.db
-        .prepare("SELECT id FROM sessions WHERE created_at < ? AND pinned = 0")
-        .all(cutoff)
-        .map((row) => String(row["id"]));
-      // A plain cap across the table again. It was partitioned by owner while one
-      // daemon served several people, because a global bound is a *shared* one and
-      // somebody creating sessions in a loop would silently delete everybody
-      // else's transcripts.
-      //
-      // ⚠ **That sentence used to end "with one person there is nobody to take it
-      // from", and it was the bug report.** A grant is `(user_id, machine_id)` and
-      // `POST /v1/tokens` mints for any holder, so the moment a machine is shared
-      // there is somebody to take it from — and the loop it describes was
-      // reachable, because `registry.create()` had no bound of any kind. Restoring
-      // the partition is not the repair and cannot be: `owner_subject` is no
-      // longer written (see the note by `putStmt`), so partitioning by it yields
-      // one group, i.e. exactly this statement. What was missing was a bound on
-      // *creation*, and it now lives at the only place that can hold one —
-      // `MAX_LIVE_SESSIONS` and `SESSION_CREATE_BURST` in `registry.ts`, refusing
-      // with 429 before a worktree exists. This cap stays what it always was: the
-      // bound on the table, not a defence against whoever filled it.
-      //
-      // `pinned DESC` first, so a pin outranks recency here exactly as it does in
-      // `listRank` — and so that this cap is what bounds pinned rows now that the
-      // age sweep above no longer touches them.
-      const excess = this.db
-        .prepare(
-          "SELECT id FROM (" +
-            "SELECT id, ROW_NUMBER() OVER (" +
-            "  ORDER BY pinned DESC, created_at DESC" +
-            ") AS n FROM sessions" +
-            ") WHERE n > ?",
-        )
-        .all(options.maxSessions)
-        .map((row) => String(row["id"]));
-
-      // **Said out loud, because this cap changed meaning and the change is
-      // destructive.** It used to be `PARTITION BY COALESCE(owner_subject, ?)`,
-      // i.e. `maxSessions` *per person*; it is now `maxSessions` across the file.
-      // `prune()` runs unconditionally inside `openStores`, so the first boot
-      // after the v6 upgrade applies the narrower bound to a database that was
-      // filled under the wider one — and each row it cuts takes its whole
-      // transcript with it. On a box that only ever had one person this is
-      // silent because it never fires. On one that did not, it is the largest
-      // irreversible thing this upgrade does, and it was the only part saying
-      // nothing.
-      if (excess.length > 0) {
-        console.error(
-          `Reemoat: pruned ${excess.length} session(s) over the ${options.maxSessions}-session cap, ` +
-            "with their transcripts. Pinned sessions rank first and are kept; if this database was " +
-            "written when the daemon served several people, that cap is now shared rather than per-person.",
+      const rows = this.db
+        .prepare("SELECT id, pinned, exit_json, resume_gave_up, updated_at, created_at FROM sessions ORDER BY id")
+        .all();
+      const inactive = rows
+        .filter((row) => !isActiveRow(row))
+        .sort(
+          (a, b) =>
+            Number(b["pinned"]) - Number(a["pinned"]) ||
+            Number(b["updated_at"]) - Number(a["updated_at"]) ||
+            Number(b["created_at"]) - Number(a["created_at"]) ||
+            (String(a["id"]) < String(b["id"]) ? -1 : String(a["id"]) > String(b["id"]) ? 1 : 0),
         );
-      }
+      const active = rows.length - inactive.length;
+      inactive.forEach((row, index) => {
+        // Rule 2. The row's rank across the whole table, active rows first: a
+        // rank within the floor is kept by both sweeps, whatever else is true
+        // of it, so what is left after a prune is never under `minSessions`.
+        const rank = index + 1;
+        if (active + rank <= options.minSessions) return;
+        const id = String(row["id"]);
+        // Rule 1 before rule 3: a row both idle and over the cap is counted as
+        // idle, because that is the rule that would have taken it at any table
+        // size. The report below reads the split off these two lists.
+        if (!Number(row["pinned"]) && Number(row["updated_at"]) < cutoff) stale.push(id);
+        else if (rank > options.maxSessions) excess.push(id);
+      });
 
-      const removed = [...new Set([...stale, ...excess])];
-      for (const id of removed) {
+      for (const id of [...stale, ...excess]) {
         this.removeEventsStmt.run(id);
         this.removeSessionStmt.run(id);
         this.lastWritten.delete(id);
@@ -1273,15 +1468,14 @@ export class SqliteSessionStore implements SessionStore {
        * What it cost was concrete. The age clause read `updated_at`, which moves
        * only on a paste, so it was permanently true of any key in real use and the
        * rule collapsed to `NOT EXISTS (SELECT 1 FROM sessions)` — eight idle days,
-       * since unpinned sessions age out at seven. A machine put down over a
-       * holiday came back with its tokens gone and nothing on screen saying why.
+       * since unpinned sessions aged out at seven then, by creation. A machine
+       * put down over a holiday came back with its tokens gone and nothing on
+       * screen saying why.
        *
        * The protection here is what it has always been and what the rest of this
        * file relies on: the 0700 directory and the 0600 file. See Q7.124.
        */
       this.db.exec("COMMIT");
-      this.reclaim();
-      return removed;
     } catch {
       try {
         this.db.exec("ROLLBACK");
@@ -1290,13 +1484,55 @@ export class SqliteSessionStore implements SessionStore {
       }
       return [];
     }
+    const removed = [...stale, ...excess];
+    /*
+     * Said after the COMMIT, so it is never said about a deletion that rolled
+     * back, and said once. The split is by which rule took the row. This
+     * replaces a `console.error` that fired only for the cap and said nothing
+     * about the age sweep — which is how the 2026-09-04 deletion left no line
+     * at all. It still names what that line named: the cap is across the file,
+     * not per person, and a database written when the daemon served several
+     * people meets a narrower bound than it was filled under.
+     *
+     * ⚠ **Outside the `try` above, and guarded on its own.** It sat inside,
+     * between the COMMIT and the `return`, so a sink that threw landed in the
+     * catch: a ROLLBACK attempted against a committed transaction, `reclaim()`
+     * skipped, and `[]` returned over rows that were in fact gone — so the
+     * upload directories of the deleted sessions were never swept, and nothing
+     * was printed either. Latent while the only sink was `console.log`, and
+     * read rather than hit; the guard is what makes the returned list mean what
+     * the docblock says it means whatever the sink does.
+     */
+    if (removed.length > 0) {
+      const parts: string[] = [];
+      if (stale.length > 0) {
+        parts.push(`${stale.length} idle past ${describeRetain(options.retainMs)} (${stale.join(", ")})`);
+      }
+      if (excess.length > 0) {
+        parts.push(`${excess.length} over the ${options.maxSessions}-session cap (${excess.join(", ")})`);
+      }
+      try {
+        this.onPruned?.(
+          `pruned ${removed.length} session(s) with their transcripts: ${parts.join("; ")}. ` +
+            "A live session, or one the daemon is still coming back to, is never pruned, a pin goes only after every other inactive row, " +
+            `and at least ${options.minSessions} rows stay at any age — active first, then pins, then the most recently touched; ` +
+            "the cap is across the whole file, not per person.",
+        );
+      } catch {
+        // The rows went at the COMMIT and this is only the telling of it: a sink
+        // that throws may not cost the caller the list of what is gone, nor the
+        // reclaim below.
+      }
+    }
+    this.reclaim();
+    return removed;
   }
 
   /**
    * Give the deleted pages back to the filesystem, sometimes.
    *
    * ⚠ **Pruning bounded the rows and nothing bounded the bytes.**
-   * `.claude/rules/daemon-sessions.md` says "what bounds the database is whole
+   * `.claude/rules/daemon-sessions.md` said "what bounds the database is whole
    * sessions: 7 days / 200, pruned at startup" — true of rows, and the file on
    * disk only ever grew. SQLite's `auto_vacuum` defaults to NONE and **cannot be
    * turned on for a database that already exists** without a full rebuild, so
@@ -1316,6 +1552,16 @@ export class SqliteSessionStore implements SessionStore {
    * daemon that deleted nothing. A quarter of the file free is the trigger: high
    * enough that ordinary churn never reaches it, low enough that a fleet of
    * expired sessions does.
+   *
+   * **The trigger is independent of what `prune()` just removed, which is why it
+   * still runs under the floor.** It reads `freelist_count` against
+   * `page_count`, and those count pages freed by *any* delete since the last
+   * `VACUUM` — `remove()` from `DELETE /sessions/:id` on any day, the event
+   * eviction an operator switched on, a prune from a boot months ago — not the
+   * rows the transaction above took. So a boot that pruned nothing can still
+   * rewrite a file a quarter of which is free, and one that pruned five rows of a
+   * hundred may correctly leave it alone. `prune()` calls this on every path
+   * that commits, including the one where the floor stopped both sweeps.
    *
    * Best-effort by construction. A failure here — no room for the copy, a
    * filesystem that will not — costs a database that is larger than it needs to
@@ -1541,6 +1787,94 @@ function toPositiveInt(value: unknown, min: number): number | null {
   if (value == null) return null;
   const n = Number(value);
   return Number.isInteger(n) && n >= min ? n : null;
+}
+
+/**
+ * The exit reason on a row, read for the prune and for nothing else.
+ *
+ * `null` for a NULL column, for a value that is not JSON, for JSON that is not
+ * an object, and for a `reason` this build cannot name — and `isActiveRow`
+ * keeps a row on every one of those — a NULL column outright, and the other
+ * three unless `resume_gave_up` says the daemon has given it up, which is read
+ * between the two — so on this column "I cannot read it" and "it is fine" are
+ * deliberately the same answer. Not `fromRow`, which drops the row for an
+ * agent it does not know and repairs the handle on the way, neither of which a
+ * deletion may depend on.
+ */
+function readExitReason(exitJson: unknown): ExitReason | null {
+  if (typeof exitJson !== "string") return null;
+  try {
+    const parsed: unknown = JSON.parse(exitJson);
+    if (parsed === null || typeof parsed !== "object") return null;
+    const reason = (parsed as { reason?: unknown }).reason;
+    return isExitReason(reason) ? reason : null;
+  } catch {
+    // Not JSON. A row this daemon cannot read is a row it may not delete.
+    return null;
+  }
+}
+
+/**
+ * Whether `prune()` may not touch this row, under either of its rules.
+ *
+ * Two columns, read in this order. A live row — `exit_json` NULL — is active
+ * whatever else is on it. ⚠ The give-up clause below was read first for one
+ * round, and the daemon writes exactly that shape for the length of every
+ * recreate: `doResume` clears the exit and persists before the launch, and
+ * `onResumed` clears the column only after it, so a crash inside that window
+ * left a row the next boot's prune could delete, under a report sentence saying
+ * a live session never is. Read live first, the row is what the sentence says:
+ * the next boot marks it `daemon_restarted` and either puts an agent back on it
+ * or, with the column set and the conversation not empty, leaves it a
+ * daemon-ended row the column makes inactive at the boot after — so keeping it
+ * bounds nothing less. Then `resume_gave_up`: a value `isPersistedGiveUp`
+ * honours is a row the daemon has stopped trying to put an agent back on by
+ * itself. The column is written only when the agent says it no longer holds
+ * the conversation (`schema.sql`, `resumeGiveUpPersists`), and `resumeSettled`
+ * takes a row carrying it out of both automatic paths — the boot pass and the
+ * prompt route. What is left is a manual `POST /sessions/:id/resume`, which has
+ * no such gate and clears the column when it succeeds, and that door closes
+ * when the prune takes the row. Such a row is inactive whatever its exit says,
+ * and it has to be: a give-up the boot pass writes sits over the exit the
+ * shutdown before it wrote, a daemon one, so read off `exit_json` alone that
+ * row was active for ever — never swept, never counted under the cap, a class
+ * nothing bounded (D27, 2026-09-05). Only the value this build honours, not any
+ * non-NULL: ⚠ it was any non-NULL for one round, on the argument that this
+ * file may not read the registry's vocabulary — while the registry reads a
+ * value it cannot name as "not given up" and puts an agent back on the row at
+ * boot, so the prune was deleting, on the rollback `isExitReason` exists for,
+ * exactly what the boot pass was coming back to. The predicate lives in
+ * `events.ts` now, beside `isExitReason`, and an unreadable value keeps the row
+ * on both columns. The one such row the boot pass does still touch is a
+ * conversation `conversationKnownEmpty` — never a turn, or cleared and unused —
+ * which it recreates rather than restores, since the conversation the agent is
+ * asked for is empty by construction. What a deletion loses there is the empty
+ * conversation the pass would have reopened under the same title and worktree,
+ * and, for the cleared arm, the events before the marker: `/clear` appends the
+ * marker and truncates nothing, so the log still holds them and
+ * `GET /sessions/:id/events` still serves them, and they go with the row as
+ * every inactive row's log does.
+ *
+ * Otherwise true for one whose exit `endedWithDaemon` — the daemon's own
+ * promise to bring it back — and for one whose exit cannot be read
+ * (`readExitReason`). The one predicate for both the age sweep and the cap,
+ * because when the cap carried its own copy as a SQL `CASE` it ranked a reason
+ * this build cannot name as inactive and cut what the sweep kept (Q2.222, the
+ * verification round). Rule 1 in `prune()`'s docblock says why each of the
+ * other six reasons is inactive.
+ */
+function isActiveRow(row: Record<string, unknown>): boolean {
+  const exitJson = row["exit_json"];
+  if (exitJson === null || exitJson === undefined) return true;
+  if (isPersistedGiveUp(row["resume_gave_up"])) return false;
+  const reason = readExitReason(exitJson);
+  return reason === null || endedWithDaemon({ reason });
+}
+
+/** `retainMs` as the prune's one line says it. */
+function describeRetain(ms: number): string {
+  const days = ms / DAY_MS;
+  return `${Number.isInteger(days) ? days : days.toFixed(1)} day(s)`;
 }
 
 /**

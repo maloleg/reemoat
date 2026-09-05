@@ -249,7 +249,8 @@ CREATE TABLE IF NOT EXISTS identity (
 -- that it is gone.** It cost a real thing and bought an argued one: `updated_at`
 -- moves only on a paste, so the age half was permanently true of any key in use
 -- and the rule collapsed to "no sessions left" — eight idle days, since unpinned
--- sessions age out at seven. A machine put down over a holiday came back with its
+-- sessions aged out at seven then, by creation. A machine put down over a holiday
+-- came back with its
 -- tokens gone. Against that, deleting a local copy revokes nothing at the vendor,
 -- and `identity.tunnel_key` sits in this same file with no sweep at all, so the
 -- file carries a live secret either way. Q7.124 has the whole argument.

@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   MemoryEventStore,
   oldestAvailable,
+  type ExitReason,
   type PersistedSession,
   type SessionEvent,
   type SessionWorkspace,
@@ -21,7 +22,7 @@ import { GitError, hostGit, type GitExec, type GitRun } from "../src/git.js";
 import { SessionRegistry } from "../src/registry.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { createApp } from "../src/server.js";
-import { SCHEMA_VERSION, openStores } from "../src/store/sqlite.js";
+import { DEFAULT_MIN_SESSIONS, SCHEMA_VERSION, openStores } from "../src/store/sqlite.js";
 import { createWorkspace, inspectRepo, removeWorkspace, WorktreeError } from "../src/worktree.js";
 import { tmp } from "./tmp.js";
 import { check } from "./daemoncheck.env.js";
@@ -368,19 +369,28 @@ process.stdout.write("\nthe database, across a restart\n");
   check("and really removes it", second.credentials.envFor("kimi"), {});
 
   /*
-   * **A pin survives the age sweep**, and it did not.
+   * **A pin survives the inactivity sweep**, and once it did not survive the age
+   * sweep this replaced.
    *
    * `server.ts`'s `listRank` already treats a pin as durable — "a `?limit=` cut
-   * that dropped it would make the pin a lie" — and this statement made it a lie by
-   * a slower route: the API cut kept a pinned session and the startup prune deleted
-   * it, with its whole transcript, at seven days. Two halves of one system
-   * disagreeing about what a pin means, and the destructive half was the one that
-   * disagreed. The bound is not lost, it moves to the count cap, where pins rank
-   * first — so this asserts both directions on rows of exactly the same age.
+   * that dropped it would make the pin a lie" — and the old statement made it a
+   * lie by a slower route: the API cut kept a pinned session and the startup
+   * prune deleted it, with its whole transcript, at seven days. Two halves of one
+   * system disagreeing about what a pin means, and the destructive half was the
+   * one that disagreed. The bound is not lost, it moves to the count cap, where
+   * pins rank first — so this asserts both directions on rows of exactly the
+   * same age.
+   *
+   * Both rows are *inactive* (`rowFor` writes `stopped`) and aged by
+   * `updated_at`, which `put` stamps with the clock and so has to be set behind
+   * it, because since Q2.222 the sweep reads activity rather than creation and
+   * takes only a session nobody is coming back to. `minSessions: 0` so the
+   * floor is not what keeps either; the floor has its own section below.
    */
   second.sessions.put({ ...persisted("s_old_pinned", { pinned: true }), createdAt: old });
   second.sessions.put({ ...persisted("s_old_plain"), createdAt: old });
-  second.sessions.prune({ retainMs: week, maxSessions: 200 });
+  second.db.prepare("UPDATE sessions SET updated_at = ? WHERE id IN ('s_old_pinned', 's_old_plain')").run(old);
+  second.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 0 });
   const afterAge = second.sessions.list().map((r) => r.id);
   check("an old unpinned session is swept", afterAge.includes("s_old_plain"), false);
   check("and an old pinned one of the same age is kept", afterAge.includes("s_old_pinned"), true);
@@ -393,7 +403,7 @@ process.stdout.write("\nthe database, across a restart\n");
    * Both tables had an age-plus-emptiness sweep. It went because `updated_at`
    * moves only on a paste, so the age half was permanently true of any key in
    * real use and the condition collapsed to "no sessions left" — eight idle days,
-   * since unpinned sessions age out at seven. What that cost was a machine put
+   * since unpinned sessions aged out at seven then, by creation. What that cost was a machine put
    * down over a holiday coming back with its tokens gone; what it bought was
    * argued away, since deleting a local copy revokes nothing at the vendor and
    * `identity.tunnel_key` sits unswept in the same file regardless.
@@ -405,7 +415,7 @@ process.stdout.write("\nthe database, across a restart\n");
    */
   second.db.prepare("UPDATE agent_credentials SET updated_at = ?").run(old);
   second.db.prepare("UPDATE system_credentials SET updated_at = ?").run(old);
-  second.sessions.prune({ retainMs: week, maxSessions: 200 });
+  second.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 0 });
   check("an aged credential is kept while any session remains", second.credentials.list().length, 1);
   check("and so is an aged system key", second.systemCredentials.list().length, 1);
 
@@ -422,9 +432,9 @@ process.stdout.write("\nthe database, across a restart\n");
    * which `compatibility.md` forbids.
    */
   for (const row of second.sessions.list()) second.sessions.remove(row.id);
-  second.db.prepare("UPDATE sessions SET created_at = ?").run(old);
+  second.db.prepare("UPDATE sessions SET created_at = ?, updated_at = ?").run(old, old);
   second.db.exec("DELETE FROM sessions");
-  second.sessions.prune({ retainMs: week, maxSessions: 200 });
+  second.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 0 });
   check("with no session left at all, the table is really empty", second.sessions.list(), []);
   /*
    * The four assertions the whole reversal rests on. Proven by putting either
@@ -442,6 +452,464 @@ process.stdout.write("\nthe database, across a restart\n");
     })(),
     [[], null],
   );
+
+  /* ---------------------------------------------------------------- *
+   * What the startup prune may delete, and the 2026-09-04 incident
+   *
+   * On host `cloud-09fce7b571` the restart for the v0.6.0 deploy logged
+   * `SIGTERM: stopping 6 session(s)` at 14:46:17 UTC and `restored 1
+   * session(s)` at 14:46:20, and the five in between were deleted by `prune()`
+   * inside `openStores`, with their transcripts — ~50 MB — because the age
+   * sweep read `created_at < now - 7d AND pinned = 0`. Five of the six had
+   * been opened before 2026-08-28, every one of them had been written to
+   * seconds earlier by the daemon's own SIGTERM handler with `daemon_shutdown`,
+   * and nothing was logged. Q2.222 is the decision; this section is each of
+   * its three rules driven alone, the incident replayed first, and then what
+   * the verification round found the first cut of the three still doing.
+   *
+   * Its own database and its own `onPruned` collector, because the section
+   * above ends with the sessions table emptied and the `degraded` array is
+   * asserted on elsewhere — a prune report is deliberately *not* a degradation,
+   * and a driver that found one among them would be the first thing to say so.
+   * `put` stamps `updated_at` with the clock, so both dates are set behind it.
+   * ---------------------------------------------------------------- */
+  {
+    const reports: string[] = [];
+    const own = openStores({
+      path: join(sandbox, "store", "prune.db"),
+      instanceId: "i_pruner",
+      onPruned: (detail) => reports.push(detail),
+    });
+    // One directory, reused by every row below: what is driven is the table,
+    // and a workspace per row would be two hundred directories for nothing.
+    const template = persisted("s_prune_template");
+    const DAY = 24 * 60 * 60 * 1000;
+    const eightDaysAgo = now - 8 * DAY;
+    const minuteAgo = now - 60 * 1000;
+    // `gaveUp: true` writes the one value `resume_gave_up` ever holds — the
+    // registry persists nothing else there (`resumeGiveUpPersists`). A string
+    // is written verbatim, which is how a row from a build that persists a
+    // second value is made, since nothing in this build will write one.
+    const row = (id: string, exit: ExitReason | "live", meta: { pinned?: boolean; gaveUp?: boolean | string } = {}): PersistedSession => ({
+      ...template,
+      id,
+      pinned: meta.pinned ?? false,
+      resumeGaveUp: meta.gaveUp === true ? "forgotten" : typeof meta.gaveUp === "string" ? meta.gaveUp : null,
+      status: exit === "live" ? "idle" : "exited",
+      exit: exit === "live" ? null : { reason: exit, at: now, detail: null, agentHandle: null, agentConfirmedDead: true },
+    });
+    const seed = (session: PersistedSession, at: { created: number; updated: number }): void => {
+      own.sessions.put(session);
+      own.db
+        .prepare("UPDATE sessions SET created_at = ?, updated_at = ? WHERE id = ?")
+        .run(at.created, at.updated, session.id);
+    };
+    // Off the table rather than `list()`, which drops a row it cannot parse —
+    // and one of the rows below is unreadable on purpose.
+    const ids = (): string[] => own.db.prepare("SELECT id FROM sessions ORDER BY id").all().map((r) => String(r["id"]));
+    // Through `remove()` so the store's own last-written cache forgets the id;
+    // a bare `DELETE` would leave `put` treating the next identical row as unchanged.
+    const reset = (): void => {
+      for (const id of ids()) own.sessions.remove(id);
+      reports.length = 0;
+    };
+    // OR REPLACE, so that a store which failed to sweep the first orphan is named
+    // by the second half's pin rather than by a UNIQUE-constraint throw here.
+    const orphan = (): number => {
+      own.db.prepare("INSERT OR REPLACE INTO events (session_id, seq, ts, bytes, payload) VALUES ('s_nobody', 1, ?, 2, '{}')").run(now);
+      return Number(own.db.prepare("SELECT COUNT(*) AS n FROM events WHERE session_id = 's_nobody'").get()?.["n"]);
+    };
+    const orphansLeft = (): number =>
+      Number(own.db.prepare("SELECT COUNT(*) AS n FROM events WHERE session_id = 's_nobody'").get()?.["n"]);
+
+    /*
+     * The incident, row for row: five sessions opened eight days ago and one
+     * opened four days ago (`s_bd274666`, 2026-08-31 — the survivor), all six
+     * written a minute ago with `daemon_shutdown`, the SIGTERM write. The old
+     * statement read `created_at` and took exactly the five, which is the
+     * journal's "stopping 6 … restored 1"; a rule that reads activity and the
+     * exit takes none. ⚠ The sixth row was seeded live and eight days idle
+     * once, so the replay lost six where the incident lost five, under a
+     * comment saying "row for row".
+     */
+    reset();
+    for (let i = 0; i < 5; i += 1) {
+      seed(row(`s_inc_${i}`, "daemon_shutdown"), { created: eightDaysAgo, updated: minuteAgo });
+    }
+    seed(row("s_inc_survivor", "daemon_shutdown"), { created: now - 4 * DAY, updated: minuteAgo });
+    const incident = ids();
+    own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 0 });
+    check("the incident: six rows just stopped by SIGTERM, five of them opened eight days ago — none is pruned", ids(), incident);
+    own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 50 });
+    check("and none with the floor in place either", ids(), incident);
+    check("and nothing is reported, because nothing was pruned", reports, []);
+
+    /*
+     * Rule 1 alone, under a floor of zero so the floor cannot be what kept a
+     * row. Every `ExitReason` — the record is exhaustive both ways, so a tenth
+     * reason is a compile error here until somebody says which side it is on
+     * — plus a live row, a pin, two exits `isActiveRow` cannot read, and a row
+     * touched this minute. One prune, and the survivors read off the table.
+     *
+     * The sides are decisions, not a remainder (rule 1 in `prune()`'s
+     * docblock): a person ended `stopped` and `agent_signed_out` — the sign-out
+     * has exactly one writer, `signOutSessions` under the logout route — the
+     * agent ended `agent_exited`, `start_failed` and `start_timeout` never had
+     * a conversation, and `agent_kill_failed` is a legacy value `autoResumable`
+     * brings back on no trigger, so no promise is broken by taking it. ⚠ Four
+     * of the nine were swept with nothing saying so, and none of the four was
+     * seeded here.
+     *
+     * And the one row the exit alone misreads: a `daemon_shutdown` row the
+     * daemon has since given up on (`resume_gave_up` set, which the registry
+     * writes only when the agent says it no longer holds the conversation).
+     * The exit is the daemon's promise; the column is the daemon recording
+     * that it cannot be kept, and `resumeSettled` keeps the row out of both
+     * automatic paths. So it is inactive and swept, while its twin with the
+     * column NULL is kept. ⚠ Read off `exit_json` alone it was active for
+     * ever — swept by no age and counted under no cap (D27, 2026-09-05).
+     *
+     * And two the column alone misreads. A *live* row carrying it — the shape
+     * `doResume` leaves on disk for the length of every recreate, exit cleared
+     * and column not yet — is kept, because the next boot comes back to it
+     * first: ⚠ the column was read before the exit for one round, so a crash
+     * inside that window left a row the next boot's prune deleted under a
+     * sentence saying a live session never is. And a `daemon_shutdown` row
+     * whose column holds a value this build does not honour is kept, the way
+     * `s_b_unknown` is kept on the other column: the registry reads such a
+     * value as "not given up" and puts an agent back on the row at boot, so a
+     * prune that read any non-NULL as inactive — ⚠ it did, for one round —
+     * deleted on a rollback exactly what the boot pass was coming back to.
+     */
+    reset();
+    const stale = { created: eightDaysAgo, updated: eightDaysAgo };
+    const byReason: Record<ExitReason, "swept" | "kept"> = {
+      stopped: "swept",
+      agent_exited: "swept",
+      agent_signed_out: "swept",
+      start_failed: "swept",
+      start_timeout: "swept",
+      agent_kill_failed: "swept",
+      daemon_shutdown: "kept",
+      daemon_restarted: "kept",
+      config_changed: "kept",
+    };
+    const reasons = Object.keys(byReason) as ExitReason[];
+    for (const reason of reasons) seed(row(`s_b_${reason}`, reason), stale);
+    seed(row("s_b_live", "live"), stale);
+    seed(row("s_b_pinned", "stopped", { pinned: true }), stale);
+    seed(row("s_b_unreadable", "stopped"), stale);
+    own.db.prepare("UPDATE sessions SET exit_json = 'not json' WHERE id = 's_b_unreadable'").run();
+    seed(row("s_b_unknown", "stopped"), stale);
+    own.db.prepare(`UPDATE sessions SET exit_json = '{"reason":"daemon_upgraded"}' WHERE id = 's_b_unknown'`).run();
+    seed(row("s_b_active", "stopped"), { created: eightDaysAgo, updated: minuteAgo });
+    seed(row("s_b_gave_up", "daemon_shutdown", { gaveUp: true }), stale);
+    seed(row("s_b_live_gave_up", "live", { gaveUp: true }), stale);
+    seed(row("s_b_gave_up_unknown", "daemon_shutdown", { gaveUp: "daemon_upgraded" }), stale);
+    const removedByAge = own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 0 }).sort();
+    const left = ids();
+    for (const reason of reasons) {
+      check(`a ${reason} row untouched for eight days is ${byReason[reason]}`, left.includes(`s_b_${reason}`), byReason[reason] === "kept");
+    }
+    check("a live row is never swept by age", left.includes("s_b_live"), true);
+    check("a pinned row is kept", left.includes("s_b_pinned"), true);
+    check("a row whose exit cannot be read is kept", left.includes("s_b_unreadable"), true);
+    check("and one whose exit names a reason this build cannot", left.includes("s_b_unknown"), true);
+    check("a row opened eight days ago and written a minute ago is kept: activity, not creation", left.includes("s_b_active"), true);
+    check(
+      "a daemon_shutdown row eight days idle that the daemon has given up on is swept: given up is inactive whatever the exit says",
+      left.includes("s_b_gave_up"),
+      false,
+    );
+    check("while its twin, with resume_gave_up NULL, is kept", left.includes("s_b_daemon_shutdown"), true);
+    check("a live row carrying resume_gave_up is kept: live is read first, and the next boot comes back to it", left.includes("s_b_live_gave_up"), true);
+    check(
+      "and a daemon_shutdown row whose resume_gave_up this build cannot name is kept, as an exit it cannot read is",
+      left.includes("s_b_gave_up_unknown"),
+      true,
+    );
+    check(
+      "and the seven swept are the whole of what was returned",
+      removedByAge,
+      [...reasons.filter((reason) => byReason[reason] === "swept").map((reason) => `s_b_${reason}`), "s_b_gave_up"].sort(),
+    );
+
+    /*
+     * Rule 2. Forty-nine rows every one of which rule 1 would take, under a
+     * floor of fifty: nothing goes, while an event belonging to no session is
+     * swept regardless, since that is not a deletion anybody can see. Then the
+     * fiftieth row — and still nothing, because the floor is on what is *left*,
+     * not a gate on the count. ⚠ It was the gate, and this pin read "the
+     * fiftieth row is what lets the sweep run, and it takes the forty-nine
+     * stale ones": fifty rows to one in one boot, under a rule file saying
+     * "never under 50 rows" (Q2.222). Then ten more, so sixty: the ten least
+     * recently touched stale rows go and fifty stay — the live row first, since
+     * the floor ranks active rows above recency, then the forty-nine most
+     * recently touched, however stale.
+     */
+    reset();
+    const pad = (i: number): string => String(i).padStart(2, "0");
+    for (let i = 0; i < 49; i += 1) {
+      seed(row(`s_floor_${pad(i)}`, "stopped"), { created: eightDaysAgo, updated: eightDaysAgo + i * 1000 });
+    }
+    check("an event belonging to no session is there to be swept", orphan(), 1);
+    own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 50 });
+    check("forty-nine stale rows under a floor of fifty: nothing is removed", ids().length, 49);
+    check("while the orphan event is swept regardless", orphansLeft(), 0);
+    check("and nothing is reported under the floor", reports, []);
+    seed(row("s_floor_49", "live"), { created: now, updated: now });
+    check("a second orphan, for the other half", orphan(), 1);
+    own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 50 });
+    check("the fiftieth row lets nothing go: fifty rows are the floor, kept whatever their age", ids().length, 50);
+    check("and the orphan still goes", orphansLeft(), 0);
+    for (let i = 0; i < 10; i += 1) {
+      seed(row(`s_floor_x${i}`, "stopped"), { created: eightDaysAgo, updated: eightDaysAgo + (100 + i) * 1000 });
+    }
+    const pastFloor = own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 50 }).sort();
+    check(
+      "sixty rows under a floor of fifty: the ten least recently touched stale ones go",
+      pastFloor,
+      Array.from({ length: 10 }, (_, i) => `s_floor_${pad(i)}`),
+    );
+    check("and fifty are left — the live row and the forty-nine most recently touched", [ids().length, ids().includes("s_floor_49")], [50, true]);
+
+    /*
+     * The floor outranks the cap, whatever either is set to. Sixty fresh
+     * inactive rows under a floor of fifty and a cap of thirty: the cap alone
+     * would cut thirty, the floor lets it cut ten, and the table is left at
+     * fifty. Three hundred under a floor of three hundred and a cap of two
+     * hundred: nothing at all. ⚠ Measured the other way in the verification
+     * round — sixty cut to thirty, three hundred cut to two hundred — while the
+     * constant's docblock said the two bounds "never meet".
+     */
+    reset();
+    for (let i = 0; i < 60; i += 1) seed(row(`s_fc_${pad(i)}`, "stopped"), { created: now, updated: minuteAgo + i * 1000 });
+    const underFloor = own.sessions.prune({ retainMs: week, maxSessions: 30, minSessions: 50 }).sort();
+    check("a cap under the floor cuts only past the floor: ten of sixty, not thirty", underFloor, Array.from({ length: 10 }, (_, i) => `s_fc_${pad(i)}`));
+    check("and the table is left at the floor, not the cap", ids().length, 50);
+    reset();
+    for (let i = 0; i < 300; i += 1) seed(row(`s_fx_${String(i).padStart(3, "0")}`, "stopped"), { created: now, updated: minuteAgo + i * 1000 });
+    check("and a floor above the cap leaves the cap nothing to cut", own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 300 }), []);
+
+    /*
+     * Rule 3. Two hundred and eight rows, every one older than any window,
+     * with a retention so long that only the cap can act: index 0 pinned, 1–3
+     * `daemon_shutdown`, the rest `stopped`. Row i was *updated* eightDaysAgo
+     * + i seconds and *created* now − i seconds, so the least recently updated
+     * rows are the most recently created: a cap that still ranked by
+     * `created_at` cuts 203–207, and one that ranks the rows nobody is coming
+     * back to by activity cuts 4–8, leaving the table at the cap plus the
+     * three interrupted rows that sit outside it.
+     *
+     * Beside them, eight rows the cap may not touch, each touched *less*
+     * recently than any of the two hundred and eight, so that a cap which so
+     * much as ranked them cuts them first: a live row, and seven whose exit
+     * `isActiveRow` cannot read — not JSON, a reason this build cannot name,
+     * and five shapes that are valid JSON and still say nothing. ⚠ The SQL
+     * `CASE` this replaced tested `json_valid` and then a reason list, so it
+     * ranked six of the eight as inactive and cut them (Q2.222).
+     */
+    reset();
+    for (let i = 0; i < 208; i += 1) {
+      const id = `s_cap_${String(i).padStart(3, "0")}`;
+      const exit = i >= 1 && i <= 3 ? "daemon_shutdown" : "stopped";
+      seed(row(id, exit, { pinned: i === 0 }), { created: now - i * 1000, updated: eightDaysAgo + i * 1000 });
+    }
+    const untouchable: Array<[string, string | null]> = [
+      ["s_cap_live", null],
+      ["s_cap_not_json", "not json"],
+      ["s_cap_unknown", '{"reason":"daemon_upgraded"}'],
+      ["s_cap_json_null", "null"],
+      ["s_cap_json_string", '"daemon_shutdown"'],
+      ["s_cap_json_array", "[]"],
+      ["s_cap_no_reason", "{}"],
+      ["s_cap_null_reason", '{"reason":null}'],
+    ];
+    for (const [id, exitJson] of untouchable) {
+      seed(row(id, "live"), { created: now, updated: eightDaysAgo - 1000 });
+      if (exitJson !== null) own.db.prepare("UPDATE sessions SET exit_json = ? WHERE id = ?").run(exitJson, id);
+    }
+    const overCap = own.sessions.prune({ retainMs: 1000 * 365 * DAY, maxSessions: 200, minSessions: 0 }).sort();
+    check("two hundred and five rows nobody is coming back to, under a cap of two hundred: exactly five go", overCap.length, 5);
+    check(
+      "the five least recently *updated* inactive rows — not the pin, not the three interrupted ones, and not the five oldest by creation",
+      overCap,
+      ["s_cap_004", "s_cap_005", "s_cap_006", "s_cap_007", "s_cap_008"],
+    );
+    check("and the table ends above the cap by exactly its active rows", ids().length, 200 + 3 + untouchable.length);
+    check(
+      "the eight rows the cap may not touch, every one touched less recently than anything it cut, are all still there",
+      untouchable.map(([id]) => id).filter((id) => !ids().includes(id)),
+      [],
+    );
+
+    /*
+     * And a table whose active rows alone exceed the cap: a hundred and fifty
+     * `daemon_shutdown` rows and fifty-one live ones, and nothing goes. Then
+     * two hundred and one pins beside three daemon-stopped rows and two live
+     * ones: the cap takes the least recently touched *pin*, and an unpinned
+     * inactive row added afterwards goes before any pin does. ⚠ The cap this
+     * replaced ranked `pinned DESC, active DESC` across the whole table and cut
+     * past two hundred regardless: it took the interrupted row in the first
+     * table, and in the second it took all five active rows and kept the pins,
+     * under a report sentence saying they were "cut last" (Q2.222).
+     */
+    reset();
+    for (let i = 0; i < 150; i += 1) seed(row(`s_int_${String(i).padStart(3, "0")}`, "daemon_shutdown"), { created: eightDaysAgo, updated: minuteAgo - i * 1000 });
+    for (let i = 0; i < 51; i += 1) seed(row(`s_live_${pad(i)}`, "live"), { created: eightDaysAgo, updated: now - i * 1000 });
+    check("two hundred and one rows the daemon is coming back to, under a cap of two hundred: none goes", own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 50 }), []);
+    check("and nothing is said", reports, []);
+    reset();
+    for (let i = 0; i < 201; i += 1) seed(row(`s_pin_${String(i).padStart(3, "0")}`, "stopped", { pinned: true }), { created: eightDaysAgo, updated: eightDaysAgo + i * 1000 });
+    for (let i = 0; i < 3; i += 1) seed(row(`s_pin_shutdown_${i}`, "daemon_shutdown"), { created: eightDaysAgo, updated: minuteAgo });
+    seed(row("s_pin_live_a", "live"), { created: eightDaysAgo, updated: now });
+    seed(row("s_pin_live_b", "live"), { created: eightDaysAgo, updated: minuteAgo });
+    check(
+      "two hundred and one pins beside five active rows: the cap takes the least recently touched pin and none of the five",
+      own.sessions.prune({ retainMs: 1000 * 365 * DAY, maxSessions: 200, minSessions: 0 }),
+      ["s_pin_000"],
+    );
+    seed(row("s_pin_plain", "stopped"), { created: now, updated: now });
+    check(
+      "and an unpinned inactive row goes before any pin, however recently it was touched",
+      own.sessions.prune({ retainMs: 1000 * 365 * DAY, maxSessions: 200, minSessions: 0 }),
+      ["s_pin_plain"],
+    );
+
+    /*
+     * A row the daemon has given up on, under the cap. Two hundred fresh
+     * inactive rows, and beside them two `daemon_shutdown` twins touched less
+     * recently than any of them and identical bar `resume_gave_up`. The one
+     * the daemon will not put an agent back on by itself ranks with the
+     * inactive rows — last, on its date — and is the one row the cap cuts; the
+     * one the daemon is still coming back to is not ranked at all. ⚠ Read off
+     * `exit_json` alone both were active, so a given-up row was counted under
+     * no cap and swept by no age, for ever (D27, 2026-09-05). Beside them,
+     * touched less recently still, the two rows the column alone misreads
+     * (rule 1 above): a live row carrying it, and a `daemon_shutdown` row
+     * carrying a value this build cannot name. Neither is ranked.
+     */
+    reset();
+    for (let i = 0; i < 200; i += 1) seed(row(`s_gu_${String(i).padStart(3, "0")}`, "stopped"), { created: now, updated: minuteAgo + i * 1000 });
+    seed(row("s_gu_given_up", "daemon_shutdown", { gaveUp: true }), { created: eightDaysAgo, updated: eightDaysAgo - 1000 });
+    seed(row("s_gu_twin", "daemon_shutdown"), { created: eightDaysAgo, updated: eightDaysAgo - 1000 });
+    seed(row("s_gu_live_gave_up", "live", { gaveUp: true }), { created: eightDaysAgo, updated: eightDaysAgo - 2000 });
+    seed(row("s_gu_unknown_gave_up", "daemon_shutdown", { gaveUp: "daemon_upgraded" }), { created: eightDaysAgo, updated: eightDaysAgo - 2000 });
+    check(
+      "two hundred inactive rows and a daemon-stopped row the daemon has given up on, under a cap of two hundred: the given-up row is the one cut",
+      own.sessions.prune({ retainMs: 1000 * 365 * DAY, maxSessions: 200, minSessions: 0 }),
+      ["s_gu_given_up"],
+    );
+    check("while its twin, which the daemon is still coming back to, is not ranked under the cap at all", ids().includes("s_gu_twin"), true);
+    check(
+      "nor a live row carrying the column, nor one carrying a value this build cannot name, both touched less recently than anything it cut",
+      [ids().includes("s_gu_live_gave_up"), ids().includes("s_gu_unknown_gave_up")],
+      [true, true],
+    );
+
+    /*
+     * What it says. Both rules in one prune, so the split can be read: three
+     * rows idle past the window and two hundred and two fresh but inactive ones,
+     * so the age sweep takes three and the cap takes two more.
+     */
+    reset();
+    for (let i = 0; i < 3; i += 1) seed(row(`s_say_idle_${i}`, "stopped"), stale);
+    for (let i = 0; i < 202; i += 1) {
+      seed(row(`s_say_fresh_${String(i).padStart(3, "0")}`, "stopped"), { created: now, updated: minuteAgo + i * 1000 });
+    }
+    const said = own.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 0 });
+    check("one sentence, naming the count", reports.length === 1 && (reports[0] ?? "").includes("pruned 5 session(s)"), true);
+    check("and the split", /3 idle past 7 day\(s\)/.test(reports[0] ?? "") && /2 over the 200-session cap/.test(reports[0] ?? ""), true);
+    check("and every id", said.length === 5 && said.every((id) => (reports[0] ?? "").includes(id)), true);
+    check("and that the transcripts went with them", (reports[0] ?? "").includes("with their transcripts"), true);
+    check(
+      "and what is never taken, rather than what is taken last — a live row, or one the daemon is still coming back to, which is narrower than interrupted now",
+      (reports[0] ?? "").includes("A live session, or one the daemon is still coming back to, is never pruned"),
+      true,
+    );
+    // The floor half of the same sentence, since this is the copy that ships in
+    // the journal: ⚠ it said "the N most recent rows are kept" for a round
+    // while the floor ranked active rows and pins above recency, and with
+    // nothing pinned on it the wording could go stale again unnoticed.
+    check(
+      "and what the floor keeps, in rank order",
+      (reports[0] ?? "").includes("rows stay at any age — active first, then pins, then the most recently touched"),
+      true,
+    );
+
+    /*
+     * A sink that throws. ⚠ `onPruned` was called inside the transaction's
+     * `try`, after the COMMIT, so a throw ran ROLLBACK against a committed
+     * transaction, skipped `reclaim()` and returned `[]` over rows that were
+     * gone — and `daemon.ts` sweeps upload directories from that list. Read
+     * rather than hit, since `console.log` does not throw; pinned so that the
+     * returned list means what `prune()`'s docblock says whatever the sink does.
+     */
+    const loud = openStores({
+      path: join(sandbox, "store", "prune-loud.db"),
+      instanceId: "i_pruner_loud",
+      onPruned: () => {
+        throw new Error("the sink threw");
+      },
+    });
+    for (let i = 0; i < 60; i += 1) {
+      loud.sessions.put(row(`s_loud_${pad(i)}`, "stopped"));
+      loud.db.prepare("UPDATE sessions SET created_at = ?, updated_at = ? WHERE id = ?").run(eightDaysAgo, eightDaysAgo + i * 1000, `s_loud_${pad(i)}`);
+    }
+    const loudSaid = loud.sessions.prune({ retainMs: week, maxSessions: 200, minSessions: 50 }).sort();
+    check("a sink that throws costs the caller nothing: the ten rows past the floor are returned", loudSaid, Array.from({ length: 10 }, (_, i) => `s_loud_${pad(i)}`));
+    check("and are really gone", Number(loud.db.prepare("SELECT COUNT(*) AS n FROM sessions").get()?.["n"]), 50);
+    loud.close();
+
+    /*
+     * The floor and the window the daemon actually runs under: `openStores`
+     * with neither option given, which is `DEFAULT_MIN_SESSIONS` and
+     * `DEFAULT_RETAIN_MS`, and the prune it runs at open. ⚠ Only the constant's
+     * value was pinned, so a bundle that defaulted the floor to zero passed
+     * every pin (the verification round's M16). Forty-nine rows eight days idle
+     * survive an open; sixty do not, and what the open takes is ten.
+     */
+    const defaults = join(sandbox, "store", "prune-defaults.db");
+    let bundle = openStores({ path: defaults, instanceId: "i_pruner_defaults" });
+    const seedDefault = (i: number): void => {
+      bundle.sessions.put(row(`s_def_${pad(i)}`, "stopped"));
+      bundle.db.prepare("UPDATE sessions SET created_at = ?, updated_at = ? WHERE id = ?").run(eightDaysAgo, eightDaysAgo + i * 1000, `s_def_${pad(i)}`);
+    };
+    for (let i = 0; i < 49; i += 1) seedDefault(i);
+    bundle.close();
+    bundle = openStores({ path: defaults, instanceId: "i_pruner_defaults" });
+    check("forty-nine rows idle eight days survive an open with the daemon's own defaults", bundle.prunedSessions, []);
+    check("and are all there", Number(bundle.db.prepare("SELECT COUNT(*) AS n FROM sessions").get()?.["n"]), 49);
+    for (let i = 49; i < 60; i += 1) seedDefault(i);
+    bundle.close();
+    bundle = openStores({ path: defaults, instanceId: "i_pruner_defaults" });
+    check(
+      "sixty do not: the open takes the ten least recently touched, off DEFAULT_RETAIN_MS and DEFAULT_MIN_SESSIONS",
+      bundle.prunedSessions.sort(),
+      Array.from({ length: 10 }, (_, i) => `s_def_${pad(i)}`),
+    );
+    check("and leaves fifty", Number(bundle.db.prepare("SELECT COUNT(*) AS n FROM sessions").get()?.["n"]), 50);
+    bundle.close();
+
+    /*
+     * The floor is fifty, and the daemon reads it from the environment beside
+     * the cap — off the entry script's text, since no in-process driver reaches
+     * `scripts/daemon.ts`. And the report has its own line, not the degraded one.
+     */
+    check("the floor is fifty", DEFAULT_MIN_SESSIONS, 50);
+    const daemonWiring = readFileSync(new URL("../scripts/daemon.ts", import.meta.url), "utf8");
+    check(
+      "and the daemon reads REEMOAT_MIN_SESSIONS beside REEMOAT_MAX_SESSIONS",
+      /maxSessions: positiveInt\(process\.env\["REEMOAT_MAX_SESSIONS"\]\),\s*minSessions: positiveInt\(process\.env\["REEMOAT_MIN_SESSIONS"\]\),/.test(daemonWiring),
+      true,
+    );
+    check(
+      "and prints what was pruned on its own line rather than as a degradation",
+      /onPruned: \(detail\) => console\.log\(`store: \$\{detail\}`\)/.test(daemonWiring),
+      true,
+    );
+    own.close();
+  }
 
   /* ---------------------------------------------------------------- *
    * The agent strip, against a real store
