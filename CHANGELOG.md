@@ -25,6 +25,8 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-06
+
 ### Changed
 
 - The fleet's `claude` follows the `latest` release channel by default, and the
