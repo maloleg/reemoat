@@ -125,9 +125,12 @@ import { tmp } from "./tmp.js";
  * `--skip` and pruned on the run after, a refresh that moves nothing, a refusal
  * that keeps the previous build with no stage left behind, and the two
  * directions of a switched `--source` — an npm copy refreshed from npm under
- * `vendor`, a vendor copy named and counted under `npm`. Nothing here reaches a
- * vendor's host or the registry; what the fake cannot say is whether the real
- * ones still answer that shape. Three more, each a way the daily run was
+ * `vendor`, a vendor copy named and counted under `npm` — and, through a stub
+ * `claude` that records its argv, that the vendor refresh hands claude's own
+ * install verb the channel it was given, both spellings, since `claude update`
+ * followed whichever channel the last install had written (Q4.115). Nothing
+ * here reaches a vendor's host or the registry; what the fake cannot say is
+ * whether the real ones still answer that shape. Three more, each a way the daily run was
  * measured going wrong around a process rather than a vendor: the build the
  * symlink named when the run began outliving that run, because the daemon's
  * `--skip` set is a snapshot and a session can start mid-run on a build it never
@@ -867,6 +870,24 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   // The installer writes this line from its own flag, and the example is where an
   // operator who did not run the installer finds out that it exists.
   check("and the installer flag that writes it", sourceBlock.includes("--agent-source npm"), true);
+  /*
+   * The channel beside it, held to the same shape (Q4.115): the default shown as
+   * a commented assignment, both values named, the day it was measured — since
+   * "stable trails latest" is a claim about the vendor that a reader should be
+   * able to date — that it is claude's vendor installer alone, and the flag
+   * that writes the line. And that changing it moves the machine *down* too,
+   * which is the surprise an operator switching to `stable` would otherwise
+   * meet as a version that went backwards overnight.
+   */
+  const channelBlock = daemonExample.split(/\n\s*\n/).find((para) => /^#\s*REEMOAT_AGENT_CHANNEL=/m.test(para)) ?? "";
+  check("which of claude's channels it follows is shown the same way, at its default", /^#\s*REEMOAT_AGENT_CHANNEL=latest$/m.test(daemonExample), true);
+  check(
+    "naming both values, the day it was measured, and whose installer reads it",
+    [/`stable`/.test(channelBlock), /`latest`/.test(channelBlock), channelBlock.includes("2026-09-05"), channelBlock.includes("claude's vendor installer only")],
+    [true, true, true, true],
+  );
+  check("that a change moves the machine either way and keeps the old build", [channelBlock.includes("down as well as up"), channelBlock.includes("keeping the old build on disk")], [true, true]);
+  check("and the installer flag that writes this one", channelBlock.includes("--agent-channel stable"), true);
 }
 
 /* ------------------------------------------------------------------ *
@@ -941,16 +962,19 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
 
   /*
    * Each agent's refresh half, by name. The install half is a vendor URL that may
-   * legitimately move; the refresh verb is a decision — `claude update` rather than
-   * a re-run of an installer with no already-installed check that downloads ~200 MB
-   * every time, and `--method curl` on opencode because without it the resolver can
-   * answer `unknown` and stop on a prompt nobody is there to answer. kimi's refresh
-   * *is* its install — `ensure_npm`, which is also what the other three take under
-   * `--source npm` — and what makes that not a re-download every night is that
-   * `npm` resolves `@latest` before it fetches anything.
+   * legitimately move; the refresh verb is a decision — `claude install "$CHANNEL"`
+   * rather than a re-run of an installer with no already-installed check that
+   * downloads ~200 MB every time, and rather than `claude update`, which follows
+   * whichever channel the last install wrote into claude's own settings and so
+   * held a host on `stable` for ever (Q4.115); `--method curl` on opencode because
+   * without it the resolver can answer `unknown` and stop on a prompt nobody is
+   * there to answer. kimi's refresh *is* its install — `ensure_npm`, which is also
+   * what the other three take under `--source npm` — and what makes that not a
+   * re-download every night is that `npm` resolves `@latest` before it fetches
+   * anything.
    */
   check("each agent has a refresh that does not re-download it", [
-    /claude update/.test(agents),
+    /claude install "\$CHANNEL"/.test(agents),
     /codex update/.test(agents),
     /opencode upgrade --method curl/.test(agents),
     agents.includes(`ensure_npm kimi ${NPM_PACKAGES.kimi} `),
@@ -1138,7 +1162,9 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * fallback nobody reviewed.
    */
   const VENDOR_REFRESH: Record<"claude" | "codex" | "opencode", string> = {
-    claude: "claude update",
+    // The install verb with the flag's channel, not `update`: Q4.115, and the
+    // block after this loop for what else that line is held to.
+    claude: 'claude install "$CHANNEL"',
     codex: "codex update",
     opencode: "opencode upgrade --method curl",
   };
@@ -1177,6 +1203,27 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       [true, true, true],
     );
   }
+
+  /*
+   * **The channel reaches both of claude's vendor lines through the flag, and
+   * through nothing else (Q4.115).** The fresh install hands it to the vendor's
+   * script and the refresh to the binary's own `install` verb — the same verb,
+   * since the script is that verb behind a download — and neither spelling may
+   * be written into a command in `ensure_claude`: `bash claude.sh stable` stood
+   * there for a release and was the whole defect, a fleet installed on a channel
+   * that had never heard of the newest model, with the refresh then following
+   * that channel for ever. The default is `latest`, assigned before any flag is
+   * read, so `--check` with no flag says what a bare run would do.
+   */
+  const claudeBody = blockIn("agents.sh", agentLines, "ensure_claude", "ensure_claude() {", "}");
+  const claudeCommands = claudeBody.split("\n").filter((line) => !/^\s*#/.test(line));
+  check(
+    "claude's fresh install and its refresh both take the channel from the flag",
+    [/bash "\$TMP\/claude\.sh" "\$CHANNEL"/.test(claudeBody), /claude install "\$CHANNEL"/.test(claudeBody)],
+    [true, true],
+  );
+  check("and neither channel is written into a command in that function", claudeCommands.filter((line) => /\b(stable|latest)\b/.test(line)), []);
+  check("the channel defaults to latest, before any flag is read", lineIn("agents.sh", agentLines, "the channel default", "CHANNEL="), "CHANNEL=latest");
   const npmCalls = agentLines.filter((line) => /\bensure_npm\b/.test(line) && !/^ensure_npm\(\)/.test(line));
   const npmCallShapes = [
     /^\s*toolchain\) ensure_npm \S+ \S+ "[^"]*"; return 0 ;;$/,
@@ -1377,10 +1424,32 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * an unknown flag, and by name, because the alternative is a run that read
    * `bogus` as `vendor` and never said so.
    */
-  const badSource = runAgents(["--source", "bogus"]);
+  /*
+   * ⚠ All four refusals run under `--check`, and that is the driver protecting
+   * itself rather than the pin: the one mutation these exist to catch is a parser
+   * that lets the value through, and a script that got past its flag loop with
+   * `bogus` in hand would run `main` — under this driver's real `curl`, against
+   * the vendors' hosts, as this uid, which the header above promises never
+   * happens here. The flag loop runs to its end before `main` consults `CHECK`,
+   * so the refusal, its exit and its sentence are the same with the flag as
+   * without it; and a parser that stopped refusing is a would-run listing and
+   * exit 0 here rather than a download.
+   */
+  const badSource = runAgents(["--check", "--source", "bogus"]);
   check("--source with a value it does not know is refused by name", [badSource.status, badSource.err.includes("--source takes vendor or npm, not bogus")], [2, true]);
-  const bareSource = runAgents(["--source"]);
+  const bareSource = runAgents(["--check", "--source"]);
   check("and so is --source with no value", [bareSource.status, bareSource.err.includes("--source needs vendor or npm")], [2, true]);
+  /*
+   * `--channel` is the same shape for claude's release channel (Q4.115): two
+   * spellings, claude's own, and the daemon passes it from `REEMOAT_AGENT_CHANNEL`
+   * after reading the same two — so a third reaching here is a bug in the daemon,
+   * refused by name rather than handed to `claude install`, whose own refusal
+   * would be swallowed by `attempt` and read as `install bogus failed`.
+   */
+  const badChannel = runAgents(["--check", "--channel", "bogus"]);
+  check("--channel with a value it does not know is refused by name", [badChannel.status, badChannel.err.includes("--channel takes stable or latest, not bogus")], [2, true]);
+  const bareChannel = runAgents(["--check", "--channel"]);
+  check("and so is --channel with no value", [bareChannel.status, bareChannel.err.includes("--channel needs stable or latest")], [2, true]);
   const dry = runAgents(["--check", "--skip", "kimi"]);
   check("--check exits 0 and says nothing will be changed", [dry.status, dry.out.includes("nothing will be changed")], [0, true]);
   // The header names the source, because a machine's operator reading the daemon's
@@ -1390,6 +1459,24 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     "and claims only what would happen",
     [/claude\s+would install/.test(dry.out), /would download https:\/\/claude\.ai/.test(dry.out), /installed/.test(dry.out.replace(/would install/g, ""))],
     [true, true, false],
+  );
+  /*
+   * And which channel claude would land on — in the header, beside the door, and
+   * on the line that would run the vendor's script, since that script's argument
+   * is what decides the build. `latest` is the default, and a chosen `stable`
+   * reaches both places; nothing between the flag and the command line rewrites
+   * it (Q4.115).
+   */
+  check(
+    "and which channel claude would follow, in the header and on the install line",
+    [dry.out.includes("claude on its latest channel"), /^  claude: would run: bash \S+\/claude\.sh latest$/m.test(dry.out)],
+    [true, true],
+  );
+  const dryStable = runAgents(["--check", "--channel", "stable"]);
+  check(
+    "with --channel stable said in both places instead",
+    [dryStable.status, dryStable.out.includes("claude on its stable channel"), /^  claude: would run: bash \S+\/claude\.sh stable$/m.test(dryStable.out), /claude[^\n]*latest/.test(dryStable.out)],
+    [0, true, true, false],
   );
   check("with kimi named as an install into its own directory", /kimi-<version>/.test(dry.out), true);
   const ownKimi = join(sandbox, "own-kimi");
@@ -1413,13 +1500,28 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    */
   const npmDry = runAgents(["--check", "--source", "npm"]);
   check("--check --source npm exits 0 and names the registry", [npmDry.status, npmDry.out.includes("from the npm registry")], [0, true]);
+  // No arm reads the channel under `npm` — all four are `@latest` from the
+  // registry — so a header naming one there would claim a choice nothing made.
+  check("and names no channel, since no arm under npm reads one", /channel/.test(npmDry.out), false);
+  /*
+   * A channel the registry cannot honour is said, not swallowed: `--channel stable`
+   * under `--source npm` would otherwise look set and do nothing. The default says
+   * nothing, since `latest` is what the registry gives anyway.
+   */
+  const npmStable = runAgents(["--check", "--source", "npm", "--channel", "stable"]);
+  check(
+    "under --source npm a channel the registry cannot honour is said not to apply",
+    [npmStable.status, npmStable.out.includes("--channel stable does not apply under --source npm")],
+    [0, true],
+  );
+  check("and the default channel under npm says nothing about applying", /does not apply/.test(npmDry.out), false);
   check(
     "and says, per harness, which package into which directory",
     AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${NPM_PACKAGES[id]}@latest, then repoint \\S*/bin/${id}$`, "m").test(npmDry.out)),
     [],
   );
   check("and that each would be an install", AGENT_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would install$`, "m").test(npmDry.out)), []);
-  check("with nothing fetched from a vendor", /would download|claude update|codex update|opencode upgrade/.test(npmDry.out), false);
+  check("with nothing fetched from a vendor", /would download|claude install|codex update|opencode upgrade/.test(npmDry.out), false);
   /*
    * An operator's own copy wins under either source, and the reason is the
    * daemon's rule rather than this script's: `findOnPath` walks `PATH` before
@@ -1427,10 +1529,39 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * never be the one that runs, and installing it would be ~100 MB to produce a
    * file nothing executes while reporting success.
    */
+  /**
+   * A `claude` as the script sees one: `--version` prints a build, and `install
+   * <stable|latest>` — the refresh verb since Q4.115 — succeeds and records
+   * what it was asked into `FAKE_LOG`, one `claude …` line per call, beside the
+   * fake npm's lines — or, with `FAKE_CLAUDE_REFUSE` set, records it and then
+   * fails with 1, a vendor being down. Anything else is exit 3 with the argv on
+   * stderr, the fake registry's rule: a verb the real binary was never asked is
+   * a red run rather than a success. The one stub stands in for both an
+   * operator's own copy on PATH and a vendor-installed one under `~/.local/bin`,
+   * since the script tells those apart by where the file is and never by what
+   * it answers.
+   */
+  const claudeStub = (at: string): void => {
+    writeFileSync(
+      at,
+      [
+        "#!/bin/sh",
+        '[ -z "${FAKE_LOG:-}" ] || printf \'claude %s\\n\' "$*" >> "$FAKE_LOG"',
+        'case "$1" in',
+        "  --version) echo '2.1.259 (Claude Code)' ;;",
+        '  install) [ "$#" = 2 ] || { echo "fake claude: unexpected argv: $*" >&2; exit 3; }',
+        '    case "$2" in stable | latest) ;; *) echo "fake claude: unknown channel $2" >&2; exit 3 ;; esac',
+        '    [ -z "${FAKE_CLAUDE_REFUSE:-}" ] || { echo "fake claude: refusing install $2" >&2; exit 1; } ;;',
+        '  *) echo "fake claude: unexpected argv: $*" >&2; exit 3 ;;',
+        "esac",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(at, 0o755);
+  };
   const ownClaude = join(sandbox, "own-claude");
   mkdirSync(ownClaude, { recursive: true });
-  writeFileSync(join(ownClaude, "claude"), "#!/bin/sh\necho '2.1.259 (Claude Code)'\n");
-  chmodSync(join(ownClaude, "claude"), 0o755);
+  claudeStub(join(ownClaude, "claude"));
   const npmOutside = runAgents(["--check", "--source", "npm"], { PATH: `/usr/bin:/bin:${agentsStubs}:${ownClaude}` });
   check(
     "under npm an operator's own claude is named and left alone",
@@ -1693,7 +1824,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would ask the registry for ${NPM_PACKAGES[id].replace(/[@/.]/g, "\\$&")}@latest, and stage nothing if it is still 2\\.0\\.0$`, "m").test(backThroughNpm.out)),
       AGENT_IDS.filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g --prefix \\S*/${id}-<version> ${NPM_PACKAGES[id]}@latest, then repoint \\S*/bin/${id}$`, "m").test(backThroughNpm.out)),
       AGENT_IDS.filter((id) => !new RegExp(`^  ${id}\\s+would refresh$`, "m").test(backThroughNpm.out)),
-      /would download|claude update|codex update|opencode upgrade/.test(backThroughNpm.out),
+      /would download|claude install|codex update|opencode upgrade/.test(backThroughNpm.out),
     ],
     [0, true, [], [], [], false],
   );
@@ -1710,8 +1841,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   const vendorHome = join(sandbox, "agents-vendor-home");
   const vendorClaude = join(vendorHome, ".local", "bin", "claude");
   mkdirSync(dirname(vendorClaude), { recursive: true });
-  writeFileSync(vendorClaude, "#!/bin/sh\necho '2.1.259 (Claude Code)'\n");
-  chmodSync(vendorClaude, 0o755);
+  claudeStub(vendorClaude);
   const staysWarning = ` at ${vendorClaude} was installed by the vendor's installer, which --source npm does not reach; remove it and the next run installs from the npm registry`;
   const vendorCopy = runAgents(["--source", "npm"], { HOME: vendorHome, FAKE_VER: "1.0.0" });
   check(
@@ -1728,11 +1858,63 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("and --check says the same, since it is a refusal and not an act", runAgents(["--source", "npm", "--check"], { HOME: vendorHome }).err.includes(staysWarning), true);
   const vendorDoor = runAgents(["--source", "vendor", "--check"], { HOME: vendorHome });
   check(
-    "under --source vendor the same copy is refreshed by the vendor's own verb",
-    [vendorDoor.status, vendorDoor.err, /^  claude: would run: claude update$/m.test(vendorDoor.out), /^  claude\s+would refresh$/m.test(vendorDoor.out)],
+    "under --source vendor the same copy is refreshed by the vendor's own verb, on the default channel",
+    [vendorDoor.status, vendorDoor.err, /^  claude: would run: claude install latest$/m.test(vendorDoor.out), /^  claude\s+would refresh$/m.test(vendorDoor.out)],
     [0, "", true, true],
   );
   check("while the three npm installed beside it go back to npm", ["codex", "opencode", "kimi"].filter((id) => !new RegExp(`^  ${id}: would run: \\S*npm i -g`, "m").test(vendorDoor.out)), []);
+  /*
+   * **The refresh re-applies the channel, for real (Q4.115).** `claude update`
+   * stood here and followed whichever channel the last install had written into
+   * claude's own settings — measured 2026-09-05 as a host installed on `stable`
+   * printing `up to date (2.1.236)` daily while `latest` was 2.1.261. So the verb
+   * is `claude install <channel>`, and what is asserted is what reached the
+   * binary: the stub under `~/.local/bin` records its argv, and a run under each
+   * spelling — `stable` said, `latest` left to the default — leaves exactly one
+   * `install` line with that channel and nothing else. Nothing is downloaded on
+   * the way: the other three are toolchain copies from the run above, refreshed
+   * from the fake registry, which is the state a machine is in after a vendor
+   * install and a switch back. The stub's own refusal is what makes a third
+   * argument, or a second verb, red rather than a refresh that merely failed.
+   */
+  const channelLog = join(sandbox, "agents-channel-log");
+  const stableRun = runAgents(["--source", "vendor", "--channel", "stable"], { HOME: vendorHome, FAKE_VER: "1.0.0", FAKE_LOG: channelLog });
+  const claudeAsked = (log: string): string[] =>
+    (existsSync(log) ? readFileSync(log, "utf8") : "").split("\n").filter((line) => line.startsWith("claude ") && !line.startsWith("claude --version"));
+  check(
+    "a real refresh hands claude's own install verb the channel it was given",
+    [stableRun.status, stableRun.err, claudeAsked(channelLog), /^  claude\s+refresh 2\.1\.259 \(Claude Code\)$/m.test(stableRun.out)],
+    [0, "", ["claude install stable"], true],
+  );
+  rmSync(channelLog, { force: true });
+  const latestRun = runAgents(["--source", "vendor"], { HOME: vendorHome, FAKE_VER: "1.0.0", FAKE_LOG: channelLog });
+  check(
+    "and with no flag the verb is told latest outright, never left to claude's own setting",
+    [latestRun.status, latestRun.err, claudeAsked(channelLog), /^  claude\s+refresh 2\.1\.259 \(Claude Code\)$/m.test(latestRun.out)],
+    [0, "", ["claude install latest"], true],
+  );
+  /*
+   * And a refresh the binary refuses — the vendor down, or a channel it no
+   * longer serves. The warning has to name the verb that failed and the channel
+   * it was given, as codex's and opencode's name theirs, because the daemon
+   * forwards this line and an operator reading it goes looking for that
+   * command: `claude update failed` stood here after the verb had become
+   * `install`, pointing at a command that no longer runs. And the rest of the
+   * vendor arm's shape with it — the build kept named, one of four counted,
+   * exit 0 — with the verb still asked exactly once.
+   */
+  rmSync(channelLog, { force: true });
+  const refusedChannel = runAgents(["--source", "vendor", "--channel", "stable"], { HOME: vendorHome, FAKE_VER: "1.0.0", FAKE_LOG: channelLog, FAKE_CLAUDE_REFUSE: "1" });
+  check(
+    "a refresh claude's own verb refuses warns naming that verb, its channel and the build kept, exit 0",
+    [
+      refusedChannel.status,
+      /^  claude\s+install stable failed; keeping 2\.1\.259 \(Claude Code\)$/m.test(refusedChannel.err),
+      refusedChannel.err.includes(`1 of ${AGENT_IDS.length} agents were not installed or refreshed`),
+      claudeAsked(channelLog),
+    ],
+    [0, true, true, ["claude install stable"]],
+  );
 
   /*
    * An operator's own copy, for real rather than under `--check`: a run under
@@ -1830,6 +2012,40 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     ],
     [1, true, true],
   );
+  /*
+   * **And claude's channel, the same answer given the same two times (Q4.115).**
+   * Here the agreement matters *more* than for the source: the daily refresh
+   * runs `claude install <channel>` and re-applies whatever it is told, so a
+   * channel the install used and the env file did not carry would be undone by
+   * the first daily run. `$3` in the body is `AGENT_CHANNEL`, and only the call
+   * line says so — so the call line is pinned *here*, as the third argument in
+   * that order, rather than left to the source's check above, which pins the
+   * second; the run below hands the lifted body its channel itself and so
+   * cannot see the call line at all.
+   */
+  check("the bootstrap defaults the agent channel to latest", lineIn("bootstrap.sh", bootLines, "the agent-channel default", "AGENT_CHANNEL="), "AGENT_CHANNEL=latest");
+  check(
+    "and parse_flags takes --agent-channel, refusing any third spelling by name",
+    [/--agent-channel\)/.test(parseFlags), /stable \| latest\) ;;/.test(parseFlags), parseFlags.includes('die "--agent-channel takes stable or latest, not $AGENT_CHANNEL"')],
+    [true, true, true],
+  );
+  // The day is pinned because "stable trails latest by a model" is a claim about
+  // the vendor on one day — the same rule the example's paragraph is held to.
+  check(
+    "usage documents the flag, both values, that it is claude's alone, and dates what it says about stable",
+    [/--agent-channel <ch>/.test(bootFn("usage")), /`stable`/.test(bootFn("usage")), /`latest`/.test(bootFn("usage")), /Claude only/.test(bootFn("usage")), bootFn("usage").includes("2026-09-05")],
+    [true, true, true, true, true],
+  );
+  check("install_agents passes it to the script as --channel, beside the source", bootFn("install_agents").includes('"$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL"'), true);
+  check(
+    "and write_env_file writes it for the daemon only when it is stable, off the call line's third argument",
+    [
+      bootBody.filter((line) => /set_env REEMOAT_AGENT_CHANNEL/.test(line)).length,
+      /^\s*if \[ "\$3" = stable \]; then set_env REEMOAT_AGENT_CHANNEL stable "\$_env"; fi$/m.test(writeEnv),
+      /^\s*' "\$CHECKOUT\/deploy\/lib\.sh" "\$CP" "\$AGENT_SOURCE" "\$AGENT_CHANNEL"/m.test(writeEnv),
+    ],
+    [1, true, true],
+  );
 
   /*
    * **And that arm, run.** The text check pins the line; this lifts the body the
@@ -1845,9 +2061,9 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   const envBody = /sh -c '([\s\S]*?)' "\$CHECKOUT\/deploy\/lib\.sh"/.exec(writeEnv)?.[1];
   check("write_env_file's body can be lifted out of it", envBody !== undefined, true);
   const envHome = join(sandbox, "bootstrap-env-home");
-  const writeEnvRun = (source: string): { run: Run; file: string } => {
-    const file = join(envHome, source, "daemon.env");
-    const run = spawnSync("sh", ["-c", envBody ?? "false", join(deployDir, "lib.sh"), "https://cp.example", source], {
+  const writeEnvRun = (source: string, channel = "latest"): { run: Run; file: string } => {
+    const file = join(envHome, `${source}-${channel}`, "daemon.env");
+    const run = spawnSync("sh", ["-c", envBody ?? "false", join(deployDir, "lib.sh"), "https://cp.example", source, channel], {
       encoding: "utf8",
       env: { ...baseEnv, HOME: envHome, REEMOAT_ENV_FILE: file },
       input: "code-1",
@@ -1865,8 +2081,9 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       valueIn(npmEnv.file, "REEMOAT_CONTROL_PLANE"),
       valueIn(npmEnv.file, "REEMOAT_ENROLL_CODE"),
       valueIn(npmEnv.file, "REEMOAT_AGENT_SOURCE"),
+      readFileSync(npmEnv.file, "utf8").split("\n").filter((line) => /^REEMOAT_AGENT_CHANNEL=/.test(line)),
     ],
-    [0, npmEnv.file, "signed", "https://cp.example", "code-1", "npm"],
+    [0, npmEnv.file, "signed", "https://cp.example", "code-1", "npm", []],
   );
   check("into a directory and a file closed to everybody else", [statSync(dirname(npmEnv.file)).mode & 0o777, statSync(npmEnv.file).mode & 0o777], [0o700, 0o600]);
   const vendorEnv = writeEnvRun("vendor");
@@ -1876,9 +2093,22 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       vendorEnv.run.status,
       valueIn(vendorEnv.file, "REEMOAT_CONTROL_PLANE"),
       valueIn(vendorEnv.file, "REEMOAT_AGENT_SOURCE"),
-      readFileSync(vendorEnv.file, "utf8").split("\n").filter((line) => /^REEMOAT_AGENT_SOURCE=/.test(line)),
+      readFileSync(vendorEnv.file, "utf8").split("\n").filter((line) => /^REEMOAT_AGENT_(SOURCE|CHANNEL)=/.test(line)),
     ],
     [0, "https://cp.example", "", []],
+  );
+  // The channel the same way: written only when it is `stable`, and then through
+  // `set_env`, so the value is single-quoted like every other line in that file.
+  const stableEnv = writeEnvRun("vendor", "stable");
+  check(
+    "and a chosen stable is written as the one channel line, single-quoted",
+    [
+      stableEnv.run.status,
+      valueIn(stableEnv.file, "REEMOAT_AGENT_CHANNEL"),
+      readFileSync(stableEnv.file, "utf8").split("\n").filter((line) => /^REEMOAT_AGENT_CHANNEL=/.test(line)),
+      readFileSync(stableEnv.file, "utf8").split("\n").filter((line) => /^REEMOAT_AGENT_SOURCE=/.test(line)),
+    ],
+    [0, "stable", ["REEMOAT_AGENT_CHANNEL='stable'"], []],
   );
 
   /*
@@ -1919,7 +2149,7 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   const agentsCall = bootFn("install_agents").split("\n").find((line) => line.includes("deploy/agents.sh")) ?? "";
   check(
     "install_agents runs the script with the installed node's directory in front",
-    agentsCall.trim().startsWith('( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" )'),
+    agentsCall.trim().startsWith('( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" )'),
     true,
   );
 
@@ -1960,6 +2190,39 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       existing.slice(flagRefused, flagRefused + 3).join("\n").includes("deploy/agents.sh --source $AGENT_SOURCE"),
     ],
     [true, true],
+  );
+  /*
+   * `--agent-channel` is remembered, parsed and refused the same way (Q4.115),
+   * and its refusal's two remedies are *not* alternatives, where the source's
+   * are: the daemon's refresh re-applies whatever its env file says, five
+   * minutes after a start and daily after that, so a one-off run of the script
+   * with `--channel` alone is undone by the next daily run. The sentence has to
+   * say so — it offered the script run with "or" once, copied from the source's
+   * refusal, where a present copy keeps its door and the run alone is enough.
+   */
+  check("the bootstrap remembers whether --agent-channel was given, defaulting to not", lineIn("bootstrap.sh", bootLines, "the agent-channel-given default", "AGENT_CHANNEL_GIVEN="), "AGENT_CHANNEL_GIVEN=0");
+  const channelArm = flagLines.indexOf("--agent-channel)");
+  check(
+    "parse_flags sets it as the arm's first act after taking the value",
+    [channelArm !== -1, flagLines[channelArm + 1]?.startsWith('AGENT_CHANNEL="${2:-}"; need_value "--agent-channel"'), flagLines[channelArm + 2]],
+    [true, true, "AGENT_CHANNEL_GIVEN=1"],
+  );
+  const channelRefused = existing.findIndex((line) => line.startsWith('[ "$AGENT_CHANNEL_GIVEN" = 0 ] || die "already set up here, so --agent-channel changes nothing.'));
+  check(
+    "existing_install refuses the channel flag too, beside the source's refusal and before any menu or non-interactive exit",
+    [channelRefused !== -1, channelRefused > flagRefused, nonTty !== -1 && channelRefused < nonTty, menuAt !== -1 && channelRefused < menuAt],
+    [true, true, true, true],
+  );
+  const channelRefusal = existing.slice(channelRefused, existing.findIndex((line, i) => i >= channelRefused && /"$/.test(line)) + 1).join("\n");
+  check(
+    "naming where the channel lives now, the restart that makes the daemon read it, and the script run as an addition rather than an alternative",
+    [
+      channelRefusal.includes("REEMOAT_AGENT_CHANNEL=$AGENT_CHANNEL in $_env"),
+      channelRefusal.includes("restart the daemon"),
+      channelRefusal.includes("also run $CHECKOUT/deploy/agents.sh --channel $AGENT_CHANNEL"),
+      /\bor run\b/.test(channelRefusal),
+    ],
+    [true, true, true, false],
   );
   /*
    * The vendor hostnames stay in `agents.sh`. `bootstrap.sh` is held to a sieve
@@ -3290,8 +3553,13 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   // and a deploy that did not read `NPM` as npm ran the other arm off the same file.
   const readsSource = armLines.indexOf(`_agent_source=$(file_value "$_daemon_env" REEMOAT_AGENT_SOURCE | tr '[:upper:]' '[:lower:]')`);
   const defaults = armLines.indexOf('[ "$_agent_source" = npm ] || _agent_source=vendor');
+  // And the channel the same way, since the script's refresh re-applies it on
+  // every run: a deploy that left it to the script's default would move a
+  // `stable` host to `latest` on the way through a restart (Q4.115).
+  const readsChannel = armLines.indexOf(`_agent_channel=$(file_value "$_daemon_env" REEMOAT_AGENT_CHANNEL | tr '[:upper:]' '[:lower:]')`);
+  const defaultsChannel = armLines.indexOf('[ "$_agent_channel" = stable ] || _agent_channel=latest');
   const announces = armLines.indexOf('echo "  agents ($_agent_source)"');
-  const callAt = armLines.findIndex((line) => line.startsWith('"$REPO_ROOT/deploy/agents.sh" --source "$_agent_source"'));
+  const callAt = armLines.findIndex((line) => line.startsWith('"$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel"'));
   const call = armLines[callAt] ?? "";
   const guardAt = armLines.indexOf(') || echo "  agents: the script did not finish; the daemon retries daily" >&2');
   const restartAt = armLines.findIndex((line) => line.startsWith("restart_list="));
@@ -3304,7 +3572,23 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   const daemonTs = readFileSync(join(repoRoot, "scripts/daemon.ts"), "utf8");
   const offSpellings = /AGENT_UPDATES_OFF: ReadonlySet<string> = new Set\(\[([^\]]+)\]\)/.exec(daemonTs)?.[1]?.match(/"([^"]+)"/g)?.map((one) => one.slice(1, -1)) ?? [];
   check("and honours every spelling the daemon reads as off", [offArm !== -1, offSpellings.length > 0, offSpellings.filter((one) => !(armLines[offArm] ?? "").split(/\s*\|\s*/).map((w) => w.replace(/\)$/, "")).includes(one))], [true, true, []]);
+  /*
+   * And the two values the daemon reads off its own environment for the same
+   * run. `scripts/daemon.ts` is where `REEMOAT_AGENT_SOURCE` and
+   * `REEMOAT_AGENT_CHANNEL` become `AgentUpdates` options, and `daemoncheck`
+   * drives the updater with options it hands over itself — so these two lines
+   * were pinned by nothing: with the channel line deleted, every daemon run said
+   * `--channel latest`, every driver stayed green, and a host whose env file
+   * says `stable` would have been moved to `latest` by its own daemon within a
+   * day (Q4.115). Read as text, like the spellings above, for the same reason.
+   */
+  check(
+    "and the daemon reads the source and the channel off its environment through the two readers daemoncheck holds",
+    [daemonTs.includes('source: agentSourceFrom(process.env["REEMOAT_AGENT_SOURCE"]'), daemonTs.includes('channel: agentChannelFrom(process.env["REEMOAT_AGENT_CHANNEL"]')],
+    [true, true],
+  );
   check("then reads the source off the same file, and defaults it to vendor", [readsSource > offArm, defaults === readsSource + 1], [true, true]);
+  check("then the channel, lowercased the same way, and defaults it to latest", [readsChannel > defaults, defaultsChannel === readsChannel + 1], [true, true]);
   check("and the two override variables, which the daemon's own run would see", [armLines.indexOf('_agent_claude=$(file_value "$_daemon_env" CLAUDE_CODE_EXECUTABLE)') > defaults, armLines.indexOf('_agent_codex=$(file_value "$_daemon_env" CODEX_PATH)') > defaults], [true, true]);
   check("says which, then runs the same script the bootstrap and the daemon run, with that source", [announces > defaults, callAt > announces], [true, true]);
   check("with node's directory in front, as the bootstrap puts it", armLines.some((line) => line.startsWith('PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"')), true);
@@ -3357,11 +3641,13 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
    * the call spells them in is nothing it is held to — and `AGENT_IDS` is in a
    * different order, which a string comparison would have pinned by accident.
    */
-  const meaning = (argv: string): { source: string | undefined; skips: string[]; rest: string[] } => {
+  type Meaning = { source: string | undefined; channel: string | undefined; skips: string[]; rest: string[] };
+  const meaning = (argv: string): Meaning => {
     const tokens = argv.split(" ").filter((one) => one.length > 0);
-    const out: { source: string | undefined; skips: string[]; rest: string[] } = { source: undefined, skips: [], rest: [] };
+    const out: Meaning = { source: undefined, channel: undefined, skips: [], rest: [] };
     for (let i = 0; i < tokens.length; i += 1) {
       if (tokens[i] === "--source") out.source = tokens[++i];
+      else if (tokens[i] === "--channel") out.channel = tokens[++i];
       else if (tokens[i] === "--skip") out.skips.push(tokens[++i] ?? "");
       else out.rest.push(tokens[i] as string);
     }
@@ -3378,16 +3664,16 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   };
   const npmDeploy = runArm({ REEMOAT_ENV_FILE: envSaying("npm") });
   check(
-    "an env file saying npm runs the script with --source npm and every prune withheld",
+    "an env file saying npm runs the script with --source npm, the channel spelled out, and every prune withheld",
     [npmDeploy.run.status, meaning(npmDeploy.argv), npmDeploy.run.out.includes("  agents (npm)\n"), npmDeploy.run.err],
-    [0, { source: "npm", skips: everyHarness, rest: [] }, true, ""],
+    [0, { source: "npm", channel: "latest", skips: everyHarness, rest: [] }, true, ""],
   );
   check("and adds nothing to the restart list by itself", npmDeploy.run.out.includes("restart_list=[]\n"), true);
   const noEnv = runArm({ REEMOAT_ENV_FILE: envSaying(null) });
   check(
-    "no env file at all is vendor, which is what the daemon reads an absent value as",
+    "no env file at all is vendor and latest, which is what the daemon reads absent values as",
     [noEnv.run.status, meaning(noEnv.argv), noEnv.run.out.includes("  agents (vendor)\n")],
-    [0, { source: "vendor", skips: everyHarness, rest: [] }, true],
+    [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }, true],
   );
   /*
    * A spelling the daemon would warn about and read as `vendor` is passed as
@@ -3396,7 +3682,22 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
    * would then report as a run that did not finish.
    */
   const bogus = runArm({ REEMOAT_ENV_FILE: envSaying("bogus") });
-  check("and a spelling that is neither is passed as vendor rather than as itself", [bogus.run.status, meaning(bogus.argv)], [0, { source: "vendor", skips: everyHarness, rest: [] }]);
+  check("and a spelling that is neither is passed as vendor rather than as itself", [bogus.run.status, meaning(bogus.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }]);
+  /*
+   * The channel, read the way `agentChannelFrom` reads it (Q4.115): `stable`
+   * however it is cased is `stable`, and a spelling that is neither is `latest`
+   * rather than itself — for the same `|| echo` reason as the source. Passed
+   * even at its default, because the script's refresh re-applies whatever it is
+   * told and the env file is what decides.
+   */
+  const stableDeploy = runArm({ REEMOAT_ENV_FILE: envSaying("npm", "REEMOAT_AGENT_CHANNEL='STABLE'\n") });
+  check(
+    "an env file saying STABLE passes --channel stable, lowercased as the daemon reads it",
+    [stableDeploy.run.status, meaning(stableDeploy.argv), stableDeploy.run.err],
+    [0, { source: "npm", channel: "stable", skips: everyHarness, rest: [] }, ""],
+  );
+  const bogusChannel = runArm({ REEMOAT_ENV_FILE: envSaying("vendor", "REEMOAT_AGENT_CHANNEL='nightly'\n") });
+  check("and a channel that is neither is passed as latest rather than as itself", [bogusChannel.run.status, meaning(bogusChannel.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }]);
   const failed = runArm({ REEMOAT_ENV_FILE: envSaying("npm") }, 1);
   check(
     "a script that did not finish is a line on stderr, and the deploy goes on",
@@ -4835,7 +5136,7 @@ process.stdout.write("\nthe one-line installer\n");
    * the documented non-interactive path. This runs under whatever `/bin/sh` is,
    * and on `check.yml`'s `ubuntu-latest` that is `dash`.
    */
-  for (const flag of ["--url", "--api-key", "--enroll-code", "--label", "--dir", "--ref", "--node", "--agent-source"]) {
+  for (const flag of ["--url", "--api-key", "--enroll-code", "--label", "--dir", "--ref", "--node", "--agent-source", "--agent-channel"]) {
     const run = spawnSync("sh", [bootstrapPath, flag], {
       cwd: deployDir,
       encoding: "utf8",
@@ -4863,6 +5164,19 @@ process.stdout.write("\nthe one-line installer\n");
     check("without installing anything on the way", existsSync(join(home, ".reemoat", "toolchain")), false);
     const good = runBootstrap(["--agent-source", "npm"]);
     check("while npm passes the parser and fails on the control plane instead", [good.status, good.err.includes("--url"), good.err.includes("--agent-source")], [2, true, false]);
+    // `--agent-channel` is the second flag with a closed set (Q4.115), refused
+    // here for what an unrefused spelling would otherwise do: reach
+    // `install_agents` as `--channel nightly`, which `deploy/agents.sh` refuses
+    // with exit 2 before installing anything — read by the bootstrap as "some
+    // agent CLIs could not be installed" — while `write_env_file` writes the key
+    // only for `stable`, so the daemon's first run, five minutes after the
+    // hand-off, would install all four on `latest`: a machine that asked for one
+    // channel and got the default, with nothing but a warning mid-install to say so.
+    const badChannel = runBootstrap(["--agent-channel", "nightly"]);
+    check("--agent-channel with a value it does not know is refused by name", [badChannel.status, badChannel.err.includes("--agent-channel takes stable or latest, not nightly")], [2, true]);
+    check("without installing anything on the way", existsSync(join(home, ".reemoat", "toolchain")), false);
+    const goodChannel = runBootstrap(["--agent-channel", "stable"]);
+    check("while stable passes the parser and fails on the control plane instead", [goodChannel.status, goodChannel.err.includes("--url"), goodChannel.err.includes("--agent-channel")], [2, true, false]);
   }
 
   /*

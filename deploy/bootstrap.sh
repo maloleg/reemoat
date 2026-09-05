@@ -109,6 +109,12 @@ AGENT_SOURCE=vendor
 # Whether somebody said so on the command line, because on a machine that is
 # already set up the flag would otherwise be accepted and change nothing.
 AGENT_SOURCE_GIVEN=0
+# Which of claude's two release channels this machine follows: `latest` by
+# default, for the reason `deploy/agents.sh` gives (Q4.115); the daemon is told
+# the same answer through `REEMOAT_AGENT_CHANNEL`, and its refresh re-applies it.
+AGENT_CHANNEL=latest
+# The same memory as `AGENT_SOURCE_GIVEN`, for the same refusal.
+AGENT_CHANNEL_GIVEN=0
 LABEL=""
 CHECKOUT="$HOME/srv/reemoat"
 GIT_REF=""
@@ -413,6 +419,12 @@ Set up a Reemoat daemon on this machine and add it to the app.
                         reach claude.ai, chatgpt.com or opencode.ai — point npm at
                         your mirror with npm_config_registry or ~/.npmrc). Written
                         into the daemon's settings, so its daily refresh agrees
+  --agent-channel <ch>  which of claude's release channels this machine follows:
+                        `latest` (the default — the newest build) or `stable`,
+                        which trails it by weeks and, on 2026-09-05, by a model.
+                        Claude only: codex's and opencode's installers have no
+                        channel. Written into the daemon's settings, and
+                        re-applied by every daily refresh
   --yes                 do not ask to confirm anything
   --uninstall           stop and remove the service and the node this script
                         installed. Names your data; deletes none of it. Exits
@@ -442,6 +454,13 @@ parse_flags() {
                      case "$AGENT_SOURCE" in
                        vendor | npm) ;;
                        *) die "--agent-source takes vendor or npm, not $AGENT_SOURCE" ;;
+                     esac ;;
+      --agent-channel)
+                     AGENT_CHANNEL="${2:-}"; need_value "--agent-channel" "$@"; shift 2
+                     AGENT_CHANNEL_GIVEN=1
+                     case "$AGENT_CHANNEL" in
+                       stable | latest) ;;
+                       *) die "--agent-channel takes stable or latest, not $AGENT_CHANNEL" ;;
                      esac ;;
       --yes | -y)    ASSUME_YES=1;         shift ;;
       --uninstall)   UNINSTALL=1;          shift ;;
@@ -1234,14 +1253,17 @@ install_dependencies() {
 # not be installed is absent from the app rather than merely stale — and the script
 # says which on stderr; the daemon tries again within the day, and the tile says so
 # until then. `--agent-source` is passed here and written into the env file below, so
-# the run that installs and the run that refreshes never disagree about where from.
+# the run that installs and the run that refreshes never disagree about where from;
+# `--agent-channel` rides the same two lines for the same reason, and one more —
+# the script's refresh *re-applies* the channel on every run (Q4.115), so a value
+# the install used and the env file did not carry would be undone within a day.
 install_agents() {
   note "agents        installing (~700 MB, a few minutes)"
   # Node's directory in front, as `install_dependencies` puts it: the script's npm
   # arm needs an `npm` and a `node`, and with `--node` naming one off PATH there
   # would otherwise be neither — kimi, and all four under `--agent-source npm`,
   # "skipped: no npm to install it with" on a machine that has just installed one.
-  ( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" ) || warn "
+  ( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" ) || warn "
   some agent CLIs could not be installed. The daemon retries daily; until then that
   harness is absent from the app. The lines above say which and why."
 }
@@ -1283,10 +1305,12 @@ write_env_file() {
     set_env REEMOAT_CONTROL_PLANE  "$1"     "$_env"
     set_env REEMOAT_ENROLL_CODE    "$_code" "$_env"
     # Only the non-default is written, so an env file says what somebody chose and
-    # nothing else; the daemon reads an absent value as `vendor`.
+    # nothing else; the daemon reads an absent value as `vendor`, and an absent
+    # channel as `latest`.
     if [ "$2" = npm ]; then set_env REEMOAT_AGENT_SOURCE npm "$_env"; fi
+    if [ "$3" = stable ]; then set_env REEMOAT_AGENT_CHANNEL stable "$_env"; fi
     printf "%s" "$_env"
-  ' "$CHECKOUT/deploy/lib.sh" "$CP" "$AGENT_SOURCE" > "$TMP/envpath" \
+  ' "$CHECKOUT/deploy/lib.sh" "$CP" "$AGENT_SOURCE" "$AGENT_CHANNEL" > "$TMP/envpath" \
     || die "could not write the daemon's environment file."
   ENV_FILE=$(cat "$TMP/envpath")
   note "settings      $ENV_FILE"
@@ -1384,6 +1408,18 @@ existing_install() {
   [ "$AGENT_SOURCE_GIVEN" = 0 ] || die "already set up here, so --agent-source changes nothing.
       Set REEMOAT_AGENT_SOURCE=$AGENT_SOURCE in $_env and restart the daemon,
       or run $CHECKOUT/deploy/agents.sh --source $AGENT_SOURCE now."
+  # The same refusal for the channel, but its two remedies are not alternatives,
+  # where the source's are: the daemon's refresh re-applies whatever its env file
+  # says, five minutes after a start and daily after that (Q4.115), so one run of
+  # the script with `--channel` moves claude now and the next daily run moves it
+  # back unless the env file says the same. The script run is only "now" rather
+  # than "in five minutes", and the sentence has to say so — it said "or" once,
+  # copied from the source's refusal, where a present copy keeps its door.
+  [ "$AGENT_CHANNEL_GIVEN" = 0 ] || die "already set up here, so --agent-channel changes nothing.
+      Set REEMOAT_AGENT_CHANNEL=$AGENT_CHANNEL in $_env and restart the daemon: its refresh
+      re-applies that file's channel five minutes after a start and daily after that. To move
+      claude now rather than in five minutes, also run $CHECKOUT/deploy/agents.sh --channel $AGENT_CHANNEL;
+      on its own, the next daily run puts the env file's channel back."
   say ""
   if [ "$TTY_OPEN" != 1 ]; then
     die "already set up here, joined to $_bound.

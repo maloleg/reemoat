@@ -1582,7 +1582,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 
 process.stdout.write("\nkeeping the agent CLIs current\n");
 {
-  const { AgentUpdates, FIRST_RUN_DELAY_MS, UPDATE_INTERVAL_MS, UPDATE_JITTER, agentSourceFrom } = await import(
+  const { AgentUpdates, FIRST_RUN_DELAY_MS, UPDATE_INTERVAL_MS, UPDATE_JITTER, agentChannelFrom, agentSourceFrom } = await import(
     "../src/agentupdate.js"
   );
 
@@ -1631,7 +1631,9 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   armed[0]?.fire();
   await new Promise((r) => setTimeout(r, 0));
   check("firing it runs the script once", ran.length, 1);
-  check("with nothing skipped when nothing is live", ran[0], []);
+  // The channel is always said, default included — the block on it below says
+  // why — and nothing is skipped when nothing is live.
+  check("with the channel spelled out and nothing skipped when nothing is live", ran[0], ["--channel", "latest"]);
   check("and the cached CLI choice is dropped afterwards", updated.length, 1);
   // With what the script said, so a run that changed nothing still leaves a line
   // — a daily run with no trace was measured as invisible, seven minutes of
@@ -1671,17 +1673,17 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   const busy = make({ busy: () => ["kimi", "claude"] });
   armed[0]?.fire();
   await new Promise((r) => setTimeout(r, 0));
-  check("a live harness is passed through as a skip", ran[0], ["--skip", "kimi", "--skip", "claude"]);
+  check("a live harness is passed through as a skip, after the channel", ran[0], ["--channel", "latest", "--skip", "kimi", "--skip", "claude"]);
   await busy.shutdown();
 
   /*
    * **Where the CLIs come from is a flag, not an environment variable.** The
    * script runs under `updateEnv()`, which strips every `REEMOAT_*` name — so
    * `REEMOAT_AGENT_SOURCE=npm` cannot reach it as itself and the daemon has to say
-   * it on the command line (Q4.114). It goes ahead of the skips by convention
-   * rather than need — the script collects every flag before it acts, so either
-   * order reads the same — and the whole list is pinned as one value so that a
-   * change to what the daemon says is a change here first.
+   * it on the command line (Q4.114). It goes ahead of the channel and the skips
+   * by convention rather than need — the script collects every flag before it
+   * acts, so any order reads the same — and the whole list is pinned as one
+   * value so that a change to what the daemon says is a change here first.
    *
    * What the flag decides on the far side is narrower than it sounds: how a
    * harness that is *absent* is installed. One that is present is refreshed
@@ -1698,7 +1700,7 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   const fromNpm = make({ source: "npm", busy: () => ["kimi"] });
   armed[0]?.fire();
   await new Promise((r) => setTimeout(r, 0));
-  check("the npm source is named to the script, ahead of the skips", ran[0], ["--source", "npm", "--skip", "kimi"]);
+  check("the npm source is named to the script, ahead of the channel and the skips", ran[0], ["--source", "npm", "--channel", "latest", "--skip", "kimi"]);
   await fromNpm.shutdown();
 
   /*
@@ -1715,8 +1717,54 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   const fromVendor = make({ source: "vendor", busy: () => ["kimi"] });
   armed[0]?.fire();
   await new Promise((r) => setTimeout(r, 0));
-  check("the vendor source is the script's own default, and is not spelled out to it", ran[0], ["--skip", "kimi"]);
+  check("the vendor source is the script's own default, and is not spelled out to it", ran[0], ["--channel", "latest", "--skip", "kimi"]);
   await fromVendor.shutdown();
+
+  /*
+   * **The channel is the other way round: spelled out on every run, default
+   * included (Q4.115).** The script's refresh is `claude install <channel>`, which
+   * re-applies whatever it is told and rewrites claude's own setting — so the env
+   * file is the source of truth, and a daemon that holds a value must not let the
+   * script's default be what decides. The argument above for not naming `vendor`
+   * does not carry here: `stable` and `latest` are claude's names, not the
+   * script's, and a rename is the vendor's act that the script would have to
+   * follow in the same change either way. After the source and before the skips,
+   * so the flags that describe the run precede the list that describes the
+   * machine — a convention the pins above already hold.
+   */
+  ran.length = 0;
+  armed.length = 0;
+  const onStable = make({ channel: "stable", busy: () => ["kimi"] });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("a chosen stable channel is named to the script, ahead of the skips", ran[0], ["--channel", "stable", "--skip", "kimi"]);
+  await onStable.shutdown();
+
+  /*
+   * **The spelling read off `REEMOAT_AGENT_CHANNEL`**, the same posture as the
+   * source's below: an unknown spelling is reported and read as the default —
+   * the script would exit 2 on it, daily, and claude would never be refreshed —
+   * rather than obeyed or refused; case and padding are forgiven; and the
+   * warning names what it saw and the two words it could have been.
+   */
+  {
+    const said: string[] = [];
+    const read = (value: string | undefined) => agentChannelFrom(value, (detail) => void said.push(detail));
+    check("stable is stable, however it is cased or padded", [read("stable"), read(" STABLE ")], ["stable", "stable"]);
+    check("and nothing is said about it", said, []);
+    check(
+      "unset, empty and latest are all the default",
+      [read(undefined), read(""), read("latest"), read(" LATEST ")],
+      ["latest", "latest", "latest", "latest"],
+    );
+    check("in silence", said, []);
+    check("a spelling the daemon does not know is read as the default rather than obeyed or refused", read("bogus"), "latest");
+    check(
+      "with exactly one line, naming the spelling it saw and the two it knows",
+      [said.length, said[0]?.includes("REEMOAT_AGENT_CHANNEL=bogus") ?? false, said[0]?.includes("stable or latest") ?? false],
+      [1, true, true],
+    );
+  }
 
   /*
    * **The spelling read off `REEMOAT_AGENT_SOURCE`**, held here because it is one

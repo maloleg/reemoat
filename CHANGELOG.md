@@ -27,6 +27,16 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Changed
 
+- The fleet's `claude` follows the `latest` release channel by default, and the
+  channel is a setting: `REEMOAT_AGENT_CHANNEL=stable|latest` in the daemon's env
+  file, `--agent-channel` on the one-line installer, `--channel` on
+  `deploy/agents.sh`. Both daemon hosts were on `stable` at 2.1.236, a build that
+  had never heard of the newest model, while `latest` was 2.1.261. The refresh
+  runs `claude install <channel>` rather than `claude update` — `update` follows
+  whichever channel the last install wrote into claude's own settings, so a host
+  installed on `stable` would have stayed there whatever the env file said. A
+  change of channel moves the machine on the next run, down as well as up, with
+  the previous build kept on disk and no session interrupted.
 - `PUT /v1/me/email` asks an API-key caller with a password for `currentPassword`
   — `400 bad_request` without it, `401 invalid_password` with a wrong one, and
   nothing is written or mailed until it verifies. A session still changes the

@@ -690,7 +690,11 @@ for svc in $TARGETS; do
       # and no `opencode` — every interrupted session on those harnesses refused by
       # `autoResume` — until the daemon's own first run, five minutes after start.
       # The same script the bootstrap and the daemon run, with what the daemon will
-      # use read off its env file: the source; the switch that turns the daily
+      # use read off its env file: the source; claude's release channel, passed
+      # outright as the daemon passes it, since the script's refresh verb
+      # re-applies it on every run and a deploy that left it to the script's
+      # default would move a `stable` host to `latest` on the way through a
+      # restart (Q4.115); the switch that turns the daily
       # refresh off, honoured here too, since a machine with no outbound network or
       # with CLIs somebody else manages is not one a deploy should reach into; and
       # the two override variables, which `agentEnv` hands the daemon's own run and
@@ -720,6 +724,10 @@ for svc in $TARGETS; do
           # read to two answers, which `.env.example` says cannot happen.
           _agent_source=$(file_value "$_daemon_env" REEMOAT_AGENT_SOURCE | tr '[:upper:]' '[:lower:]')
           [ "$_agent_source" = npm ] || _agent_source=vendor
+          # And the channel, read the way the daemon's `agentChannelFrom` reads it:
+          # `stable` or `latest`, lowercased, anything else `latest`.
+          _agent_channel=$(file_value "$_daemon_env" REEMOAT_AGENT_CHANNEL | tr '[:upper:]' '[:lower:]')
+          [ "$_agent_channel" = stable ] || _agent_channel=latest
           _agent_claude=$(file_value "$_daemon_env" CLAUDE_CODE_EXECUTABLE)
           _agent_codex=$(file_value "$_daemon_env" CODEX_PATH)
           echo "  agents ($_agent_source)"
@@ -727,7 +735,7 @@ for svc in $TARGETS; do
             PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"; export PATH
             [ -z "$_agent_claude" ] || { CLAUDE_CODE_EXECUTABLE=$_agent_claude; export CLAUDE_CODE_EXECUTABLE; }
             [ -z "$_agent_codex" ] || { CODEX_PATH=$_agent_codex; export CODEX_PATH; }
-            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --skip claude --skip codex --skip opencode --skip kimi
+            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel" --skip claude --skip codex --skip opencode --skip kimi
           ) || echo "  agents: the script did not finish; the daemon retries daily" >&2
           ;;
       esac

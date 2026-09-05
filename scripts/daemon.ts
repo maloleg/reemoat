@@ -16,7 +16,7 @@ import type { AgentId } from "../src/acp/agents.js";
 import { systemSecretFor } from "../src/acp/systems.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
-import { AgentUpdates, agentSourceFrom } from "../src/agentupdate.js";
+import { AgentUpdates, agentChannelFrom, agentSourceFrom } from "../src/agentupdate.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
 import { codeFingerprint, enroll, EnrollError } from "../src/enroll.js";
@@ -600,8 +600,9 @@ const agentUpdates = AgentUpdates.start({
     // no line in the log was measured as invisible, and the script's own notes
     // are the only record of which build each harness is on now.
     console.log(`agent update: ran deploy/agents.sh${report === null ? "" : `\n${report.replace(/^/gm, "    ")}`}`);
-    // Or the daemon goes on launching the build it resolved before this ran, for the
-    // length of that cache — see `LocalRuntime.agentCli`.
+    // Or the daemon's *report* goes on naming the build it resolved before this ran,
+    // for the length of that cache: the spawn already runs the new one, because the
+    // held path is the symlink the script repointed — see `LocalRuntime.agentCli`.
     runtime.forgetAvailability();
     /*
      * And the capability cache, which `forgetAvailability` cannot reach: it holds
@@ -633,6 +634,10 @@ const agentUpdates = AgentUpdates.start({
   // updater so a driver can hold it, and an unknown value is said here rather
   // than obeyed.
   source: agentSourceFrom(process.env["REEMOAT_AGENT_SOURCE"], (detail: string) => console.error(`agent update: ${detail}`)),
+  // Which of claude's release channels the fleet follows, the same way: read
+  // once here, warned about here, and passed to the script on every run — the
+  // env file is what decides, not the script's default (Q4.115).
+  channel: agentChannelFrom(process.env["REEMOAT_AGENT_CHANNEL"], (detail: string) => console.error(`agent update: ${detail}`)),
 });
 
 /*

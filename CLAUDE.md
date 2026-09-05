@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 858 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 859 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -287,7 +287,9 @@ session may be on is kept, and a failure is a warning rather than a stop. Nothin
 is vendored under it any more (Q4.114): a harness with no CLI is refused with a
 sentence rather than started; `REEMOAT_AGENT_SOURCE=npm`, all four from the npm
 registry into that toolchain, is a firewalled machine's choice, never a fallback,
-and decides only how an absent CLI is installed.
+and decides only how an absent CLI is installed; `REEMOAT_AGENT_CHANNEL` is which
+of claude's release channels the fleet follows, `latest` by default, and unlike the
+source it moves a copy that is already there: re-applied on every refresh (Q4.115).
 `REEMOAT_AGENT_UPDATES=off` (or `0`) switches it off. What runs is
 `CLAUDE_CODE_EXECUTABLE`/`CODEX_PATH` outright, else the **first** copy on PATH,
 then in the directories the script installs into — so a file an agent drops into

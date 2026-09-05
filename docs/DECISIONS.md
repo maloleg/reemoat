@@ -59,17 +59,17 @@ bug in the file.
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 123 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 79 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 298 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 53 | `###` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 130 | `###` |
-| | | **858** | |
+| | | **859** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 858 rather than the 451
+dividers. So the count is over **both** depths, and it says 859 rather than the 452
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -17737,7 +17737,9 @@ the four come from is a choice made once per machine.
   `ensure_claude`, `ensure_codex` and `ensure_opencode` then reads the same table —
   for the two with a variable, an override set in `CLAUDE_CODE_EXECUTABLE` or
   `CODEX_PATH` → *left alone*, whatever the flag; opencode has none — a toolchain copy → `ensure_npm`, whatever the flag; a copy in
-  the vendors' directories → the vendor's own updater (`claude update`, `codex
+  the vendors' directories → the vendor's own updater (`claude update` [`claude
+  install "$CHANNEL"` since Q4.115: `update` follows whichever channel the last
+  install wrote into claude's own settings], `codex
   update`, `opencode upgrade --method curl`) under `vendor`, and under `npm` — the
   one thing a switch cannot do, since the registry cannot refresh a build the
   vendor's installer wrote — `vendor_copy_stays`: a warning on stderr naming the
@@ -17934,6 +17936,118 @@ refused refresh keeping its build, a vendor-installed claude under `--source npm
 named and counted, a toolchain copy refreshed from npm under `vendor` — and runs
 `deploy.sh`'s daemon arm against a stub, env file by env file; `daemoncheck`
 holds `agentSourceFrom`'s spellings and that `agentCli` holds no miss.
+
+### Q4.115 — Which channel the fleet's claude follows, and why the refresh re-applies it
+
+**Question.** Fable 5.1 was absent from the picker on both daemon hosts — the
+question Q6.106 opened, back with the resolver fixed. The model list is what the
+`claude` binary publishes (Q6.106), both hosts ran v0.6.0 with claude 2.1.236, and
+`deploy/agents.sh` had installed that claude with `bash claude.sh stable`, under a
+comment choosing `stable` over `latest` "chosen rather than inherited" on the
+grounds that a fleet on `latest` differs from itself for no reason anybody chose.
+
+**Measured, 2026-09-05.**
+- The 2.1.236 binary contains the id `claude-fable-5-1` **zero** times; a 2.1.261
+  contains it ten times. `GET https://downloads.claude.ai/claude-code-releases/stable`
+  answered `2.1.236` and `/latest` answered `2.1.261` the same day.
+- `https://claude.ai/install.sh` redirects to
+  `downloads.claude.ai/claude-code-releases/bootstrap.sh`, which always downloads
+  the latest binary and then runs `<binary> install <target>`, `target` one of
+  `stable`, `latest` or `x.y.z`. The vendor's script *is* `claude install
+  <channel>` behind a download.
+- `claude install <channel>` writes `autoUpdatesChannel=<channel>` into the user's
+  `~/.claude/settings.json` — the binary logs `Install: Saved autoUpdatesChannel=…
+  to user settings` — and `claude update` follows that setting: under channel
+  `stable` with 2.1.236 installed it printed `Claude Code is up to date (2.1.236)`.
+  So a host installed with `stable` tracks `stable` for ever, whatever the fleet
+  later decides, unless the *refresh* re-applies the channel and not only the first
+  install.
+- In an isolated `HOME`: a fresh `install latest` took 21 s (downloads 2.1.261,
+  writes the setting); `claude install latest` on a copy that was already current
+  took 6 s with no download — the verb is idempotent and cheap when current;
+  `claude install stable` on a 2.1.261 downloaded 2.1.236, repointed
+  `~/.local/bin/claude` to it (a downgrade) and kept 2.1.261 under
+  `~/.local/share/claude/versions/`, writing `autoUpdatesChannel=stable`. `claude
+  config get autoUpdatesChannel` demands a login and `-g` is an unknown option, so
+  `claude config` is not a lever for the setting.
+- The uniformity argument does not hold. Every host runs this script within the
+  same day — the bootstrap once, `deploy.sh` on every update, the daemon daily on
+  `UPDATE_INTERVAL_MS` — so a fleet on `latest` is as uniform as one on `stable`,
+  one day behind Anthropic instead of weeks.
+
+**Decision (D24, owner, 2026-09-05).** The fleet's claude follows `latest` by
+default, and the channel is a setting, plumbed exactly as `REEMOAT_AGENT_SOURCE` is
+(Q4.114).
+- `deploy/agents.sh --channel stable|latest`, `CHANNEL=latest` before any flag is
+  read; a third spelling or a bare `--channel` exits 2 by name, as `--source` does.
+  The fresh install is `bash claude.sh "$CHANNEL"`; the vendor-provenance refresh
+  is `claude install "$CHANNEL"` **instead of `claude update`**, because `update`
+  follows a setting written by whichever install ran last, while `install`
+  re-applies the fleet's channel on every run and is measured cheap when current.
+  The warning that stood there — never a re-run of the installer script — stays
+  true and now says why this verb: `claude.ai/install.sh` still downloads ~200 MB
+  every run and has no already-installed check, and the binary's own verb does
+  neither. Claude's vendor arm alone reads the flag: codex's and opencode's
+  installers have no channel and the npm arm is `@latest` for all four. `--check`
+  names the channel in its header and in claude's would-run line.
+- `src/agentupdate.ts`: `AgentUpdateOptions.channel`, and `agentChannelFrom` beside
+  `agentSourceFrom` — `stable` is `stable`; unset, empty or `latest` is `latest`;
+  anything else is one warning naming the spelling and both words, then `latest`.
+  `runOnce` passes `--channel <value>` **always**, default included, after
+  `--source` and before the `--skip` list: the env file is the source of truth,
+  and the script's default must not be what decides on a daemon that holds a
+  value. That is the one place this differs from `source`, which names only its
+  departure from the default; the argument there — a renamed script default would
+  exit every daemon in the field — does not carry here, since `stable` and
+  `latest` are claude's names and not the script's. `scripts/daemon.ts` reads
+  `REEMOAT_AGENT_CHANNEL` through it with `console.error`.
+- `deploy/deploy.sh` reads `REEMOAT_AGENT_CHANNEL` off the env file, lowercased as
+  the source is, `latest` unless it says `stable`, and passes `--channel` on its
+  pre-restart run. `deploy/bootstrap.sh` takes `--agent-channel stable|latest`,
+  validated in `parse_flags`, passed to `install_agents` as `--channel`, written by
+  `write_env_file` through `set_env` — single-quoted, as every env-file value is —
+  as `REEMOAT_AGENT_CHANNEL=stable` only when it is not the default, and refused by
+  `existing_install` on a machine already set up, naming the env file, the restart
+  that makes the daemon read it, and a run of the script as an *addition* — the
+  daily refresh re-applies the env file's channel, so a script run alone moves
+  claude for a day; `--agent-source`'s refusal says "or", and a present copy
+  keeping its door is why that one is right. `.env.example` carries `# REEMOAT_AGENT_CHANNEL=latest` as a commented
+  assignment at its default, over a paragraph naming both values, the measurement
+  and that changing it moves the machine on the next run, down as well as up.
+
+**What bounds it.** The constraint Q4.113 and Q6.106 state survives: no daemon
+restart, no live session interrupted. The install verb swaps `~/.local/bin/claude`
+by rename and keeps the previous build under `~/.local/share/claude/versions/`, so
+a running agent keeps the inode it opened — and a *new* session runs the new build
+the moment the symlink is repointed, because what the daemon's resolver holds is
+the path and not the file it named (`LocalRuntime.agentCli`: *the file a held path
+names was swapped by rename, and the path did not move*). What the resolver cache
+on `AGENT_CLI_TTL_MS` plus the `forgetAvailability` the updater calls after every
+run bound is narrower than that: how long the daemon's version *report* names the
+previous build — up to ten minutes after a refresh the daemon did not make, and
+none after its own. A change of channel therefore moves the
+machine on the next run, in either direction, with the old build on disk. The
+interval is unchanged: `UPDATE_INTERVAL_MS` stays 24 h, and **it is the second
+dial** if a day behind proves too slow — the first was the channel.
+
+**Rejected.** `claude update` kept, with the channel applied at install only — it
+is what tracked `stable` for ever. `claude config` to set the channel — demands a
+login and has no `-g`. Re-running the vendor's script as the refresh — ~200 MB per
+host per day for a verb the binary already has. Naming the channel only when it
+departs from the default, as `source` does — a daemon that holds a value would
+then defer to the script.
+
+**Status.** Current; applied 2026-09-05. `deploycheck` drives the flag's two
+refusals (under `--check`, so a parser that stopped refusing lists rather than
+downloads), `--check` under both channels, and the refresh for real through a stub
+claude that records the channel it was asked for — both spellings, and a refusal,
+whose warning names the verb and the channel rather than an `update` that no
+longer runs — and reads the pins: `"$CHANNEL"` on both claude lines and no
+literal channel in a command position of `ensure_claude`, `deploy.sh`'s read and
+pass, `scripts/daemon.ts`'s two readers, the bootstrap's flag, call, `set_env` with
+its call line, dated usage and refusal, and the example's commented assignment.
+`daemoncheck` holds `agentChannelFrom`'s spellings and the flag's place in the
+argument list.
 
 ## Invariants — rules that were defects first
 
@@ -21242,7 +21356,9 @@ provider that is not configured. Neither is reachable without a real key.
 ### Q6.106 — Which build of a CLI runs: an override, else the first on PATH and then in `MANAGED_CLI_DIRS`
 
 **Question.** Fable 5.1 did not appear in the model list. `SYSTEMS.anthropic.models`
-is `[]` on purpose; the list is what the `claude` binary publishes, and
+is `[]` on purpose; the list is what the `claude` binary publishes [and which
+build that is came back as a *channel* question a second time — Q4.115: a fleet
+installed on `stable` ran a claude that had never heard of the model], and
 `claude-agent-acp`'s `claudeCliPath()` is two branches — `CLAUDE_CODE_EXECUTABLE`,
 else a `require` bound to its SDK — and **throws** with neither, never consulting
 PATH. So the vendored copy was not a preference but the only answer, exactly as old

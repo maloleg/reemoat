@@ -30,7 +30,12 @@ import { agentEnv, type AgentId } from "./acp/agents.js";
  *
  * **The work is a shell script, not code here**, and that is deliberate: every
  * vendor hostname lives in `deploy/agents.sh`, so `src/` gains no fourth `fetch` —
- * `plugins.md` names the three it holds, and that count is the property.
+ * `plugins.md` names the three it holds, and that count is the property. What the
+ * script is told is three things, all on its command line because it runs under
+ * `updateEnv()` and cannot see this daemon's environment: where the CLIs come
+ * from (`--source`, off `REEMOAT_AGENT_SOURCE`), which of claude's release
+ * channels the fleet follows (`--channel`, off `REEMOAT_AGENT_CHANNEL`, Q4.115),
+ * and which harnesses have a live agent (`--skip`, once per harness).
  */
 /** What one run of the script came to. */
 export interface RunOutcome {
@@ -92,6 +97,34 @@ export interface AgentUpdateOptions {
    * callers, and none can quietly see a different one.
    */
   source?: "vendor" | "npm";
+  /**
+   * Which of claude's two release channels the fleet follows; `latest` when unset
+   * (Q4.115).
+   *
+   * Measured 2026-09-05: the model list is what the `claude` binary publishes
+   * (Q6.106), and both daemon hosts, installed on `stable`, ran a 2.1.236 that
+   * contains `claude-fable-5-1` zero times while `latest` was a 2.1.261 that
+   * contains it ten. The channel is claude's own setting as much as this
+   * daemon's — `claude install <channel>` writes `autoUpdatesChannel` into
+   * `~/.claude/settings.json` and `claude update` follows that — so the script
+   * re-applies it with the install verb on every refresh rather than trusting
+   * whichever install ran last, and the value has to reach every run.
+   *
+   * ⚠ **Passed as a flag on every run, and — unlike `source` — spelled out even
+   * at its default.** The env file is the source of truth for the channel, and a
+   * daemon that holds a value must not let the script's own default be what
+   * decides: the two are equal today, and a setting that is only honoured while
+   * it happens to equal a default somewhere else is not a setting. The argument
+   * `source` makes for not naming `vendor` — that a renamed
+   * script default would exit every daemon in the field — does not carry here,
+   * because `stable` and `latest` are claude's names rather than this script's,
+   * and renaming either is the vendor's act, which the script would have to
+   * follow in the same change either way. Same three callers as `source`: the
+   * bootstrap's install, off its own `--agent-channel`, which it then writes into
+   * the env file; `deploy.sh`'s pre-restart run, off that file; and this, off the
+   * same file at start.
+   */
+  channel?: "stable" | "latest";
   /** Injected so a driver can run this offline, with no network and no clock. */
   run?: (script: string, args: readonly string[]) => Promise<RunOutcome>;
   /** Injected for the same reason. Must answer something `unref`-able or a fake. */
@@ -263,6 +296,10 @@ export class AgentUpdates {
     const script = join(PACKAGE_ROOT, "deploy", "agents.sh");
     const args: string[] = [];
     if (this.options.source === "npm") args.push("--source", "npm");
+    // Always, default included — the option's docblock says why the two flags
+    // differ on that. After the source and before the skips, so the flags that
+    // describe the run precede the list that describes the machine.
+    args.push("--channel", this.options.channel ?? "latest");
     for (const agent of this.options.busy()) args.push("--skip", agent);
     const run = this.options.run ?? runScript;
     let answer: RunOutcome;
@@ -280,11 +317,12 @@ export class AgentUpdates {
     /*
      * ⚠ **A run that completed is not a run that succeeded, and the script cannot
      * say which.** It exits 0 whatever each vendor answered — the installer must not
-     * abort over a vendor being down — so the only record of `claude update failed`
-     * is a line on stderr. Forwarded, or a fleet with every vendor blocked would read
-     * as updated daily and warn nothing, which is the silent-success mode the script's
-     * own kimi paragraph calls worse than not trying. The cache is still dropped:
-     * three of four refreshing is three binaries that may have moved.
+     * abort over a vendor being down — so the only record of `claude install
+     * latest failed` is a line on stderr. Forwarded, or a fleet with every vendor
+     * blocked would read as updated daily and warn nothing, which is the
+     * silent-success mode the script's own kimi paragraph calls worse than not
+     * trying. The cache is still dropped: three of four refreshing is three
+     * binaries that may have moved.
      */
     const warnings = (answer.warnings ?? "").trim();
     if (warnings.length > 0) this.options.onWarning(`agent update: ${warnings}`);
@@ -310,6 +348,27 @@ export function agentSourceFrom(value: string | undefined, warn: (detail: string
     warn(`REEMOAT_AGENT_SOURCE=${spelled} is not a source this daemon knows (vendor or npm); using vendor`);
   }
   return "vendor";
+}
+
+/**
+ * Which of claude's release channels the fleet follows, read off
+ * `REEMOAT_AGENT_CHANNEL` (Q4.115).
+ *
+ * `stable` is the one other answer; unset or empty is `latest`, the default the
+ * measurement chose. The posture is {@link agentSourceFrom}'s exactly: an unknown
+ * spelling is *reported* through `warn` and then read as the default, rather than
+ * obeyed — the script would exit 2 on it, daily, and claude would never be
+ * refreshed — or refused, which is a typo costing a daemon that will not start.
+ * Pure and exported so `daemoncheck` can hold the spellings; `scripts/daemon.ts`
+ * passes `console.error`.
+ */
+export function agentChannelFrom(value: string | undefined, warn: (detail: string) => void): "stable" | "latest" {
+  const spelled = (value ?? "").trim().toLowerCase();
+  if (spelled === "stable") return "stable";
+  if (spelled !== "" && spelled !== "latest") {
+    warn(`REEMOAT_AGENT_CHANNEL=${spelled} is not a channel this daemon knows (stable or latest); using latest`);
+  }
+  return "latest";
 }
 
 /**
