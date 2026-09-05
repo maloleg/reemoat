@@ -96,13 +96,18 @@ paths:
   defence against flooding. Q1.407.
 - **A credential the code can read is a credential something must be able to write.**
   There is **one `UPDATE api_keys` statement that changes what a key *is*, reached
-  by two routes**: `revokeApiKey` behind `DELETE /v1/me/keys/:keyId` and
-  `DELETE /v1/admin/users/:id/keys/:keyId`. The second `UPDATE` on that table is a
+  by one route**: `revokeApiKey` behind `DELETE /v1/me/keys/:keyId`, the holder's
+  own. It was two until 2026-09-06 — `DELETE /v1/admin/users/:id/keys/:keyId` is
+  deleted with the admin's list of anybody's keys (Q1.631) — and the `user_id`
+  clause inside carries more since, not less: the one caller passes its own id, and
+  the clause is what makes a key id seen in a listing worthless to anybody but its
+  holder. The second `UPDATE` on that table is a
   bookkeeping one — `touchKey` writes `last_used_at` on an accepted bearer lookup,
   at most once per `KEY_TOUCH_INTERVAL_MS` and never on a revoked row, so a leaked
   key's row says when it was last presented (Q1.629). **No
   password change on this service retires a key** — revoking it is its own act, and it
-  is the one an admin has. Same shape `sessionOf` is named for: **a property the code
+  is the holder's alone; an admin's remedy is the account (`disable`, delete). Same
+  shape `sessionOf` is named for: **a property the code
   appears to have and nothing enforces is worse than one it visibly lacks.** Q1.408.
 - **A credential does not outlive the person who minted it.** `burnUserCodes` runs
   inside the delete's existing `BEGIN`/`COMMIT` — synchronous, like everything else in

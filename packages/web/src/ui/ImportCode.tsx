@@ -6,7 +6,7 @@ import { ApiError, errorText } from "../http";
 import { MAX_IMPORT_BYTES } from "../wire";
 import { IMPORT_SKILL } from "../importSkill";
 import type { MachineId } from "../ids";
-import { Button, Icon, SHEET_FOOT } from "./bits";
+import { Button, Icon, SHEET_FOOT, SHEET_SCROLL } from "./bits";
 import { Sheet } from "./Sheet";
 import { copyText } from "./clipboard";
 import { toast } from "./Toast";
@@ -274,12 +274,19 @@ export function ImportCode({
       }
     >
       <div
-        className="flex min-h-0 flex-1 flex-col gap-5"
+        className={SHEET_SCROLL}
         /*
          * The drop target is the whole body rather than the box below it. The box
          * says where to aim; this catches everything that misses, which on a
          * trackpad is most of it. `onDragOver` must `preventDefault` or `drop`
          * never fires — the browser's default is to refuse.
+         *
+         * It is also this screen's scroller and its padding, since `SHEET_BODY`
+         * has neither (Q3.553): `SHEET_SCROLL` fills the body, so a drop anywhere
+         * in it still lands, and the steps sit in the padding a screen gets. The
+         * column of steps is nested rather than `flex` being appended to that
+         * string — it decides `display`, and a call site adding its own is the
+         * shape `AgentBuilder` declines for the same reason.
          */
         onDragOver={(event) => {
           if (!event.dataTransfer.types.includes("Files")) return;
@@ -298,6 +305,7 @@ export function ImportCode({
           pick(event.dataTransfer.files);
         }}
       >
+      <div className="flex flex-col gap-5">
         {/*
           * **"Machine" is a word this screen has already spent.** There is a machine
           * picker on the form behind this sheet, a Machines section in settings, and
@@ -319,10 +327,10 @@ export function ImportCode({
             * So the block is readable and scrollable, and the control is an icon in
             * its corner rather than the only thing there is to look at.
             *
-            * `overscroll-contain` is load-bearing rather than decorative: the sheet
-            * body is itself a scroller, and without it reaching the end of this box
-            * starts moving the sheet — the nested-scroller failure `DirectoryPicker`
-            * describes one file over.
+            * `overscroll-contain` is load-bearing rather than decorative: the
+            * `SHEET_SCROLL` this sits in is itself a scroller, and without it
+            * reaching the end of this box starts moving the screen — the
+            * nested-scroller failure `DirectoryPicker` describes one file over.
             */}
           <div className="relative w-full">
             <pre className="max-h-56 overflow-y-auto overscroll-contain rounded-md border border-edge-strong bg-ink py-2.5 pr-16 pl-3 font-mono text-2xs leading-relaxed whitespace-pre-wrap text-fg">
@@ -436,6 +444,7 @@ export function ImportCode({
         </Step>
 
         {phase.kind === "failed" && <p className="text-sm text-danger wrap-anywhere">{phase.message}</p>}
+      </div>
       </div>
     </Sheet>
   );

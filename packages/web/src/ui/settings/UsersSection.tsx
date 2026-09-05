@@ -1,8 +1,8 @@
 import { MoreHorizontal, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import * as cp from "../../cp";
-import type { AdminUserRow, ApiKeyRecord } from "../../cp";
-import { orderKeys, userState, userStateText } from "../../account";
+import type { AdminUserRow } from "../../cp";
+import { userState, userStateText } from "../../account";
 import { errorText } from "../../http";
 import { adminMayInvite, type InstanceConfig } from "../../instance";
 import { machineLimitChangeNotice, machineLimitProblem } from "../../quota";
@@ -23,7 +23,6 @@ import {
   TwoStep,
 } from "../bits";
 import { toast } from "../Toast";
-import { KeyRow, KeyTable } from "./KeyRow";
 import { OneTimeSecret } from "./OneTimeSecret";
 
 /**
@@ -303,12 +302,19 @@ function CreateUser({
 }
 
 /**
- * Which panel under a row is open. **One at a time**: the keys list and the
- * machine limit used to be two booleans, so both could be open under one row and
- * the limit panel — drawn second — sat under a key list that had just changed
- * height. A union makes "both" unspellable.
+ * Which panel under a row is open. **A union of one member, on purpose.**
+ *
+ * The machine limit is the only panel a row has now — the API keys list that
+ * used to be the other member was deleted on 2026-09-06 with the admin's whole
+ * view of anybody's keys (Q1.631). The type stays a union rather than folding
+ * into a boolean because of what two booleans once cost: the keys list and the
+ * limit panel were `open` flags side by side, so both could be open under one
+ * row, and the limit panel — drawn second — sat under a key list that had just
+ * changed height. A union makes "both" unspellable, and a single state over it
+ * is what keeps that true. So a second panel, when one arrives, is a member
+ * added here — never a boolean beside `panel` — and `webcheck` pins the shape.
  */
-type RowPanel = "keys" | "limit" | null;
+type RowPanel = "limit" | null;
 
 /**
  * How much room a kebab's panel needs below the row before it opens upward.
@@ -349,7 +355,6 @@ function UserRow({
    */
   const state = userState(user, emailEnabled);
   const [confirming, setConfirming] = useState(false);
-  const [keys, setKeys] = useState<ApiKeyRecord[] | null>(null);
   const [panel, setPanel] = useState<RowPanel>(null);
   const [placement, setPlacement] = useState<"up" | "down">("down");
   const rowRef = useRef<HTMLDivElement>(null);
@@ -381,30 +386,6 @@ function UserRow({
       })
       .catch((cause: unknown) => toast("error", errorText(cause)))
       .finally(() => setBusy(false));
-  };
-
-  /**
-   * Open or close the key list for this row, re-reading it on every open.
-   *
-   * Nothing on this row asks for a password — an admin may revoke a key here and
-   * may not issue one.
-   */
-  const toggleKeys = (): void => {
-    if (panel === "keys") {
-      setPanel(null);
-      return;
-    }
-    setPanel("keys");
-    // Back to the placeholder on every open: rows held from a previous open are
-    // a claim about a list somebody may have changed since.
-    setKeys(null);
-    void cp
-      .adminUserKeys(user.id)
-      .then((rows) => setKeys(orderKeys(rows)))
-      .catch((cause: unknown) => {
-        setPanel(null);
-        toast("error", errorText(cause));
-      });
   };
 
   const over = user.machinesOverLimit ?? 0;
@@ -619,42 +600,25 @@ function UserRow({
               {(close) => (
                 <>
                   {/*
-                   * **An admin could not previously see that a key exists at all.**
+                   * **No "API keys" item, and that is the second instruction
+                   * about it rather than the first.** "API keys (N)" sat here
+                   * from Q1.611 to 2026-09-06, opening a list of the person's
+                   * keys with a two-step Revoke on each — the only caller of
+                   * `adminRevokeKey` anywhere. It survived the first instruction
+                   * to remove it (Q3.217) on the argument that nothing else could
+                   * retire a key its holder was not around to retire. The owner's
+                   * second instruction was that an admin can neither look at a
+                   * person's keys nor do anything with them, and the routes went
+                   * with the item (Q1.631): a key is between the person and their
+                   * machine, and its holder revokes it from their own keys screen.
+                   * What this menu keeps is the account — disable and delete are
+                   * what an admin has over a credential now.
                    *
-                   * `revoked_at` was a column nothing could write, so the one
-                   * credential here that never expires was both immortal and absent
-                   * from the list read to answer "who can use this". The count comes
-                   * from the fleet list and the rows from `GET
-                   * /v1/admin/users/:id/keys`; `undefined` is an older control plane
-                   * that did not count, which is a different fact from zero and is
-                   * drawn as no number rather than as `0`.
-                   *
-                   * **It is in the menu rather than deleted, and that is the one
-                   * place this row keeps something it was asked to lose.** The
-                   * panel behind it is the only caller of `adminRevokeKey`
-                   * anywhere in the product — an admin revoking *somebody else's*
-                   * key has no other door, in any client, since `cpctl`'s
-                   * `keys --revoke` retires only your own. Removing it outright
-                   * would take that capability out of the product entirely, which
-                   * is precisely the state the invariant "a credential the code
-                   * can read is a credential something must be able to write"
-                   * exists to end. Off the row it is; out of the product it is
-                   * not.
-                   */}
-                  <RowAction
-                    label={typeof user.keys === "number" ? `API keys (${user.keys})` : "API keys"}
-                    onClick={() => {
-                      close();
-                      toggleKeys();
-                    }}
-                  />
-                  {/*
-                   * The numbers ride the label, exactly as `API keys (N)` does
-                   * one line up: zero row width, and an absent field degrades to
-                   * no number rather than to `0 of undefined`. This is the only
-                   * place in the app an admin can see how close somebody is to
-                   * their limit without opening anything — the row's badge is
-                   * drawn only at or over it.
+                   * The numbers ride the label: zero row width, and an absent
+                   * field degrades to no number rather than to `0 of undefined`.
+                   * This is the only place in the app an admin can see how close
+                   * somebody is to their limit without opening anything — the
+                   * row's badge is drawn only at or over it.
                    */}
                   <RowAction
                     label={
@@ -742,57 +706,6 @@ function UserRow({
         </div>
       </div>
 
-      {panel === "keys" && (
-        <div ref={panelRef} className="border-t border-edge/50 px-3 pb-3 pt-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className={SETTINGS_HEADING}>API keys</span>
-            {/* Both panels close the same way — this one had no Close while the
-                limit panel did, so the only way to fold it was the kebab again. */}
-            <Button size="sm" tone="ghost" onClick={() => setPanel(null)}>
-              Close
-            </Button>
-          </div>
-          {/*
-           * Revoked rows are **listed rather than filtered**: the question this
-           * panel answers is "is the one that leaked dead yet", which a row that
-           * vanishes on revocation cannot answer. Newest first, revoked last —
-           * `orderKeys`, the same order the person's own API keys screen draws.
-           *
-           * `KeyRow` is the one shared with that screen, with `confirm` on: an
-           * admin retiring *somebody else's* credential is two taps, and the
-           * question names the key (Q3.219). No sentence about this browser's own
-           * key here — an admin's own keys are the API keys section's job, and
-           * the row cannot know which one this tab holds without repeating that
-           * screen's logic.
-           */}
-          {keys === null ? (
-            <SkeletonRow />
-          ) : keys.length === 0 ? (
-            <p className="mt-1 text-xs text-muted">No keys.</p>
-          ) : (
-            <KeyTable>
-              {keys.map((record) => (
-                <KeyRow
-                  key={record.id}
-                  record={record}
-                  confirm={true}
-                  revoke={() => cp.adminRevokeKey(user.id, record.id)}
-                  onRevoked={() => {
-                    // Same rule as the mint path: a failed re-read keeps the rows
-                    // on screen rather than dropping into the placeholder state.
-                    void cp
-                      .adminUserKeys(user.id)
-                      .then((rows) => setKeys(orderKeys(rows)))
-                      .catch(() => undefined);
-                    onChanged();
-                  }}
-                />
-              ))}
-            </KeyTable>
-          )}
-        </div>
-      )}
-
       {panel === "limit" && (
         <div ref={panelRef}>
           <MachineLimitPanel user={user} onChanged={onChanged} onClose={() => setPanel(null)} />
@@ -805,10 +718,12 @@ function UserRow({
 /**
  * How many machines this person may own, raised or lowered.
  *
- * **An expandable panel under the row, opened from the kebab** — the shape
- * `toggleKeys` already established. Not a `Sheet`: that is a second dismissable
- * layer over the settings sheet, for one control. Not inline on the row: that
- * reopens the ~370px-of-controls measurement the kebab was introduced to end.
+ * **An expandable panel under the row, opened from the kebab** — a shape the
+ * row's API keys list established first and this panel is now the only
+ * instance of, that list being deleted with the admin's view of anybody's
+ * keys (Q1.631). Not a `Sheet`: that is a second dismissable layer over the
+ * settings sheet, for one control. Not inline on the row: that reopens the
+ * ~370px-of-controls measurement the kebab was introduced to end.
  * And not a two-step row confirmation, because this is a *form* — a number, a
  * Save, a Reset and a sentence — rather than a yes/no.
  *
@@ -1023,11 +938,15 @@ function MachineLimitPanel({
 }
 
 /*
- * `KeyRow` was here, and it is `./KeyRow` now — one row for this panel and for
- * the person's own API keys screen, which drew the same key in a second markup
- * with a second spacing and no age. The two-step-versus-one-tap decision that
- * used to be the difference between the two copies is that component's
- * `confirm` prop.
+ * `KeyRow` was here, and it is `./KeyRow` now, drawn by the person's own API
+ * keys screen and by nothing in this file. It moved out when this file's admin
+ * key panel and that screen drew the same key in two markups with two spacings
+ * and only one age; the two-step-versus-one-tap decision that used to be the
+ * difference between the copies became that component's `confirm` prop. The
+ * admin panel that was the second caller is deleted (Q1.631), so `KeyRow` has
+ * one caller again — and it stays in its own file rather than moving back into
+ * `KeysSection`, because `webcheck` reads this file for the *absence* of a
+ * `./KeyRow` import, which is the pin that an admin draws nobody's keys.
  *
  * `RowAction` was here before that, and it is in `bits.tsx` now.
  *

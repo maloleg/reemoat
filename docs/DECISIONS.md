@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 123 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 124 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 298 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 300 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 131 | `###` |
-| | | **861** | |
+| | | **864** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 861 rather than the 454
+dividers. So the count is over **both** depths, and it says 864 rather than the 455
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -825,7 +825,9 @@ left `/v1/me/keys` again by the owner's decision (Q1.630), and on 2026-09-05
 /v1/admin/users/:id/password` sweeps the account's keys as well. Two `UPDATE
 api_keys` statements, three routes — and `POST /v1/me/password` is deliberately
 not one of them. **The sweep and its route are since deleted, which takes the
-count to one statement and two routes; see the supersession at the end.**
+count to one statement and two routes; see the supersession at the end.** **Amended
+2026-09-06.** The admin route is deleted too (Q1.631): one statement, one route, the
+holder's own.
 
 **Why it is here at all.** `callerAuth` read `api_keys.revoked_at` and answered
 `api_key_revoked`, so from both ends the capability looked present — the schema
@@ -878,7 +880,10 @@ UPDATE api_keys SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at I
 ```
 
 reached by `DELETE /v1/me/keys/:keyId` and `DELETE
-/v1/admin/users/:id/keys/:keyId` and by nothing else. **No password change on this
+/v1/admin/users/:id/keys/:keyId` and by nothing else (**amended 2026-09-06**: the
+second of those is deleted by Q1.631, so it is reached by `DELETE /v1/me/keys/:keyId`
+alone, and the count on `GET /v1/admin/users` two paragraphs up is gone with it).
+**No password change on this
 service retires a key** — not the self-service one, which never did, and not the
 mailed reset that replaced the admin's, which counts the account's live keys into
 `apiKeysActive` and revokes none of them. The paragraph above arguing that an
@@ -1684,7 +1689,8 @@ not signed out by the change.
 
 **Decision.** Two routes write `api_keys.revoked_at`, both deliberate revocations:
 `DELETE /v1/me/keys/:keyId` and `DELETE /v1/admin/users/:id/keys/:keyId`, through
-`revokeApiKey`.
+`revokeApiKey`. **Amended 2026-09-06.** One route now — the admin one is deleted by
+Q1.631, and an admin has no verb over anybody's keys at all.
 
 **Why.** The column was read by `callerAuth` and written by nothing, so the one
 credential here that never expires was also the one nothing could take back — a
@@ -2018,7 +2024,10 @@ wait list is 16 and answers `503 overloaded` with `Retry-After: 1` rather than h
 ### Q1.408 — Could an API key ever be taken back?
 
 **Rule.** One `UPDATE api_keys` statement, reached by two routes: `revokeApiKey` behind
-`DELETE /v1/me/keys/:keyId` and `DELETE /v1/admin/users/:id/keys/:keyId`.
+`DELETE /v1/me/keys/:keyId` and `DELETE /v1/admin/users/:id/keys/:keyId`. **Amended
+2026-09-06.** Reached by one route, the holder's own: the admin route is deleted by
+Q1.631, and the `user_id` clause the rule below leans on now carries the whole of
+"somebody else's is a 404".
 
 **Why.** `api_keys.revoked_at` was read by `callerAuth`, which answered `api_key_revoked`
 — so the capability looked present from both ends, the schema having the column and the
@@ -3218,6 +3227,47 @@ with a wrong password in the body; the password gate stays pinned on
 `POST /v1/me/password` and on the API-key arm of `PUT /v1/me/email` — refused
 without the password, refused with a wrong one, through with the right one,
 and the session and no-password-row arms through with none.
+
+### Q1.631 — May an admin see or retire somebody else's API key?
+
+**Decision.** No, and nothing else about anybody's keys either. `GET
+/v1/admin/users/:id/keys` and `DELETE /v1/admin/users/:id/keys/:keyId` are
+deleted, `GET /v1/admin/users` no longer counts a person's live keys, and the
+Users screen's "API keys" item and the panel it opened are gone with
+`adminUserKeys` and `adminRevokeKey`. What is left of an admin's reach over
+`api_keys` is the account itself: disable ends every credential's use through
+`callerAuth`'s live `disabled_at` read, and delete removes the rows. A key is
+listed by its holder alone (`GET /v1/me/keys`) and retired by its holder alone
+(`DELETE /v1/me/keys/:keyId`, `cpctl keys --revoke`), so `revokeApiKey` stands
+behind one route.
+
+**Why.** The owner's instruction on 2026-09-06, in one line: an admin cannot
+look at a user's API keys, nor do anything at all with them. Q3.217 kept the
+panel against an earlier instruction to remove it, on the argument that its
+revoke was the only writer of `revoked_at` for a key you do not hold, so that
+deleting it would leave a credential the code reads and nothing can write.
+That argument has expired: `DELETE /v1/me/keys/:keyId` has been the holder's
+own writer since Q1.611, and the leaked-key case Q1.408 was about is the
+account's own key, which its holder revokes from the keys screen. What the
+admin route bought after that was a second reader of somebody else's
+credential list — the prefixes and when each was last presented — and the
+owner's model of the product is that a key is between the person and their
+machine.
+
+**Alternatives taken out.** Keeping the count on the fleet list ("N keys" with
+no list behind it): still a fact about somebody's credentials, and the
+instruction was about anything at all. Keeping the revoke and dropping the
+read: a revoke needs an id, and the only way to an id was the read. Leaving
+the routes and hiding the menu item: a route no client can reach is the shape
+Q7.74's `withKey` was deleted for.
+
+**Status.** Applied. `relaycheck` asserts both routes answer 404 to the admin
+that used to reach them, that a fleet-list row carries no `keys` field, and
+that the holder's own list and revoke still work — the revoked row still
+listed, a second revoke a 404 — and, by reading `app.ts`, that no route
+mounted under `/v1/admin/users/:id/` reads or updates `api_keys`. `webcheck`
+asserts `UsersSection` imports nothing from `KeyRow`, that `cp.ts` exports
+neither function, and that the row's one panel is the machine limit.
 
 ## Session lifecycle, questions and attachments
 
@@ -10833,7 +10883,15 @@ exists to end, which is the state that matters: the person who has left is exact
 the person who will not be revoking their own. Off the row it is; out of the
 product it is not.
 
-**Status.** Current
+**Amended 2026-09-06.** Out of the product it now is. The owner's second instruction
+was that an admin can neither look at a person's keys nor do anything with them, and
+the argument above had expired by then: the holder's own `DELETE /v1/me/keys/:keyId`
+was the writer of `revoked_at` since Q1.611, and the person who has left is handled
+by disabling or deleting the account, which ends every credential's use. The item,
+the panel, `adminUserKeys`, `adminRevokeKey` and both admin routes are deleted —
+Q1.631.
+
+**Status.** Superseded by Q1.631
 
 #### Q3.218 — In what order does a confirming settings row lay out its two answers?
 
@@ -16332,7 +16390,8 @@ the dispatcher's call-site shape.
 
 **Decision.** Every two-step confirmation in the web client is `TwoStep`
 (`bits.tsx`) — fifteen mounts across fourteen sites, counted by `webcheck` as a
-table by file. It owns the layout property Q3.218 states: one container drawn in
+table by file (fourteen across thirteen since Q1.631 took `KeyRow`'s two-step
+arm with the admin key panel that was its only user). It owns the layout property Q3.218 states: one container drawn in
 both arms, the act then Cancel with Cancel last in DOM order, Cancel `plain` and
 never `primary`, and — for an act that returns a promise — the wait: both
 answers disabled, a spinner in the act's label, the question closed only in
@@ -16424,6 +16483,79 @@ braced `{"Cancel"}` child and a raw `<button>`), holds the fifteen by file, pins
 the box string and the accessible name across the primitive, and re-points each
 site's own pin to what that site still decides — including, at the four sites
 with a shared flag, that the flag is held from the promise handed over.
+
+#### Q3.553 — Why does a sheet's body never scroll, and why has the settings pop-up no scrollbar at all?
+
+**Decision.** `SHEET_BODY` is a flex column that clips (`overflow-hidden`) and
+carries no padding; every pop-up scrolls in a box of its own — `SHEET_SCROLL`,
+or the settings and market panes' own scroller — and `SHEET_SCREEN` cancels
+nothing, since there is nothing left to cancel. Inside the settings sheet, and
+the market sheet that mirrors it string for string, the rail and the pane carry
+`no-scrollbar`: they scroll, and draw no bar.
+
+**Why.** Reported 2026-09-06 from a desktop: a horizontal bar along the foot
+of the settings pop-up and a vertical one down its right edge, on an Account
+screen that fit. The horizontal one can only be the body's — nothing narrower
+than the panel scrolls sideways — and the vertical one is the same mechanism
+in the other axis. Both are the price of cancelling a scroll container's
+padding from inside it. `SHEET_BODY` was `overflow-y-auto` with `px-4 py-5`,
+and every screen inside it — settings' rail-beside-pane row, `SHEET_SCREEN` —
+reached the padding edge with `-mx-4 -my-5` so that a rail's border and a
+screen's action bar could touch the panel's edge. A scroll container's
+scrollable overflow includes its own end padding beyond the content's far edge
+(CSS Overflow 3, which current engines follow), so a child that ends exactly
+at the padding edge overflows by exactly one padding: 16–20px of scroll range
+in each axis that nothing could ever show, drawn as a bar wherever
+`pointer: fine` holds, since `index.css` opts every box out of macOS's overlay
+bars with `scrollbar-width: thin`. The remedy is structural rather than
+cosmetic: a box that is not a scroll container has no scrollable overflow and
+can draw no bar, and every pop-up already scrolled in a child of its own. The
+pane's own bar is then the owner's call, and the call was none in the settings
+pop-up. `.no-scrollbar`'s docblock said "never on a vertical list", for the
+cue a desktop bar gives about how much more there is; the owner weighed that
+cue against a permanent classic bar on every desktop scroller and chose no bar
+here, with scrolling unchanged.
+
+**Alternatives taken out.** `overflow-x-hidden` on the body: hides the bar and
+keeps a 20px vertical range a wheel over the padding can still move.
+`no-scrollbar` on the body alone: hides both bars and keeps both ranges.
+Padding on the body with screens that do not cancel it: a rail's border
+stopping 16px short of the panel's edge, and an action bar with a gutter. A
+`bare` prop on `Sheet`: two body strings for one box, where every pop-up in
+the app is already a screen.
+
+**Status.** Applied. `webcheck` reads `SHEET_BODY` off `bits.tsx` and asserts
+`overflow-hidden`, no `overflow-y-auto` and no padding class; that
+`SHEET_SCREEN` carries no negative margin; that `Settings.tsx` and
+`PluginsSheet.tsx` still draw the rail and the scroller string for string,
+with `no-scrollbar` on both; and that neither they nor `PluginSettings.tsx`
+carry a negative margin — the last had the same defect one box further in,
+a `sticky` "Writing to" bar reaching the market pane's edges by `-mx-4 -mt-4`
+inside that pane's padding, so the market's scroller now pads by arm as
+Settings' does and that screen pads its own form (`PANE_PAD`).
+
+#### Q3.554 — Why is every row of the API-keys table the same height?
+
+**Decision.** `KeyRow` is `h-12` on the row and no vertical padding on the
+cells. A row with a Revoke button and a revoked row with none measure the
+same, and `align-middle` centres both.
+
+**Why.** Reported 2026-09-06: three rows, three heights. A live key's row was
+the button's 36px plus the cells' `py-2`; a revoked row had no button and was
+its text plus the same padding, a third shorter. A table whose rows are sized
+by which control each happens to hold reads as three kinds of thing where
+there is one. The height is a property of the row rather than of its contents:
+48px clears `BUTTON_SIZE.sm` at both pointer floors — 36px, and 44px under a
+coarse pointer — and leaves a badged prefix and a `whitespace-nowrap` age
+alone.
+
+**Alternatives taken out.** An empty control-sized box in a revoked row's last
+cell: a second copy of `BUTTON_SIZE.sm`'s numbers that drifts the day the
+button does. Vertical padding tuned so that text plus padding equals button
+plus padding: two numbers that agree by arithmetic nobody will re-run.
+
+**Status.** Applied. `webcheck` asserts the row string and that no cell of the
+row carries a `py-` class.
 
 ## Deployment, packaging and code layout
 
@@ -23696,7 +23828,9 @@ that panel is the only caller of `adminRevokeKey` anywhere — `cpctl admin key`
 mints keys it cannot revoke, and `myKeys`/`revokeMyKey` have no callers — so
 deleting it would return API-key revocation to exactly the state the invariant "a
 credential the code can read is a credential something must be able to write"
-exists to end. It is one line in the menu.
+exists to end. It is one line in the menu. (**Amended 2026-09-06.** That line is
+gone too, with the routes behind it — Q1.631, which records why the argument here
+had expired.)
 
 **Two smaller ones, recorded because each looked like a rendering fault.** The
 rail's scrollbar was `overflow-y-auto` emitting only `overflow-y: auto`, and CSS

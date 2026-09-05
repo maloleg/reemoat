@@ -2798,8 +2798,11 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * were three INSERTs, one SELECT, one DELETE inside user deletion, and no
    * `UPDATE api_keys` anywhere in this service. A key was therefore immortal
    * until the account holding it was deleted outright, which is why these two
-   * routes exist for *everybody* and not only for an admin: the person most
-   * likely to know a key leaked is the person who pasted it somewhere.
+   * routes exist for *everybody*: the person most likely to know a key leaked
+   * is the person who pasted it somewhere. Since 2026-09-06 they are also the
+   * **only** list and the only revoke there is — the admin's pair over somebody
+   * else's keys is deleted (Q1.631), so a key is seen and ended by its holder
+   * and by nobody else.
    * ---------------------------------------------------------------- */
 
   /** Your API keys, as much of one as may ever be shown. See `apiKeyRows`. */
@@ -3850,7 +3853,6 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           "  (SELECT COUNT(*) FROM user_passwords p WHERE p.user_id = u.id) AS has_password, " +
           "  (SELECT COUNT(*) FROM user_sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL " +
           "     AND s.expires_at > ?) AS sessions, " +
-          "  (SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id AND k.revoked_at IS NULL) AS keys, " +
           // A join rather than two correlated subqueries against one row of one
           // table: `user_emails.user_id` is the primary key, so this is 1:1 and
           // the pair was fetching the same row twice per user.
@@ -3860,9 +3862,11 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           // This is the screen an admin lowers a limit from, so it has to show
           // both sides of the fallback — the same obligation
           // `GET /v1/admin/settings` meets for a setting. The count is a
-          // correlated subquery like `sessions` and `keys` beside it; the
-          // override is a join, because `user_machine_limits.user_id` is a
-          // primary key and the join is 1:1.
+          // correlated subquery like `sessions` beside it; the override is a
+          // join, because `user_machine_limits.user_id` is a primary key and
+          // the join is 1:1. (A third subquery counted live API keys until
+          // 2026-09-06 and is gone: an admin is told nothing about anybody's
+          // keys, not even how many — Q1.631.)
           "  (SELECT COUNT(*) FROM machine_owners mo WHERE mo.user_id = u.id) AS machines, " +
           "  ml.max_machines AS machine_limit " +
           /*
@@ -3906,19 +3910,19 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         hasPassword: Number(row["has_password"]) > 0,
         sessions: Number(row["sessions"]),
         /*
-         * How many live API keys, which an admin could not see **at all**.
+         * No `keys` field, and its absence is asserted rather than assumed.
          *
-         * The one credential here that never expires and that nothing prompted
-         * anybody to revoke was also the one absent from the list read to answer
-         * "who can use this". A count rather than the keys themselves: this route
-         * is the fleet-wide list and a per-user detail belongs on the per-user
-         * route, which `GET /v1/admin/users/:id/keys` now is.
-         *
-         * A correlated subquery like the two above it, filtered to unrevoked —
-         * the question is how many credentials still work, not how many were ever
-         * minted.
+         * A count of live API keys rode here from Q1.611 to 2026-09-06 — "how
+         * many credentials still work", filtered to unrevoked — and `relaycheck`
+         * now pins that `"keys" in row` is false for every row this route
+         * answers. The owner's instruction was that an admin can neither look at
+         * a person's keys nor do anything with them, and a count is still a fact
+         * about somebody's credentials (Q1.631). What an admin is left with is
+         * the account: `disable` ends every credential's use through `callerAuth`'s
+         * live `disabled_at` read, and `DELETE /v1/admin/users/:id` removes the
+         * rows. The web client's `AdminUserRow` no longer declares the field,
+         * and reads nothing off it from a control plane old enough to send one.
          */
-        keys: Number(row["keys"]),
         /*
          * How many machines they own, their ceiling, and which side it came
          * from — the three numbers the machine-limit panel on this row draws.
@@ -4320,17 +4324,17 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   });
 
   /* ---------------------------------------------------------------- *
-   * ⚠ Two routes used to live here and are deleted:
-   *   `POST /v1/admin/users/:id/password` and `POST /v1/admin/users/:id/keys`.
+   * ⚠ Four routes used to live here and are deleted, in two acts.
    *
-   * **An admin can take a credential away and can never issue one.** That is
-   * the invariant those deletions buy, and it is stated as a property of the
-   * whole service rather than of a route: *no route in this service issues a
-   * credential for an account other than the caller's own*. The bootstrap in
-   * `main.ts` is not a route and has no caller — it is the fleet coming into
-   * existence. Everything else (`POST /v1/me/keys`, `/v1/login`,
-   * `/v1/register/confirm`, `/v1/reset`) issues only to an account that has just
-   * proved something about itself.
+   * First `POST /v1/admin/users/:id/password` and `POST /v1/admin/users/:id/keys`
+   * (Q7.74). **An admin can take a credential away and can never issue one.**
+   * That is the invariant those two deletions buy, and it is stated as a
+   * property of the whole service rather than of a route: *no route in this
+   * service issues a credential for an account other than the caller's own*.
+   * The bootstrap in `main.ts` is not a route and has no caller — it is the
+   * fleet coming into existence. Everything else (`POST /v1/me/keys`,
+   * `/v1/login`, `/v1/register/confirm`, `/v1/reset`) issues only to an account
+   * that has just proved something about itself.
    *
    * It is greppable, which is what makes it survive: `INSERT INTO api_keys`
    * appears in exactly two files, and the occurrence in this one is not on a
@@ -4346,38 +4350,30 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * password**; that is a known limitation rather than an oversight, it is
    * recorded in `docs/DECISIONS.md`, and `GET /v1/admin/users` reports
    * `emailVerified` per row so an admin can see who is exposed to it.
+   *
+   * Then, on 2026-09-06, `GET /v1/admin/users/:id/keys` and `DELETE
+   * /v1/admin/users/:id/keys/:keyId` (Q1.631) — the list of somebody's keys
+   * and the revoke that took its id from that list — and with them the live-key
+   * count on `GET /v1/admin/users`. **An admin can now neither see nor do
+   * anything with anybody's API keys.** The revoke had survived one earlier
+   * instruction to remove it on the argument that it was the only writer of
+   * `revoked_at` for a key you do not hold (Q3.217); that argument expired
+   * when `DELETE /v1/me/keys/:keyId` became the holder's own writer (Q1.611),
+   * and the case Q1.408 was about — a leaked key — is the account's own key,
+   * which its holder retires from the keys screen. What the admin route bought
+   * after that was a second reader of somebody else's credential list, and the
+   * owner's model is that a key is between the person and their machine.
+   *
+   * The invariant as it stands, and `relaycheck` reads this file to assert it:
+   * **no route mounted at or under `/v1/admin/users/:id` reads or updates
+   * `api_keys`**, with one exemption named there — `DELETE /v1/admin/users/:id`
+   * sweeps the table (`DELETE FROM api_keys WHERE user_id = ?`) inside the
+   * account's own removal, which is not a fact about a key but the account
+   * ceasing to exist. Every other statement on `api_keys` in this file is the
+   * holder's own (`POST`/`GET`/`DELETE /v1/me/keys`), `callerAuth`'s lookup and
+   * `touchKey`, or the reset's `apiKeysActive` count, which the person proving
+   * control of their own address is told about their own account.
    * ---------------------------------------------------------------- */
-
-  /** Somebody's API keys — never a hash, never a key. See `apiKeyRows`. */
-  app.get("/v1/admin/users/:id/keys", requireAdmin, (c) => {
-    const userId = c.req.param("id");
-    if (!db.prepare("SELECT id FROM users WHERE id = ?").get(userId)) {
-      return jsonError(c, 404, "user_not_found", "no such user");
-    }
-    return c.json({ keys: apiKeyRows(db, userId) });
-  });
-
-  /**
-   * Revoke somebody's API key — **the write that did not exist**.
-   *
-   * `callerAuth` has always read `revoked_at` and answered `api_key_revoked`, so
-   * from both ends the capability looked present; there was no `UPDATE api_keys`
-   * anywhere in this service. Deleting the whole user was the only way to retire
-   * a key, which on the single-admin deployment `install.sh` creates means a
-   * leaked admin key had no in-band remedy at all.
-   *
-   * No self-refusal, unlike the two routes above: revoking a credential is the
-   * safe direction, and the account this most needs to be usable on is the one
-   * whose key just leaked.
-   */
-  app.delete("/v1/admin/users/:id/keys/:keyId", requireAdmin, (c) => {
-    if (!revokeApiKey(db, c.req.param("id"), c.req.param("keyId"))) {
-      // One answer for unknown, already revoked, and belonging to another user —
-      // the last of which is what the `user_id` clause inside makes true.
-      return jsonError(c, 404, "key_not_found", "no such API key, or already revoked");
-    }
-    return c.json({ revoked: true });
-  });
 
   /**
    * Ban somebody. This is what "removing a user" is: rows are never deleted.
@@ -4768,9 +4764,16 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * (`addmachine`, `enroll`, `grant`) with its third step still missing, which is
    * exactly the failure user-owned machines exists to remove.
    *
-   * It grants nothing an admin did not already have: `POST /v1/admin/users/:id/keys`
-   * lets an admin mint a credential for any user and act as them. Registering a
-   * machine *for* somebody is the same authority, spelled honestly.
+   * When it was written it granted nothing an admin did not already have:
+   * `POST /v1/admin/users/:id/keys` let an admin mint a credential for any user
+   * and act as them, and registering a machine *for* somebody was the same
+   * authority spelled honestly. That route is deleted (Q7.74) and an admin can
+   * no longer act as anybody, so this is now the *larger* of the two: the one
+   * place an admin puts something into a person's account rather than taking
+   * something out of it. It stays because a machine is not a credential — the
+   * enrollment code that makes it live is minted separately, single-use, and
+   * bounded by the owner's own limit — and because `install.sh` has no other
+   * way to hand a freshly enrolled daemon to the person it was installed for.
    *
    * **`ownerId` is required now, and that used to be optional.** The arm that
    * created a machine with no owner is gone: it was the second of the two ways
@@ -5957,15 +5960,19 @@ function readLabel(raw: unknown): { ok: true; label: string } | { ok: false; mes
  *
  * **Never `key_hash`, and never the key.** Only the hash was ever stored, so the
  * plaintext is unrecoverable by construction — this projection is what says so
- * out loud beside the two routes that return it. `prefix` is the eight clear
- * characters `keyPrefix` slices out of a key; it is not a secret (it is the
- * token's own middle, and exists to narrow an indexed lookup) and it is the only
- * thing that lets somebody holding two keys tell which row is which.
+ * out loud beside the one route that returns it, `GET /v1/me/keys` (it was two
+ * until `GET /v1/admin/users/:id/keys` was deleted on 2026-09-06, Q1.631).
+ * `prefix` is the eight clear characters `keyPrefix` slices out of a key; it is
+ * not a secret (it is the token's own middle, and exists to narrow an indexed
+ * lookup) and it is the only thing that lets somebody holding two keys tell
+ * which row is which.
  *
- * Revoked rows are **listed rather than filtered**, unlike the count on
- * `GET /v1/admin/users`. The count answers "how many credentials still work";
- * this list answers "is the one that leaked dead yet", and a row that vanishes on
- * revocation cannot answer it.
+ * Revoked rows are **listed rather than filtered**. The question this list
+ * answers is "is the one that leaked dead yet", and a row that vanishes on
+ * revocation cannot answer it. (The other question — "how many credentials
+ * still work" — used to be answered by a filtered count on `GET
+ * /v1/admin/users`, and is answered nowhere now: an admin is told nothing
+ * about anybody's keys.)
  */
 function apiKeyRows(db: DatabaseSync, userId: string): Record<string, unknown>[] {
   return db
@@ -6027,11 +6034,22 @@ function markPasswordChanged(db: DatabaseSync, userId: string, now: number): voi
  * Retire one API key. `false` when it is unknown, already revoked, or somebody
  * else's — one answer for all three, so probing cannot enumerate what exists.
  *
- * **`user_id` is in the WHERE clause and is not decoration**, the same argument
+ * **Reached by one route**, `DELETE /v1/me/keys/:keyId`, which passes the
+ * caller's own id. It was two until 2026-09-06: `DELETE
+ * /v1/admin/users/:id/keys/:keyId` passed a path parameter here and is deleted
+ * (Q1.631) — an admin has no verb over anybody's keys, and a key is retired by
+ * its holder alone.
+ *
+ * **`user_id` is in the WHERE clause and is not decoration**, and losing the
+ * admin caller makes it *more* load-bearing rather than less. The same argument
  * `relabelMachine` makes about its own: with the key id alone this statement
  * revokes any credential in the fleet whenever it is called with the wrong
- * argument, and the route above it would be the only thing that ever stopped it.
- * With the clause it is safe read on its own.
+ * argument, and the route above it would be the only thing that ever stopped
+ * it. The one caller left hands over `caller.userId`, so the clause is what
+ * turns "the key id you typed" into "the key id you typed *among your own*" —
+ * a key id is a random string anybody may have seen in a listing, and without
+ * the clause a holder could retire a stranger's key by guessing. With the
+ * clause the function is safe read on its own, whichever route reaches it next.
  *
  * `revoked_at IS NULL` is what makes a second call a 404 rather than silently
  * rewriting the timestamp of a revocation that already happened.

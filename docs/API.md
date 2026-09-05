@@ -173,7 +173,7 @@ plugin_failed` for anything the plugin's own code raised.
 
 ---
 
-## The control plane — 60 routes
+## The control plane — 58 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -223,7 +223,6 @@ password change is refused all of it by a second positional gate.
 |---|---|
 | `GET` · `POST /v1/admin/users` · `DELETE /v1/admin/users/:id` | Delete is irreversible; disable is not |
 | `POST /v1/admin/users/:id/disable` · `/enable` · `/invite` | Suspend and restore an account, or mail an invitation |
-| `GET` · `DELETE /v1/admin/users/:id/keys[/:keyId]` | Somebody else's API keys, and retiring one |
 | `PUT` · `DELETE /v1/admin/users/:id/machine-limit` | The commercial limit, per person |
 | `GET` · `POST · PATCH /v1/admin/machines[/:id]` | Every machine in the fleet, whoever owns it |
 | `POST /v1/admin/machines/:id/enrollments` · `/revoke` · `PUT /v1/admin/machines/:id/owner` | Mint a single-use enrollment code, revoke a machine, hand one to somebody else |

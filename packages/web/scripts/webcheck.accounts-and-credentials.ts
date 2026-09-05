@@ -1064,29 +1064,36 @@ process.stdout.write("\nyour own API keys\n");
   // At the row's own size: the one sentence on the screen saying an act is
   // irreversible was its smallest type (review D9).
   check("and the consequence is drawn at text-xs", /<span className="text-xs text-muted">revoking it signs you out<\/span>/.test(keyRow), true);
+  /*
+   * **Every row is one height, and the height is the row's** (Q3.554). A live
+   * key's row was the Revoke button plus `py-2` on the cells and a revoked row
+   * its text plus the same padding, a third shorter — three rows, three
+   * heights. `h-12` on the `<tr>` clears `BUTTON_SIZE.sm` at both of its floors
+   * and the cells carry no vertical padding at all, so nothing a cell holds or
+   * omits can change what the row measures. Read off the row element rather
+   * than the file: the header row keeps its own `py-1.5`.
+   */
+  const rowStart = keyRow.indexOf("<tr className={`h-12 border-t border-edge/60 align-middle ");
+  const rowEnd = keyRow.indexOf("</tr>", rowStart);
+  check("a key row is a fixed 48px", rowStart >= 0 && rowEnd > rowStart, true);
+  check("and no cell of it pads vertically", /\b(py|pt|pb)-/.test(keyRow.slice(rowStart, rowEnd)), false);
   // The consequence at rest is allowed only beside a one-tap control (10A), and
-  // the own-keys screen is the only caller that draws it.
+  // the own-keys screen is the only caller there is. The row used to take a
+  // `confirm` prop for the admin panel that listed somebody else's keys; that
+  // panel is deleted (Q1.631), so the row mounts no `TwoStep` and offers no
+  // two-step arm to opt into.
   const keys = read("KeysSection.tsx");
-  check("own keys are one tap", /confirm=\{false\}/.test(keys), true);
+  check("own keys are one tap", [/<TwoStep\b/.test(keyRow), /\bconfirm\b/.test(keyRow), /confirm=/.test(keys)], [false, false, false]);
   check("and the screen decides this-browser from the credential in hand", /thisBrowsersKey\(credential,/.test(keys), true);
   /*
    * **Every Revoke names its key to a screen reader** (review D18): the prefix
    * is two cells left of the button, so a column of buttons all reading
-   * "Revoke" is a column of one-tap acts with no subject. Both the bare button
-   * and the confirming act carry it — the latter's visible text is still the
-   * bare verb, the question naming the key being a sibling span. The confirming
-   * one is `TwoStep`'s `act.ariaLabel` (E7's review, Q3.552), forwarded to the
-   * `DangerButton` the primitive draws.
+   * "Revoke" is a column of one-tap acts with no subject. One button per row
+   * now — the confirming act that carried the name through `TwoStep`'s
+   * `act.ariaLabel` went with the admin panel (Q1.631).
    */
-  check("both Revoke buttons name their key", keyRow.split("`Revoke ${record.prefix}…`").length - 1, 2);
-  check(
-    "the resting one as its own prop, the confirming one through the primitive's act",
-    [
-      /ariaLabel=\{`Revoke \$\{record\.prefix\}…`\}/.test(keyRow),
-      /act=\{\{ label: "Revoke", danger: true, icon: Trash2, ariaLabel: `Revoke \$\{record\.prefix\}…` \}\}/.test(keyRow),
-    ],
-    [true, true],
-  );
+  check("the Revoke button names its key", keyRow.split("`Revoke ${record.prefix}…`").length - 1, 1);
+  check("as its own prop", /ariaLabel=\{`Revoke \$\{record\.prefix\}…`\}/.test(keyRow), true);
   check("and DangerButton forwards the name", /ariaLabel=\{ariaLabel\}/.test(read("../bits.tsx")), true);
 
   /*

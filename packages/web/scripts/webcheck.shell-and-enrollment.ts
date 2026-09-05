@@ -292,14 +292,48 @@ process.stdout.write("\nwho owns Escape, and what paints above what\n");
    * for two, twelve and eighty lines of body, so walking the settings list
    * resized the dialog under a pointer already aimed at the next row.
    */
-  const { SHEET_BODY, SHEET_PANEL } = await import("../src/ui/bits.js");
+  const { SHEET_BODY, SHEET_PANEL, SHEET_SCREEN } = await import("../src/ui/bits.js");
   const bodyClasses = SHEET_BODY.split(/\s+/);
   check(
     "a sheet's body is a flex column, so its children's flex-1 means something",
     ["flex", "flex-col", "min-h-0", "flex-1"].map((name) => bodyClasses.includes(name)),
     [true, true, true, true],
   );
-  check("and it is the fallback scroller", bodyClasses.includes("overflow-y-auto"), true);
+  /*
+   * ⚠ **And it never scrolls and pads nothing — the inverse of what this pinned
+   * for four releases, when it asserted `overflow-y-auto` as "the fallback
+   * scroller".** Reported 2026-09-06 from a desktop: a horizontal bar along the
+   * foot of the settings pop-up and a vertical one down its right edge, on an
+   * Account screen that fit. The body was `overflow-y-auto` with `px-4 py-5`, and
+   * every screen inside it reached the padding edge with `-mx-4 -my-5` so a rail's
+   * border and an action bar could touch the panel's edge. A scroll container's
+   * scrollable overflow includes its own end padding *beyond* the content's far
+   * edge (CSS Overflow 3), so a child ending exactly at the padding edge overflows
+   * by exactly one padding: 16–20px of scroll range in each axis that nothing
+   * could show, drawn as a bar wherever `pointer: fine` holds. A box that is not a
+   * scroll container has no scrollable overflow and can draw no bar, and every
+   * pop-up already scrolled in a child of its own — so the body clips, carries no
+   * padding for a child to overflow by, and a screen inside it has nothing to
+   * cancel. Variant prefixes are stripped before the test, because the old
+   * strings carried the offending classes as `sm:px-5` and `sm:-mx-5` as well as
+   * bare. Q3.553.
+   */
+  const unprefixed = (name: string): string => name.replace(/^[a-z0-9-]+:/, "");
+  check(
+    "and it clips rather than scrolls",
+    [bodyClasses.includes("overflow-hidden"), bodyClasses.includes("overflow-y-auto")],
+    [true, false],
+  );
+  check(
+    "and pads nothing, so there is no end padding for a child to overflow by",
+    bodyClasses.filter((name) => /^p[xytblr]?-/.test(unprefixed(name))),
+    [],
+  );
+  check(
+    "and a screen inside it cancels nothing",
+    SHEET_SCREEN.split(/\s+/).filter((name) => unprefixed(name).startsWith("-m")),
+    [],
+  );
   /*
    * **And it paints its own ground, because it is the thing that slides.**
    *

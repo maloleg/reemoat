@@ -89,15 +89,18 @@ export function authFailure(error: unknown): AuthFailure | null {
    * `api_key_revoked`, `invalid_api_key`, `missing_api_key` and anything a later
    * release adds.
    *
-   * **`api_key_revoked` is newly reachable and no arm of its own is needed.**
+   * **`api_key_revoked` is reachable and no arm of its own is needed.**
    * `revoked_at` was a column nothing could write, so a key was immortal; there
-   * are **two** writers now, both deliberate revocations — `DELETE
-   * /v1/me/keys/:keyId` and its admin twin `DELETE
-   * /v1/admin/users/:id/keys/:keyId`. The third this used to name was the sweep
-   * inside the admin password reset, and that route is deleted: an admin can no
+   * is **one** writer now, a deliberate revocation by the holder — `DELETE
+   * /v1/me/keys/:keyId`, `revokeMyKey` here. This used to name three. The sweep
+   * inside the admin password reset went with that route: an admin can no
    * longer end this tab by resetting somebody's password, because an admin can
-   * no longer reset somebody's password. They can still revoke the key, which is
-   * the same outcome arrived at by saying so.
+   * no longer reset somebody's password. Then the admin twin, `DELETE
+   * /v1/admin/users/:id/keys/:keyId`, was deleted on 2026-09-06 (Q1.631): an
+   * admin can no longer revoke the key either, or see that it exists. So the
+   * only way this tab's key stops working under it is that its own holder
+   * revoked it from the keys screen or `cpctl keys --revoke` — or the account
+   * was disabled or deleted, which arrive as their own codes.
    *
    * It answers `"credentials"` rather than a fourth `AuthFailure` member,
    * deliberately: the union names what the person must **do**, and the remedy

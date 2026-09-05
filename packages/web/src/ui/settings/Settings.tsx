@@ -90,6 +90,24 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
    */
   const shown = active ?? DEFAULT_SECTION;
   /*
+   * The pane's scroller, and the one box in this pop-up that pads.
+   *
+   * `SHEET_BODY` pads nothing and clips (Q3.553), so the padding a screen gets is
+   * decided here, by arm. At index depth the phone draws the section list flush,
+   * edge to edge like every list in the app, and the desktop draws
+   * `DEFAULT_SECTION` padded — so that arm pads at `sm` alone. Every other arm is
+   * a screen and pads at every width.
+   *
+   * ⚠ **`no-scrollbar`, on a vertical scroller, is the owner's call for this
+   * pop-up and the market's.** On a fine pointer `index.css` draws a permanent
+   * classic bar on every scroller, and there is to be none inside the settings
+   * pop-up; the scrolling is unchanged. `PluginsSheet` carries the same string
+   * and `webcheck` reads it off this file rather than restating it. Q3.553.
+   */
+  const paneScroll = `min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain no-scrollbar ${
+    active === null ? "sm:px-5 sm:py-4" : "px-4 py-4 sm:px-5"
+  }`;
+  /*
    * ⚠ **Both take the origin, and handing it to one of them is the failure.** The
    * chevron is named after where it goes — `Header`'s standing rule and the whole
    * difference between this control and the history button it must never become —
@@ -130,14 +148,19 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
      * The head still names the pop-up and nothing else — `Sheet`'s `<h1>` spans
      * the rail as well as the pane. The screen's name is `paneTitle`, drawn below
      * in the box it is about. Q3.427.
+     *
+     * No negative margin on this box: `SHEET_BODY` pads nothing and never
+     * scrolls, so the rail's border reaches the panel's edge by sitting in it,
+     * and the two scrollers below are the rail and the pane. Q3.553.
      */
-    <div className="-mx-4 -my-5 flex min-h-0 flex-1 sm:-mx-5">
+    <div className="flex min-h-0 flex-1">
         {/*
          * The section list, beside the section. Hidden below `sm`, where the
          * section takes the whole body and the index renders the list into it —
          * the same list → detail the rest of the app uses, in the same direction.
+         * It scrolls and draws no bar — `no-scrollbar`, for `paneScroll`'s reason.
          */}
-        <div className="hidden w-56 shrink-0 overflow-y-auto overscroll-contain border-r border-edge sm:block">
+        <div className="hidden w-56 shrink-0 overflow-y-auto overscroll-contain no-scrollbar border-r border-edge sm:block">
           <SettingsNav state={state} active={shown} paneName={paneName} variant="rail" />
         </div>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -158,11 +181,12 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
            * unnamed.
            *
            * ⚠ `px-4 pt-4 sm:px-5` rides THIS row and the scroller below keeps its
-           * own `px-4 py-4 sm:px-5` untouched, for the reason the old `mb-4` had to
-           * ride the heading: at the four section depths this row is
+           * own padding (`paneScroll`) untouched, for the reason the old `mb-4` had
+           * to ride the heading: at the four section depths this row is
            * `display: none` at `sm`+ and must take its top padding with it. It is
-           * also why the padding may not be hoisted onto this column — the index
-           * arm's `-mx-4 -my-4` cancels the scroller's, **on the scroller**.
+           * also why the padding may not be hoisted onto this column — at index
+           * depth the scroller pads nothing below `sm`, so the phone's section
+           * list sits flush, and a padding on the column would gutter it.
            *
            * ⚠ No `overflow-y-auto` and no `overscroll-contain` on this column.
            * `SHEET_BODY` records the measurement: Chrome ends the scroll chain at a
@@ -204,13 +228,13 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
            * **Why this pane is not the screen the address bar names.**
            *
            * Above the scroller rather than inside it, and that is layout rather
-           * than taste: the index arm below cancels the scroller's own padding
-           * with `-mx-4 -my-4` so the section list sits flush, and a sibling drawn
-           * before it would be pulled 16px back underneath by that negative top
-           * margin. `px-4 pt-4 sm:px-5` is the chevron row's padding, which costs
-           * nothing to share — the two are never both drawn, since a refusal
-           * collapses `here.section` to `null` and `settingsUp` answers `null`
-           * with it.
+           * than taste: a refusal collapses the pane to the index arm, whose
+           * scroller pads nothing below `sm` so the section list sits flush — a
+           * sibling drawn inside it would sit edge to edge on a phone and inset at
+           * `sm`, two shapes for one sentence. `px-4 pt-4 sm:px-5` is the chevron
+           * row's padding, which costs nothing to share — the two are never both
+           * drawn, since a refusal collapses `here.section` to `null` and
+           * `settingsUp` answers `null` with it.
            *
            * ⚠ **No `role="status"`.** `Empty`'s partition is that only a *failure*
            * is announced — the absence of an answer, something that happened —
@@ -223,10 +247,10 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
           {refusal !== null && (
             <p className="shrink-0 px-4 pt-4 text-xs text-muted sm:px-5">{refusal}</p>
           )}
-          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
+          <div className={paneScroll}>
           {active === null ? (
             <>
-              <div className="-mx-4 -my-4 sm:hidden">
+              <div className="sm:hidden">
                 <SettingsNav state={state} active={null} paneName={paneName} variant="page" />
               </div>
               {/*
@@ -238,10 +262,10 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
                * at different rows.
                *
                * ⚠ `hidden sm:block` rather than a width read in JavaScript, which is
-               * `AppShell`'s standing rule. The phone arm above keeps its `-mx-4
-               * -my-4` cancelling the scroller's padding; at `sm` that child is
-               * `display: none`, so its negative margins take nothing with them and
-               * this one sits in the scroller's ordinary padding.
+               * `AppShell`'s standing rule. The phone arm above sits flush because
+               * `paneScroll` pads nothing below `sm` at this depth; at `sm` that
+               * child is `display: none` and the scroller's `sm:px-5 sm:py-4` is
+               * back, so this one sits in the padding every section gets.
                */}
               <div className="hidden sm:block">
                 <SectionBody state={state} section={DEFAULT_SECTION} />

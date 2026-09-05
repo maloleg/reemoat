@@ -34,6 +34,19 @@ import { PluginBlockView } from "../PluginView";
  * writing one form to several is only honest where they agree about its shape,
  * which is `paneAgreement`'s whole job.
  */
+/**
+ * The padding this screen draws for itself.
+ *
+ * The market's pane scroller pads every other screen and pads this one **not at
+ * all**, because the bar below is `sticky` and has to reach both edges of the
+ * scroller — and a bar that reached them by `-mx-4 -mt-4` inside a padded
+ * scroller gave that scroller one padding of horizontal scroll range it could
+ * never show (Q3.553's mechanism: a scroll container's scrollable overflow
+ * includes its own end padding). `Settings.tsx` pads by arm for the same
+ * reason; this is the same string as its section arm, restated once here.
+ */
+const PANE_PAD = "px-4 py-4 sm:px-5";
+
 export function PluginSettingsScreen({
   state,
   pluginId,
@@ -92,15 +105,17 @@ export function PluginSettingsScreen({
      * left.
      */
     return (
-      <Empty
-        action={
-          <Button size="sm" onClick={() => navigate(marketEntryPath(pluginId), true)}>
-            Back to the plugin
-          </Button>
-        }
-      >
-        None of those machines is in your list any more, so there is nothing to configure.
-      </Empty>
+      <div className={PANE_PAD}>
+        <Empty
+          action={
+            <Button size="sm" onClick={() => navigate(marketEntryPath(pluginId), true)}>
+              Back to the plugin
+            </Button>
+          }
+        >
+          None of those machines is in your list any more, so there is nothing to configure.
+        </Empty>
+      </div>
     );
   }
   return (
@@ -264,13 +279,19 @@ function Pane({
        * own ground: a transparent sticky bar has the form legible straight through
        * it. `z-10` sits under `LAYER.menu`'s `z-40`, so a `select` field's dropdown
        * panel paints over this bar rather than under it.
+       *
+       * ⚠ **No negative margin.** It reaches the scroller's edges because the
+       * scroller pads nothing for this screen; the form below pads itself with
+       * `PANE_PAD`. The `-mx-4 -mt-4` it used to carry bought the market's pane a
+       * sideways scroll range of one padding, which `webcheck` now refuses.
        */}
-      <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-4 border-b border-edge bg-surface px-4 py-2 text-xs sm:-mx-5 sm:px-5">
+      <div className="sticky top-0 z-10 border-b border-edge bg-surface px-4 py-2 text-xs sm:px-5">
         <span className="text-muted">Writing to </span>
         <span className="text-fg" title={scope.join(", ")}>
           {scopeSummary(scope)}
         </span>
       </div>
+      <div className={PANE_PAD}>
 
       <Excluded agreement={agreement} gone={gone} nameOf={nameOf} />
 
@@ -371,6 +392,7 @@ function Pane({
       ))}
 
       <Outcomes outcomes={outcomes} nameOf={nameOf} />
+      </div>
     </div>
   );
 }

@@ -3700,14 +3700,15 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
     db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run((afterFirst ?? 0) - KEY_TOUCH_INTERVAL_MS - 1, minted?.id ?? "");
     const aged = storedUse();
     check("a use past the minute writes again", [(await send("/v1/me", { headers: bobKey })).status, (storedUse() ?? 0) > (aged ?? 0)], [200, true]);
-    // Both list routes carry it, in the same field, off the same projection.
+    // The holder's list carries it, off `apiKeyRows`' one projection. The
+    // admin's view of the same list used to be asserted beside it and is
+    // deleted (Q1.631): the route answers 404 to the admin that used to read
+    // it, so when a key was last presented is a fact its holder alone is told.
     check("the keys list answers it", typeof (await bobKeys()).find((key) => key.id === minted?.id)?.lastUsedAt, "number");
     check(
-      "and so does the admin's view of the same list",
-      typeof ((await (await send(`/v1/admin/users/${withKey.id}/keys`, { headers: admin })).json()) as {
-        keys: { id: string; lastUsedAt: number | null }[];
-      }).keys.find((key) => key.id === minted?.id)?.lastUsedAt,
-      "number",
+      "and the admin's view of the same list no longer exists",
+      (await send(`/v1/admin/users/${withKey.id}/keys`, { headers: admin })).status,
+      404,
     );
 
     /*
@@ -6460,22 +6461,57 @@ process.stdout.write("\nproving it is your own account, and retiring a key\n");
   const keyId = own.keys[0]?.id ?? "";
   check("revoking the key you are holding is allowed", (await send(`/v1/me/keys/${keyId}`, { method: "DELETE", headers: theirs })).status, 200);
   check("and it stops authenticating immediately", await outcome(await send("/v1/me", { headers: theirs })), [401, "api_key_revoked"]);
-  // Revoked rows are listed rather than filtered, unlike the count on
-  // `GET /v1/admin/users`: that count answers "how many still work", this list
-  // answers "is the one that leaked dead yet", and a row that vanishes on
-  // revocation cannot answer it.
-  const after = (await (await send(`/v1/admin/users/${curie.id}/keys`, { headers: superAdmin })).json()) as {
+  /*
+   * Revoked rows are listed rather than filtered: this list answers "is the one
+   * that leaked dead yet", and a row that vanishes on revocation cannot answer
+   * it. Read back as curie's **session**, because the key just revoked was the
+   * only other credential curie held — and because the holder's list is the
+   * only list there is now. Until 2026-09-06 this read `GET
+   * /v1/admin/users/:id/keys` as the admin, and that route is deleted (Q1.631);
+   * what it asserted about the list is unchanged and asserted on the route
+   * that survived.
+   */
+  const asCurie = { authorization: `Bearer ${curieSession}`, "content-type": "application/json" };
+  const after = (await (await send("/v1/me/keys", { headers: asCurie })).json()) as {
     keys: { revokedAt: number | null }[];
   };
   check("the revoked row is still listed, with its timestamp", [after.keys.length, after.keys[0]?.revokedAt !== null], [1, true]);
-  // One answer for unknown, already revoked, and somebody else's — the last of
-  // which is what the `user_id` clause inside `revokeApiKey` makes true.
-  check("a second revoke is a 404", await outcome(await send(`/v1/admin/users/${curie.id}/keys/${keyId}`, { method: "DELETE", headers: superAdmin })), [404, "key_not_found"]);
-  check("and so is revoking it as somebody else's", await outcome(await send(`/v1/admin/users/${bystander.id}/keys/${keyId}`, { method: "DELETE", headers: superAdmin })), [404, "key_not_found"]);
-  const counted = ((await (await send("/v1/admin/users", { headers: superAdmin })).json()) as {
-    users: { id: string; keys: number }[];
-  }).users.find((user) => user.id === curie.id);
-  check("and the admin list counts only keys that still work", counted?.keys, 0);
+  /*
+   * One answer for unknown, already revoked, and somebody else's — the last of
+   * which is what the `user_id` clause inside `revokeApiKey` makes true, and
+   * which matters *more* now that the function has one caller: the holder's
+   * route passes the caller's own id, so the clause is what stops somebody who
+   * saw a key id in a listing retiring a stranger's key by spelling it. The
+   * second revoke goes through the holder's own route; the "somebody else's"
+   * arm is hopper, an admin, whose own-keys route is scoped to hopper.
+   */
+  check("a second revoke is a 404", await outcome(await send(`/v1/me/keys/${keyId}`, { method: "DELETE", headers: asCurie })), [404, "key_not_found"]);
+  check("and so is revoking it as somebody else's own", await outcome(await send(`/v1/me/keys/${keyId}`, { method: "DELETE", headers: hers })), [404, "key_not_found"]);
+  /*
+   * **An admin can neither see nor do anything with anybody's keys** (Q1.631).
+   * The two routes that used to be exercised here — the list this section read
+   * the id off, and the revoke that took it — answer 404 to the same admin
+   * that reached them. **A bare 404, and the bareness is the assertion**: the
+   * key above is already revoked, so the old `DELETE` route answered 404 too,
+   * as a `key_not_found` envelope — a status alone read green with the route
+   * still there (measured while pinning this). No handler stands behind either
+   * path now, so the answer is the framework's own text and not JSON. And the
+   * fleet list, which used to count curie's live keys in a `keys` field, now
+   * carries no such field at all — `"keys" in row` is false, not `0`, because
+   * a count is still a fact about somebody's credentials and the instruction
+   * was about anything at all.
+   */
+  const vanished = async (response: Response): Promise<[number, boolean]> => [
+    response.status,
+    (response.headers.get("content-type") ?? "").includes("json"),
+  ];
+  check("the admin's list of somebody's keys is gone", await vanished(await send(`/v1/admin/users/${curie.id}/keys`, { headers: superAdmin })), [404, false]);
+  check("and so is the admin's revoke of one", await vanished(await send(`/v1/admin/users/${curie.id}/keys/${keyId}`, { method: "DELETE", headers: superAdmin })), [404, false]);
+  check("even aimed at a different account", await vanished(await send(`/v1/admin/users/${bystander.id}/keys/${keyId}`, { method: "DELETE", headers: superAdmin })), [404, false]);
+  const listed = ((await (await send("/v1/admin/users", { headers: superAdmin })).json()) as {
+    users: Record<string, unknown>[];
+  }).users.find((user) => user["id"] === curie.id);
+  check("and the fleet list carries no count of anybody's keys", [listed !== undefined, listed !== undefined && "keys" in listed], [true, false]);
 }
 
 /* ------------------------------------------------------------------ *
@@ -6640,6 +6676,65 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
       "and that place is not a route naming somebody else",
       appSource.slice(routeStart, mintAt).includes('c.req.param("id")'),
       false,
+    );
+
+    /*
+     * **No route at or under `/v1/admin/users/:id` reads or updates
+     * `api_keys`** (Q1.631), asserted the same way: off the source, so that it
+     * stays true when somebody adds a route next year. The routes are every
+     * registration whose path is `/v1/admin/users/:id` or begins
+     * `/v1/admin/users/:id/`; a handler body is the text from that
+     * registration to the next `\n  });` — the route's own closer, at the
+     * two-space indent every route in `createApp` is registered at, which no
+     * nested callback shares. The docblock *above* a registration is outside
+     * the slice on purpose: it is allowed to say `api_keys` while explaining
+     * why the body does not.
+     *
+     * "Touches" is the table's name **or one of the helpers that reach it** —
+     * `apiKeyRows`, `revokeApiKey`, `touchKey`, `keyPrefix` — because that is
+     * how the two deleted routes touched it: neither body spelled `api_keys`,
+     * both went through a helper, and a pin on the bare name read green with
+     * both routes still registered (measured while pinning this). The path
+     * check above it is the other half, for a route that reaches the table
+     * through a helper this list has not heard of yet.
+     *
+     * One exemption, by name: `DELETE /v1/admin/users/:id` sweeps the table
+     * inside the account's own removal, and that is not a fact about a key but
+     * the account ceasing to exist. The exemption is itself pinned to the
+     * sweep — a `DELETE FROM api_keys WHERE user_id = ?` and no `SELECT` or
+     * `UPDATE` on the table, and none of the helpers — so it cannot quietly
+     * widen into a read.
+     */
+    const ADMIN_USER_ROUTE = /^  app\.(get|post|put|patch|delete)\("(\/v1\/admin\/users\/:id(?:\/[^"]*)?)"/gm;
+    const adminUserRoutes = [...appSource.matchAll(ADMIN_USER_ROUTE)].map((found) => {
+      const start = found.index ?? 0;
+      const end = appSource.indexOf("\n  });", start);
+      return { name: `${found[1]} ${found[2]}`, path: found[2] ?? "", closed: end !== -1, body: appSource.slice(start, end === -1 ? appSource.length : end) };
+    });
+    // Enough routes that the sweep is a sweep: disable, enable, invite, both
+    // machine-limit verbs and the delete. Fewer means the pattern stopped
+    // matching, which would make every check below pass over nothing — and a
+    // body with no closer would run to the end of the file and count every
+    // statement below it, so that is asserted too.
+    check("the routes under /v1/admin/users/:id are found", adminUserRoutes.length >= 6, true);
+    check("and every handler body ends at a route's own closer", adminUserRoutes.every((route) => route.closed), true);
+    check("neither key route is registered any more", adminUserRoutes.filter((route) => route.path.includes("/keys")).map((route) => route.name), []);
+    const TOUCHES_KEYS = /api_keys|apiKeyRows|revokeApiKey|touchKey|keyPrefix/;
+    check(
+      "the one handler under it that touches api_keys is the account delete",
+      adminUserRoutes.filter((route) => TOUCHES_KEYS.test(route.body)).map((route) => route.name),
+      ["delete /v1/admin/users/:id"],
+    );
+    const sweep = adminUserRoutes.find((route) => route.name === "delete /v1/admin/users/:id")?.body ?? "";
+    check(
+      "and it only sweeps — one DELETE, no SELECT or UPDATE on the table, and none of the helpers",
+      [
+        (sweep.match(/DELETE FROM api_keys WHERE user_id = \?/g) ?? []).length,
+        /SELECT[^;]*FROM api_keys/.test(sweep),
+        /UPDATE api_keys/.test(sweep),
+        /apiKeyRows|revokeApiKey|touchKey|keyPrefix/.test(sweep),
+      ],
+      [1, false, false, false],
     );
   }
 

@@ -286,11 +286,10 @@ per machine and holds a socket only for the three most recently viewed sessions.
 
 **The two-step confirmation is the only modal-shaped control on a settings
 *row*, and every one of them is `TwoStep`** (Q3.552): `grep -c '<TwoStep'` over
-`ui/settings/*.tsx` and `AgentBuilder.tsx` counts **fifteen** (fourteen sites,
+`ui/settings/*.tsx` and `AgentBuilder.tsx` counts **fourteen** (thirteen sites,
 two in `MachineLimitPanel`), a table `webcheck` holds by file. Revoking an API
-key is two-step **only for somebody else's**: one `KeyRow` serves both lists and
-`confirm` is the prop, so `KeysSection`'s *own* keys are a bare `Revoke` on one
-tap, the only consequence at rest being the `this browser` row's — decided by
+key is a bare `Revoke` on one tap — the only list is your own, `KeysSection`,
+its one consequence at rest the `this browser` row's, decided by
 `thisBrowsersKey`, never under a session credential (Q3.219, Q3.545, Q3.546).
 Registration in `ServerSection` is a `Badge` and a verb rather than a
 `role="switch"` — **only the act that widens authority is confirmed**, Q3.220.
@@ -315,10 +314,10 @@ closing only on the 200, standing on a failure. Two drifted sites keep
 on every row, which takes the reserved trailing slot with it. The confirmation
 still leaves the menu and lands on the row: a menu held open to hold a
 confirmation would be a second dismissable layer over the sheet, for one tap.
-**"API keys" stays in that menu** — its panel is the only caller of
-`adminRevokeKey` anywhere in the product, and `DELETE
-/v1/admin/users/:id/keys/:keyId` is reachable from it and nowhere else. Q3.216,
-Q3.217.
+**"API keys" is gone from that menu**, panel and all: Q1.631 supersedes Q3.217,
+which kept it as the only caller of `adminRevokeKey`. The holder's own `DELETE
+/v1/me/keys/:keyId` writes `revoked_at` now, an admin neither sees nor
+touches anybody's keys, and the row's one panel is the machine limit. Q3.216.
 
 **This app has modals, and there is a single arbiter for them.** `ui/overlay.ts`
 holds a LIFO stack of dismissible layers and one capture-phase listener;

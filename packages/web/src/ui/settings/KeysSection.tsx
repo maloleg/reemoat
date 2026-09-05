@@ -189,7 +189,6 @@ export function KeysSection({ me }: { me: Me | null }): ReactNode {
             <KeyRow
               key={record.id}
               record={record}
-              confirm={false}
               thisBrowser={thisBrowsersKey(credential, record.prefix)}
               revoke={() => cp.revokeMyKey(record.id)}
               onRevoked={revokeOwn(record)}

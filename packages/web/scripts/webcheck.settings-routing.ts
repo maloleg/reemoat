@@ -1447,7 +1447,7 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
    * has to be added here by name. Tokens rather than `Cancel</Button>` children,
    * because a child count walked past two plausible copies: a braced handler
    * with a `{"Cancel"}` child, and a raw `<button>` with a named handler (E7's
-   * review). The other table is the count `web-shell.md` states ("fifteen"): a
+   * review). The other table is the count `web-shell.md` states ("fourteen"): a
    * confirmation added anywhere under `ui/settings/` changes it, and the rule
    * file's number changes with it.
    */
@@ -1476,14 +1476,13 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
     .filter(([, n]) => n > 0)
     .sort(([a], [b]) => (a < b ? -1 : 1));
   check(
-    "the fifteen confirmations are the primitive's, by file",
+    "the fourteen confirmations are the primitive's, by file",
     sites,
     [
       ["AccountSection.tsx", 1],
       ["AgentBuilder.tsx", 1],
       ["AgentsPanel.tsx", 1],
       ["EmailSection.tsx", 1],
-      ["KeyRow.tsx", 1],
       ["MachineAgentsSection.tsx", 1],
       ["MachineSection.tsx", 1],
       ["PluginsPanel.tsx", 1],
@@ -1492,7 +1491,9 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
       ["UsersSection.tsx", 3],
     ],
   );
-  check("fifteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 15);
+  // Fifteen until Q1.631 took the admin key panel and, with it, the two-step arm
+  // `KeyRow` carried for somebody else's credential.
+  check("fourteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 14);
   check(
     "and every one of those files imports it from bits",
     sites.filter(([name]) => !/import \{[^}]*\bTwoStep\b[^}]*\} from "\.\.?\/bits"/.test(swept.find(([n]) => n === name)?.[1] ?? "")).map(([name]) => name),

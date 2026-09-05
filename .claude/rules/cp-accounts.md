@@ -61,9 +61,11 @@ pnpm cpctl admin retirekey <kid>     # once every daemon has re-enrolled. The la
 #     `db.prepare("INSERT INTO api_keys` appears in `app.ts` exactly once, and not on a
 #     route reading `c.req.param("id")`, which `relaycheck` asserts by reading the source.
 #     What that does *not* buy is Q1.301.
-#   ⚠ **Retiring somebody *else's* key has no cpctl verb** — `keys --revoke` retires only your
-#     own, and `DELETE /v1/admin/users/:id/keys/:keyId` is reachable from the web UI alone —
-#     and neither has **giving an ownerless machine an owner**
+#   ⚠ **Retiring somebody *else's* key has no verb anywhere, and neither has seeing one** —
+#     `keys --revoke` retires only your own, and the admin's `DELETE
+#     /v1/admin/users/:id/keys/:keyId`, which the web UI alone used to reach, is deleted with
+#     its `GET` (Q1.631): an admin has no verb over anybody's keys, not even a count. What
+#     still has no cpctl verb is **giving an ownerless machine an owner**
 #     (`PUT /v1/admin/machines/:id/owner`).
 ```
 
@@ -106,13 +108,17 @@ through `cpctl passwd`, which sets the first password an account with no
 either by its three-character prefix. There is no OAuth and that stays deliberate.
 Q1.303.
 
-**An API key can be retired, by exactly two routes.** `DELETE /v1/me/keys/:keyId` and
-`DELETE /v1/admin/users/:id/keys/:keyId` write `api_keys.revoked_at` through
-`revokeApiKey`. **A self-service password change retires nothing**: `POST
-/v1/me/password` revokes sessions and leaves keys alone, deliberately — a separate
-credential with a separate lifecycle, and `cpctl` is holding one. Two routes list them
+**An API key can be retired, by exactly one route — its holder's.** `DELETE
+/v1/me/keys/:keyId` writes `api_keys.revoked_at` through `revokeApiKey`. The admin
+twin that shared the function until 2026-09-06, `DELETE
+/v1/admin/users/:id/keys/:keyId`, is deleted: **an admin has no verb over anybody's
+keys** — no list, no count on the fleet list, no revoke — and what an admin has over
+a credential is the account, `disable` and `DELETE /v1/admin/users/:id` (Q1.631).
+**A self-service password change retires nothing**: `POST /v1/me/password` revokes
+sessions and leaves keys alone, deliberately — a separate credential with a separate
+lifecycle, and `cpctl` is holding one. One route lists them, `GET /v1/me/keys`
 (`apiKeyRows` — the prefix, when it was made and when it was last presented, never
-the key and never the hash), and `GET /v1/admin/users` counts the unrevoked ones.
+the key and never the hash).
 `/v1/me` also says when the password was last changed by its owner
 (`passwordChangedAt`, `NULL` for one an admin issued and nobody replaced). Q1.304,
 Q1.629.

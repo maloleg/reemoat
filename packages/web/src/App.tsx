@@ -12,7 +12,7 @@ import { Sheet } from "./ui/Sheet";
 import { SessionBrowser } from "./ui/SessionBrowser";
 import { SignIn } from "./ui/SignIn";
 import { ToastHost } from "./ui/Toast";
-import { Spinner } from "./ui/bits";
+import { SHEET_SCROLL, Spinner } from "./ui/bits";
 
 /**
  * The two subtrees that are not on the first-paint path.
@@ -327,8 +327,13 @@ function OverlaySheet({
   const upLabel = sheetUpLabel(route, origin);
   const up = upLabel === null ? null : upFrom(route, under, origin);
 
+  /*
+   * A flex item of `SHEET_BODY`'s column rather than `h-full`: the body pads
+   * nothing and clips (Q3.553), so a child that wants the middle of it takes the
+   * height with `flex-1` — `AgentBuilder`'s waiting screens are the same shape.
+   */
   const spinner = (
-    <div className="flex h-full items-center justify-center">
+    <div className="flex min-h-0 flex-1 items-center justify-center">
       <Spinner />
     </div>
   );
@@ -366,12 +371,21 @@ function OverlaySheet({
            * remounts rather than carrying the first one's view and form state into
            * the second's name. `AgentDetail` is keyed for the same reason.
            */}
-          <PluginScreen
-            key={`${route.machineId}:${route.pluginId}`}
-            machineId={route.machineId}
-            pluginId={route.pluginId}
-            onTitle={setReported}
-          />
+          {/*
+           * The screen's scroller, here rather than in `PluginScreen`: that file
+           * answers a board, a spinner or an `Empty` and knows nothing about the
+           * box it is drawn in, and `SHEET_BODY` pads nothing and never scrolls
+           * (Q3.553) — so this is the box that does both, the way every other
+           * pop-up's screen carries its own.
+           */}
+          <div className={SHEET_SCROLL}>
+            <PluginScreen
+              key={`${route.machineId}:${route.pluginId}`}
+              machineId={route.machineId}
+              pluginId={route.pluginId}
+              onTitle={setReported}
+            />
+          </div>
         </Suspense>
       )}
     </Sheet>

@@ -96,6 +96,18 @@ export function PluginsSheet({ state, route }: { state: AppState; route: MarketR
   const identified = route.entry !== null && named !== null && named.id === route.entry ? named : null;
   const title = identified?.name ?? marketPaneTitle(route);
 
+  /*
+   * Which arm of the pane is drawn, decided once for the scroller's padding and
+   * the body below it, so the two cannot disagree about which screen pads itself.
+   */
+  const settingsScreen = route.entry !== null && route.settings.length > 0;
+  // The JSX restates `route.entry !== null` beside it: `tsc` does not carry a
+  // narrowing through this alias to a property of `route`, and the screen takes
+  // the id as a `string`.
+  const paneScroll = `min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain no-scrollbar ${
+    settingsScreen ? "" : "px-4 py-4 sm:px-5"
+  }`;
+
   return (
     /*
      * ⚠ **No `<Sheet>` here** — one panel serves every route-backed pop-up, owned
@@ -109,18 +121,21 @@ export function PluginsSheet({ state, route }: { state: AppState; route: MarketR
     <>
       {/*
        * ⚠ **The settings sheet's box, string for string.** Two rails one tap apart
-       * inside sheets that look the same must not measure differently, and the
-       * negative margins cancel `SHEET_BODY`'s own `px-4 py-5 sm:px-5` for the
-       * reason `Settings.tsx` records: the body stops being the scroller and the
-       * pane's own box takes over, which is the structure `SHEET_BODY` was given a
-       * flex context to support.
+       * inside sheets that look the same must not measure differently, and
+       * `webcheck` reads each string off `Settings.tsx` and asserts it here. No
+       * negative margin: `SHEET_BODY` pads nothing and never scrolls (Q3.553), so
+       * the rail's border reaches the panel's edge by sitting in it, and the two
+       * boxes that scroll are the rail and the scroller inside the pane — both
+       * `no-scrollbar`, the owner's call for the settings pop-up and this one: on a
+       * fine pointer `index.css` draws a permanent classic bar on every scroller,
+       * and there is to be none in here. Scrolling is unchanged.
        *
        * ⚠ No `overflow-y-auto` on this row or on the pane column — only on the rail
        * and on the scroller inside the pane. Chrome ends the scroll chain at a box
        * carrying `overscroll-behavior: contain` even when it has nothing to scroll.
        */}
-      <div className="-mx-4 -my-5 flex min-h-0 flex-1 sm:-mx-5">
-        <div className="hidden w-56 shrink-0 overflow-y-auto overscroll-contain border-r border-edge sm:block">
+      <div className="flex min-h-0 flex-1">
+        <div className="hidden w-56 shrink-0 overflow-y-auto overscroll-contain no-scrollbar border-r border-edge sm:block">
           <MarketNav active={route.tab} />
         </div>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -216,11 +231,16 @@ export function PluginsSheet({ state, route }: { state: AppState; route: MarketR
         </div>
       )}
 
-      {/* The pane's own scroller, `Settings.tsx`'s string — and the only box in this
-          column carrying `overscroll-contain`, because it is the only one that can
-          always scroll. */}
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
-      {route.entry !== null && route.settings.length > 0 ? (
+      {/* The pane's own scroller, `Settings.tsx`'s string for a section, and the
+          only box in this column carrying `overscroll-contain`, because it is the
+          only one that can always scroll. It pads by arm, as `Settings.tsx` does:
+          every screen but one takes the section arm, and the plugin's settings
+          screen takes none — its "Writing to" bar is `sticky` and has to reach the
+          scroller's edges, and reaching them by negative margin inside a padded
+          scroller is the end-padding overflow Q3.553 removed from the body. That
+          screen pads its own form (`PANE_PAD`). */}
+      <div className={paneScroll}>
+      {settingsScreen && route.entry !== null ? (
         /*
          * ⚠ **No catalogue is consulted here and none is needed.** A plugin's
          * settings are drawn by the daemon holding it, so this screen works on an

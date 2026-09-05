@@ -581,15 +581,28 @@ process.stdout.write("\nthe machine limit\n");
     );
     check("and a one-tap write puts the arming flag back", /const write = \(work: Promise<cp\.MachineLimitAnswer>\): void => \{\s*void apply\(work\)\s*\.then\(\(\) => setConfirming\(null\)\)/.test(src), true);
     /*
-     * **One key row for both lists.** `UsersSection` drew its own `KeyRow` and
-     * `AccountSection` drew a second markup of the same key, and only one said
-     * how old it was. The admin panel now imports the shared one and defines
-     * none — so the two lists cannot drift, and the two-step-versus-one-tap
-     * decision is that component's `confirm` prop rather than two copies.
+     * **An admin draws nobody's keys** (Q1.631). Until 2026-09-06 three checks
+     * here pinned the opposite: that `UsersSection` imported the shared
+     * `KeyRow` for its per-user key panel, kept no copy of its own, and drew
+     * it with the two-step on because it was somebody else's credential. The
+     * panel, the "API keys" item that opened it, and the two `cp.ts` functions
+     * behind them (`adminUserKeys`, `adminRevokeKey`) are deleted, so the pins
+     * invert: nothing from `./KeyRow` reaches this file, neither function is
+     * named in it, and neither is exported by `cp.ts` at all. Both sources are
+     * read through `strip`, so the names may survive in the comments recording
+     * their deletion — `docscheck` needs them to, since Q1.631 cites both —
+     * without counting as a caller or an export.
      */
-    check("the admin's key panel draws the shared row", /import \{ KeyRow, KeyTable \} from "\.\/KeyRow"/.test(src), true);
-    check("and keeps no copy of its own", /function KeyRow\(/.test(src), false);
-    check("with the two-step on, since it is somebody else's credential", /<KeyRow[\s\S]{0,200}confirm=\{true\}/.test(src), true);
+    check("the users screen imports nothing from KeyRow", /from "\.\/KeyRow"/.test(src), false);
+    check("and names neither admin key function", [/adminUserKeys/.test(src), /adminRevokeKey/.test(src)], [false, false]);
+    check("and offers no API keys item", /"API keys"/.test(src), false);
+    const cpSrc = strip(readFileSync(new URL("../src/cp.ts", import.meta.url), "utf8"));
+    check(
+      "and cp.ts exports neither",
+      [/export (?:async )?function adminUserKeys\b/.test(cpSrc), /export (?:async )?function adminRevokeKey\b/.test(cpSrc)],
+      [false, false],
+    );
+    check("nor declares a keys count on the fleet row", /^\s*keys\?: number;/m.test(cpSrc), false);
     /*
      * **A failed listing is the first fact about this screen**, drawn above the
      * form in the app's one failure shape with Try again wired to the read
@@ -597,14 +610,18 @@ process.stdout.write("\nthe machine limit\n");
      */
     check("a failed user listing says so with Try again wired to refresh", /\{error !== null && \(\s*<Empty failed action=\{<Button size="sm" onClick=\{refresh\}>Try again<\/Button>\}>\s*\{error\}\s*<\/Empty>\s*\)\}/.test(src), true);
     /*
-     * **One panel under a row at a time.** The keys list and the limit panel
-     * were two booleans, so both could open under one row and the second sat
-     * under a list that had just changed height. A union makes "both"
-     * unspellable, and a single state over it is what keeps that true.
+     * **One panel under a row at a time, and the row's one panel is the
+     * machine limit.** The keys list and the limit panel were two booleans, so
+     * both could open under one row and the second sat under a list that had
+     * just changed height. A union made "both" unspellable, and a single state
+     * over it is what keeps that true. The keys member is gone with the admin's
+     * view of anybody's keys (Q1.631), and the union is pinned as a union of
+     * one rather than let fold into a boolean: the next panel arrives as a
+     * member here, never as a flag beside `panel`.
      */
-    check("the row's panels are one union", /type RowPanel = "keys" \| "limit" \| null;/.test(src), true);
+    check("the row's panels are one union, of one", /type RowPanel = "limit" \| null;/.test(src), true);
     check("held in one state per row", (src.match(/useState<RowPanel>\(null\)/g) ?? []).length, 1);
-    check("and each panel is gated on it", [/\{panel === "keys" && \(/.test(src), /\{panel === "limit" && \(/.test(src)], [true, true]);
+    check("and the one panel is gated on it", [/\{panel === "limit" && \(/.test(src), /panel === "keys"/.test(src)], [true, false]);
     /*
      * **The admin checkbox precedes Create in DOM order.** It came after, so tab
      * order and reading order both reached the button before the one choice

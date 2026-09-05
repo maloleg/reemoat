@@ -27,8 +27,8 @@ import { LAYER, useDismissible } from "./overlay";
  * `toast()` from {@link TwoStep}'s default failure arm, `Icon` from the toast's
  * render — and neither module body reads the other at evaluation time. It is
  * here rather than passed in by every caller because "a failed act is a toast
- * saying why" is the answer at fourteen of fifteen confirmations, and a default
- * that thirteen callers restate is not a default.
+ * saying why" is the answer at thirteen of fourteen confirmations, and a default
+ * that twelve callers restate is not a default.
  */
 import { toast } from "./Toast";
 
@@ -1603,7 +1603,8 @@ export const SHEET_PANEL =
 export const SHEET_HEAD =
   "flex min-h-14 shrink-0 items-center gap-2 border-b border-edge px-4 sm:px-5";
 /**
- * The one padding for anything inside a sheet.
+ * The box between a sheet's head and its foot: a flex column that clips, and
+ * carries no padding of its own.
  *
  * **`flex flex-col` is the load-bearing half and it was missing**, which is why no
  * pop-up in this app scrolled at all. Both callers write `min-h-0 flex-1` on their
@@ -1623,6 +1624,26 @@ export const SHEET_HEAD =
  * once, because the children become real scrollers and their `overscroll-contain`
  * becomes true rather than merely stated.
  *
+ * ⚠ **This box never scrolls, and it pads nothing: `overflow-hidden`, no `px-`,
+ * no `py-`. Every pop-up scrolls in a child of its own** — {@link SHEET_SCROLL},
+ * or the settings and market panes' own scroller — and that child carries the
+ * padding. It was `overflow-y-auto` with `px-4 py-5 sm:px-5`, the scroller of last
+ * resort, and every screen inside it reached the padding edge with `-mx-4 -my-5`
+ * so that a rail's border and a screen's action bar could touch the panel's edge.
+ * Reported 2026-09-06 from a desktop: a horizontal bar along the foot of the
+ * settings pop-up and a vertical one down its right edge, on an Account screen
+ * that fit. A scroll container's scrollable overflow includes its own end padding
+ * *beyond* the content's far edge (CSS Overflow 3, and current engines follow it),
+ * so a child that ends exactly at the padding edge overflows by exactly one
+ * padding — 16–20px of scroll range in each axis that nothing could ever show,
+ * drawn as a bar wherever `pointer: fine` holds, since `index.css` opts every box
+ * out of macOS's overlay bars with `scrollbar-width: thin`. Hiding the bar
+ * (`overflow-x-hidden`, `no-scrollbar`) keeps the range a wheel can still move;
+ * padding here with screens that do not cancel it stops a rail 16px short of the
+ * edge. The remedy is structural: a box that is not a scroll container has no
+ * scrollable overflow and can draw no bar, and every pop-up already scrolled in a
+ * child of its own. Q3.553.
+ *
  * **`bg-surface` is what makes the section slide legible, and its absence was the
  * whole of "the previous screen's text is still there".** This box carries the
  * `view-transition-name` the horizontal slide moves, and a named element is
@@ -1638,8 +1659,7 @@ export const SHEET_HEAD =
  * own ground, none falls through — reaching the one box that had been getting
  * away with it because nothing had ever moved it before.
  */
-export const SHEET_BODY =
-  "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-surface px-4 py-5 sm:px-5";
+export const SHEET_BODY = "flex min-h-0 flex-1 flex-col overflow-hidden bg-surface";
 /** Actions right, Cancel last — see {@link BUTTON_TONE}. */
 export const SHEET_FOOT =
   "flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-edge px-4 py-3.5 sm:px-5";
@@ -1663,11 +1683,17 @@ export const SHEET_FOOT =
  * to — which is also the truthful animation, since the action *is* part of the
  * screen. `Sheet`'s `footer` stays for the pop-ups with one screen. Q3.472.
  *
- * Cancels `SHEET_BODY`'s own padding so the bar reaches both edges;
- * {@link SHEET_SCROLL} puts it back on the part that scrolls.
+ * No negative margin, because there is nothing to cancel: `SHEET_BODY` carries no
+ * padding, so the bar reaches both edges by sitting in it, and the padding a
+ * screen wants is on {@link SHEET_SCROLL}, the part of it that scrolls. It was
+ * `-mx-4 -my-5 … sm:-mx-5` against a body that padded and scrolled, and that pair
+ * is what drew a bar over a screen that fit — see `SHEET_BODY`, Q3.553.
  */
-export const SHEET_SCREEN = "-mx-4 -my-5 flex min-h-0 flex-1 flex-col sm:-mx-5";
-/** The scrolling half of a {@link SHEET_SCREEN}: everything above the bar. */
+export const SHEET_SCREEN = "flex min-h-0 flex-1 flex-col";
+/**
+ * The scrolling half of a {@link SHEET_SCREEN}: everything above the bar, and the
+ * one box in the screen that pads, since neither the screen nor `SHEET_BODY` does.
+ */
 export const SHEET_SCROLL =
   "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-5";
 /**

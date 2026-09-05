@@ -622,17 +622,23 @@ export function mintToken(machine: string): Promise<IssuedToken> {
  * ------------------------------------------------------------------ */
 
 /**
- * `AdminUser` plus the count the fleet list gained.
+ * `AdminUser` plus the machine numbers the fleet list gained.
  *
  * Widened here rather than in `wire.ts` for the same reason `ApiKeyRecord` is
  * declared here: it is a control-plane shape and the daemon's wire has no
  * opinion about it. Optional, like every other field this list has grown, so an
- * older control plane reads as "not reported" rather than as zero live keys —
- * the difference between "nobody has a key" and "nobody asked".
+ * older control plane reads as "not reported" rather than as zero — the
+ * difference between "nobody owns a machine" and "nobody asked".
+ *
+ * **No `keys` field.** A count of live API keys was declared here from Q1.611
+ * to 2026-09-06 and is gone with the admin's view of anybody's keys (Q1.631):
+ * a control plane older than that still sends `keys` on every row, and this
+ * client neither declares it nor reads it, so the number reaches no screen.
+ * Not declared as deprecated-optional either — a field the type carries is a
+ * field somebody will draw, and the instruction was that an admin sees nothing
+ * about a person's keys, not even how many.
  */
 export interface AdminUserRow extends AdminUser {
-  /** Live (unrevoked) API keys. The credential an admin previously could not see at all. */
-  keys?: number;
   /** Machines they own. Not machines they can reach — a grant carries no quota. */
   machines?: number;
   /** Their effective ceiling, already clamped to the fleet-wide one. */
@@ -741,41 +747,31 @@ export function adminCreateUser(name: string, isAdmin: boolean, email?: string):
 }
 
 /*
- * ⚠ `adminResetPassword` and `adminMintKey` used to live here and are deleted
- *   with the two routes behind them.
+ * ⚠ Four admin functions used to live here and are deleted, in two acts.
  *
- * **An admin can take a credential away and can never issue one.** Revoking
- * stays — see `adminRevokeKey` below, whose own docblock already argued that
- * revoking is the safe direction. What replaces the reset is the person doing it
- * themselves: `requestPasswordReset` above, and `mintMyKey` for a key.
+ * `adminResetPassword` and `adminMintKey` went first, with the two routes
+ * behind them (Q7.74). **An admin can take a credential away and can never
+ * issue one.** What replaces the reset is the person doing it themselves:
+ * `requestPasswordReset` above, and `mintMyKey` for a key.
  *
- * Leaving these as callerless exports would recreate exactly the `myKeys` /
- * `revokeMyKey` situation this change exists to fix — two functions nothing
- * calls, describing a capability the product no longer has.
+ * `adminUserKeys` and `adminRevokeKey` went on 2026-09-06 (Q1.631), with `GET
+ * /v1/admin/users/:id/keys` and `DELETE /v1/admin/users/:id/keys/:keyId` behind
+ * them and the "API keys" item in the Users row's kebab in front of them. The
+ * revoke had survived an earlier instruction to remove it on the argument that
+ * it was the only writer of `revoked_at` for a key you do not hold (Q3.217);
+ * that expired once `revokeMyKey` and `DELETE /v1/me/keys/:keyId` were the
+ * holder's own writer, and the owner's model is that a key is between the
+ * person and their machine. **An admin can neither see nor do anything with
+ * anybody's API keys**; the whole of their reach is the account — `adminSetDisabled`
+ * and `adminDeleteUser` below.
+ *
+ * Leaving any of the four as callerless exports would recreate exactly the
+ * `myKeys` / `revokeMyKey` situation the first deletion existed to fix — a
+ * function nothing calls, describing a capability the product no longer has.
+ * `webcheck` asserts neither of the newer two is exported, and the names stay
+ * in this comment because `docscheck` requires every symbol `docs/DECISIONS.md`
+ * cites to grep to source.
  */
-
-/** Somebody's API keys. Never a key, never a hash — see `ApiKeyRecord`. */
-export async function adminUserKeys(userId: string): Promise<ApiKeyRecord[]> {
-  const body = await cpFetch<{ keys: ApiKeyRecord[] }>(`/v1/admin/users/${encodeURIComponent(userId)}/keys`);
-  return body.keys;
-}
-
-/**
- * Revoke somebody's API key.
- *
- * No self-refusal here, unlike the two routes above, and that asymmetry is the
- * server's and is deliberate: revoking a credential is the safe direction, and
- * the account this most needs to work on is the one whose key just leaked.
- *
- * Unknown, already revoked and belonging to another user are one `404
- * key_not_found`, so probing cannot enumerate what exists.
- */
-export function adminRevokeKey(userId: string, keyId: string): Promise<{ revoked: boolean }> {
-  return cpFetch<{ revoked: boolean }>(
-    `/v1/admin/users/${encodeURIComponent(userId)}/keys/${encodeURIComponent(keyId)}`,
-    { method: "DELETE" },
-  );
-}
 
 /**
  * Ban somebody, or let them back in.

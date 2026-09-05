@@ -61,8 +61,28 @@ it — so a citation here would be the one kind nothing checks.
   codex's two caveats and the plugin consent's `http` caveat are cut to the caps
   the plan set, with the same facts in fewer words.
 
+### Removed
+
+- An admin's view of anybody else's API keys. `GET` and `DELETE
+  /v1/admin/users/:id/keys[/:keyId]` are gone, the fleet list no longer counts a
+  person's live keys, and the "API keys" item in a user row's menu — with the
+  panel it opened — is gone with them. A key is listed and retired by the
+  person holding it, on their own API keys screen or with `cpctl keys`; an
+  admin's reach over an account is disable and delete.
+
 ### Fixed
 
+- A settings pop-up drew two scrollbars it had no use for on a desktop: a
+  horizontal one along its foot and a vertical one down its right edge, on a
+  screen that fit. A sheet's body was a padded scroller whose every screen
+  cancelled the padding with negative margins, and a scroll container counts
+  its own end padding past the content, so each axis had one padding of range
+  nothing could show. The body no longer scrolls or pads — every pop-up scrolls
+  in a box of its own — and inside the settings and plugins pop-ups the section
+  rail and the pane scroll with no bar drawn at all.
+- Every row of the API keys table is the same height. A row with a Revoke
+  button was the button's height plus padding and a revoked row was its text
+  plus the same padding, a third shorter.
 - The startup prune deletes only inactive sessions, never below fifty, and says
   what it removed. It read `created_at`, so a conversation older than seven days
   from the day it was *opened* was deleted at the next restart however much it

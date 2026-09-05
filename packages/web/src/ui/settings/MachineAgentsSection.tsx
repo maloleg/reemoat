@@ -71,8 +71,8 @@ interface Drag {
  *
  * ⚠ **Without this the drag was a control a phone could not finish.** `dropIndex`
  * clamps the target to the rows that exist and `move()` writes a transform —
- * nothing scrolled the pane the list is inside. Rows are 61px and the sheet's body
- * is 92dvh less a head, this screen's prose and its status line, so with ten
+ * nothing scrolled the pane the list is inside. Rows are 61px and the pane's
+ * scroller is 92dvh less a head, this screen's prose and its status line, so with ten
  * agents on a 390px phone the bottom row's journey to the top is a drag into a
  * region the finger cannot reach: the row travels, the list does not. The keyboard
  * path worked and was the only one that did, which is backwards for an app whose
@@ -118,15 +118,16 @@ function driftFor(box: DOMRect, y: number): number {
  * The box this list actually scrolls inside, or `null` if nothing does.
  *
  * ⚠ **Walked at `pointerdown` rather than named**, because this component is drawn
- * in two places that scroll differently: the settings sheet's own body
- * (`overflow-y-auto overscroll-contain`) and, at `sm` and above, the same body
- * beside a rail. A selector or a ref threaded down from `Settings.tsx` would be
- * this file knowing the shape of a screen two components up, and it would be wrong
- * the first time this list is drawn anywhere else.
+ * in a box it does not own: the settings pane's scroller (`paneScroll` in
+ * `Settings.tsx`), alone below `sm` and beside a rail above it, with `SHEET_BODY`
+ * clipping around both. A selector or a ref threaded down from `Settings.tsx`
+ * would be this file knowing the shape of a screen two components up, and it would
+ * be wrong the first time this list is drawn anywhere else.
  *
  * The `scrollHeight > clientHeight` test is what stops it settling on an ancestor
- * that is *declared* scrollable and has nothing to scroll — which is every one of
- * `SHEET_BODY`'s wrappers on a list short enough to fit.
+ * that is *declared* scrollable and has nothing to scroll — which that pane is on
+ * a list short enough to fit. `SHEET_BODY` itself is `overflow-hidden` and is
+ * never a candidate.
  */
 function nearestScroller(from: HTMLElement): HTMLElement | null {
   for (let box = from.parentElement; box !== null; box = box.parentElement) {
