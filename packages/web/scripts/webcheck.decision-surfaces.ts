@@ -166,8 +166,14 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * copies are redundant rather than wrong. Deleting them is safe **only** while
    * the `BUTTON_SIZE` check directly below stands, which is why that check was
    * added in the same change.
+   *
+   * ⚠ **And then seven became five** (E7's review, Q3.552): the confirming pair
+   * left this file for `TwoStep` in `bits.tsx`, whose two answers go through
+   * `BUTTON_SIZE.sm` with no `className` of their own — which is exactly the case
+   * the check below exists for, and the sweep above cannot see. What is left on
+   * this surface is `PluginView`'s four and `PluginsPanel`'s Restart.
    */
-  check("the plugin sweep actually found the controls", [tapped >= 1, small >= 6], [true, true]);
+  check("the plugin sweep actually found the controls", [tapped >= 1, small >= 5], [true, true]);
   check("nothing on a plugin's own surface is under 44px", shortPlugin, []);
   check("and every small control there keeps the coarse-pointer floor", bareSmall, []);
 
@@ -313,7 +319,11 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * menu row rather than a `DangerButton`.
    */
   {
-    const panel = readFileSync(new URL("../src/ui/settings/PluginsPanel.tsx", import.meta.url), "utf8");
+    // Comments stripped, as every other source read here is: the includes below
+    // are on JSX, and a docblock quoting a removed row (`label="Settings"` is
+    // the one this file argues against) would satisfy or fail them from prose
+    // (review D12).
+    const panel = stripComments(readFileSync(new URL("../src/ui/settings/PluginsPanel.tsx", import.meta.url), "utf8"));
     /*
      * ⚠ **`Settings` is deliberately *not* in this list any more, and the check
      * below is what stops it coming back.** A plugin's settings are on the
@@ -346,18 +356,25 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      * **The remove confirmation names the plugin and replaces the row's
      * controls.** "Remove it and everything it kept?" was drawn *under* a row
      * whose link and kebab stayed live, and Cancel was the one filled button on
-     * the screen. Three pins: the question carries `plugin.name`; the confirming
-     * group ends with Cancel; and no Cancel in this file wears `tone="primary"`.
+     * the screen. The pair is `TwoStep`'s now (E7's review, Q3.552): Cancel
+     * last and in the default tone are that primitive's guarantees, pinned over
+     * it in `webcheck.settings-routing.ts`. What this file has to hold is that
+     * the question and the act reach it — the act as `danger` with the glyph,
+     * since uninstalling takes the plugin's data — that the row draws no Cancel
+     * of its own beside them, and that no Cancel in this file (the install
+     * flow's abort included) wears `tone="primary"`.
      */
     const confirmStart = panel.indexOf("and its data?");
     check("the remove question names the plugin", confirmStart >= 0 && /Remove <span[^>]*>\{plugin\.name\}<\/span> and its data\?/.test(panel), true);
-    const confirmEnd = panel.indexOf("</div>", confirmStart);
-    const confirmGroup = confirmStart >= 0 && confirmEnd >= 0 ? panel.slice(confirmStart, confirmEnd) : "";
-    check("and Cancel is the last button in the confirming group", /Cancel\s*<\/Button>\s*$/.test(confirmGroup), true);
+    const confirmBox = confirmStart >= 0 ? panel.lastIndexOf("<TwoStep", confirmStart) : -1;
+    // Where the element closes: its own `/>` on a line of its own, since a `<>…</>` fragment inside `question` carries a `/>` too.
+    const confirmGroup = confirmBox >= 0 ? panel.slice(confirmBox, confirmStart + panel.slice(confirmStart).search(/^\s*\/>/m)) : "";
+    check("and the pair is the primitive's, with the act destructive", /act=\{\{ label: "Remove", danger: true, icon: Trash2 \}\}/.test(confirmGroup), true);
+    check("and the row draws no Cancel of its own beside it", /setConfirming\(false\)/.test(panel), false);
     check("and Cancel wears the default tone", /tone="primary"[^>]*>\s*Cancel|<Button[^>]*tone="primary"[\s\S]{0,120}Cancel/.test(panel), false);
     // The confirmation is drawn *instead of* the link-and-kebab box, so the two
     // are the arms of one ternary rather than siblings: `confirming ? (…) : (…)`.
-    check("and the confirmation stands in for the row's controls rather than under them", /\{confirming \? \(\s*<div[^>]*>\s*<span[^>]*>\s*Remove/.test(panel), true);
+    check("and the confirmation stands in for the row's controls rather than under them", /\{confirming \? \(\s*<TwoStep\b/.test(panel), true);
     /*
      * ⚠ **The row is a link, and the link is the whole answer to "where are this
      * plugin's settings".** Without this, deleting the `Settings` entry above
@@ -503,27 +520,82 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * ⚠ **The settings sheet's box, string for string.** These two pop-ups are
    * siblings a tap apart: one opening as a heading with a pill and the other as a
    * rail beside a pane reads as two applications, and a 2px difference between the
-   * rails reads as one of them being broken. Pinned as literals rather than as
-   * "there is a rail", because a rail that measures differently is the failure.
+   * rails reads as one of them being broken. The rail and the scroller are **read
+   * off `Settings.tsx`** and asserted verbatim here, so the property pinned is
+   * that the two are one string rather than that each matches a copy of it in this
+   * file — a copy the two could both drift away from together. What each string
+   * must carry is then pinned once, on the one read from Settings.
+   *
+   * ⚠ **`no-scrollbar` on both, and no negative margin in either file.** Reported
+   * 2026-09-06: a horizontal bar along the foot of the settings pop-up and a
+   * vertical one at its right edge on a screen that fit — the body's, because the
+   * body scrolled and padded while both sheets cancelled that padding with
+   * `-mx-4 -my-5`, and a scroll container's scrollable overflow includes its own
+   * end padding beyond a child that reaches the padding edge. `SHEET_BODY` clips
+   * and pads nothing now (`webcheck.shell-and-enrollment` pins that half), so
+   * there is nothing left for either sheet to cancel; and the bar the rail and the
+   * pane would still draw on a fine pointer is the owner's call, which was none
+   * inside these two pop-ups. Q3.553.
    */
   {
     const bare = stripComments(sheet);
+    const settingsSrc = stripComments(
+      readFileSync(new URL("../src/ui/settings/Settings.tsx", import.meta.url), "utf8"),
+    );
     const nav = stripComments(readFileSync(new URL("../src/ui/plugins/MarketNav.tsx", import.meta.url), "utf8"));
     const settingsNav = stripComments(
       readFileSync(new URL("../src/ui/settings/SettingsNav.tsx", import.meta.url), "utf8"),
     );
+    const rail = /className="(hidden w-56 shrink-0 [^"]*)"/.exec(settingsSrc)?.[1] ?? null;
     check(
-      "the market draws Settings' rail",
-      /hidden w-56 shrink-0 overflow-y-auto overscroll-contain border-r border-edge sm:block/.test(bare),
-      true,
+      "Settings draws a rail that scrolls and draws no bar",
+      rail,
+      "hidden w-56 shrink-0 overflow-y-auto overscroll-contain no-scrollbar border-r border-edge sm:block",
     );
+    check("and the market draws the same one", rail !== null && bare.includes(`className="${rail}"`), true);
     check("and Settings' pane", /flex min-h-0 min-w-0 flex-1 flex-col/.test(bare), true);
+    /*
+     * Settings' scroller is a template — one base and an arm per depth, because
+     * its index draws the phone's section list flush — and the market has no index,
+     * so what it must carry is the base joined to the arm a *section* gets.
+     */
+    const scroller = /const paneScroll = `([^`$]+)\$\{\s*active === null \? "([^"]+)" : "([^"]+)"\s*\}`/.exec(
+      settingsSrc,
+    );
     check(
-      "and Settings' scroller",
-      /min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5/.test(bare),
+      "Settings' scroller pads by arm, flush on the phone's index and nowhere else",
+      scroller === null ? null : [scroller[1], scroller[2], scroller[3]],
+      ["min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain no-scrollbar ", "sm:px-5 sm:py-4", "px-4 py-4 sm:px-5"],
+    );
+    /*
+     * The market pads by arm too: the same base and section arm, and one arm of
+     * its own drawn flush — the plugin's settings screen, whose "Writing to" bar
+     * is `sticky` and reaches the scroller's edges only because the scroller pads
+     * nothing there. That screen pads its form itself, with the section arm's
+     * string, and carries no negative margin: the `-mx-4 -mt-4` its bar used to
+     * wear was the body's defect one box down.
+     */
+    const market = /const paneScroll = `([^`$]+)\$\{\s*settingsScreen \? "([^"]*)" : "([^"]+)"\s*\}`/.exec(bare);
+    check(
+      "and the market draws the same base and section arm, with its settings screen flush",
+      market === null || scroller === null ? null : [market[1] === scroller[1], market[2], market[3] === scroller[3]],
+      [true, "", true],
+    );
+    const pluginSettings = stripComments(
+      readFileSync(new URL("../src/ui/plugins/PluginSettings.tsx", import.meta.url), "utf8"),
+    );
+    check(
+      "whose sticky bar reaches the edges without a negative margin",
+      scroller !== null &&
+        /className="sticky top-0 z-10 border-b border-edge bg-surface px-4 py-2 text-xs sm:px-5"/.test(pluginSettings) &&
+        pluginSettings.includes(`const PANE_PAD = "${scroller[3]}";`),
       true,
     );
-    check("with the sheet body's padding cancelled once", /-mx-4 -my-5 flex min-h-0 flex-1 sm:-mx-5/.test(bare), true);
+    check(
+      "and no file here cancels a padding the box outside it no longer has",
+      [/-m[xyt]-/.test(settingsSrc), /-m[xyt]-/.test(bare), /-m[xyt]-/.test(pluginSettings)],
+      [false, false, false],
+    );
     /*
      * ⚠ `AppShell`'s standing rule: a resized window may not render a rail that is
      * not there, so the breakpoint is a class string and never a measurement.
@@ -745,6 +817,14 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
       /<Disclosure first=\{false\} label="Permissions" defaultOpen>/.test(consent),
       true,
     );
+    /*
+     * The http caveat at nine words, under the ten-word caveat cap (review D10):
+     * it ran to nineteen, and `http` and "unencrypted" are the two words that
+     * carry it, so both are asserted to survive whatever else is cut.
+     */
+    const clear = /<p className="mt-1 text-xs text-fg">\s*([^<]*http[^<]*)<\/p>/.exec(consent)?.[1]?.trim() ?? "";
+    check("the http caveat names the protocol and the consequence", /\bhttp\b/.test(clear) && /unencrypted/.test(clear), true);
+    check("in ten words or fewer", clear.length > 0 && clear.split(/\s+/).length <= 10, true);
   }
   {
     /*

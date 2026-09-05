@@ -61,9 +61,11 @@ pnpm cpctl admin retirekey <kid>     # once every daemon has re-enrolled. The la
 #     `db.prepare("INSERT INTO api_keys` appears in `app.ts` exactly once, and not on a
 #     route reading `c.req.param("id")`, which `relaycheck` asserts by reading the source.
 #     What that does *not* buy is Q1.301.
-#   ⚠ **Retiring somebody *else's* key has no cpctl verb** — `keys --revoke` retires only your
-#     own, and `DELETE /v1/admin/users/:id/keys/:keyId` is reachable from the web UI alone —
-#     and neither has **giving an ownerless machine an owner**
+#   ⚠ **Retiring somebody *else's* key has no verb anywhere, and neither has seeing one** —
+#     `keys --revoke` retires only your own, and the admin's `DELETE
+#     /v1/admin/users/:id/keys/:keyId`, which the web UI alone used to reach, is deleted with
+#     its `GET` (Q1.631): an admin has no verb over anybody's keys, not even a count. What
+#     still has no cpctl verb is **giving an ownerless machine an owner**
 #     (`PUT /v1/admin/machines/:id/owner`).
 ```
 
@@ -106,13 +108,17 @@ through `cpctl passwd`, which sets the first password an account with no
 either by its three-character prefix. There is no OAuth and that stays deliberate.
 Q1.303.
 
-**An API key can be retired, by exactly two routes.** `DELETE /v1/me/keys/:keyId` and
-`DELETE /v1/admin/users/:id/keys/:keyId` write `api_keys.revoked_at` through
-`revokeApiKey`. **A self-service password change retires nothing**: `POST
-/v1/me/password` revokes sessions and leaves keys alone, deliberately — a separate
-credential with a separate lifecycle, and `cpctl` is holding one. Two routes list them
+**An API key can be retired, by exactly one route — its holder's.** `DELETE
+/v1/me/keys/:keyId` writes `api_keys.revoked_at` through `revokeApiKey`. The admin
+twin that shared the function until 2026-09-06, `DELETE
+/v1/admin/users/:id/keys/:keyId`, is deleted: **an admin has no verb over anybody's
+keys** — no list, no count on the fleet list, no revoke — and what an admin has over
+a credential is the account, `disable` and `DELETE /v1/admin/users/:id` (Q1.631).
+**A self-service password change retires nothing**: `POST /v1/me/password` revokes
+sessions and leaves keys alone, deliberately — a separate credential with a separate
+lifecycle, and `cpctl` is holding one. One route lists them, `GET /v1/me/keys`
 (`apiKeyRows` — the prefix, when it was made and when it was last presented, never
-the key and never the hash), and `GET /v1/admin/users` counts the unrevoked ones.
+the key and never the hash).
 `/v1/me` also says when the password was last changed by its owner
 (`passwordChangedAt`, `NULL` for one an admin issued and nobody replaced). Q1.304,
 Q1.629.
@@ -160,7 +166,8 @@ is. `POST /v1/enroll` sits above THE LINE and has no caller, so `callerAuth`'s l
 recovered by `POST /v1/forgot` and by nothing else, and it needs an address the
 account has **confirmed**. An API key is *not* a way back: `POST /v1/me/password`
 requires the current password whenever there is one, whichever credential is
-presenting. **Where SMTP is unconfigured a forgotten password has no remedy at all**
+presenting, and so does `PUT /v1/me/email` when a key is what presents — the
+reset channel cannot be repointed from a leaked key either (Q1.630, amended). **Where SMTP is unconfigured a forgotten password has no remedy at all**
 but deleting the account and creating it again; `GET /v1/admin/users` reports
 `emailVerified` per row so an admin can see who is exposed to it. Q7.76 records what
 closing it would take; Q1.310.
@@ -216,7 +223,7 @@ daemon closes `4401` on its own ping tick at `exp + leeway`.
 | `packages/web/src/ui/SignIn.tsx` | Two fields, once, and no API-key field — that door is `cpctl passwd`. A real `<form>` so Enter submits natively and a password manager can see it, plus the two secondary links `showsGateLink` decides and the `gateNotice` sentence standing in for whichever is missing. It calls `gateOffer` **nowhere**, and `webcheck` reads the file off disk to assert that |
 | `packages/web/src/ui/gate/` | Register, confirm, forgot, reset and verify — the five screens reached before there is a credential, in **one** file: the same card, the same token out of the same fragment, the same two error mappers. **Nothing here submits on mount** bar `/verify`, which is idempotent on an account you are already signed in to (`gateNeedsSession`); the rest render a button, because a prefetcher or a mail gateway `GET`s every URL in an inbound message and would spend the link before the human saw it. `GateCard` is the box, shared with `SignIn`, sized `min-h-full` rather than `AppShell`'s `h-dvh` because these render **outside** the shell |
 | `packages/web/src/ui/ForcedPasswordChange.tsx` | The wall an admin-created account lands on. **Reached by state, not by a URL**, which is why it is filed beside `SignIn.tsx` and not in `ui/gate/`, and returned before `<AppShell>` in `App.tsx` so a typed `/settings/account` renders it too. **Not a `Sheet`**: Escape must not reveal the app behind an obligation `requirePasswordCurrent` is still enforcing. The current password is *not* waived, and Sign out stays reachable — the only way off this screen for somebody who lost the temporary password |
-| `packages/control-plane/src/app.ts` | Routes: login, sessions, passwords, API keys, tokens, machines and their owners, grants, enrollment, admin — plus `GET /v1/instance`, `POST /v1/register` and `/register/confirm`, `/v1/forgot`, `/v1/reset`, `PUT /v1/me/email` and `/v1/me/email/verify`, `POST /v1/admin/users/:id/invite`, `GET` and `PUT /v1/admin/settings`, `POST /v1/admin/settings/test`, `GET /v1/admin/mail` and `POST /v1/admin/mail/:id/retry`. **The `/v1/*` gate is positional** — the public set is the **nine** routes registered above it — and **THE SECOND LINE** below it refuses everything to an account that owes a password, bar the four routes registered between the two. `/v1/me/password` is the one route that still asks for the current password, inline, because it is also the route that must let an account with no password row set a first one; `/v1/me/keys` and `PUT /v1/me/email` take the session alone (Q1.630) |
+| `packages/control-plane/src/app.ts` | Routes: login, sessions, passwords, API keys, tokens, machines and their owners, grants, enrollment, admin — plus `GET /v1/instance`, `POST /v1/register` and `/register/confirm`, `/v1/forgot`, `/v1/reset`, `PUT /v1/me/email` and `/v1/me/email/verify`, `POST /v1/admin/users/:id/invite`, `GET` and `PUT /v1/admin/settings`, `POST /v1/admin/settings/test`, `GET /v1/admin/mail` and `POST /v1/admin/mail/:id/retry`. **The `/v1/*` gate is positional** — the public set is the **ten** routes registered above it, `/health` among them (`cp-credentials.md` lists them in order) — and **THE SECOND LINE** below it refuses everything to an account that owes a password, bar the four routes registered between the two. `/v1/me/password` asks for the current password whoever is presenting, because it is also the route that must let an account with no password row set a first one; `PUT /v1/me/email` asks an API-key caller with a password and nobody else, through the same `verifyCurrentPassword`; `/v1/me/keys` takes the session alone (Q1.630, amended 2026-09-05) |
 | `packages/control-plane/src/settings.ts` | What an admin may change without a redeploy. **A row wins, the environment is the fallback, absence of both is unset** — and absence of a row *is* "read the environment", which is why the table is key/value. No cache and no seed, each for a stated reason |
 | `packages/control-plane/src/registration.ts` | A sign-up nobody has confirmed. **Not a `users` row** — a half-created one would hold the login name for ever, and an expired sign-up releases it by doing nothing |
 | `packages/web/src/gate.ts` | Every URL rule for the screens reached before there is a credential, and the three exports deciding what a signed-out screen offers. **The fail-open is `showsGateLink`, not `gateOffer`**: `gateOffer` answers three ways (`link`/`closed`/`unknown`) and every caller wants two, so `showsGateLink` is `!== "closed"` — only a definite no hides a door — and `gateNotice` goes through it too, the property being that it is `null` **iff** both links are drawn. Fails open where `visibleSections` fails closed. Q1.312 |

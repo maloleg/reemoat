@@ -3700,14 +3700,15 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
     db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run((afterFirst ?? 0) - KEY_TOUCH_INTERVAL_MS - 1, minted?.id ?? "");
     const aged = storedUse();
     check("a use past the minute writes again", [(await send("/v1/me", { headers: bobKey })).status, (storedUse() ?? 0) > (aged ?? 0)], [200, true]);
-    // Both list routes carry it, in the same field, off the same projection.
+    // The holder's list carries it, off `apiKeyRows`' one projection. The
+    // admin's view of the same list used to be asserted beside it and is
+    // deleted (Q1.631): the route answers 404 to the admin that used to read
+    // it, so when a key was last presented is a fact its holder alone is told.
     check("the keys list answers it", typeof (await bobKeys()).find((key) => key.id === minted?.id)?.lastUsedAt, "number");
     check(
-      "and so does the admin's view of the same list",
-      typeof ((await (await send(`/v1/admin/users/${withKey.id}/keys`, { headers: admin })).json()) as {
-        keys: { id: string; lastUsedAt: number | null }[];
-      }).keys.find((key) => key.id === minted?.id)?.lastUsedAt,
-      "number",
+      "and the admin's view of the same list no longer exists",
+      (await send(`/v1/admin/users/${withKey.id}/keys`, { headers: admin })).status,
+      404,
     );
 
     /*
@@ -3733,6 +3734,35 @@ process.stdout.write("\nsigning in, sessions and passwords\n");
       "and its last use does not move",
       Number(db.prepare("SELECT last_used_at FROM api_keys WHERE id = ?").get(spareRow?.id ?? "")?.["last_used_at"]),
       marker,
+    );
+  }
+
+  /* -- and the write is bookkeeping, never a refusal --------------------- */
+
+  {
+    /*
+     * **`touchKey.run` sits inside a `try`, like `touchSession`'s write does.**
+     * The deployed shape is two containers on one SQLite file, and a write the
+     * other process holds the file against for longer than `BUSY_TIMEOUT_MS`
+     * throws out of `run()`; with no `app.onError` on this service, an
+     * unguarded call there answers a plain-text 500 to a request that had
+     * already authenticated. Nothing reads `last_used_at` for a decision, so
+     * the write must be allowed to fail.
+     *
+     * Read off the source, because no in-memory database here can be made busy
+     * from another process: `node:sqlite` takes the busy timeout at open, and a
+     * driver that held the file from a second connection would be measuring
+     * that connection rather than this guard. The regex is the whole shape —
+     * `try {`, the one call, `} catch {` — so a `try` that closes before the
+     * call, or a call that moved out of it, both read as the guard being gone.
+     */
+    const appSource = readFileSync(new URL("../packages/control-plane/src/app.ts", import.meta.url), "utf8");
+    const touches = "touchKey.run(";
+    check("app.ts touches a key's last use in exactly one place", appSource.split(touches).length - 1, 1);
+    check(
+      "and that place is the body of a try whose catch swallows the failure",
+      /try \{\s*touchKey\.run\([^;]{0,200};\s*\} catch \{/.test(appSource),
+      true,
     );
   }
 
@@ -6343,10 +6373,12 @@ process.stdout.write("\nproving it is your own account, and retiring a key\n");
   /*
    * ⚠ **Reversed on 2026-09-04 (Q1.630): a session is enough to mint a key.**
    * The password gate this block used to assert is gone from this one route —
-   * `POST /v1/me/password` and `PUT /v1/me/email` keep theirs, asserted below —
-   * so what is pinned here is the new shape: no body needed, a stray
-   * `currentPassword` ignored rather than verified, and a bodiless request
-   * minting exactly as `{}` does.
+   * `POST /v1/me/password` keeps its for everybody, asserted below, and `PUT
+   * /v1/me/email` keeps its for an API-key caller only, asserted under
+   * "registration, recovery, and the mail that carries them" (Q1.630 as amended
+   * 2026-09-05) — so what is pinned here is the new
+   * shape: no body needed, a stray `currentPassword` ignored rather than
+   * verified, and a bodiless request minting exactly as `{}` does.
    */
   const second = await post("/v1/me/keys", {}, hers);
   check("minting yourself a key needs only your session", second.status, 201);
@@ -6429,22 +6461,57 @@ process.stdout.write("\nproving it is your own account, and retiring a key\n");
   const keyId = own.keys[0]?.id ?? "";
   check("revoking the key you are holding is allowed", (await send(`/v1/me/keys/${keyId}`, { method: "DELETE", headers: theirs })).status, 200);
   check("and it stops authenticating immediately", await outcome(await send("/v1/me", { headers: theirs })), [401, "api_key_revoked"]);
-  // Revoked rows are listed rather than filtered, unlike the count on
-  // `GET /v1/admin/users`: that count answers "how many still work", this list
-  // answers "is the one that leaked dead yet", and a row that vanishes on
-  // revocation cannot answer it.
-  const after = (await (await send(`/v1/admin/users/${curie.id}/keys`, { headers: superAdmin })).json()) as {
+  /*
+   * Revoked rows are listed rather than filtered: this list answers "is the one
+   * that leaked dead yet", and a row that vanishes on revocation cannot answer
+   * it. Read back as curie's **session**, because the key just revoked was the
+   * only other credential curie held — and because the holder's list is the
+   * only list there is now. Until 2026-09-06 this read `GET
+   * /v1/admin/users/:id/keys` as the admin, and that route is deleted (Q1.631);
+   * what it asserted about the list is unchanged and asserted on the route
+   * that survived.
+   */
+  const asCurie = { authorization: `Bearer ${curieSession}`, "content-type": "application/json" };
+  const after = (await (await send("/v1/me/keys", { headers: asCurie })).json()) as {
     keys: { revokedAt: number | null }[];
   };
   check("the revoked row is still listed, with its timestamp", [after.keys.length, after.keys[0]?.revokedAt !== null], [1, true]);
-  // One answer for unknown, already revoked, and somebody else's — the last of
-  // which is what the `user_id` clause inside `revokeApiKey` makes true.
-  check("a second revoke is a 404", await outcome(await send(`/v1/admin/users/${curie.id}/keys/${keyId}`, { method: "DELETE", headers: superAdmin })), [404, "key_not_found"]);
-  check("and so is revoking it as somebody else's", await outcome(await send(`/v1/admin/users/${bystander.id}/keys/${keyId}`, { method: "DELETE", headers: superAdmin })), [404, "key_not_found"]);
-  const counted = ((await (await send("/v1/admin/users", { headers: superAdmin })).json()) as {
-    users: { id: string; keys: number }[];
-  }).users.find((user) => user.id === curie.id);
-  check("and the admin list counts only keys that still work", counted?.keys, 0);
+  /*
+   * One answer for unknown, already revoked, and somebody else's — the last of
+   * which is what the `user_id` clause inside `revokeApiKey` makes true, and
+   * which matters *more* now that the function has one caller: the holder's
+   * route passes the caller's own id, so the clause is what stops somebody who
+   * saw a key id in a listing retiring a stranger's key by spelling it. The
+   * second revoke goes through the holder's own route; the "somebody else's"
+   * arm is hopper, an admin, whose own-keys route is scoped to hopper.
+   */
+  check("a second revoke is a 404", await outcome(await send(`/v1/me/keys/${keyId}`, { method: "DELETE", headers: asCurie })), [404, "key_not_found"]);
+  check("and so is revoking it as somebody else's own", await outcome(await send(`/v1/me/keys/${keyId}`, { method: "DELETE", headers: hers })), [404, "key_not_found"]);
+  /*
+   * **An admin can neither see nor do anything with anybody's keys** (Q1.631).
+   * The two routes that used to be exercised here — the list this section read
+   * the id off, and the revoke that took it — answer 404 to the same admin
+   * that reached them. **A bare 404, and the bareness is the assertion**: the
+   * key above is already revoked, so the old `DELETE` route answered 404 too,
+   * as a `key_not_found` envelope — a status alone read green with the route
+   * still there (measured while pinning this). No handler stands behind either
+   * path now, so the answer is the framework's own text and not JSON. And the
+   * fleet list, which used to count curie's live keys in a `keys` field, now
+   * carries no such field at all — `"keys" in row` is false, not `0`, because
+   * a count is still a fact about somebody's credentials and the instruction
+   * was about anything at all.
+   */
+  const vanished = async (response: Response): Promise<[number, boolean]> => [
+    response.status,
+    (response.headers.get("content-type") ?? "").includes("json"),
+  ];
+  check("the admin's list of somebody's keys is gone", await vanished(await send(`/v1/admin/users/${curie.id}/keys`, { headers: superAdmin })), [404, false]);
+  check("and so is the admin's revoke of one", await vanished(await send(`/v1/admin/users/${curie.id}/keys/${keyId}`, { method: "DELETE", headers: superAdmin })), [404, false]);
+  check("even aimed at a different account", await vanished(await send(`/v1/admin/users/${bystander.id}/keys/${keyId}`, { method: "DELETE", headers: superAdmin })), [404, false]);
+  const listed = ((await (await send("/v1/admin/users", { headers: superAdmin })).json()) as {
+    users: Record<string, unknown>[];
+  }).users.find((user) => user["id"] === curie.id);
+  check("and the fleet list carries no count of anybody's keys", [listed !== undefined, listed !== undefined && "keys" in listed], [true, false]);
 }
 
 /* ------------------------------------------------------------------ *
@@ -6513,6 +6580,81 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
       false,
     );
     check("and its usage says so out loud", source.includes("There is no 'admin passwd' and no 'admin key'"), true);
+
+    /*
+     * **Which verbs ask for the password, against which routes read one.**
+     * `cpctl key` prompted "your current password" for a route that reads no
+     * body (Q1.630), which is a prompt claiming a protection that was not
+     * there; `cpctl email` prompts for one the route *does* verify — for an
+     * API-key caller (Q1.630, amended 2026-09-05) — and dropping that one would
+     * open the reset channel to a leaked key. cpctl is that caller unless
+     * `REEMOAT_CP_KEY` came from `cpctl login`, which prints a session token
+     * into the same variable, and the route ignores a password from a session;
+     * so `currentPasswordBody` asks `/v1/me` which credential is presenting and
+     * sends `{}` for a session, or the prompt would be the lie `key` just lost.
+     * The two verbs are pinned apart, on the verb's own source, because the
+     * same helper serves both and a tidy-up that removed it from one would
+     * remove it from the other. A case is read to its own closing brace so the
+     * comment above the next case cannot leak into it.
+     *
+     * **Read with comments stripped.** A positive pin over raw source is
+     * satisfied by a comment that names the call after the call is gone — the
+     * probe that found this replaced the `usedText` row with a
+     * `// TODO restore usedText(...)` line and spread nothing into the email
+     * body behind `// used to spread currentPasswordBody() in here`, and every
+     * pin below stayed green. The stripper is the two regexes
+     * `webcheck.source.ts` applies for the same reason, copied rather than
+     * imported because a control-plane driver reaching into the web package's
+     * driver files for one line is a dependency in the wrong direction. It cuts
+     * a `//` inside a string too (`BASE_URL`'s default), which is outside every
+     * slice taken here and is why the pins assert code shapes no string carries.
+     * The two negative `key` pins below read the stripped code too, through
+     * `caseOf`, though they would hold without it — a comment can only break a
+     * negative, never satisfy one — because one slice serving all three is what
+     * keeps them about the same case. The `admin(` pins above are the ones that
+     * keep the raw source: negatives, over a function `caseOf` does not cut.
+     */
+    const stripComments = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const code = stripComments(source);
+    const caseOf = (name: string): string => {
+      const start = code.indexOf(`case "${name}": {`);
+      if (start === -1) throw new Error(`cpctl.ts has no case "${name}"`);
+      return code.slice(start, code.indexOf("\n    }\n", start));
+    };
+    check("cpctl key sends no password, because the route reads none", /currentPasswordBody\(/.test(caseOf("key")), false);
+    check("and no body at all", /body:/.test(caseOf("key")), false);
+    check("cpctl email still asks for it, because the route asks an API-key caller", /currentPasswordBody\(/.test(caseOf("email")), true);
+    /*
+     * And the helper asks `/v1/me` which credential this shell holds before it
+     * could prompt: `via` is answered there for exactly this — "what lets a
+     * client stop guessing" — and a session gets `{}`, since the route ignores
+     * a password from one. Ordered, so the prompt cannot be reached first.
+     */
+    const helperAt = code.indexOf("async function currentPasswordBody(");
+    const helperBody = code.slice(helperAt, code.indexOf("\n}\n", helperAt));
+    check(
+      "and the helper sends nothing under a session token, which the route ignores, before it could prompt",
+      [
+        helperAt !== -1 && /"\/v1\/me"/.test(helperBody),
+        /if \(me\.via === "session"\) return JSON\.stringify\(\{\}\);/.test(helperBody),
+        helperBody.indexOf('me.via === "session"') < helperBody.indexOf("readSecret("),
+      ],
+      [true, true, true],
+    );
+    /*
+     * And the listing carries when each key was last presented, which is the
+     * column Q1.629 added so a person can tell "is the one that leaked dead
+     * yet" from a list: the row prints it through `usedText`, whose two arms
+     * are the phrase and "never used" for `null` and `undefined` alike.
+     */
+    check("cpctl keys prints when each was last used", /usedText\(key\.lastUsedAt\)/.test(caseOf("keys")), true);
+    const usedTextAt = code.indexOf("function usedText(");
+    const usedTextBody = code.slice(usedTextAt, code.indexOf("\n}\n", usedTextAt));
+    check(
+      "with one arm for a key never presented and one for the age",
+      [usedTextBody.includes('"never used"'), /last used \$\{/.test(usedTextBody)],
+      [true, true],
+    );
     /*
      * The invariant, mechanically. `INSERT INTO api_keys` may appear in exactly
      * two files, and the occurrence in `app.ts` must not be on a route that
@@ -6534,6 +6676,65 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
       "and that place is not a route naming somebody else",
       appSource.slice(routeStart, mintAt).includes('c.req.param("id")'),
       false,
+    );
+
+    /*
+     * **No route at or under `/v1/admin/users/:id` reads or updates
+     * `api_keys`** (Q1.631), asserted the same way: off the source, so that it
+     * stays true when somebody adds a route next year. The routes are every
+     * registration whose path is `/v1/admin/users/:id` or begins
+     * `/v1/admin/users/:id/`; a handler body is the text from that
+     * registration to the next `\n  });` — the route's own closer, at the
+     * two-space indent every route in `createApp` is registered at, which no
+     * nested callback shares. The docblock *above* a registration is outside
+     * the slice on purpose: it is allowed to say `api_keys` while explaining
+     * why the body does not.
+     *
+     * "Touches" is the table's name **or one of the helpers that reach it** —
+     * `apiKeyRows`, `revokeApiKey`, `touchKey`, `keyPrefix` — because that is
+     * how the two deleted routes touched it: neither body spelled `api_keys`,
+     * both went through a helper, and a pin on the bare name read green with
+     * both routes still registered (measured while pinning this). The path
+     * check above it is the other half, for a route that reaches the table
+     * through a helper this list has not heard of yet.
+     *
+     * One exemption, by name: `DELETE /v1/admin/users/:id` sweeps the table
+     * inside the account's own removal, and that is not a fact about a key but
+     * the account ceasing to exist. The exemption is itself pinned to the
+     * sweep — a `DELETE FROM api_keys WHERE user_id = ?` and no `SELECT` or
+     * `UPDATE` on the table, and none of the helpers — so it cannot quietly
+     * widen into a read.
+     */
+    const ADMIN_USER_ROUTE = /^  app\.(get|post|put|patch|delete)\("(\/v1\/admin\/users\/:id(?:\/[^"]*)?)"/gm;
+    const adminUserRoutes = [...appSource.matchAll(ADMIN_USER_ROUTE)].map((found) => {
+      const start = found.index ?? 0;
+      const end = appSource.indexOf("\n  });", start);
+      return { name: `${found[1]} ${found[2]}`, path: found[2] ?? "", closed: end !== -1, body: appSource.slice(start, end === -1 ? appSource.length : end) };
+    });
+    // Enough routes that the sweep is a sweep: disable, enable, invite, both
+    // machine-limit verbs and the delete. Fewer means the pattern stopped
+    // matching, which would make every check below pass over nothing — and a
+    // body with no closer would run to the end of the file and count every
+    // statement below it, so that is asserted too.
+    check("the routes under /v1/admin/users/:id are found", adminUserRoutes.length >= 6, true);
+    check("and every handler body ends at a route's own closer", adminUserRoutes.every((route) => route.closed), true);
+    check("neither key route is registered any more", adminUserRoutes.filter((route) => route.path.includes("/keys")).map((route) => route.name), []);
+    const TOUCHES_KEYS = /api_keys|apiKeyRows|revokeApiKey|touchKey|keyPrefix/;
+    check(
+      "the one handler under it that touches api_keys is the account delete",
+      adminUserRoutes.filter((route) => TOUCHES_KEYS.test(route.body)).map((route) => route.name),
+      ["delete /v1/admin/users/:id"],
+    );
+    const sweep = adminUserRoutes.find((route) => route.name === "delete /v1/admin/users/:id")?.body ?? "";
+    check(
+      "and it only sweeps — one DELETE, no SELECT or UPDATE on the table, and none of the helpers",
+      [
+        (sweep.match(/DELETE FROM api_keys WHERE user_id = \?/g) ?? []).length,
+        /SELECT[^;]*FROM api_keys/.test(sweep),
+        /UPDATE api_keys/.test(sweep),
+        /apiKeyRows|revokeApiKey|touchKey|keyPrefix/.test(sweep),
+      ],
+      [1, false, false, false],
     );
   }
 
@@ -9657,20 +9858,25 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
     );
   }
 
-  /* -- repointing the reset channel takes the session alone (Q1.630) -------- */
+  /* -- repointing the reset channel: the session alone, a key with the password -- */
 
   {
     /*
-     * ⚠ **Reversed on 2026-09-04 by the owner's decision.** For one release this
-     * route asked for the current password unconditionally, because with a
-     * stolen session bearer and nothing else the chain repoint → verify with the
-     * same session → `/v1/forgot` → `/v1/reset` ends in a password the thief
-     * chose. That chain is open again, by decision rather than by accident, and
-     * `app.ts` keeps it written down at the route. What is pinned here is the
-     * new shape: an account with a password adds or changes its address on the
-     * session alone, and a `currentPassword` in the body is ignored rather than
-     * verified — so the refusal this block used to assert cannot come back by a
-     * stray import.
+     * ⚠ **Reversed on 2026-09-04 by the owner's decision, and narrowed on
+     * 2026-09-05 (Q1.630, amended).** For one release this route asked for the
+     * current password unconditionally, because with a stolen bearer and
+     * nothing else the chain repoint → verify with the same bearer →
+     * `/v1/forgot` → `/v1/reset` ends in a password the thief chose. The owner
+     * opened that chain again for a **session** — a person signed in, listed
+     * under Devices and one tap to end — and `app.ts` keeps it written down at
+     * the route. What this block drove for one day was the chain open for an
+     * **API key** too, under the words "the session alone", with a key from
+     * `seedKey` as the bearer: a leaked `cpctl` key could repoint the address,
+     * confirm it with the same key, and walk the rest of the chain with no
+     * person anywhere in it and no admin reset behind it (Q1.403). So the
+     * matrix is by `caller.via` now, and every arm is driven: a key with a
+     * password must present it, a session presents nothing, and the
+     * no-password-row exemption stands for a key.
      */
     const pia = seedUser("u_pia", "pia", null, false);
     const piaPassword = "pia's own long password";
@@ -9678,15 +9884,45 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
       .prepare("INSERT INTO user_passwords (user_id, hash, updated_at) VALUES (?,?,?)")
       .run(pia, await hashPassword(piaPassword, "authenticated"), Date.now());
     const piaKey = seedKey(pia);
+    const piaSession = {
+      authorization: `Bearer ${mintSession(gdb, pia, { ip: null, userAgent: null }).token}`,
+      "content-type": "application/json",
+    };
 
     check(
-      "adding a first address takes the session alone",
-      (await gput("/v1/me/email", { email: "pia@example.com" }, piaKey)).status,
+      "an API key on an account with a password is refused without it",
+      await codeOf(await gput("/v1/me/email", { email: "pia@example.com" }, piaKey)),
+      [400, "bad_request"],
+    );
+    check(
+      "and refused with the wrong one, as the password route refuses it",
+      await codeOf(await gput("/v1/me/email", { email: "pia@example.com", currentPassword: "not it" }, piaKey)),
+      [401, "invalid_password"],
+    );
+    // Refused before anything happened: no row was written and nothing was queued.
+    check(
+      "and a refusal wrote no address",
+      gdb.prepare("SELECT COUNT(*) AS n FROM user_emails WHERE user_id = ?").get(pia)?.["n"],
+      0,
+    );
+    check(
+      "and mailed nothing",
+      mailed.filter((m) => m.to === "pia@example.com").length,
+      0,
+    );
+    check(
+      "with the right one it goes through",
+      (await gput("/v1/me/email", { email: "pia@example.com", currentPassword: piaPassword }, piaKey)).status,
       200,
     );
     check(
-      "and a password in the body is ignored, not verified",
-      (await gput("/v1/me/email", { email: "pia2@example.com", currentPassword: "not it" }, piaKey)).status,
+      "a session adds or changes the address alone (Q1.630 stands for a person signed in)",
+      (await gput("/v1/me/email", { email: "pia2@example.com" }, piaSession)).status,
+      200,
+    );
+    check(
+      "and a password in a session's body is ignored, not verified",
+      (await gput("/v1/me/email", { email: "pia3@example.com", currentPassword: "not it" }, piaSession)).status,
       200,
     );
 

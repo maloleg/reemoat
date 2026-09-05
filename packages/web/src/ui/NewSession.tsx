@@ -831,14 +831,15 @@ function NewSession({
        * height is left with a floor. The technique is `AskCard`'s: fixed head and
        * foot, shrinkable middles.
        *
-       * The padding is restored here because `SHEET_SCREEN` cancels the body's, so
-       * the bar below can reach both edges.
+       * The padding is here because `SHEET_BODY` carries none — every pop-up pads
+       * the box that scrolls (Q3.553) — so the bar below reaches both edges by
+       * sitting in the body, with nothing cancelled on the way.
        *
        * ⚠ **It scrolls, and the `shrink-0` children above are why it has to.**
-       * `SHEET_BODY` used to be the scroller of last resort; with the bar moved
-       * inside it, this column is `min-h-0 flex-1` of a box that no longer
-       * overflows, so anything the fixed rows cannot fit escapes and paints over
-       * the bar rather than scrolling. The inline sign-in reaches it in one tap: a
+       * `SHEET_BODY` used to be the scroller of last resort and now clips; this
+       * column is `min-h-0 flex-1` of a box that never scrolls, so anything the
+       * fixed rows cannot fit would be cut off at the bar rather than reachable,
+       * unless this box moves. The inline sign-in reaches it in one tap: a
        * device-code transcript adds a couple of hundred pixels to a `shrink-0`
        * block on a 667px screen. The folder list keeps its `min-h-32` floor, so
        * this only moves once there is genuinely nowhere left to shrink to.

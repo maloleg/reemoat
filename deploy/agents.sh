@@ -7,14 +7,19 @@
 #                                    #   vendors' own hosts — the arm for a machine behind
 #                                    #   a firewall. `vendor` is the default and the only
 #                                    #   other value
+#   deploy/agents.sh --channel stable # which of claude's two release channels this
+#                                    #   machine follows. `latest` is the default and
+#                                    #   `stable` the only other value; claude's vendor
+#                                    #   arm alone reads it (see below)
 #   deploy/agents.sh --skip <agent>  # keep that harness's previous build on disk; repeatable,
 #                                    #   and what the daemon passes for each harness with a
 #                                    #   live agent (see below for what it withholds)
 #
 # Exits 0 whatever the vendors answered — a failure is a line on stderr, never a
 # status, and the daemon forwards those lines as warnings — and 2 only for a flag
-# it does not know, a `--source` that is neither `vendor` nor `npm`, or a `--skip`
-# or `--source` with nothing after it. With no `HOME` at all it stops at its first
+# it does not know, a `--source` that is neither `vendor` nor `npm`, a `--channel`
+# that is neither `stable` nor `latest`, or a `--skip`, `--source` or `--channel`
+# with nothing after it. With no `HOME` at all it stops at its first
 # line, non-zero: a state no caller can produce, since the daemon sets `HOME`
 # itself and the other two run from a shell that has one.
 #
@@ -60,6 +65,24 @@
 # by, whatever the flag says today, which is what makes switching the flag on a
 # machine that already has its agents safe in both directions.
 #
+# **`--channel` is which of claude's two release channels this fleet follows, and
+# `latest` is the default for a measured reason (Q4.115).** The model list is what
+# the `claude` binary publishes (Q6.106), and on 2026-09-05 both daemon hosts,
+# installed on `stable` by this script, ran 2.1.236 — a binary that contains
+# `claude-fable-5-1` zero times, where 2.1.261 contains it ten. That day `stable`
+# answered 2.1.236 and `latest` 2.1.261. The argument `stable` used to make here —
+# that a fleet on `latest` differs from itself for no reason anybody chose — does
+# not hold: every host runs this script within the same day, so the fleet is as
+# uniform on `latest` as on `stable`, one day behind Anthropic instead of weeks.
+# **Claude's vendor arm alone reads it**: codex's and opencode's installers have no
+# channel, and the npm arm is `@latest` for all four under either `--source`. The
+# daemon passes it from `REEMOAT_AGENT_CHANNEL` on every run, default included —
+# unlike `--source`, which it names only under `npm`; `AgentUpdateOptions.channel`
+# says why the two differ — so the install and every refresh after it agree, and
+# the refresh *has* to be told, because claude keeps the channel as a setting of
+# its own and `claude update` follows that setting rather than this flag;
+# `ensure_claude` says how.
+#
 # **No sudo, ever. No system package manager. No shell profile is touched** — the
 # PATH export below is what makes codex's and opencode's own profile writers
 # early-return, and it is load-bearing rather than convenience.
@@ -99,8 +122,13 @@ trap '' PIPE
 CHECK=0
 SKIP=" "
 SOURCE=vendor
+# claude's release channel — the header says why `latest`. The two spellings are
+# claude's own (`claude install <stable|latest>`), so a third is refused here by
+# name rather than handed to a verb that would refuse it out of sight.
+CHANNEL=latest
 _want_skip=0
 _want_source=0
+_want_channel=0
 for _arg in "$@"; do
   if [ "$_want_skip" = 1 ]; then SKIP="$SKIP$_arg "; _want_skip=0; continue; fi
   if [ "$_want_source" = 1 ]; then
@@ -111,15 +139,25 @@ for _arg in "$@"; do
     _want_source=0
     continue
   fi
+  if [ "$_want_channel" = 1 ]; then
+    case "$_arg" in
+      stable | latest) CHANNEL=$_arg ;;
+      *) printf -- '--channel takes stable or latest, not %s\n' "$_arg" >&2; exit 2 ;;
+    esac
+    _want_channel=0
+    continue
+  fi
   case "$_arg" in
-    --check)  CHECK=1 ;;
-    --skip)   _want_skip=1 ;;
-    --source) _want_source=1 ;;
+    --check)   CHECK=1 ;;
+    --skip)    _want_skip=1 ;;
+    --source)  _want_source=1 ;;
+    --channel) _want_channel=1 ;;
     *) printf 'unknown flag: %s\n' "$_arg" >&2; exit 2 ;;
   esac
 done
 [ "$_want_skip" = 1 ] && { printf -- '--skip needs an agent name\n' >&2; exit 2; }
 [ "$_want_source" = 1 ] && { printf -- '--source needs vendor or npm\n' >&2; exit 2; }
+[ "$_want_channel" = 1 ] && { printf -- '--channel needs stable or latest\n' >&2; exit 2; }
 
 # ⚠ **What `--skip` withholds, and which harnesses have anything to withhold.** The
 # three native installers all swap by *rename* — a symlink repointed, or a `mv` over
@@ -298,6 +336,9 @@ attempt() {
 #
 # ⚠ **`--source` decides how a harness that is absent is installed, and nothing
 # about one that is present: a copy is refreshed through the door it came in by.**
+# `--channel` is the one flag that does reach a present copy: claude's vendor refresh
+# re-applies it on every run (`ensure_claude`, Q4.115), which is the asymmetry between
+# the two flags and the reason the daemon names the channel on every run.
 # Measured before this existed, both directions of a switch went wrong: under `npm`
 # a claude the vendor arm had put in `~/.local/bin` read as "installed outside
 # reemoat" and was never refreshed again — on exactly the machine `npm` is for, one
@@ -545,21 +586,58 @@ ensure_claude() {
     outside) outside_note "claude       " claude; return 0 ;;
     vendor)
       if [ "$SOURCE" = npm ]; then vendor_copy_stays "claude       " claude; return 0; fi
-      # ⚠ **`claude update`, never a re-run of the installer.** That script has no
-      # already-installed check and downloads ~200 MB every time; the CLI's own
-      # update verb resolves the channel and exits without downloading when it is
-      # current.
-      if attempt "claude" claude update; then done_note "claude       " refresh claude
-      else warn "  claude        update failed; keeping $(claude --version 2>/dev/null | head -1)"; failed=$((failed + 1)); fi
+      # ⚠ **`claude install "$CHANNEL"`, never a re-run of the installer script —
+      # and not `claude update`, which stood here until 2026-09-05.** The script at
+      # `claude.ai/install.sh` has no already-installed check and downloads ~200 MB
+      # every time; the binary's own `install` verb does not — measured that day in
+      # an isolated `HOME`: `claude install latest` on a copy that was already
+      # 2.1.261 took 6 s and downloaded nothing. It is `install <channel>` rather
+      # than `update` because `update` follows `autoUpdatesChannel` in
+      # `~/.claude/settings.json`, which is whatever the *last* install verb wrote
+      # (the binary logs `Install: Saved autoUpdatesChannel=… to user settings`):
+      # a host this script installed on `stable` ran `claude update` daily and
+      # printed `Claude Code is up to date (2.1.236)` while `latest` was 2.1.261,
+      # so it would have tracked `stable` for ever whatever the fleet's setting
+      # became. `install <channel>` re-applies the channel and rewrites that
+      # setting on every run, so a host follows the env file rather than its own
+      # history — and it moves *down* as readily: `claude install stable` on a
+      # 2.1.261 downloaded 2.1.236 and repointed `~/.local/bin/claude` to it,
+      # keeping 2.1.261 under `~/.local/share/claude/versions/`. Either direction is
+      # a symlink swapped by rename with the previous build left on disk, which is
+      # what "no restart, no session interrupted" (Q4.113) rests on here: a running
+      # agent keeps the inode it opened, and a *new* session runs the new build the
+      # moment the symlink is repointed, because what the daemon holds is the path
+      # `~/.local/bin/claude` and not the file it named (`LocalRuntime.agentCli`).
+      # What the daemon's `AGENT_CLI_TTL_MS` cache and the `forgetAvailability` it
+      # calls after this run bound is narrower: how long its version *report* names
+      # the previous build. `claude config` is not a lever for any of this —
+      # `claude config get autoUpdatesChannel` demands a login and `-g` is an
+      # unknown option — so the verb that writes the setting is the one run.
+      # The failure line names the verb that failed and the channel it was given,
+      # as codex's and opencode's name theirs: the daemon forwards this line, and
+      # an operator reading it goes looking for that command — `update failed`
+      # stood here after the verb had become `install` and named one that no
+      # longer runs.
+      if attempt "claude" claude install "$CHANNEL"; then done_note "claude       " refresh claude
+      else warn "  claude        install $CHANNEL failed; keeping $(claude --version 2>/dev/null | head -1)"; failed=$((failed + 1)); fi
       return 0
       ;;
   esac
   if [ "$SOURCE" = npm ]; then ensure_npm claude @anthropic-ai/claude-code "claude       "; return 0; fi
   have curl || { warn "  claude        skipped: curl is not on PATH"; failed=$((failed + 1)); return 0; }
-  # `stable` rather than `latest`, chosen rather than inherited: the two are tens of
-  # patches apart, and a fleet that lands on whatever shipped this morning is a fleet
-  # whose agents differ from each other for no reason anybody chose.
-  if download claude https://claude.ai/install.sh && attempt "claude" bash "$TMP/claude.sh" stable; then
+  # The channel, chosen rather than inherited, and `latest` by default for the
+  # reason the header gives (Q4.115): `stable` stood here as "the two are tens of
+  # patches apart", and measured 2026-09-05 that was the whole problem — a fleet
+  # installed on it ran a claude that had never heard of the newest model. What
+  # the vendor's script does with the argument, measured the same day:
+  # `claude.ai/install.sh` redirects to the vendor's bootstrap, which always
+  # downloads the newest binary and then runs `<binary> install <channel>` — the
+  # same verb the refresh above runs — which fetches that channel's build if it is
+  # not the one just downloaded, points `~/.local/bin/claude` at it and writes the
+  # channel into `~/.claude/settings.json`; 21 s from nothing to a 2.1.261 under
+  # `latest`. So the channel a fresh install lands on is this flag's, and every
+  # refresh after it re-applies the same flag rather than trusting that setting.
+  if download claude https://claude.ai/install.sh && attempt "claude" bash "$TMP/claude.sh" "$CHANNEL"; then
     done_note "claude       " install claude
   else
     warn "  claude        install failed; this machine has no copy of it until the next run"
@@ -627,7 +705,15 @@ ensure_kimi() {
 
 main() {
   take_lock
-  if [ "$SOURCE" = npm ]; then _how="from the npm registry"; else _how="with each vendor's own installer"; fi
+  # The channel is said beside the door, and only for the door that reads it: under
+  # `npm` no arm looks at it, and a header that named it there would claim a choice
+  # nothing made.
+  if [ "$SOURCE" = npm ]; then _how="from the npm registry"; else _how="with each vendor's own installer, claude on its $CHANNEL channel"; fi
+  # A channel the registry cannot honour is said rather than swallowed: under `npm`
+  # every copy is `@latest`, so `--channel stable` there would otherwise look set and
+  # do nothing, which is the silent lie the flag exists to end (Q4.115). The default
+  # says nothing, since `latest` is what the registry gives anyway.
+  if [ "$SOURCE" = npm ] && [ "$CHANNEL" != latest ]; then note "claude        --channel $CHANNEL does not apply under --source npm: the registry has no channels, so @latest is what is installed"; fi
   if [ "$CHECK" = 1 ]; then say "agents (--check: nothing will be changed; $_how)"; else say "agents ($_how)"; fi
   ensure_claude
   ensure_codex

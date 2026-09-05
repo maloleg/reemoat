@@ -96,8 +96,8 @@ Four ways to prove who you are, offered least-authority-first:
 | signing up | only offered where `registration.enabled` is on. Where the instance confirms by mail it waits on **a keypress, not a timer** — `POST /v1/login` tolerates five failures in fifteen minutes before it starts blocking, so a polling loop would lock you out of the account you just made |
 
 Flags: `--url`, `--api-key`, `--enroll-code`, `--label`, `--dir` (default
-`~/srv/reemoat`), `--ref`, `--node`, `--agent-source vendor|npm`, `--yes`,
-`--uninstall`, `--purge`, `--help`.
+`~/srv/reemoat`), `--ref`, `--node`, `--agent-source vendor|npm`,
+`--agent-channel stable|latest`, `--yes`, `--uninstall`, `--purge`, `--help`.
 
 **What it will not do:** no `sudo`, no package manager, nothing written to a
 shell profile. Reemoat's own state is under `~/.reemoat` and the checkout. The
@@ -116,7 +116,12 @@ than a fallback: a vendor outage never switches a machine to a differently built
 binary by itself. And it decides only how a CLI that is missing is installed — one
 already on the machine keeps being refreshed the way it was installed — which is
 also why the flag is refused on a machine that is already set up: the setting is
-`REEMOAT_AGENT_SOURCE` in the env file, and the installer says so. `REEMOAT_AGENT_UPDATES=off` stops the re-run, and
+`REEMOAT_AGENT_SOURCE` in the env file, and the installer says so. Which of claude's
+two release channels the machine follows is the same shape — `--agent-channel
+stable|latest`, `latest` by default because the model list is what the binary
+publishes and `stable` trailed it by weeks and a model, written into the env file
+as `REEMOAT_AGENT_CHANNEL=stable` only when chosen, and re-applied by every daily
+refresh rather than only by the install. `REEMOAT_AGENT_UPDATES=off` stops the re-run, and
 `deploy/agents.sh --check` previews one. The daemon does not need node on *your*
 `PATH` — `runtime_path` bakes the resolved one into the unit.
 

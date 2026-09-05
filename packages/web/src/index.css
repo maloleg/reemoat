@@ -722,6 +722,16 @@ kbd {
  * standard property, and the `::-webkit-scrollbar` rule is what Safari still
  * needs. Never put this on a vertical list — there a bar is the only thing saying
  * how much more there is.
+ *
+ * ⚠ **Overruled for exactly two vertical scrollers, by the owner's call on
+ * 2026-09-06 (Q3.553): the rail and the pane of the settings sheet, and of the
+ * market sheet that mirrors it string for string.** On a fine pointer the rule
+ * above draws a permanent classic bar on every scroller in the app, and the owner
+ * weighed the cue a bar gives against a bar down the edge of every settings
+ * screen and wants none inside that pop-up; scrolling is unchanged. The
+ * `overscroll-behavior-x: contain` below is harmless on a vertical scroller —
+ * it governs an axis those boxes never move in. Everywhere else the sentence
+ * above still stands.
  */
 .no-scrollbar {
   scrollbar-width: none;

@@ -25,6 +25,112 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-06
+
+### Changed
+
+- The fleet's `claude` follows the `latest` release channel by default, and the
+  channel is a setting: `REEMOAT_AGENT_CHANNEL=stable|latest` in the daemon's env
+  file, `--agent-channel` on the one-line installer, `--channel` on
+  `deploy/agents.sh`. Both daemon hosts were on `stable` at 2.1.236, a build that
+  had never heard of the newest model, while `latest` was 2.1.261. The refresh
+  runs `claude install <channel>` rather than `claude update` — `update` follows
+  whichever channel the last install wrote into claude's own settings, so a host
+  installed on `stable` would have stayed there whatever the env file said. A
+  change of channel moves the machine on the next run, down as well as up, with
+  the previous build kept on disk and no session interrupted.
+- `PUT /v1/me/email` asks an API-key caller with a password for `currentPassword`
+  — `400 bad_request` without it, `401 invalid_password` with a wrong one, and
+  nothing is written or mailed until it verifies. A session still changes the
+  address alone, and an account with no password row is still let through on
+  its key. The address is the reset channel; a key can leak from a disk with no
+  person anywhere in the chain and no admin reset behind it, where a session is
+  a person signed in, listed under Devices and one tap to end.
+- `cpctl key` no longer prompts for a password the route never read. `cpctl
+  email` still does when the shell holds an API key, and asks nothing when
+  `REEMOAT_CP_KEY` came from `cpctl login`, since the route ignores a password
+  from a session. `cpctl keys` prints when each key was last used.
+- Every two-step confirmation on a settings row is one control, `TwoStep`. The
+  first tap still replaces the row's buttons with the question, the act and
+  Cancel — Cancel last, on the same pixels, the question standing until the
+  server has answered — held in one place and pinned once rather than
+  re-derived on each of fourteen sites. The two centred confirmations keep
+  their shape; the question reads in the text colour everywhere, with its
+  consequence muted under it. Signing an agent out on a machine that has left
+  the list is refused, greyed, rather than answered with a toast.
+- Settings say less, again: the New session strip's lede, the two limit
+  consequences, the not-enrolled line, the agent card's unknown-sign-in line,
+  codex's two caveats and the plugin consent's `http` caveat are cut to the caps
+  the plan set, with the same facts in fewer words.
+
+### Removed
+
+- An admin's view of anybody else's API keys. `GET` and `DELETE
+  /v1/admin/users/:id/keys[/:keyId]` are gone, the fleet list no longer counts a
+  person's live keys, and the "API keys" item in a user row's menu — with the
+  panel it opened — is gone with them. A key is listed and retired by the
+  person holding it, on their own API keys screen or with `cpctl keys`; an
+  admin's reach over an account is disable and delete.
+
+### Fixed
+
+- A settings pop-up drew two scrollbars it had no use for on a desktop: a
+  horizontal one along its foot and a vertical one down its right edge, on a
+  screen that fit. A sheet's body was a padded scroller whose every screen
+  cancelled the padding with negative margins, and a scroll container counts
+  its own end padding past the content, so each axis had one padding of range
+  nothing could show. The body no longer scrolls or pads — every pop-up scrolls
+  in a box of its own — and inside the settings and plugins pop-ups the section
+  rail and the pane scroll with no bar drawn at all.
+- Every row of the API keys table is the same height. A row with a Revoke
+  button was the button's height plus padding and a revoked row was its text
+  plus the same padding, a third shorter.
+- The startup prune deletes only inactive sessions, never below fifty, and says
+  what it removed. It read `created_at`, so a conversation older than seven days
+  from the day it was *opened* was deleted at the next restart however much it
+  was in use — on 2026-09-04 one deploy's restart deleted five of the six
+  conversations it had just stopped, with their transcripts (~50 MB), and the
+  journal held nothing but `restored 1 session(s)`. A session is now swept only
+  when it was ended by a person or by the agent, never started, or given up on
+  because the agent no longer holds the conversation (only a manual Resume
+  tries again) — never a live one, and never one the daemon ended on its own
+  restart or shutdown and is still coming back to, at any age and under any
+  cap — and only once untouched for seven days by its last write; a prune
+  never leaves fewer than fifty rows (`REEMOAT_MIN_SESSIONS`) — the ones it
+  never sweeps first, then pins, then the most recently touched, whatever
+  their age; the two-hundred cap is on the rows nobody is coming back to and
+  takes the least recently touched of them, pins last; and every id that went
+  is printed at startup on its own `store:` line.
+- A valid API-key request no longer answers a plain-text 500 when the
+  `last_used_at` bookkeeping write meets a busy database: the write is guarded
+  the way the session one already was, so a request that could not record its
+  own use still succeeds.
+- Reset on an Email field survives the next Save. Save sends every SMTP field
+  from the draft, and a Reset re-synced the draft only while the form had no
+  other edits — so edit Host, Reset From, Save wrote the old From straight back
+  under a "Saved." toast.
+- Public URL is filled in with the page's own origin on a fresh server, since
+  mail cannot be sent without it and the field drew the origin only as a
+  placeholder. Save is live at once; the provenance line says "not set" until
+  it lands. A value already stored or set in the environment is left alone.
+- New key waits for the key list to load rather than opening the leaf during
+  the skeleton only to be told the ceiling. A list that failed to load still
+  lets you mint.
+- Every Revoke on the keys screen and under a user's keys names its key to a
+  screen reader.
+- Three controls no longer stay live during the write they belong to: a
+  field's Reset while a Save is in flight, the strip's Remove while its delete
+  is out, and the device-code box, which empties after the code is written so a
+  failed send leaves it in the box beside the toast rather than gone.
+- The machines list no longer jumps on load: the loading row is the height of
+  the machine row it stands in for. And a retired machine leaves the list at
+  once rather than a round trip later.
+- Revoking the key this browser holds still signs the tab out when browser
+  storage is blocked. The one-shot notice for the sign-in screen was written
+  unguarded, and a browser with storage disabled threw there before the
+  credential was cleared — so the tab kept a dead key and the next request said
+  "Your session expired" about an act the person had just chosen.
+
 ## [0.6.0] - 2026-09-04
 
 ### Added

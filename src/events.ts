@@ -834,6 +834,72 @@ export function endedWithDaemon(exit: { reason: ExitReason } | null | undefined)
 }
 
 /**
+ * Every member of `ExitReason`, as a value, so that a string read off disk can
+ * be told from one this build has never heard of.
+ *
+ * A `Record<ExitReason, true>` rather than an array with `satisfies`, because a
+ * record is exhaustive in **both** directions: a reason added to the union is a
+ * compile error here until it is listed, and one removed from the union is a
+ * compile error until it is delisted. An array only checks that what is listed
+ * is a member.
+ *
+ * Who asks is `SqliteSessionStore.prune`, and why is `compatibility.md`'s rule
+ * about which way an unknown value must fail. The prune deletes a session it
+ * reads as inactive, and "inactive" is decided from `exit.reason` — so a reason
+ * a newer build wrote, say a fourth member of {@link DAEMON_EXIT_REASONS} that
+ * this build reads as merely "not one of my three", would have its conversation
+ * deleted on the rollback that `deploy/deploy.sh --ref` advertises as the way
+ * back. A reason this build cannot name is one it may not act on.
+ */
+const EXIT_REASON_MEMBERS: Record<ExitReason, true> = {
+  stopped: true,
+  agent_exited: true,
+  start_failed: true,
+  start_timeout: true,
+  daemon_shutdown: true,
+  agent_kill_failed: true,
+  daemon_restarted: true,
+  config_changed: true,
+  agent_signed_out: true,
+};
+
+export function isExitReason(value: unknown): value is ExitReason {
+  return typeof value === "string" && Object.hasOwn(EXIT_REASON_MEMBERS, value);
+}
+
+/**
+ * Why the daemon stopped trying, when it stopped for a reason of its own.
+ *
+ * `workspace_missing` and `unsupported` are settled facts about the world rather
+ * than attempts that ran out — the checkout is gone, or this agent build cannot
+ * reattach at all — so neither consumes an attempt and neither is retried inside
+ * one daemon life. `attempts_exhausted` is the ordinary one. Which of these
+ * outlives a restart is `registry.ts`'s `resumeGiveUpPersists`; the union sits
+ * here, beside `ExitReason`, because one member of it is written to disk.
+ */
+export type ResumeGiveUp =
+  | "workspace_missing"
+  | "unsupported"
+  | "forgotten"
+  | "attempts_exhausted";
+
+/**
+ * Whether a string off disk is a give-up this version knows how to honour.
+ *
+ * `isExitReason`'s twin, for the other column a deletion is decided from, and
+ * here for the same reason: `sessions.resume_gave_up` is a plain string, so a
+ * row written by a newer build could hold a member this one does not know.
+ * Both readers answer the same way for such a value — the registry reads it as
+ * "not given up" and puts an agent back on the row, which costs one spawn, and
+ * the prune reads it as not given up and keeps the row — because the other
+ * answer on either side is a session that silently never comes back, or is
+ * deleted on the rollback `deploy/deploy.sh --ref` advertises as the way back.
+ */
+export function isPersistedGiveUp(value: unknown): value is ResumeGiveUp {
+  return value === "forgotten";
+}
+
+/**
  * How to signal an agent, and how to recognise it after a restart.
  *
  * Part of the persisted vocabulary rather than a runtime detail, because it is
@@ -1052,8 +1118,11 @@ export interface PersistedSession {
    * unreachable mount, an agent that is not signed in — is deliberately
    * forgotten across a restart, because a restart is new information.
    *
-   * Typed as a string rather than the union so this file does not have to know
-   * the registry's vocabulary; the registry validates on the way back in.
+   * Typed as a string rather than the union because the column is a plain
+   * string on disk and a row written by a newer build may hold a member this
+   * one does not know. `isPersistedGiveUp` is what tells the one this build
+   * honours from the rest, and both readers go through it: the registry on the
+   * way back in, and the prune, which may not delete on a value it cannot read.
    */
   resumeGaveUp: string | null;
   /**
@@ -1135,8 +1204,11 @@ export interface MemoryEventStoreOptions {
  * which is the only thing anybody was actually getting.
  *
  * **What still bounds the database is whole sessions, not parts of one.**
- * `SqliteSessionStore.prune` keeps 7 days / 200 sessions and removes a session
- * *entire*, with its events. That line is deliberate and is the one to hold:
+ * `SqliteSessionStore.prune` removes an *inactive* session untouched for 7 days,
+ * or one past the 200 cap — never a live one, nor one the daemon is still coming
+ * back to, and never one of the 50 rows the floor keeps at any age (active first,
+ * then pins, then the most recently touched) — and removes it *entire*, with its
+ * events. That line is deliberate and is the one to hold:
  * a conversation is kept whole or not at all, never trimmed to a suffix.
  *
  * The one thing that still cuts inside a session is `DEFAULT_MAX_EVENT_BYTES`,

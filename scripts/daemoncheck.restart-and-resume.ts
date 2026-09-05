@@ -490,9 +490,12 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
    *
    * `create()` resolved a cwd, ran a real `git worktree add` and spawned an
    * agent, once per request, unbounded. The only thing counting sessions was
-   * `SqliteSessionStore.prune`, and that counts in order to **delete**: it keeps
-   * the newest `maxSessions` and takes every other transcript with it at the next
-   * boot. So a loop of `POST /sessions` on a shared machine was a way to destroy
+   * `SqliteSessionStore.prune`, and that counts in order to **delete**: it kept
+   * the newest `maxSessions` by creation and took every other transcript with it
+   * at the next boot (it takes only inactive rows now and never leaves fewer than
+   * `DEFAULT_MIN_SESSIONS`, but past the cap it is still a deletion — the
+   * store-and-worktrees module drives that half). So a loop of `POST /sessions`
+   * on a shared machine was a way to destroy
    * the owner's conversations, and `sqlite.ts`'s own comment beside the cap had
    * written the precondition down — "with one person there is nobody to take it
    * from" — which a grant makes false.

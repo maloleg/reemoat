@@ -10,6 +10,7 @@ import {
   clip,
   endedWithDaemon,
   isAuthFailure,
+  isPersistedGiveUp,
   oldestAvailable,
   type AgentCommands,
   type AgentConfig,
@@ -25,6 +26,7 @@ import {
   type ExitReason,
   type PermissionOptionSummary,
   type PersistedSession,
+  type ResumeGiveUp,
   type SessionEvent,
   type SessionExit,
   type SessionStatus,
@@ -89,16 +91,21 @@ const KILL_CONFIRM_MS = 250;
  * — a real checkout, with the repository's own hooks — and spawned an agent, once
  * per request, for ever. The only thing downstream that counted sessions was
  * `SqliteSessionStore.prune`, and that is not a bound on creation, it is a
- * **deletion**: it keeps the newest `maxSessions` rows and takes every other
- * transcript with it, at daemon boot, with one `console.error` after the fact.
+ * **deletion**: it kept the newest `maxSessions` rows by creation and took every
+ * other transcript with it, at daemon boot, with one `console.error` after the
+ * fact and only for the cap. (It takes only inactive rows now, never leaves
+ * fewer than `DEFAULT_MIN_SESSIONS`, and reports every id through `onPruned` —
+ * Q2.222 — but it is still a deletion, and this bound is still the one on
+ * creation.)
  *
  * That was survivable while the daemon served one person, and `sqlite.ts` says
  * so in the comment beside the cap — "with one person there is nobody to take it
  * from". A grant makes it false. `grants` is `(user_id, machine_id)` and `POST
  * /v1/tokens` mints for any holder, so anybody sharing a machine can create
- * sessions on it; a loop then fills the newest-200 with fresh empty rows, and the
- * next restart deletes the owner's conversations. The daemon deliberately does
- * not know *who* is asking — it "stops asking who the subject is" — so the
+ * sessions on it; a loop then fills the table past the cap with fresh empty
+ * rows, and the next restart deletes the owner's conversations. The daemon
+ * deliberately does not know *who* is asking — it "stops asking who the subject
+ * is" — so the
  * remedy cannot be per-person, and does not need to be: what makes the prune
  * destructive is the rate of creation, not its origin.
  *
@@ -985,21 +992,11 @@ export interface SessionResumeState {
 }
 
 /**
- * Why the daemon stopped trying, when it stopped for a reason of its own.
- *
- * `workspace_missing` and `unsupported` are settled facts about the world rather
- * than attempts that ran out — the checkout is gone, or this agent build cannot
- * reattach at all — so neither consumes an attempt and neither is retried inside
- * one daemon life. `attempts_exhausted` is the ordinary one.
- */
-export type ResumeGiveUp =
-  | "workspace_missing"
-  | "unsupported"
-  | "forgotten"
-  | "attempts_exhausted";
-
-/**
  * The one give-up that outlives this daemon, and why it is the only one.
+ *
+ * `ResumeGiveUp` itself lives in `events.ts` beside `ExitReason`, with
+ * `isPersistedGiveUp`, because the store reads the column too: the prune
+ * decides a deletion from it and may not act on a value it cannot name.
  *
  * Retry state is otherwise in memory on the argument that a restart is new
  * information — a new binary, a re-signed-in agent, a remounted disk. That
@@ -1020,11 +1017,6 @@ export type ResumeGiveUp =
  */
 export function resumeGiveUpPersists(reason: ResumeGiveUp): boolean {
   return reason === "forgotten";
-}
-
-/** Whether a string off disk is a give-up this version knows how to honour. */
-export function isPersistedGiveUp(value: string | null | undefined): value is ResumeGiveUp {
-  return value === "forgotten";
 }
 
 /**
@@ -1973,7 +1965,10 @@ export class ManagedSession {
         // string on disk and a row written by a future version could hold a
         // member this one does not know. An unrecognised value reads as "not
         // given up", which costs one spawn and is the safe direction — the
-        // alternative is a session silently never coming back.
+        // alternative is a session silently never coming back. The prune reads
+        // the column through the same predicate and keeps such a row
+        // (`isActiveRow`), so what this pass would put an agent back on is
+        // still there to be put back on.
         resumeGaveUp: isPersistedGiveUp(row.resumeGaveUp) ? row.resumeGaveUp : null,
         title: row.title,
         pinned: row.pinned,

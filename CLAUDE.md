@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 854 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 864 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -164,7 +164,9 @@ pnpm pincheck                        # every place a version is written down. Th
                                      #   served response. **None of them says a bump happened** —
                                      #   they agree with each other, never with a tag — plus
                                      #   SOURCE_URL against the repository package.json names,
-                                     #   which is the §13 offer's other half and was checked nowhere
+                                     #   which is the §13 offer's other half and was checked nowhere.
+                                     #   And one number that is not a version: the API-key ceiling,
+                                     #   written once on each side of the wire
 pnpm deploycheck                     # deploy/: quoting, env files, PATH, a unit for both init systems,
                                      #   and RELAY_INPUTS against the relay entry's own import closure
 pnpm docscheck                       # the documentation, held to what it claims about itself: this
@@ -285,7 +287,9 @@ session may be on is kept, and a failure is a warning rather than a stop. Nothin
 is vendored under it any more (Q4.114): a harness with no CLI is refused with a
 sentence rather than started; `REEMOAT_AGENT_SOURCE=npm`, all four from the npm
 registry into that toolchain, is a firewalled machine's choice, never a fallback,
-and decides only how an absent CLI is installed.
+and decides only how an absent CLI is installed; `REEMOAT_AGENT_CHANNEL` is which
+of claude's release channels the fleet follows, `latest` by default, and unlike the
+source it moves a copy that is already there: re-applied on every refresh (Q4.115).
 `REEMOAT_AGENT_UPDATES=off` (or `0`) switches it off. What runs is
 `CLAUDE_CODE_EXECUTABLE`/`CODEX_PATH` outright, else the **first** copy on PATH,
 then in the directories the script installs into — so a file an agent drops into
@@ -373,9 +377,9 @@ teardown is returned as an unsubscribe function; idempotent shutdown is
 
 **Nothing in `src/` writes to stdout or stderr**, with two sanctioned exceptions.
 `store/sqlite.ts`'s v6 migration prints when it destroys something (a dropped
-forge account, a collapsed credential, sessions cut by a cap that used to be
-per-person). Those happen inside `openStores`, before any callback the daemon
-could have wired, so it is the only moment anybody can be told. And
+forge account, a collapsed credential). Those happen inside `openStores`, before
+any callback the daemon could have wired, so it is the only moment anybody can
+be told. And
 `src/plugins/runner.ts` is the *child* process's entry point rather than the daemon's:
 its `unhandledRejection` handler writes to the stderr `runtime.ts` already
 captures into the ring shown on the plugin's failure row, which is the whole of

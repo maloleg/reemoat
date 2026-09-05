@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { takeRevokedKeyNotice } from "./account";
+import { clearRevokedKeyNotice, peekRevokedKeyNotice } from "./account";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
 import { setTelegramBack } from "./telegram";
@@ -12,7 +12,7 @@ import { Sheet } from "./ui/Sheet";
 import { SessionBrowser } from "./ui/SessionBrowser";
 import { SignIn } from "./ui/SignIn";
 import { ToastHost } from "./ui/Toast";
-import { Spinner } from "./ui/bits";
+import { SHEET_SCROLL, Spinner } from "./ui/bits";
 
 /**
  * The two subtrees that are not on the first-paint path.
@@ -80,20 +80,33 @@ export function App(): ReactNode {
    * The one-shot line a deliberate sign-out leaves behind: revoking the key this
    * browser was holding clears the credential and reloads onto the sign-in
    * screen, and without this the gate would say nothing about an act the person
-   * just chose. `takeRevokedKeyNotice` deletes on read, so it is read **once, in
-   * a state initialiser** — not in the render body, where the first signed-out
-   * paint would consume it and the config patch a moment later (`bootstrap`
-   * fires `loadConfig` before it settles the phase) would re-render to `null`.
+   * just chose. Read **once, by construction**: `peekRevokedKeyNotice` in a
+   * state initialiser, which leaves the storage alone, and
+   * `clearRevokedKeyNotice` in a mount effect, once the line is in state. Not
+   * in the render body, where the first signed-out paint would read it and the
+   * config patch a moment later (`bootstrap` fires `loadConfig` before it
+   * settles the phase) would re-render to `null`. And not deleting inside the
+   * initialiser (review D16): that was right only because React 19 keeps the
+   * first initialiser's result under StrictMode's double call, and a rule that
+   * holds by a version's grace is not a rule. State survives StrictMode's
+   * simulated remount, so the effect firing twice deletes a value already read.
    * Storage disabled is the same as no notice.
    */
   const [revoked] = useState<string | null>(() => {
     try {
-      return takeRevokedKeyNotice(window.sessionStorage);
+      return peekRevokedKeyNotice(window.sessionStorage);
     } catch {
       // Private browsing, or storage disabled: the sign-in screen is still right.
       return null;
     }
   });
+  useEffect(() => {
+    try {
+      clearRevokedKeyNotice(window.sessionStorage);
+    } catch {
+      // Private browsing, or storage disabled: nothing was read, nothing to clear.
+    }
+  }, []);
   const route = useRoute();
   const under = useUnder();
   // The other pop-up this one was opened from, for the way *up*. The ✕ is
@@ -314,8 +327,13 @@ function OverlaySheet({
   const upLabel = sheetUpLabel(route, origin);
   const up = upLabel === null ? null : upFrom(route, under, origin);
 
+  /*
+   * A flex item of `SHEET_BODY`'s column rather than `h-full`: the body pads
+   * nothing and clips (Q3.553), so a child that wants the middle of it takes the
+   * height with `flex-1` — `AgentBuilder`'s waiting screens are the same shape.
+   */
   const spinner = (
-    <div className="flex h-full items-center justify-center">
+    <div className="flex min-h-0 flex-1 items-center justify-center">
       <Spinner />
     </div>
   );
@@ -353,12 +371,21 @@ function OverlaySheet({
            * remounts rather than carrying the first one's view and form state into
            * the second's name. `AgentDetail` is keyed for the same reason.
            */}
-          <PluginScreen
-            key={`${route.machineId}:${route.pluginId}`}
-            machineId={route.machineId}
-            pluginId={route.pluginId}
-            onTitle={setReported}
-          />
+          {/*
+           * The screen's scroller, here rather than in `PluginScreen`: that file
+           * answers a board, a spinner or an `Empty` and knows nothing about the
+           * box it is drawn in, and `SHEET_BODY` pads nothing and never scrolls
+           * (Q3.553) — so this is the box that does both, the way every other
+           * pop-up's screen carries its own.
+           */}
+          <div className={SHEET_SCROLL}>
+            <PluginScreen
+              key={`${route.machineId}:${route.pluginId}`}
+              machineId={route.machineId}
+              pluginId={route.pluginId}
+              onTitle={setReported}
+            />
+          </div>
         </Suspense>
       )}
     </Sheet>
