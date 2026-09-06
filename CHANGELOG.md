@@ -25,6 +25,24 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- An instance can point somebody who has no machine at somewhere to get one.
+  `REEMOAT_CP_MACHINES_OFFER_URL` in the control plane's environment takes an
+  `https://` address, and the three screens that already print the one-line
+  installer draw a second, quieter link beside it. Environment-only on purpose:
+  it names one particular shop, and a runtime setting would draw it on the
+  Server settings screen of every instance. **Empty by default**, and an instance that never sets it
+  looks exactly as it did before. The signed-in person's email address travels in
+  the link as `?email=`, so a checkout on the far side can prefill its own form;
+  it goes only when they tap it, and every response here already carries
+  `referrer-policy: no-referrer`, so nothing else about the instance goes with it.
+  The address is configured rather than compiled in because this is AGPL software
+  and forks run their own control planes.
+  The offer is drawn only where a machine may still be added: at or over the
+  machine limit a bought host would be refused at the dial, so offering one there
+  would sell something this control plane will not connect.
+
 ## [0.7.0] - 2026-09-06
 
 ### Changed

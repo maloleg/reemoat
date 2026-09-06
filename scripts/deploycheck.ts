@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { AGENT_IDS, AGENT_LOGIN, MANAGED_CLI_DIRS } from "../src/acp/agents.js";
+import { SETTING_KEYS, envNameFor } from "../packages/control-plane/src/settings.js";
 import { tmp } from "./tmp.js";
 
 /**
@@ -842,6 +843,31 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * so, or the pair is worse documented than neither.
    */
   check("and the credential directory is named as not being one of them", /CODEX_HOME/.test(daemonExample), true);
+
+  /*
+   * ⚠ **Every runtime setting, swept against the control plane's own example.**
+   *
+   * `SETTING_KEYS` already has its environment mapping asserted in a loop by
+   * `relaycheck`, and its route projection asserted by count — but nothing
+   * anywhere held the *documentation* to the list. All of the keys that existed
+   * when this was written were documented by hand and this sweep passed on the
+   * day it was added, which is exactly when a ratchet is worth putting in: it
+   * costs nothing now and refuses the next key that arrives without a line.
+   *
+   * The shape is the commented assignment above's, and for its reason — a
+   * variable named only in prose is one an operator cannot copy, and one whose
+   * default nobody wrote down. A key whose default is "unset" is a bare `=`,
+   * which `^#\s*KEY=` matches as happily as one with a value.
+   *
+   * Derived through `envNameFor` rather than transcribed, so a key renamed on
+   * that side comes here rather than quietly passing against its old spelling.
+   */
+  const cpExample = readFileSync(join(repoRoot, "packages", "control-plane", ".env.example"), "utf8");
+  check(
+    "every runtime setting is documented as a commented assignment",
+    SETTING_KEYS.filter((key) => !new RegExp(`^#\\s*${envNameFor(key)}=`, "m").test(cpExample)),
+    [],
+  );
   /*
    * And the one variable here that is *ours*: where `deploy/agents.sh` gets the
    * CLIs from. `vendor` is each vendor's own installer and `npm` is the registry,
@@ -2273,6 +2299,30 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     true,
   );
   check("the control-plane wizard writes it", new RegExp(`set_env ${KEY} `).test(installer), true);
+
+  /*
+   * ⚠ **The two environment-only values, which the sweep above cannot reach.**
+   * `SETTING_KEYS` is swept against this file in one loop, and neither of these
+   * is a member — the catalogue because a database-owned value could name an
+   * origin the CSP refuses, the offer because it points at one particular shop
+   * and that array is drawn on every instance's Server settings screen. Being
+   * outside the sweep is exactly why they are named here: an env-only variable
+   * that nothing documents is one an operator has no way to discover.
+   */
+  for (const envOnly of ["REEMOAT_CP_PLUGIN_CATALOGUE_URL", "REEMOAT_CP_MACHINES_OFFER_URL"]) {
+    check(
+      `the example documents ${envOnly} as a commented assignment`,
+      new RegExp(`^#\\s*${envOnly}=`, "m").test(cpExample),
+      true,
+    );
+    check(
+      `and ${envOnly} is read from the environment rather than the settings table`,
+      new RegExp(`process\\.env\\["${envOnly}"\\]`).test(
+        readFileSync(join(repoRoot, "packages/control-plane/src/main.ts"), "utf8"),
+      ),
+      true,
+    );
+  }
   /*
    * And asks rather than assuming. A `set_env` with a literal would be a
    * decision made on the operator's behalf about whether a proxy exists, which

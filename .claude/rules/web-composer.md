@@ -291,3 +291,10 @@ length guard does not tell the two apart. Q3.410.
 | `packages/web/src/ui/Composer.tsx` | Where a prompt is written: Enter to send, auto-grow, per-session draft, the `/` menu, and Stop in the send slot while the agent works. It **writes** the optimistic echo and does not draw it |
 | `packages/web/src/ui/CommandMenu.tsx` | The menu: the agent's commands and the controls it does *not* publish, in one list, two stages. Never takes focus |
 | `packages/web/src/ui/AgentConfigBar.tsx` | The composer's control strip: mode left, model/effort/context right, a nested control inside its host's menu, the rest behind `…`. Drawn from `category`, never an id |
+
+**`MachineOffer` does not appear in the strip either**, and it joins
+`installCommand` in that for a stronger version of the same reason: a link off
+this origin, sitting between somebody and starting work, is the worst instance of
+a control leaving the strip. `MachineLine`'s empty state keeps its one door to
+Settings → Machines, which is where both live. `webcheck.shell-and-enrollment.ts`
+asserts the absence of both by name.

@@ -48,6 +48,7 @@ import {
   type MachineTab,
 } from "./groups";
 import { CommandLine } from "./CommandLine";
+import { MachineOffer } from "./MachineOffer";
 import { Mark } from "./Mark";
 import { HelpButton, ProfileMenu } from "./ProfileMenu";
 import { RenameField, SessionMenu } from "./SessionMenu";
@@ -249,6 +250,12 @@ export function SessionBrowser({
                   <div className="text-left">
                     <CommandLine command={installCommand(location.origin)} />
                   </div>
+                  {/* ⚠ **Inside `lg:hidden`, with the command.** At `lg` the pane
+                      draws both instead, and an offer hoisted out of this div
+                      would render twice — once in a 280px rail and once beside
+                      it. The same reason the command is in here. No wrapper: the
+                      component fills its box and centres its own contents. */}
+                  <MachineOffer config={state.config} me={state.me} />
                 </div>
               </>
             ) : (

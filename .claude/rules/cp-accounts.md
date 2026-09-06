@@ -238,3 +238,23 @@ daemon closes `4401` on its own ping tick at `exp + leeway`.
 |---|---|
 | Control-plane bodies | 64 KiB above THE LINE, on the **seven** routes there that take one — `/v1/login`, `/v1/enroll`, `/v1/register`, `/v1/register/confirm`, `/v1/forgot`, `/v1/reset`, `/v1/provision`, the only places somebody whose credential the gate cannot resolve decides how many bytes are read — 256 KiB below it, both answering `413 payload_too_large` in the envelope every client parses. `currentPassword`/`newPassword` are refused over 512 chars |
 | Registration | Closed by default. A sign-up holds its login name for **24h** and releases it by expiring — `pending_registrations`, swept at startup, which is what makes a name reusable at all |
+
+**Two values reach the browser from the environment and never from
+`instance_settings`, and they are kept out for different reasons.**
+`REEMOAT_CP_PLUGIN_CATALOGUE_URL` cannot be a row because
+`createControlPlaneApp` builds the `Content-Security-Policy` from it **once**, so
+a database-owned value could name an origin the document's own `connect-src`
+refuses. `REEMOAT_CP_MACHINES_OFFER_URL` could technically be a row and is
+deliberately not one: it points at one particular shop run by whoever runs the
+deployment, and `SETTING_KEYS` is drawn on the Server settings screen of *every*
+instance — a row there would put a commercial switch, with somebody's business
+behind it, in front of every admin of every fork. Both are read in `main.ts`,
+validated with `isBrowserReachable`, warned-and-ignored rather than fatal, and
+handed to the app as constructor options; both are published on
+`GET /v1/instance` as **an address rather than a boolean**, because a client that
+renders one cannot be told "there is one" and left to invent where it goes.
+Neither has a compiled-in default — this is AGPL software and forks run their own
+control planes. `webcheck.shell-and-enrollment.ts` asserts from both sides that
+no `SETTING_KEYS` member names the offer and that `main.ts` is where it is read;
+`deploycheck` asserts both are documented in `.env.example`, since the
+`SETTING_KEYS` sweep there cannot reach them.

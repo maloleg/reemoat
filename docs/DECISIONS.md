@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 124 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 125 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 300 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 131 | `###` |
-| | | **864** | |
+| | | **865** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 864 rather than the 455
+dividers. So the count is over **both** depths, and it says 865 rather than the 456
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3268,6 +3268,101 @@ listed, a second revoke a 404 — and, by reading `app.ts`, that no route
 mounted under `/v1/admin/users/:id/` reads or updates `api_keys`. `webcheck`
 asserts `UsersSection` imports nothing from `KeyRow`, that `cp.ts` exports
 neither function, and that the row's one panel is the machine limit.
+
+### Q1.632 — Where does an instance point somebody who has no machine?
+
+**Decision.** At an address the operator sets in the environment, and at nothing
+by default. `REEMOAT_CP_MACHINES_OFFER_URL` is read once in `main.ts`, validated
+with `isBrowserReachable`, warned-and-ignored if it is not http(s), and handed to
+`createControlPlaneApp` as an option; `GET /v1/instance` publishes it as
+`machines.offer`. In the browser `parseInstanceConfig` reads it through the
+existing `isAbsoluteHttpUrl`, `machineOffer` answers `null` fail-closed on an
+unknown config, and `machineOfferHref` builds the link with `URLSearchParams`,
+putting `me.email` in it so the far side can prefill its own form.
+`MachineOffer` draws one row and returns `null` when there is nothing to offer,
+on `MachinesSection`, `SessionBrowser` and `AppShell` — inside the
+`mayAddMachine` arm, below `installCommand`, and never in the composer strip.
+
+**Why.** The checkout at `get.reemoat.com` has accepted `?email=` since it was
+built, with a docblock naming "a link in the app" as the case it was for, and
+nothing had ever generated one: the app had no notion the shop existed and the
+shop cannot ask who is signed in. What was missing was the one place both facts
+are known at once, which is the screen a new account lands on with an empty
+fleet.
+
+**Environment-only, and not a `SETTING_KEYS` row — which it was, for half a
+day.** The first version put it beside `machines.per_user` with a field on the
+Server settings screen, on the argument that an admin owning the value is what
+lets a fork use the feature for its own shop. The owner's instruction on
+2026-09-06 was that the option is not for public use, and the argument behind it
+is stronger than the one it replaced: `SETTING_KEYS` is drawn on the settings
+screen of *every* instance and projected by `GET /v1/admin/settings` to every
+admin, so a row there does not offer a fork a feature — it puts one particular
+shop, run by whoever runs the deployment, in front of every administrator of
+every copy. `pluginCatalogueUrl` is already kept out of that array, so the shape
+existed; only its reason is different (a CSP built once at construction cannot
+follow a database). Whoever owns the deployment owns the env file. The price is
+that changing the address needs a restart, which is right for a value that
+changes about never.
+
+**An address rather than a boolean, which is `pluginCatalogueUrl`'s decision and
+its argument.** A client that renders a link cannot be told "there is an offer"
+and left to invent where it goes. The stake here is one degree higher than a
+refused `fetch`: this value goes into an `href` a person taps, carrying their
+email address. And the boolean form needs a URL compiled into `packages/web` —
+which, under AGPL, puts one project's shop on every fork's screens in a build
+they are entitled to and have not changed. Absence-is-off is already this file's
+dominant idiom (`plugins.catalogue`, `registration.email_domains`,
+`mail.reply_to`), so a URL setting *is* the parameter that is off by default.
+
+**Only in the `mayAddMachine` arm, and the reason is commercial as well as
+structural.** A machine bought on the far side comes back here to enroll, which
+needs a free slot: at or over the limit the dial is refused with a `403`. An
+offer in the other arm therefore takes money for a host this control plane will
+not connect — and draws it beside the sentence saying the fleet is full, which
+makes the "Add a machine" heading a lie while `machineQuotaNotice` stays
+literally `null`-iff-`mayAddMachine`. `webcheck` pins it from both sides: after
+`installCommand(` and before the `machineQuotaNotice(` call.
+
+**`URLSearchParams`, not concatenation, and measured.** The base is
+operator-supplied and may carry a path, a trailing slash, an existing query or a
+fragment. Against `https://get.example#top`, `` `${base}?email=…` `` produces
+`https://get.example#top?email=…` — the whole query inside the fragment, so the
+far side receives none of it and the link still opens and still looks right.
+`encodeURIComponent` cannot fix that; it does not answer `?` against `&`, or
+where the `#` goes. `set` rather than `append`, so a base already naming an
+address is replaced rather than joined by a second the receiver picks between
+arbitrarily. And the serialisation turns `+` into `%2B`, which is not cosmetic:
+the service on the other side reads the query with Hono, whose decoder replaces
+`+` with a space *before* percent-decoding, into a field that page renders
+`readonly` — so a bare `+` would arrive as a mangled address nobody could
+correct.
+
+**An unverified address is still prefilled.** `emailVerified` answers whether
+*this* control plane may send to it — it gates recovery and invitation, and
+exists because an unverified claim reserves nothing here. That is a statement
+about this instance's trust, not about whether the string is the one the person
+would type into somebody else's checkout. Withholding it would empty the form
+for exactly the newest account, whose confirmation link is still in their inbox,
+and that is the person this offer is most for.
+
+**Alternatives taken out.** A boolean flag with `get.reemoat.com` compiled in:
+shortest, and wrong for a fork. A pair — `offer_enabled` beside `offer_url` —
+worse than either: two fields that can disagree, which is what `mailConfigured`'s
+docblock exists to argue against. A `SETTING_KEYS` row with the admin control
+removed but the key left in: the screen would stop drawing it and
+`GET /v1/admin/settings` would go on projecting it to every admin, which is the
+half of the exposure that mattered. Deep-linking the checkout as
+`/checkout?plan=cloud&email=…`: it works today and is brittle by construction —
+that route names a catalogue row and answers 404 for one that is not active, the
+catalogue is Postgres rows in a service on another deploy pipeline this build
+cannot see, and a plan had just been retired there by switching a row off. The
+link names the shop's root instead, and the shop resolves its own plan. Drawing it in the composer strip: `MachineLine` has
+the same three-arm empty state and is the obvious fourth site, and a link off the
+origin between somebody and starting work is the worst instance of a control
+leaving the strip. Signing the address so the far side could trust it: it
+protects a form default — the order is built from the POST body either way — at
+the cost of a shared secret spanning two repositories with no rotation story.
 
 ## Session lifecycle, questions and attachments
 

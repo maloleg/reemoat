@@ -188,7 +188,7 @@ these, so a new route is private by doing nothing. "Public" is not
 | | |
 |---|---|
 | `GET /health` · `GET /v1/jwks` | Liveness, and the public keys every daemon verifies tokens against |
-| `GET /v1/instance` | What this instance allows, its plugin catalogue address (`plugins.catalogue`, `null` on an instance with no market) and its AGPL §13 source offer |
+| `GET /v1/instance` | What this instance allows, its plugin catalogue address (`plugins.catalogue`, `null` on an instance with no market), where it points somebody who has no machine (`machines.offer`, `null` on one that points nowhere) and its AGPL §13 source offer |
 | `POST /v1/login` | A name **or a confirmed email address**, plus a password, for a bearer session token — not a cookie; nothing here is ambient. Throttled on the submitted identifier and the caller's address |
 | `POST /v1/enroll` | A daemon's one and only control-plane request, ever |
 | `POST /v1/provision` | Add a daemon for somebody else. Takes a `pk_`, not an account |

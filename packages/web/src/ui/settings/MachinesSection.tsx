@@ -23,6 +23,7 @@ import {
   reachText,
 } from "../bits";
 import { CommandLine } from "../CommandLine";
+import { MachineOffer } from "../MachineOffer";
 
 /**
  * Your machines, and adding one.
@@ -177,9 +178,17 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
       <section className={SETTINGS_SECTION}>
         <h2 className={SETTINGS_HEADING}>Add a machine</h2>
         {canAdd ? (
-          <div className="mt-3">
-            <CommandLine command={installCommand(location.origin)} />
-          </div>
+          <>
+            <div className="mt-3">
+              <CommandLine command={installCommand(location.origin)} />
+            </div>
+            {/* Under the command, never above it: the free way to add a machine
+                is the answer, and this is the alternative for somebody who has
+                no machine to point it at. Inside this arm for the reason
+                `MachineOffer`'s own docblock gives — the other arm is where the
+                fleet is full, and a machine bought there cannot enroll. */}
+            <MachineOffer config={state.config} me={state.me} />
+          </>
         ) : (
           <p className="mt-2 text-xs text-muted">{machineQuotaNotice(state.me)}</p>
         )}

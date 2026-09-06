@@ -425,6 +425,7 @@ export interface ControlPlaneOptions {
    * because installing from a file never involved this at all.
    */
   pluginCatalogueUrl?: string | null;
+  machineOfferUrl?: string | null;
   /** Live tunnel state, or `null` when the relay is switched off. */
   relay?: RelayView | null;
   /**
@@ -494,6 +495,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const relayUrl = options.relayUrl ?? null;
   const relayUrls = options.relayUrls ?? null;
   const pluginCatalogueUrl = options.pluginCatalogueUrl ?? null;
+  const machineOfferUrl = options.machineOfferUrl ?? null;
   const relay = options.relay ?? null;
   const trustedProxyHops = options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS;
   const app = new Hono<AppEnv>();
@@ -1474,6 +1476,26 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     return c.json({
       registration: { enabled: mode.enabled, requiresEmail: mode.requiresEmail },
       mail: { configured: mailConfigured(db).configured },
+      /*
+       * Where somebody with no machine can get one, or `null`.
+       *
+       * `plugins.catalogue` below, in shape and in argument: **the address,
+       * never a boolean.** What differs is which header each has to satisfy, and
+       * it is worth stating here because the inconsistency otherwise looks like
+       * one somebody should fix — a catalogue is `fetch`ed and so needs
+       * `connect-src`, which is why it is environment-only and pinned to the CSP
+       * built once at construction; this is an `<a href>`, the policy above has
+       * no `navigate-to` and neither `form-action` nor `base-uri` constrains a
+       * link, so it can be an ordinary `SETTING_KEYS` row an admin owns without
+       * a redeploy.
+       *
+       * Above the credential line with the rest of this route, and correctly so:
+       * whether this instance points anywhere for a machine is a fact about the
+       * instance. The *address* is public; the person's email is not, and it is
+       * appended in the browser out of `GET /v1/me` — this route has no caller to
+       * know one for.
+       */
+      machines: { offer: machineOfferUrl },
       /*
        * Where the plugin market's catalogue lives, or `null`.
        *
