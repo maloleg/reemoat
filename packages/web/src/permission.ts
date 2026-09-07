@@ -1272,26 +1272,65 @@ export function askedQuestion(
   const questions = readQuestions(pending.rawInput ?? inputFor(pending.toolCallId, events));
   if (questions === null) return null;
 
-  for (const question of questions) {
-    const byLabel = new Map(question.options.map((option) => [option.label, option]));
-    const answers: AskedQuestion["answers"] = [];
-    for (const option of offered) {
-      const match = byLabel.get(option.name);
-      // By identity, and one miss abandons the whole question rather than
-      // drawing a partial one: an answer we could not match is an answer whose
-      // description would go on the wrong row.
-      if (match === undefined) break;
-      answers.push({ optionId: option.optionId, label: match.label, description: match.description });
+  /*
+   * ⚠ **The index is built over *every* question before anything is matched, and
+   * a label seen twice is refused rather than resolved.**
+   *
+   * This walked the questions in order and took the first one whose labels
+   * covered the offered options. Two ways that draws one question's wording over
+   * another question's answers, and both were measured against this function:
+   *
+   * - One `AskUserQuestion` carrying several questions that share answer labels —
+   *   `Yes` and `No`, `Approve` and `Reject`. Offered options belonging to question 1 were
+   *   answered with question 0's `question` string and question 0's per-answer
+   *   descriptions. The measured option-id shape is `q0_opt_0` / `q0_skip`, and
+   *   the index in it exists precisely because a label does not identify a
+   *   question.
+   * - Two options carrying the **same label inside one question**, which needs no
+   *   multi-question shape at all: `new Map` kept the last, so two distinct
+   *   `optionId`s drew as identical rows with the same description.
+   *
+   * `answeredQuestions` in `tail.ts` — the sibling join over the same events, for
+   * the settled case — already refuses exactly this with its `AMBIGUOUS` symbol,
+   * on the stated ground that attributing an answer to the wrong question is
+   * worse than attributing none. `web-transcript.md` states it as a rule. This is
+   * the live half of that pair: the person reads the wording and taps an answer
+   * that is recorded against something else, on the surface that approves what an
+   * agent is about to do on a machine with no sandbox. Falling back to plain
+   * buttons is the whole cost of refusing.
+   */
+  type Asked = (typeof questions)[number];
+  const AMBIGUOUS = Symbol("ambiguous");
+  const byLabel = new Map<string, { asked: Asked; option: Asked["options"][number] } | typeof AMBIGUOUS>();
+  for (const asked of questions) {
+    for (const option of asked.options) {
+      byLabel.set(option.label, byLabel.has(option.label) ? AMBIGUOUS : { asked, option });
     }
-    if (answers.length !== offered.length) continue;
-    const skip = rest[0];
-    return {
-      question: question.question,
-      answers,
-      skip: skip === undefined ? null : { optionId: skip.optionId, name: skip.name },
-    };
   }
-  return null;
+
+  let asked: Asked | null = null;
+  const answers: AskedQuestion["answers"] = [];
+  for (const option of offered) {
+    const hit = byLabel.get(option.name);
+    // By identity, and one miss abandons the whole question rather than
+    // drawing a partial one: an answer we could not match is an answer whose
+    // description would go on the wrong row.
+    if (hit === undefined || hit === AMBIGUOUS) return null;
+    // Every offered option must come from *one* question. Two questions covered
+    // by one permission's options is the shape the old first-match loop resolved
+    // silently, and there is no wording that would be true of both.
+    if (asked === null) asked = hit.asked;
+    else if (asked !== hit.asked) return null;
+    answers.push({ optionId: option.optionId, label: hit.option.label, description: hit.option.description });
+  }
+  if (asked === null || answers.length !== offered.length) return null;
+
+  const skip = rest[0];
+  return {
+    question: asked.question,
+    answers,
+    skip: skip === undefined ? null : { optionId: skip.optionId, name: skip.name },
+  };
 }
 
 /**

@@ -1045,6 +1045,38 @@ process.stdout.write("\nmachine groups\n");
    * *future* group that copies rather than the one that used to.
    */
   check("and the render order names it once", visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key), ["m_a/pb"]);
+
+  /*
+   * ⭐ **And when the view stops drawing it, the floor lifts it — which needed no
+   * fleet at all.**
+   *
+   * `waitingFloor` walked `groups.groups` for its candidates, and `place` in
+   * `sessionGroups` *moves* a pinned row into `groups.pinned` (and an ungranted
+   * one into `groups.orphans`), returning `null`. So a pinned blocked row was in
+   * neither `active` nor `ended`, was never a candidate, and — per the assertion
+   * three lines up — was never counted in `blockedCount` either. The subtraction
+   * the comment above calls "everything blocked minus what the view draws" was
+   * over a **subset** of the fleet.
+   *
+   * One machine and one needle is the whole reproduction: every count reads zero
+   * and only the header dot is left, which is the "typing four letters into the
+   * search box hid an approval" failure `waitingFloor`'s own comment records as
+   * fixed for the other groups. Driven through both doors the comment names — a
+   * needle: `pinnedFor` cuts by the needle, so the row leaves the view while
+   * still being blocked, which is precisely the state the floor exists for.
+   */
+  setQuery("zzz-matches-nothing");
+  check(
+    "a needle that hides a pinned blocked row does not hide the approval",
+    visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key),
+    ["m_a/pb"],
+  );
+  check(
+    "and it is the floor that is holding it up",
+    waitingFloor(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key),
+    ["m_a/pb"],
+  );
+  setQuery("");
 }
 
 process.stdout.write("\nwhat is actually on screen\n");

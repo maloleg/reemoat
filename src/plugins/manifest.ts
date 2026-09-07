@@ -510,13 +510,6 @@ export function contributedId(pluginId: string, localId: string): string {
   return `${pluginId}:${localId}`;
 }
 
-/** The `<pluginId>` half, or `null` for anything that is not a contributed id. */
-export function pluginOfContributedId(id: string): string | null {
-  const cut = id.indexOf(":");
-  if (cut <= 0) return null;
-  return isContributedId(id) ? id.slice(0, cut) : null;
-}
-
 /**
  * Whether this *could* be an id a plugin contributed — a shape test, never a
  * membership test.

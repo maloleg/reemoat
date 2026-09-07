@@ -48,7 +48,7 @@ import {
   verifiedOwnerOf,
 } from "./emails.js";
 import { checkEmailAddress, MAX_EMAIL_CHARS } from "./mail/address.js";
-import { mailHealth, NOTICE_INTERVAL_MS, sentRecently, type MailSender } from "./mail/outbox.js";
+import { mailAccepts, mailHealth, NOTICE_INTERVAL_MS, sentRecently, type MailSender } from "./mail/outbox.js";
 import {
   emailChanged,
   emailVerify,
@@ -63,6 +63,7 @@ import {
 import {
   burnRegistration,
   claimRegistration,
+  foldName,
   mintRegistration,
   nameTaken,
   nameTakenByAnother,
@@ -875,6 +876,17 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * being renamed, so renaming it to the name it already has succeeds every time.
    * The count is stated here rather than derived, so it is the thing to check
    * against `spendWrite(` when a route is added.
+   *
+   * ⚠ **The eighth and ninth are `POST /v1/me/password` and `PUT /v1/me/email`,
+   * and the paragraph above was wrong a second time in the same way** — the
+   * count went uncorrected while the set it names grew. Both were missed for the
+   * opposite reason to the rename: they *do* read like writes, but this
+   * enumeration was assembled from what costs a **transaction**, and what makes
+   * these two the most expensive routes below THE LINE is not their rows. Each
+   * reaches `scrypt` at N = 2^15 twice per request, on the lane Q1.407 gives an
+   * unconditional preference to, so the cost lands on `/v1/login` rather than
+   * here; `PUT /v1/me/email` also enqueues two messages into a 500-row outbox
+   * shared with password recovery. Their own route docblocks carry the argument.
    */
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
@@ -1671,6 +1683,27 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * day, because that message is itself mail sent to a third party on an
      * anonymous request.
      */
+    /*
+     * ⚠ **Whether the live sign-up on this address is the caller's own, and
+     * nothing established that until now.** The resend arm below re-mails
+     * `pending`'s stored name and hash on the strength of the *address* alone,
+     * and its docblock says that answers somebody "who re-submits the form
+     * because their mail never arrived" with "another copy of *their* link" —
+     * true only if the row is theirs, which the code never asked.
+     *
+     * Reversed, it is a squat. A stranger signs up as `mallory` against
+     * `victim@`, which is anonymous and reserves nothing anybody notices. The
+     * victim later signs up as themselves with their own address, falls into
+     * that arm, and is mailed a link that creates **`mallory`** — with mallory's
+     * password and an `INSERT INTO user_emails … verified_at` for the victim's
+     * address. `verifiedOwnerOf` then answers mallory for ever: the victim can
+     * never register that address, and `/v1/forgot` for it mails them on
+     * mallory's behalf. That is exactly the squatting
+     * `idx_user_emails_verified` exists to prevent, reached by handing the
+     * verification to the squatter.
+     */
+    const mine = pending !== null && foldName(pending.name) === foldName(trimmed);
+
     if (existingOwner !== null || pending !== null) {
       if (existingOwner !== null && !noticeAlreadySent(folded, now) && mayMail(folded)) {
         send(
@@ -1683,7 +1716,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           }),
           now + REGISTRATION_TTL_MS,
         );
-      } else if (pending !== null && mayMail(folded)) {
+      } else if (pending !== null && mine && mayMail(folded)) {
         /*
          * **This is where the resend route went, and the row is the reason it
          * had to come here rather than be replaced by "just sign up again".**
@@ -1721,6 +1754,49 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
             lifetime: lifetimeText(REGISTRATION_TTL_MS),
           }),
           again.expiresAt,
+        );
+      } else if (existingOwner === null && !mine && mayMail(folded)) {
+        /*
+         * **Somebody else's live sign-up is holding this address, so this caller
+         * gets their own link beside it rather than nothing.**
+         *
+         * The narrow fix — refuse the arm above and send nothing — closes the
+         * squat and leaves the squatter holding the address anyway: they re-post
+         * their own pair, `mintRegistration` re-extends the 24 hours, and the
+         * person who owns the mailbox never receives a single mail or any way to
+         * find out why. Two rows instead, because **the mailbox is the only
+         * party that can decide between them**: two links arrive, each naming the
+         * account it would create, and only one of them is the name the reader
+         * asked for. Whoever holds the address wins by clicking, which is the
+         * property the whole confirmation flow is built to give them.
+         *
+         * The values are the caller's own, never `pending`'s — that direction is
+         * the takeover the arm above refuses — and `mintRegistration`'s supersede
+         * is scoped to `(email_folded, name_folded)`, so this insert cannot
+         * retire the row it is standing beside. `claimRegistration` needs no
+         * change: the loser's link stays live until its own TTL and then fails on
+         * `verifiedOwnerOf` at confirm time, which is already the "somebody else
+         * proved it first" path and already burns with `email_taken`.
+         *
+         * Still silent, and still the same body: this arm and the two above are
+         * indistinguishable to the caller, so none of them says whether the
+         * address was spoken for.
+         */
+        const own = mintRegistration(
+          db,
+          { name: trimmed, email: email?.address ?? "", passwordHash: hash },
+          REGISTRATION_TTL_MS,
+          now,
+        );
+        send(
+          email?.address ?? "",
+          "register",
+          registrationConfirm({
+            name: trimmed,
+            url: `${publicOrigin()}/confirm#t=${own.token}`,
+            lifetime: lifetimeText(REGISTRATION_TTL_MS),
+          }),
+          own.expiresAt,
         );
       }
       return c.json({ pending: true, expiresAt: now + REGISTRATION_TTL_MS });
@@ -1960,13 +2036,33 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     const now = Date.now();
     defer(() => {
       try {
+        /*
+         * ⚠ **Asked before anything is spent or burned, because both are
+         * one-way.** `mayMailReset` spends one of this address's three attempts
+         * and `mintEmailToken` burns whatever live reset link the account
+         * already had — so discovering a full queue *after* them leaves somebody
+         * strictly worse off than never asking: no new mail, and the link
+         * already sitting in their inbox now dead. Three of those and they are
+         * blocked for fifteen minutes, which on an instance with no admin
+         * password reset is the whole way in.
+         *
+         * `reset` is not a caller-driven kind, so this can only be false on a
+         * genuine backlog rather than because somebody flooded the cheap kinds
+         * — that is what `MAX_OUTBOX_CALLER_DRIVEN` is for. Reported to stderr
+         * because nobody is waiting on this: the response went out before this
+         * block ran, and it must keep saying `{sent: true}` either way.
+         */
+        if (!mailAccepts(db, "reset", now)) {
+          console.error("forgot: the outbox is full, so no recovery mail was queued and no attempt was spent");
+          return;
+        }
         const userId = verifiedOwnerOf(db, checked.folded);
         if (userId === null || !mayMailReset(checked.folded)) return;
         const user = db.prepare("SELECT name, disabled_at FROM users WHERE id = ?").get(userId);
         // A disabled account gets nothing, and says so to nobody.
         if (user === undefined || user["disabled_at"] !== null) return;
         const minted = mintEmailToken(db, userId, "reset", checked.folded, RESET_TTL_MS, now);
-        send(
+        const queued = send(
           checked.address,
           "reset",
           passwordReset({
@@ -1976,6 +2072,18 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           }),
           minted.expiresAt,
         );
+        /*
+         * ⚠ **`send`'s answer was thrown away here, and it is the only signal
+         * that a recovery mail was lost.** The guard above closes the case this
+         * process can see coming; this closes the race, and a `mail === null`
+         * instance where `send` is false always. Giving the attempt back is the
+         * conservative direction: the caller received nothing, so charging them
+         * for it converts an outage of ours into a lockout of theirs.
+         */
+        if (!queued) {
+          resetMailThrottle.succeed(resetMailKey(checked.folded));
+          console.error("forgot: the outbox refused a recovery mail, so the attempt was given back");
+        }
       } catch (error) {
         console.error(`forgot failed after answering: ${describeError(error)}`);
       }
@@ -2335,6 +2443,40 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      */
     const before = effectiveLimit(db, ownerId);
     const owned = machineCount(db, ownerId);
+
+    /*
+     * ⚠ **Already over the limit is a refusal, because raising it here would
+     * undo an admin's suspension with a credential that may not.**
+     *
+     * Q1.503 fixed the *failed* provision — the write moved below the create so a
+     * refusal changes nothing — and its own "Why" describes this damage exactly:
+     * "a 409 that created nothing had un-suspended forty-five machines an admin
+     * had deliberately switched off, reported nowhere". What it did not do is
+     * stop the **successful** provision from doing the same thing, and the
+     * arithmetic above is why it can: `raisedTo` is `owned + 1`, computed from
+     * the machine *count*, so when an admin has lowered the limit below the count
+     * the new limit clears every machine the lowering switched off.
+     *
+     * `PUT /v1/admin/users/:id/machine-limit` returns the ids it suspended, so
+     * the lowering is a deliberate, reported act. The inverse arrives here on a
+     * `pk_` provisioning key, which `schema.sql` and `cp-machines.md` both state
+     * is not an admin credential — "it revokes, renames, grants and reads
+     * nothing" — and the 201 names no machine, so nothing tells the admin their
+     * suspension was reversed. One call, arbitrarily many machines back online on
+     * the daemon's own reconnect backoff.
+     *
+     * Refusing costs an automated provisioner exactly the case where a human has
+     * already intervened, which is the case that should stop it.
+     */
+    if (owned > before.limit) {
+      return jsonError(
+        c,
+        409,
+        "machine_limit",
+        `that user has ${owned} machines against a limit of ${before.limit}, so ${owned - before.limit} are switched off — raise their limit first`,
+      );
+    }
+
     const raisedTo = owned >= before.limit ? Math.min(owned + 1, MAX_MACHINES_PER_USER) : null;
 
     /*
@@ -2621,6 +2763,32 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * make the migration impossible rather than safe.
    */
   app.post("/v1/me/password", async (c) => {
+    /*
+     * ⚠ **The most expensive authenticated route in this service, and it was
+     * the one with no counter.** Q1.413 enumerated what an ordinary account
+     * could drive as fast as it could ask and named a signature and a
+     * transaction; it missed the two routes that reach `scrypt` — N = 2^15,
+     * 32 MiB — *twice* per request, once to verify and once to hash.
+     *
+     * `passwordChangeKey` is not the bound. It counts wrong guesses, and
+     * `verifyCurrentPassword` calls `throttle.succeed(key)` on every correct
+     * one, so a caller who knows their own password never arms it: posting
+     * `{currentPassword: P, newPassword: P}` in a loop is unbounded, and
+     * `checkPasswordPolicy` has no reuse test to stop it.
+     *
+     * What makes that a fleet outage rather than a warm CPU is Q1.407's
+     * unconditional preference: `release` wakes an authenticated waiter first,
+     * so a permanently non-empty authenticated queue means `wake("public")`
+     * never runs. Five concurrent requests pin `active` at MAX_CONCURRENT and
+     * `/v1/login`, `/v1/register` and `/v1/reset` queue to MAX_QUEUED_PUBLIC
+     * and then answer `503 overloaded` — including for the admin who would
+     * come to stop it. Q1.407 records the login-spray direction of that
+     * starvation as a known limitation; this is the same weapon pointed the
+     * other way, and unlike a spray it is bounded by a counter that exists.
+     */
+    const writeGuard = spendWrite(c, "password");
+    if (writeGuard !== null) return writeGuard;
+
     const caller = c.get("caller");
     const body = await readJsonObject(c);
     if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
@@ -2970,6 +3138,32 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * index makes worth nothing — and the *verification* is what answers 409.
    */
   app.put("/v1/me/email", async (c) => {
+    /*
+     * ⚠ **The only authenticated route that enqueues mail on every call, and
+     * its one counter follows the recipient rather than the caller.**
+     * `mayMail(checked.folded)` is keyed on the address the caller just typed —
+     * its own docblock calls that out as the single victim-keyed counter here —
+     * so a distinct address per request gets a fresh budget every time
+     * (`foldEmail` does no plus-address canonicalisation). Each accepted call
+     * puts two rows in `mail_outbox`, and `MAX_OUTBOX_PENDING` is 500 with no
+     * per-kind reservation, so one signed-in session could fill the queue and
+     * `enqueueMail` would start answering `null` for everybody — taking
+     * `/v1/forgot` with it, which is the state `RESET_MAIL_THROTTLE` exists to
+     * make unreachable, arrived at through the shared outbox instead of the
+     * shared throttle.
+     *
+     * This bounds the caller at Q1.413's 60/minute. It does **not** close the
+     * outbox side: a per-kind ceiling that keeps headroom for `reset` and
+     * `invite` is the other half and is a change to what Q7.79 says the queue
+     * costs, so it is asked rather than assumed.
+     *
+     * Also the second of the two 32 MiB KDF doors — the API-key arm below
+     * reaches `verifyCurrentPassword` on the `"authenticated"` lane, which is
+     * `/v1/me/password`'s starvation argument reached by another door.
+     */
+    const writeGuard = spendWrite(c, "email");
+    if (writeGuard !== null) return writeGuard;
+
     const caller = c.get("caller");
     if (!mailConfigured(db).configured) {
       return jsonError(c, 409, "mail_unconfigured", "this control plane cannot send mail, so it cannot confirm an address");

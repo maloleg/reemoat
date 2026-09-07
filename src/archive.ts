@@ -871,16 +871,44 @@ function tarString(field: Buffer): string {
  * resource-fork bookkeeping, none of which this import applies.
  */
 function paxPath(block: Buffer): string | null {
+  /*
+   * ⚠ **Walked in bytes, because that is what the length counts.**
+   *
+   * This decoded the whole block to a string first and then compared and advanced
+   * `length` against **UTF-16 code units**. The two agree only for ASCII, and
+   * bsdtar writes a `path=` record for *any* non-ASCII name rather than only for
+   * a long one — so the commonest tarball a Mac produces walked this off by one
+   * unit per multi-byte character. Three measured outcomes, all from an ordinary
+   * `tar -czf`:
+   *
+   * - `app/tëst.txt`, a 52-byte record read as 51 units: the slice over-reads by
+   *   one, `paxPath` answers `"app/tëst.txt\n3"`, `safeMemberPath` calls that
+   *   `control_char`, and the route refuses the **whole archive** with 400.
+   * - A name of 60 `ä` plus a suffix: the bound breaks, this returns `null`, and
+   *   `extractTgz` silently falls back to the truncated 100-byte ustar field — so
+   *   the file lands under a name the person never wrote.
+   * - Two such siblings truncating to one name: the second `open(…, "wx")` is
+   *   `EEXIST` and the import fails 503 having already written the first.
+   *
+   * `importSkill` tells people to write `tar --format=ustar`, which emits no pax
+   * at all — but the route takes any `.tar.gz` a drop target is handed, and
+   * `unpackArchive` is shared with the plugin installer. The digits and the key
+   * are ASCII by the format, so `latin1` is exact for both and cannot itself
+   * re-introduce a width mismatch; only the value is UTF-8.
+   */
   let at = 0;
-  const text = block.toString("utf8");
-  while (at < text.length) {
-    const space = text.indexOf(" ", at);
+  while (at < block.length) {
+    const space = block.indexOf(0x20, at);
     if (space === -1) break;
-    const length = Number.parseInt(text.slice(at, space), 10);
-    if (!Number.isFinite(length) || length <= 0 || at + length > text.length) break;
-    const record = text.slice(space + 1, at + length).replace(/\n$/, "");
-    const equals = record.indexOf("=");
-    if (equals > 0 && record.slice(0, equals) === "path") return record.slice(equals + 1);
+    const length = Number.parseInt(block.subarray(at, space).toString("latin1"), 10);
+    if (!Number.isFinite(length) || length <= 0 || at + length > block.length) break;
+    // `<length> <key>=<value>\n`, the newline counted inside the length.
+    const body = block.subarray(space + 1, at + length);
+    const equals = body.indexOf(0x3d);
+    if (equals > 0 && body.subarray(0, equals).toString("latin1") === "path") {
+      const end = body.length > 0 && body[body.length - 1] === 0x0a ? body.length - 1 : body.length;
+      return body.subarray(equals + 1, end).toString("utf8");
+    }
     at += length;
   }
   return null;

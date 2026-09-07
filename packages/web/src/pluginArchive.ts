@@ -238,6 +238,33 @@ async function peekTarGz(blob: Blob): Promise<ArchivePeek> {
             reason: "that archive uses a binary size field this screen cannot follow",
           };
         }
+        /*
+         * ⚠ **A size this reader will not do arithmetic on**, and this is
+         * `archive.ts:912` transcribed rather than paraphrased — the same
+         * transcription the all-zero test above is, and the half that was
+         * dropped. `tarOctal` is deliberately forgiving of what somebody else
+         * wrote: `Number.parseInt` takes a leading minus, so the octal string
+         * `-1000` in the 12-byte size field parses to -512 without ever setting
+         * bit 7 that sends it down the base-256 arm.
+         *
+         * On the daemon a negative size desynchronises the block stream and
+         * every name after it is read out of the middle of somebody's file.
+         * Here it is worse, because `padded` is *added to `start`*: any size in
+         * [-1023, -512] makes `Math.ceil(size / TAR_BLOCK) * TAR_BLOCK` exactly
+         * `-TAR_BLOCK`, so `padded` is 0, the header is not all zeros, the
+         * `end - start < padded` guard cannot fire, and the walk re-reads the
+         * same 512 bytes for ever. This inner `for (;;)` holds no `await`, so it
+         * is a hard freeze of the tab — measured at 174 bytes of archive, never
+         * returning, with a 5 s `setTimeout` that never fired. That tab is the
+         * consent screen for a file somebody picked, and every live session
+         * stream in the origin goes with it.
+         */
+        if (!Number.isSafeInteger(size) || size < 0) {
+          return {
+            kind: "unreadable",
+            reason: "that archive has a member size this screen cannot follow",
+          };
+        }
         const typeflag = String.fromCharCode(held[start + 156] ?? 0);
         const padded = TAR_BLOCK + Math.ceil(size / TAR_BLOCK) * TAR_BLOCK;
         if (end - start < padded) break;

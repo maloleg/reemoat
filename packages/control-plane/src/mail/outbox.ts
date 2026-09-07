@@ -80,6 +80,70 @@ const MAX_BACKOFF_MS = 60 * 60 * 1000;
  */
 export const MAX_OUTBOX_PENDING = 500;
 
+/**
+ * The kinds a caller can ask for as fast as a throttle lets them.
+ *
+ * The split is *who decides there is a message*, not how important it is.
+ * `register` and `register_notice` are anonymous, `verify` and `email_changed`
+ * are one signed-in account's, and `test` is an admin pressing a button. What is
+ * **not** here is the whole point: `reset` and `invite` are the two nobody can
+ * make this service produce on demand, and they are the two whose loss has no
+ * remedy — `cp-mail.md` and `RESET_MAIL_THROTTLE`'s own docblock both say
+ * recovery must stay reachable.
+ */
+const CALLER_DRIVEN: ReadonlySet<MailKind> = new Set<MailKind>([
+  "register",
+  "register_notice",
+  "verify",
+  "email_changed",
+  "test",
+]);
+
+/**
+ * The most of the queue those kinds may hold between them.
+ *
+ * ⚠ **`MAX_OUTBOX_PENDING` alone is a shared fate, and it made recovery
+ * reachable by anybody who could fill it.** One signed-in session looping
+ * `PUT /v1/me/email` with a fresh address each time enqueues two rows a call and
+ * is *not* bounded by `mayMail`, which follows the recipient — so ~250 calls put
+ * `enqueueMail` at its ceiling and it starts answering `null` for **everybody**.
+ * `/v1/forgot` then spends one of an address's three attempts, answers
+ * `{sent: true}` and queues nothing, three times, and that person is locked out
+ * for fifteen minutes with no message and, on an instance with no admin password
+ * reset, no other way in. That is precisely the state `RESET_MAIL_THROTTLE`
+ * exists to make unreachable, arrived at through the shared outbox instead of
+ * through the shared throttle.
+ *
+ * A hundred rows of headroom rather than a proportion: the reserve has to be
+ * counted in *people locked out*, and one reset row is one person. It is not a
+ * per-user quota and does not try to be — this bounds the blast radius of the
+ * cheap kinds, and `spendWrite` on the routes that produce them bounds the rate.
+ */
+export const MAX_OUTBOX_CALLER_DRIVEN = 400;
+
+/**
+ * Whether the queue would take a message of this kind right now.
+ *
+ * Exported because the check has a second caller: `/v1/forgot` asks *before*
+ * `mintEmailToken`, since minting burns the account's previous live reset link
+ * and discovering the queue is full afterwards leaves somebody strictly worse
+ * off than not asking — no new mail and the link already in their inbox dead.
+ * Advisory rather than a reservation: `enqueueMail` re-checks, and a row landing
+ * between the two costs one message rather than correctness.
+ */
+export function mailAccepts(db: DatabaseSync, kind: MailKind, now = Date.now()): boolean {
+  if (pendingCount(db, now) >= MAX_OUTBOX_PENDING) return false;
+  if (!CALLER_DRIVEN.has(kind)) return true;
+  const row = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM mail_outbox " +
+        "WHERE sent_at IS NULL AND failed_at IS NULL AND not_after > ? " +
+        `AND kind IN (${[...CALLER_DRIVEN].map(() => "?").join(", ")})`,
+    )
+    .get(now, ...CALLER_DRIVEN);
+  return Number(row?.["n"] ?? 0) < MAX_OUTBOX_CALLER_DRIVEN;
+}
+
 /** Terminal rows are kept this long so "did it go out" stays answerable. */
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -242,7 +306,7 @@ export function pendingCount(db: DatabaseSync, now = Date.now()): number {
  * bounds it on the failure path.
  */
 export function enqueueMail(db: DatabaseSync, args: EnqueueArgs, now = Date.now()): string | null {
-  if (pendingCount(db, now) >= MAX_OUTBOX_PENDING) return null;
+  if (!mailAccepts(db, args.kind, now)) return null;
 
   const id = newId("mo");
   db.prepare(

@@ -149,21 +149,34 @@ export interface MintedRegistration {
  * branch of the registration route spends the same ~51ms, so a `409 name_taken`
  * is not *also* a timing oracle.
  *
- * Any earlier live sign-up for the same address is superseded in the same
- * transaction, which is what makes **signing up again** safe — and, since the
- * resend route was deleted, what signing up again is *for*: the previous link
- * stops working the moment a new one is minted. `nameTakenByAnother` is the
- * other half, the one that lets the same name through.
+ * Any earlier live sign-up for the same address **under the same folded name**
+ * is superseded in the same transaction, which is what makes **signing up
+ * again** safe — and, since the resend route was deleted, what signing up again
+ * is *for*: the previous link stops working the moment a new one is minted.
+ * `nameTakenByAnother` is the other half, the one that lets the same name
+ * through.
+ *
+ * ⚠ **`name_folded` in that WHERE is load-bearing and was added late.** The
+ * supersede was keyed on the address alone, which is correct for the only case
+ * that existed then — one person re-submitting the form — and is an account
+ * takeover for the case that did not: two *different* names on one address. A
+ * stranger's sign-up would have retired the real person's live link and put its
+ * own in that mailbox, which is the takeover the paragraph below refuses,
+ * reached through a door it was not looking at. Scoped per identity, two people
+ * claiming one address hold two independent rows and each supersedes only their
+ * own; the mailbox decides between them by which link gets clicked, which is the
+ * only party that should decide.
  *
  * **What keeps that safe is the caller, and it is worth saying which caller.**
  * Substituting a second sign-up's password for a live one would be an account
  * takeover needing no credential and no race, since name and address are both
- * guessable. `POST /v1/register` never reaches here with a live pending row for
- * the address: it branches on `pendingForEmail` first and re-mints from the
- * *stored* name and hash, so the values below are only ever a fresh sign-up's
- * own. This function does not re-check that, deliberately — it is the recorder,
- * and the decision about whose password a link carries belongs at the route
- * where the branch is.
+ * guessable. `POST /v1/register` reaches here with a live pending row for the
+ * address only when that row's folded name is **not** the caller's — the
+ * same-name case branches on `pendingForEmail` first and re-mints from the
+ * *stored* name and hash. So the values below are only ever the caller's own,
+ * and they can never overwrite somebody else's. This function does not re-check
+ * that, deliberately — it is the recorder, and the decision about whose password
+ * a link carries belongs at the route where the branch is.
  */
 export function mintRegistration(
   db: DatabaseSync,
@@ -179,8 +192,8 @@ export function mintRegistration(
   try {
     db.prepare(
       "UPDATE pending_registrations SET used_at = ?, used_from = 'superseded' " +
-        "WHERE email_folded = ? AND used_at IS NULL",
-    ).run(now, emailFolded);
+        "WHERE email_folded = ? AND name_folded = ? AND used_at IS NULL",
+    ).run(now, emailFolded, foldName(input.name));
     db.prepare(
       "INSERT INTO pending_registrations " +
         "(id, token_hash, name, name_folded, email, email_folded, password_hash, created_at, expires_at) " +

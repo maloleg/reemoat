@@ -613,15 +613,41 @@ export function waitingFloor(groups: SessionGroups, view: ListView): SessionRow[
     for (const row of matching(rowsOf(group, view.filter), view.query)) reachable.add(row.key);
   }
 
+  /*
+   * ⚠ **Every row in the fleet, and `groups.groups` alone is not that.**
+   *
+   * `place` in `sessionGroups` *moves* a pinned row into `groups.pinned` and a
+   * row whose machine is no longer granted into `groups.orphans`, returning
+   * `null` — so neither is ever in a `MachineGroup`'s `active`/`ended`, and
+   * neither incremented the `blockedCount` this subtraction is drawn against.
+   * Sourced from the machines alone, the floor was subtracting a set from a
+   * *subset* of itself, and a blocked row in either list could never be lifted.
+   *
+   * It needed no fleet to reach: one machine, one pinned session blocked on a
+   * permission, and a search needle that matches nothing — `visibleRows` empty,
+   * the floor empty, every count zero, and only the header dot left. That is
+   * exactly the "typing four letters into the search box hid an approval"
+   * failure the comment above records as fixed for the other groups, and the
+   * "a blocked session appears in the floor even under the Ended filter" claim
+   * ten lines up. `pinnedFor`'s docblock, `web-shell.md` and Q3.11 all assert
+   * the property this loop did not have.
+   *
+   * `reachable` and `seen` are untouched: a pin the view *does* draw is already
+   * in `reachable` via `pinnedFor`, so nothing is lifted twice.
+   */
+  const fleet: SessionRow[] = [
+    ...groups.groups.flatMap((group) => [...group.active, ...group.ended]),
+    ...groups.pinned,
+    ...groups.orphans,
+  ];
+
   const seen = new Set<string>();
   const out: SessionRow[] = [];
-  for (const group of groups.groups) {
-    for (const row of [...group.active, ...group.ended]) {
-      if (!needsHuman(row.snapshot)) continue;
-      if (reachable.has(row.key) || seen.has(row.key)) continue;
-      seen.add(row.key);
-      out.push(row);
-    }
+  for (const row of fleet) {
+    if (!needsHuman(row.snapshot)) continue;
+    if (reachable.has(row.key) || seen.has(row.key)) continue;
+    seen.add(row.key);
+    out.push(row);
   }
   return out;
 }

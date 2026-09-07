@@ -1095,6 +1095,80 @@ process.stdout.write("\nthe permission card's context\n");
   ), null);
 
   /*
+   * ⭐ **A label that names two answers names no question, and this used to
+   * resolve it silently by taking whichever came first.**
+   *
+   * The join walked the questions in order and returned the first whose labels
+   * covered the offered options, so a payload carrying several questions with
+   * shared answer labels drew question 0's wording and question 0's per-answer
+   * descriptions above buttons belonging to question 1. The measured option-id
+   * shape is `q0_opt_0` / `q0_skip` and the index in it is there precisely
+   * because a label does not identify a question — this read past it.
+   *
+   * The second case needs no multi-question payload at all: two options carrying
+   * the same label inside **one** question. `new Map` kept the last, so two
+   * distinct `optionId`s drew as identical rows with the same description, and
+   * whichever the reader tapped was a coin toss they could not see.
+   *
+   * `answeredQuestions` in `tail.ts` — the same join for the settled case —
+   * already refuses both with its `AMBIGUOUS` symbol. Falling back to plain
+   * buttons is the whole cost, and this is the surface that approves what an
+   * agent does on a machine with no sandbox.
+   */
+  const twoQuestions = {
+    questions: [
+      { question: "Should I add a caching layer?", options: [{ label: "Yes", description: "adds redis" }, { label: "No", description: "leave it" }] },
+      { question: "Should I drop the old table?", options: [{ label: "Yes", description: "irreversible" }, { label: "No", description: "keep it" }] },
+    ],
+  };
+  const sharedLabels = {
+    ...askPending,
+    options: [
+      { optionId: "q1_opt_0", name: "Yes", kind: "allow_once" },
+      { optionId: "q1_opt_1", name: "No", kind: "allow_once" },
+      { optionId: "q1_skip", name: "Skip", kind: "reject_once" },
+    ],
+  };
+  check(
+    "a label two questions share resolves to neither",
+    asking(sharedLabels, [
+      { seq: 1, at: 0, event: { type: "tool_call", toolCallId: "5:tool_rk3", title: "Asking user questions", kind: "other", status: "pending", rawInput: null, locations: [], content: [] } },
+      { seq: 2, at: 0, event: { type: "tool_call_update", toolCallId: "5:tool_rk3", title: null, status: "in_progress", rawInput: twoQuestions, locations: [], content: [] } },
+    ]),
+    null,
+  );
+  check(
+    "and a label repeated inside one question is refused too, with no second question in sight",
+    asking(
+      { ...askPending, options: [{ optionId: "a", name: "Same", kind: "allow_once" }, { optionId: "b", name: "Other", kind: "allow_once" }, { optionId: "s", name: "Skip", kind: "reject_once" }] },
+      [
+        { seq: 1, at: 0, event: { type: "tool_call", toolCallId: "5:tool_rk3", title: "Asking user questions", kind: "other", status: "pending", rawInput: null, locations: [], content: [] } },
+        { seq: 2, at: 0, event: { type: "tool_call_update", toolCallId: "5:tool_rk3", title: null, status: "in_progress", rawInput: { questions: [{ question: "Which?", options: [{ label: "Same", description: "A" }, { label: "Same", description: "B" }, { label: "Other", description: "C" }] }] }, locations: [], content: [] } },
+      ],
+    ),
+    null,
+  );
+  /*
+   * And the unambiguous multi-question case still answers, so the guard refuses
+   * the collision rather than the shape: the same two questions with distinct
+   * labels join to the one the offered options actually belong to.
+   */
+  check(
+    "distinct labels across two questions still join to the right one",
+    asking(
+      { ...askPending, options: [{ optionId: "q1_opt_0", name: "Drop it", kind: "allow_once" }, { optionId: "q1_opt_1", name: "Keep it", kind: "allow_once" }, { optionId: "q1_skip", name: "Skip", kind: "reject_once" }] },
+      [
+        { seq: 1, at: 0, event: { type: "tool_call", toolCallId: "5:tool_rk3", title: "Asking user questions", kind: "other", status: "pending", rawInput: null, locations: [], content: [] } },
+        { seq: 2, at: 0, event: { type: "tool_call_update", toolCallId: "5:tool_rk3", title: null, status: "in_progress", rawInput: { questions: [
+          { question: "Should I add a caching layer?", options: [{ label: "Add it", description: "adds redis" }, { label: "Skip caching", description: "leave it" }] },
+          { question: "Should I drop the old table?", options: [{ label: "Drop it", description: "irreversible" }, { label: "Keep it", description: "keep it" }] },
+        ] }, locations: [], content: [] } },
+      ],
+    )?.question,
+    "Should I drop the old table?",
+  );
+
+  /*
    * **The hole this gate closes, driven with the payload that opens it.**
    *
    * Four innocuous `allow_once` options and a tool input carrying a `questions`

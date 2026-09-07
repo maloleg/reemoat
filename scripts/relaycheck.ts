@@ -5846,10 +5846,33 @@ process.stdout.write("\nmachines somebody owns\n");
       writeMachineLimit(db, full.id, 5, "u_admin");
       const suspendedBefore = [...overLimitMachineIds(db)].length;
 
+      /*
+       * ⭐ **Already over the limit is refused before the arithmetic, and the
+       * un-suspension it used to perform was on the *successful* path.**
+       *
+       * Q1.503 moved the write below the create, which fixed the refusals. It
+       * did not stop a provision that *succeeds* from doing the same damage, and
+       * `owned + 1` is why it could: with an admin-lowered limit of five under
+       * fifty machines the new limit clears all forty-five the lowering switched
+       * off, on a `pk_` key that `cp-machines.md` says is not an admin
+       * credential, reported by a 201 that names no machine.
+       *
+       * ⚠ **This case no longer reaches the ceiling arm below**, which is why
+       * that arm now has a fixture of its own: `owned > limit` is answered
+       * first, so the fifty-rows-under-a-lowered-limit shape stopped exercising
+       * `min(51, 50)` the moment this guard existed. Two shapes because they are
+       * two refusals that happen to share a code.
+       */
       check(
-        "provisioning at the fleet ceiling is refused",
+        "provisioning for somebody already over their limit is refused",
         await outcome(await post("/v1/provision", { key: reminted, user: full.id, machine: "fiftyfirst" }, bare)),
         [409, "machine_limit"],
+      );
+      check(
+        "and it says which state it is refusing, since an admin put them in it",
+        (await message(await post("/v1/provision", { key: reminted, user: full.id, machine: "fiftyfirst" }, bare)))
+          .includes("are switched off"),
+        true,
       );
       check("and the refusal left their limit exactly as it found it", effectiveLimit(db, full.id).limit, 5);
       report(
@@ -5857,7 +5880,34 @@ process.stdout.write("\nmachines somebody owns\n");
         [...overLimitMachineIds(db)].length === suspendedBefore,
         `${[...overLimitMachineIds(db)].length} over, was ${suspendedBefore}`,
       );
+
+      /*
+       * ⭐ **The fleet ceiling, which needs `owned === limit` to be reached at
+       * all.** Cleared rather than set: an unset override is fifty, so fifty
+       * machines are exactly at it, `owned > limit` is false, `min(51, 50)`
+       * writes nothing new and `createOwnedMachine` refuses `too_many`. This is
+       * the arm Q1.503's ordering exists for, and with the guard above it has
+       * only this one way in.
+       */
       clearMachineLimit(db, full.id);
+      const atCeiling = [...overLimitMachineIds(db)].length;
+      check(
+        "provisioning at the fleet ceiling is refused",
+        await outcome(await post("/v1/provision", { key: reminted, user: full.id, machine: "fiftyfirst" }, bare)),
+        [409, "machine_limit"],
+      );
+      check(
+        "and that one names the ceiling rather than a suspension",
+        (await message(await post("/v1/provision", { key: reminted, user: full.id, machine: "fiftyfirst" }, bare)))
+          .includes("fleet-wide ceiling"),
+        true,
+      );
+      check("and the ceiling refusal wrote no limit either", effectiveLimit(db, full.id).source, "default");
+      report(
+        "and it un-suspended nothing on the way out",
+        [...overLimitMachineIds(db)].length === atCeiling,
+        `${[...overLimitMachineIds(db)].length} over, was ${atCeiling}`,
+      );
     }
 
     /*
@@ -9175,6 +9225,63 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
       [409, "name_taken"],
     );
     check("and the newest link finishes the sign-up", (await gpost("/v1/register/confirm", { token: secondToken })).status, 201);
+  }
+
+  /*
+   * ⭐ **A second sign-up on one address under a *different* name is that
+   * caller's own link, and it neither re-mails nor retires the first.**
+   *
+   * The resend arm above matched on the **address alone**, so it re-minted a
+   * stranger's stored name and hash for anybody who typed that address. Reversed
+   * it is a squat: sign up as `mallory` against `victim@`, which reserves
+   * nothing anybody notices, and the victim's own later sign-up is answered with
+   * a mail that creates **mallory** — mallory's password, and `verified_at` on
+   * the victim's address, so `verifiedOwnerOf` answers mallory for ever and
+   * `/v1/forgot` for that address mails the victim on mallory's behalf.
+   *
+   * Narrowing the arm alone would have closed the hijack and left the squatter
+   * holding the address, re-extending it every 24 hours while the person who
+   * owns the mailbox never receives anything. Two live rows instead, which is
+   * why `mintRegistration`'s supersede had to be scoped to
+   * `(email_folded, name_folded)`: **the mailbox is the only party entitled to
+   * decide**, and it decides by which link gets clicked.
+   *
+   * All four halves, because three pass while it is broken: the second sign-up
+   * is answered the same silent way, it mints a *different* token, the first
+   * link is still live afterwards, and the loser's link then fails on the
+   * address rather than doing anything.
+   */
+  {
+    const first = await gpost("/v1/register", {
+      name: "pavel",
+      password: "correct horse battery",
+      email: "contested@example.com",
+    });
+    check("a first sign-up on a contested address is pending", first.status, 200);
+    const pavelsLink = tokenOf("register");
+
+    const second = await gpost("/v1/register", {
+      name: "rupert",
+      password: "correct horse battery",
+      email: "contested@example.com",
+    });
+    check("a different name on the same address is answered the same silent way", second.status, 200);
+    const rupertsLink = tokenOf("register");
+    check(
+      "and it mints its own link rather than re-mailing somebody else's",
+      rupertsLink !== pavelsLink && rupertsLink.length > 0,
+      true,
+    );
+    check(
+      "the first link is still live, so the second did not supersede it",
+      (await gpost("/v1/register/confirm", { token: pavelsLink })).status,
+      201,
+    );
+    check(
+      "and the mailbox having chosen, the loser's link fails on the address",
+      await codeOf(await gpost("/v1/register/confirm", { token: rupertsLink })),
+      [409, "email_taken"],
+    );
   }
 
   /*

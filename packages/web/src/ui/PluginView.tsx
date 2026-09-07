@@ -514,10 +514,15 @@ function Field({
  * notice. That is why it is the same shape as `sameNode` in `tail.ts` rather than
  * a deep-equality helper: the list is meant to be read beside the type.
  *
- * Exported so a driver can reach it, for `sameNode`'s reason — a comparator that
- * wrongly answers `true` shows a stale row and nothing anywhere would say so.
+ * ⚠ **It was exported "so a driver can reach it", for `sameNode`'s reason, and
+ * no driver ever did** — nothing in `packages/web/scripts` imports either
+ * comparator, so the totality both docblocks call load-bearing was asserted by
+ * nobody. Local again rather than exported-and-unused: the claim to be enforced
+ * is a real gap, and an export that pretends it is covered hides it. Reaching
+ * for the enforcement means exporting these *and* sweeping them the way
+ * `sameNode` is.
  */
-export function samePluginRow(a: PluginRow, b: PluginRow): boolean {
+function samePluginRow(a: PluginRow, b: PluginRow): boolean {
   if (a === b) return true;
   return (
     a.id === b.id &&
@@ -552,7 +557,7 @@ export function samePluginRow(a: PluginRow, b: PluginRow): boolean {
  * deciding that from a subset of it is how the next field added to `PluginField`
  * becomes invisible.
  */
-export function samePluginBlock(a: PluginBlock, b: PluginBlock): boolean {
+function samePluginBlock(a: PluginBlock, b: PluginBlock): boolean {
   if (a === b) return true;
   if (a.type !== b.type) return false;
   switch (a.type) {

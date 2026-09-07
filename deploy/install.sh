@@ -116,7 +116,6 @@ resolve_bin git "deploy/deploy.sh" >/dev/null
 
 ENV_FILE=$(env_file "$SERVICE")
 ENV_EXAMPLE=$(env_example "$SERVICE")
-ENV_IS_NEW=0
 
 if [ -f "$ENV_FILE" ]; then
   echo "  environment:  $ENV_FILE (existing, left alone)"
@@ -149,7 +148,6 @@ else
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "  environment:  $ENV_FILE (created from $(basename -- "$ENV_EXAMPLE"))"
-  ENV_IS_NEW=1
 fi
 
 
@@ -676,8 +674,9 @@ ask_daemon() {
 }
 
 # **"Still the example" rather than "created by this run", and the answers land
-# atomically.** `ENV_IS_NEW` was set at copy time, so a Ctrl-C at any `ask` left the
-# raw example in place and the *next* run took the "existing, left alone" branch,
+# atomically.** A flag set at copy time — `ENV_IS_NEW`, removed with the last of
+# its readers — meant a Ctrl-C at any `ask` left the raw example in place, so the
+# *next* run took the "existing, left alone" branch,
 # skipping the interview and with it the do-not-start guard below.
 #
 # `cmp` alone was not enough, and saying it was is what the first version of this

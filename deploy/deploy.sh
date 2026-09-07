@@ -147,6 +147,27 @@ case "$WANT" in
         ;;
     esac
     TARGETS="$WANT"
+    # ⚠ **`--service control-plane` carries the relay, because they are one
+    # deployment and the relay arm has to be *reached* to decide anything.**
+    #
+    # `TARGETS="$WANT"` alone made the per-service loop below skip the `relay)`
+    # arm entirely, and `svc_restart` recreates with `--no-deps` — so the relay
+    # kept the old image while the control plane beside it moved. That is not a
+    # narrow path: `ci-deploy.sh` refuses every `DEPLOY_SERVICE` but this one and
+    # always passes it, so the whole automated deploy could never evaluate the
+    # relay's own gate. And nothing catches up afterwards, because `CHANGED` is
+    # only ever *this* run's `OLD..NEW` — a relay input skipped once is in no
+    # later diff.
+    #
+    # It does not widen what happens, only what is *considered*: the arm below
+    # still decides for itself, and answers "recreate: no" for a change that
+    # never reached the relay. `--service relay` stays the precise verb for the
+    # relay alone; this makes `control-plane` the stack rather than ambiguous,
+    # which is what `svc_installed` already meant by proxying the relay's
+    # installedness to this service's env file.
+    if [ "$WANT" = control-plane ] && svc_installed relay; then
+      TARGETS="$TARGETS relay"
+    fi
     ;;
 esac
 
@@ -666,6 +687,31 @@ for svc in $TARGETS; do
       # change to how the container itself is defined, and no image id can see it.
       if { [ "$CP_IMAGE_MOVED" -eq 1 ] && touched "$RELAY_INPUTS"; } ||
         touched '^deploy/docker/compose\.yml$' '^deploy/compose\.sh$'; then
+        restart_list="${restart_list:+$restart_list }$svc"
+      elif [ "$(cp_image_source)" = pull ] &&
+        [ "$(cp_running_fingerprint "$svc")" != "$(cp_image_fingerprint)" ]; then
+        # ⚠ **In pull mode the paragraph above has no diff to stand on.**
+        #
+        # `touched` reads `git diff OLD..NEW`, and the documented way to take a
+        # new image on a pull host is to edit `REEMOAT_CP_IMAGE` and run this —
+        # which moves no commit. `CHANGED` is then empty, `touched` is false for
+        # every pattern, and this printed "nothing the relay is made of moved"
+        # while the control plane beside it went to a new image and migrated the
+        # schema. `_idle_ok` a few hundred lines up already says the premise is
+        # false in so many words and sets itself to 0 for exactly this reason;
+        # this arm is that same correction, applied where the relay is decided.
+        #
+        # Asked as a fingerprint rather than a diff because in pull mode there is
+        # nothing else to ask: the image was built elsewhere, so what changed
+        # inside it is unknowable here and "is the relay on the image this deploy
+        # is running" is the only answerable question. That is why this is gated
+        # on `pull` — in build mode the diff is real and the paragraph above is
+        # the sharper instrument, and running this there would recreate every
+        # tunnel in the fleet for a CSS change.
+        #
+        # It also subsumes `svc_container_missing` on this path: an absent
+        # container fingerprints empty, which differs from any image.
+        echo "  recreate: the relay is not on the image this deploy is running"
         restart_list="${restart_list:+$restart_list }$svc"
       elif svc_container_missing "$svc"; then
         # The first deploy on a host that predates the split, and the one case

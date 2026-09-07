@@ -2173,26 +2173,9 @@ export class ManagedSession {
    * it cannot read one. Two forms of one rule is exactly the drift the predicate
    * is meant to prevent, so `daemoncheck` asserts the two agree on a session
    * holding only a question.
-   *
-   * (An earlier draft named `oldestPendingAt` here as a second caller. It is not
-   * one: that getter has no callers anywhere, and predates this change.)
    */
   private get awaitingCount(): number {
     return this.pending.size + this.pendingElicitations.size;
-  }
-
-  private *awaiting(): Iterable<{ raisedAt: number }> {
-    for (const record of this.pending.values()) yield record.info;
-    for (const record of this.pendingElicitations.values()) yield record.info;
-  }
-
-  /** When the longest wait began, of either kind, for "blocked for how long". */
-  get oldestPendingAt(): number | null {
-    let oldest: number | null = null;
-    for (const info of this.awaiting()) {
-      if (oldest === null || info.raisedAt < oldest) oldest = info.raisedAt;
-    }
-    return oldest;
   }
 
   /**
