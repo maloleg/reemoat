@@ -336,3 +336,9 @@ rendering that must never happen — the scope is the whole difference between t
 | | |
 |---|---|
 | Transcript diff | **250 000 LCS cells** (`MAX_LCS_CELLS`) after the prefix/suffix trim, past which it degrades to one replacement block and says `wholeFile` — Q3.104. 60 drawn lines per file (`DIFF_MAX_LINES`), with `omitted` carrying the rest and the counts staying the **true** totals. 2 lines of context (`DIFF_CONTEXT`). A word-level mark is dropped once it would cover more than 60% of its line (`MAX_MARK_SHARE`), past which the two lines are not one line edited and the row tint has already said so — Q3.301. 400 chars (`MAX_MARK_CHARS`) is the longest pair compared character by character. `changeCounts` memoises in a `WeakMap` keyed on the event, so a diff is computed once per event for the life of the tab |
+
+**A download button draws nothing for a location outside the workspace** — not a
+disabled button, and not one that toasts when it is pressed. It lived in
+`web-composer.md` until the sheet work needed the characters, which is where it
+should have been all along: the button is `EventList.tsx`'s, and the composer has
+never drawn one.

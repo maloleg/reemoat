@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
 import { snapshot } from "./webcheck.ws.js";
+import { stripComments } from "./webcheck.source.js";
 import {
   changeCounts,
   chipParts,
-  chipReserve,
   chipValue,
   choiceLabel,
   diffLines,
@@ -540,6 +540,492 @@ process.stdout.write("\nthe composer's send key\n");
       true,
     );
   }
+
+  /*
+   * **One box, and the four facts that make it one.**
+   *
+   * There is no DOM here and no component renderer anywhere in this repository,
+   * so a container is a class string like every other layout rule — and Tailwind
+   * v4 emits *nothing at all* for a token it does not recognise, with no error and
+   * no failing build. Read off disk in the `CornerDownLeft` style, where an
+   * absence is the assertion.
+   */
+  {
+    const composer = readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8");
+    const bar = readFileSync(new URL("../src/ui/AgentConfigBar.tsx", import.meta.url), "utf8");
+    // Comment-stripped for both reads below. The strip's own docblocks name
+    // `ContextPie` and `<form>` and `type="submit"` while explaining why each is
+    // gone or guarded against, and an assertion that cannot tell prose from code
+    // would be answered by the sentence describing the thing it is looking for.
+    const barCode = stripComments(bar);
+
+    // The box carries the boundary, and the field inside it carries none. Both
+    // halves, because either one alone is satisfied by a composer with no border
+    // anywhere — which is a field nothing says is a field.
+    check(
+      "the composer's box is the bounded control",
+      /className=\{`relative rounded-xl border border-edge-strong/.test(composer),
+      true,
+    );
+    /*
+     * **And the box is the `<form>`, which is what puts every control under a
+     * default `type="submit"`.** Asserted so the sweep two blocks down is read as
+     * load-bearing rather than as belt-and-braces: it was the second guard while
+     * a smaller `<form>` sat inside a `<div>` box, and Send moving into the
+     * control row spent that, a submit button having to be inside what it submits.
+     */
+    check(
+      "and it is the form, so nothing under it may default to submit",
+      /<form\n\s+onSubmit=\{submit\}\n\s+className=\{`relative rounded-xl/.test(composer),
+      true,
+    );
+    check(
+      "and the textarea inside it draws neither a border nor a fill",
+      /className="no-focus-ring block min-h-11 w-full resize-none overflow-hidden bg-transparent/.test(composer),
+      true,
+    );
+    // The caret is a text control's own focus indicator; `no-focus-ring` is the
+    // opt-out `index.css` grants for exactly that, and the box must not grow a
+    // second one now that it is the visible chrome.
+    check("the box looks the same focused and not", /focus-within:/.test(composer), false);
+
+    /*
+     * **The paperclip is the composer's, and the strip has no `leading` slot to
+     * put it back in.** That is what retires `configBarShows`: its third clause
+     * existed to keep a bar alive for the paperclip's sake, and a control that is
+     * not in the bar cannot be lost with it.
+     */
+    check("the composer draws its own paperclip", /icon={Paperclip}\n\s+label="Attach a file"/.test(composer), true);
+    check("beside the strip rather than inside it", /<AgentConfigBar/.test(composer), true);
+    check("and hands it no `leading` node", /leading=/.test(composer), false);
+
+    // The readout is gone from the client. The daemon still sends the field —
+    // `webcheck.plugin-protocol.ts` pins `contextUsage` on the client's mirror of
+    // the snapshot, and that assertion is now the only thing holding it there.
+    check("no context readout is drawn", /ContextPie/.test(barCode), false);
+
+    /*
+     * ⚠ **Every button in the strip names its type, and the cost of one that does
+     * not is a sent message.** A bare `<button>` defaults to `type="submit"`;
+     * these sit inside the composer's box, one refactor away from being inside its
+     * `<form>`, at which point tapping the model chip sends the draft. The box is
+     * a `<div>` precisely so that is not the only thing standing between the two,
+     * and this is the other half.
+     *
+     * Comments are stripped first: they name `<form>` and `type="submit"` while
+     * explaining exactly this, and a scan that stops at the first `>` finds the
+     * one inside the prose.
+     */
+    {
+      const typeless = [...barCode.matchAll(/<button\b/g)]
+        .map((match) => barCode.slice(match.index, barCode.indexOf(">", match.index)))
+        .filter((tag) => !/\btype=/.test(tag));
+      check("no button in the strip can submit a form by default", typeless, []);
+      // Not trivially true: the property is worth nothing if the scan found none.
+      check("and the scan found the buttons", [...barCode.matchAll(/<button\b/g)].length >= 4, true);
+      /*
+       * The same sweep over `Composer.tsx`, where the answer today is that there
+       * are no hand-rolled buttons at all — everything goes through `IconButton`,
+       * which defaults `type` to `"button"` itself. Asserted as an emptiness so
+       * the first one written by hand has to answer this rather than inherit a
+       * submit from the box it is inside.
+       */
+      const composerCode = stripComments(composer);
+      const composerTypeless = [...composerCode.matchAll(/<button\b/g)]
+        .map((match) => composerCode.slice(match.index, composerCode.indexOf(">", match.index)))
+        .filter((tag) => !/\btype=/.test(tag));
+      check("nor anything hand-rolled in the composer itself", composerTypeless, []);
+    }
+
+    /*
+     * **The picker draws twice and a class chooses, which is `AppShell`'s rule
+     * for this app reaching one control further in.**
+     *
+     * Below `sm` the model chip leaves the row and its choices fold into the mode
+     * picker; above it the chip is back and the picker holds only what it always
+     * did. Both renderings are in the document at once and `display` decides —
+     * never a measurement in JavaScript, so a window dragged across the breakpoint
+     * cannot draw a row that is not there.
+     *
+     * Read off disk because every one of these is a word in a class string, and
+     * Tailwind emits **nothing at all** for a token it does not recognise: a typo
+     * here fails silently, with no error and a passing build.
+     */
+    check(
+      "the model chip is folded by a class rather than by a measurement",
+      /foldedBelowSm\.length > 0 \? "hidden sm:contents" : "contents"/.test(barCode),
+      true,
+    );
+    /*
+     * ⚠ **And it folds only where there is somewhere to fold into.** The mode
+     * control is not guaranteed — an agent may publish none, and one drawn from
+     * memory arrives in `unavailable`, where `Absent` draws no nested sections at
+     * all. Either way a chip hidden below `sm` would put its choices nowhere: a
+     * control unreachable on a phone, silently, which is what "a control never
+     * leaves the strip" is written against. `splitOptions` makes the same test for
+     * `nested`, and this is that rule applied to the same host.
+     */
+    check(
+      "and only where a live mode control exists to fold into",
+      /category === NESTED_HOST && one\.kind !== "boolean" && !unavailable\.has\(one\.id\)/.test(barCode),
+      true,
+    );
+    check(
+      "and nothing in the strip asks the window how wide it is",
+      /matchMedia|innerWidth|ResizeObserver/.test(barCode),
+      false,
+    );
+    // The pair, because either one alone is satisfied by a picker that draws both
+    // presentations at every width — which is two menus open at once.
+    check("the anchored panel is the wide one", /hidden w-60 max-w-\[calc\(100vw-1\.5rem\)\] sm:block/.test(barCode), true);
+    check("and the sheet is the narrow one", /flex touch-manipulation flex-col justify-end bg-fg\/25 sm:hidden/.test(barCode), true);
+    /*
+     * ⚠ **And the sheet is not `Sheet`.** That component sets `inert` on `#root`
+     * the moment it mounts, which a `display` class cannot gate — so a `Sheet`
+     * here would lock the whole app behind an invisible panel every time somebody
+     * opened a popover on a desktop. The picker registers as a `menu`, which
+     * `overlay.ts` deliberately does not count when it decides whether to inert.
+     */
+    check("the picker registers as a menu and never as a sheet", /useDismissible\("sheet"/.test(barCode), false);
+    check("so nothing here can make the app inert", /inert/.test(barCode), false);
+    /*
+     * Two copies of one list in one document, so every id either presentation
+     * generates has to name which one it is in. Without this the refusal line
+     * carries the same id twice and `aria-describedby` resolves to whichever the
+     * browser reaches first, which on a phone is the hidden one.
+     */
+    check("an id says which presentation it is in", /\$\{where\}-\$\{option\.id\}-refusal/.test(barCode), true);
+    /*
+     * ⚠ **And the outside-press listener knows about both boxes**, which is the
+     * one thing a portal breaks silently. The sheet is rendered into
+     * `document.body`, so it is outside the anchored panel's `boxRef` by
+     * construction: tested against that alone, every tap *inside* the sheet — a
+     * row included — was an outside press, closing the picker on `pointerdown`
+     * before the `click` that would have chosen the value landed. The control did
+     * nothing at all on a phone, silently, which is the failure this listener is
+     * a `pointerdown` rather than a `blur` in order to avoid.
+     */
+    check(
+      "the outside-press test covers the portalled sheet as well as the panel",
+      /boxRef\.current\?\.contains\(target\) === true \|\| sheetRef\.current\?\.contains\(target\) === true/.test(barCode),
+      true,
+    );
+    // The scrim is outside that ref on purpose: a press on it has to close.
+    check("and the ref is on the panel rather than on the scrim", /ref=\{sheetRef\}\n\s+onPointerDown=/.test(barCode), true);
+
+    /*
+     * ⚠ **The sheet leaves the way it arrived, and the two clocks that make that
+     * true are in two files.** There is no route here, so nothing wraps the
+     * unmount in a view transition the way `sheet-close` does for the routed
+     * pop-ups: the picker keeps itself mounted for `SHEET_EXIT_MS` and plays the
+     * arrival keyframe in reverse. A timer shorter than the animation cuts the
+     * slide off mid-travel; a longer one leaves a finished panel on the screen
+     * waiting to be unmounted. Neither is visible to a compiler, and the CSS half
+     * is a custom property Tailwind emits no error for.
+     */
+    {
+      const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+      const declared = /--animate-sheet-out: sheet-out (\d+)ms/.exec(css)?.[1];
+      const timed = /const SHEET_EXIT_MS = (\d+);/.exec(barCode)?.[1];
+      check("both halves of the exit were found", [declared !== undefined, timed !== undefined], [true, true]);
+      check("and the unmount waits exactly as long as the animation", timed, declared);
+      /*
+       * ⚠ **And the exit may never name the arrival's keyframes**, which is the
+       * assertion this section was missing and the defect it cost.
+       *
+       * `--animate-sheet-out` was `sheet … reverse` — one description of one
+       * movement, which is what the routed sheet's own close rule does — and it
+       * never played. An element keeps its running animation for as long as the
+       * `animation-name` list is unchanged, so swapping the class on the same node
+       * edited the direction and fill of an animation that had finished 260ms
+       * earlier instead of starting one, leaving it in its after phase holding what
+       * reversal had made the last frame: the 0% keyframe, off the bottom of the
+       * screen. The sheet vanished in one frame with the utility emitted, the
+       * durations agreeing and every check green — the eye was the only thing that
+       * could see it, and only on a phone.
+       *
+       * Both halves are asserted: that each exit names keyframes of its own and
+       * that those keyframes exist. Either alone passes for a token Tailwind emits
+       * nothing for.
+       */
+      check(
+        "the sheet's exit has keyframes of its own",
+        [/--animate-sheet-out: sheet-out /.test(css), /@keyframes sheet-out \{/.test(css)],
+        [true, true],
+      );
+      check(
+        "and so does the scrim's",
+        [/--animate-scrim-out: scrim-out /.test(css), /@keyframes scrim-out \{/.test(css)],
+        [true, true],
+      );
+      check(
+        "neither exit is the arrival's own name replayed",
+        /--animate-(?:sheet|scrim)-out: (?:sheet|scrim) /.test(css),
+        false,
+      );
+      /*
+       * The panel goes at once and the sheet stays: they are two presentations of
+       * one control and only one of them is animated out. Gated on `leaving` in
+       * the markup, which is the only place that distinction exists.
+       */
+      check("the anchored panel does not linger", /\{open && !leaving && \(/.test(barCode), true);
+    }
+
+    /*
+     * **The sheet's head is pinned and the sheet has two detents**, and every part
+     * of that is a class this driver is the only reader of.
+     *
+     * It was one `overflow-y-auto` panel with the grab bar as its first child, so
+     * the bar scrolled away with the first screenful of a model list — the one
+     * screen where somebody is scrolling — and advertised a gesture that did
+     * nothing. The bar is now a flex sibling of the scroller rather than a child of
+     * it, which is the whole of why it stays, and a real button: tap to change
+     * detent, drag to do the same.
+     */
+    check(
+      "the grab bar is a button rather than a decoration",
+      /aria-expanded=\{expanded\}\n\s+className=\{`tap relative flex min-h-8 shrink-0 touch-none/.test(barCode),
+      true,
+    );
+    /*
+     * ⚠ **And it is 32px of head reaching 44px of target**, the chips' own
+     * arrangement through the same measured constant. A flat `min-h-11` put twenty
+     * pixels of nothing between the sheet's top edge and a 4px bar, which was
+     * reported as too much room above the grabber; growing instead of padding buys
+     * the room back without dropping under the target this app holds everything to.
+     */
+    check("and it reaches 44px by growing rather than by padding", /justify-center \$\{TAP_GROW_Y\}`\}/.test(barCode), true);
+    /*
+     * ⚠ **The panel may never be the scroller**, which is the single class that
+     * puts the bar back inside a scroll and is one careless edit away at all times.
+     * Asserted as an absence on the panel and a presence on the list, because
+     * either alone is satisfied by a sheet that scrolls in two places at once.
+     */
+    check(
+      "and the panel clips rather than scrolls",
+      /flex w-full flex-col overflow-hidden overscroll-contain rounded-t-2xl/.test(barCode),
+      true,
+    );
+    check(
+      "the rows scroll only once the sheet is full",
+      /expanded \? "flex-1 overflow-y-auto" : "touch-none overflow-hidden"/.test(barCode),
+      true,
+    );
+    /*
+     * The two detents, in `dvh`. `vh` on a phone is the viewport with the browser
+     * chrome retracted, so a sheet sized in it hides its own last rows under the
+     * address bar — and the last rows here are the ones somebody opened the sheet
+     * to reach. `SHEET_FULL` is `SHEET_PANEL`'s phone height, so the two kinds of
+     * sheet in this app agree about what full means.
+     */
+    {
+      const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+      /*
+       * The resting detent lives in the CSS as a *default*, not in the component:
+       * at rest the gesture has written nothing at all, so "rest" is the absence of
+       * every property it can write and cannot drift from what this file says.
+       */
+      check(
+        "rest is a default in the stylesheet rather than a class on the panel",
+        [/--sheet-max, 60dvh/.test(css), /--sheet-min, 0/.test(css), /--sheet-h, auto/.test(css)],
+        [true, true, true],
+      );
+      check("and the full detent is the routed sheets' phone height", /const SHEET_FULL = "92dvh";/.test(barCode), true);
+      /*
+       * ⚠ **Opening writes `--sheet-min` and not only `--sheet-max`**, which is the
+       * whole difference between a picker that can be pulled open and one that
+       * cannot: a cap does nothing to a panel already shorter than it, so the effort
+       * control — four rows, never near the resting cap — ignored the gesture while
+       * the model control obeyed it. Two chips on one row answering one drag
+       * differently is the defect; the space under four rows in a sheet somebody
+       * deliberately opened is not.
+       */
+      check(
+        "a short picker can be pulled open too",
+        /"--sheet-min": SHEET_FULL, "--sheet-max": SHEET_FULL/.test(barCode),
+        true,
+      );
+      /*
+       * And the panel carries no `style` prop, which is what keeps one writer on
+       * these properties. Two would settle by emission order, which is the same
+       * trap `AppShell` keeps an inline width off its `<aside>` to avoid.
+       */
+      check("the geometry has exactly one writer", /ref=\{sheetRef\}[\s\S]{0,2000}?style=/.test(barCode), false);
+      check("and the panel wears the class that declares it", /className=\{`config-sheet pb-safe/.test(barCode), true);
+    }
+    /*
+     * ⚠ **And the fraction the gesture compares against is the class's own number.**
+     * A drag has to know where "full" is in pixels and CSS will not say, so 92 is
+     * written twice — once as `92dvh` and once as `0.92` — and this is what keeps
+     * them one number. Drift here is invisible: the sheet simply settles a little
+     * short of, or past, the height it then snaps to when the inline height clears.
+     */
+    {
+      const share = /const SHEET_FULL_SHARE = ([\d.]+);/.exec(barCode)?.[1];
+      const dvh = /const SHEET_FULL = "(\d+)dvh";/.exec(barCode)?.[1];
+      check("both spellings of the full detent were found", [share !== undefined, dvh !== undefined], [true, true]);
+      check("and they are the same height", share, dvh === undefined ? undefined : String(Number(dvh) / 100));
+    }
+    /*
+     * **The panel follows the finger**, which is three things: a height measured at
+     * `pointerdown` rather than tracked, a per-move subtraction against it, and the
+     * transition switched off for the length of the gesture. It changed detent on
+     * its own for one round — a button worked by swiping, moving a distance that had
+     * nothing to do with the distance dragged.
+     */
+    check(
+      "the drag reads where the panel is when it starts",
+      /height: panel\.getBoundingClientRect\(\)\.height/.test(barCode),
+      true,
+    );
+    check(
+      "and every move is that height less the travel",
+      /const wanted = from\.height - travelled;/.test(barCode),
+      true,
+    );
+    check("with the settle off while the finger is down", /settling\(false\);\n\s+paint\(\{\n\s+"--sheet-min": "0px"/.test(barCode), true);
+    /*
+     * ⚠ **And the *end* of the settle is a write that may not animate**, which is
+     * the bounce this section did not have an assertion for. Handing the height
+     * back to `.config-sheet`'s defaults changes `min-height` and `max-height`,
+     * both animated: settling a long list back to rest sent `--sheet-max` from
+     * 92dvh to the 60dvh default over 300ms while the pixel height was cleared in
+     * the same frame, so the panel sprang to full and shrank back — and a short
+     * picker opening did the mirror of it. Reported as *"it goes back to where it
+     * started and then winds round again"*. `paintNow` is that write, and both arms
+     * of the settle have to take it.
+     */
+    check(
+      "and the hand-off back to the defaults lands in one frame",
+      barCode.match(/paintNow\(\{/g)?.length,
+      2,
+    );
+    check(
+      "with the animation put back a frame later rather than immediately",
+      /restore\.current = window\.requestAnimationFrame\(\(\) => \{\n\s+restore\.current = null;\n\s+settling\(true\);/.test(barCode),
+      true,
+    );
+    /*
+     * ⚠ **And that frame is cancellable.** A gesture starting inside it would have
+     * its transition switched back on underneath it — a drag that chases the finger
+     * rather than following it, intermittently, and only ever just after a previous
+     * one. `settling` cancels any pending restore before it writes.
+     */
+    check(
+      "a gesture inside that frame cancels it rather than inheriting it",
+      /window\.cancelAnimationFrame\(restore\.current\);\n\s+restore\.current = null;/.test(barCode),
+      true,
+    );
+    /*
+     * The transition itself is a literal in the stylesheet and is switched off
+     * inline, never through a custom property inside the shorthand: a `var()` there
+     * makes every longhand a pending-substitution value, which is a thin place in
+     * more than one engine and harder to reason about than a number.
+     */
+    check(
+      "the transition is switched off inline rather than substituted",
+      [/panel\.style\.transition = on \? "" : "none";/.test(barCode), /--sheet-settle/.test(barCode)],
+      [true, false],
+    );
+    /*
+     * ⚠ **And the gesture never goes through React.** A pointer moves sixty times a
+     * second and a render here is every row of the open picker — 362 of them on
+     * opencode, each a `<button>` — so state would have the panel arriving where
+     * the finger had been. `AppShell`'s rail settled this for the same gesture one
+     * control out; this is that rule applied again, and the assertion is the one
+     * that would catch a well-meaning rewrite into `useState`.
+     */
+    check("the drag writes those properties directly", /panel\.style\.setProperty\(name, value\)/.test(barCode), true);
+    check(
+      "and the only render it costs is the list's detent",
+      barCode.match(/setExpanded\(/g)?.length,
+      3,
+    );
+    /*
+     * Below the resting height the panel stops shortening and slides, or the rows
+     * would be eaten from the bottom while the box stayed where it was. Both arms
+     * come off one `wanted`, so the hand-off has no step in it.
+     */
+    check(
+      "and below rest it slides rather than shortening",
+      /\{ height: rest, below: rest - wanted \}/.test(barCode),
+      true,
+    );
+    /*
+     * ⚠ **The settle's two clocks, in two files**, the same pairing `SHEET_EXIT_MS`
+     * has: the timer is what hands the panel's height back to its detent classes,
+     * so a short one cuts the settle off and a long one leaves an inline pixel
+     * height pinning a sheet that has stopped moving.
+     */
+    {
+      const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+      const declared = /\.config-sheet \{[\s\S]*?transition:\n\s+height (\d+)ms/.exec(css)?.[1];
+      const timed = /const SHEET_SETTLE_MS = (\d+);/.exec(barCode)?.[1];
+      check("both halves of the settle were found", [declared !== undefined, timed !== undefined], [true, true]);
+      check("and the height goes back to its classes exactly when it lands", timed, declared);
+    }
+    /*
+     * ⚠ **A release the panel never hears is a gesture that never ends**, and a
+     * sheet left pinned to a pixel height with its transition switched off. An
+     * uncaptured pointer lifted outside the window delivers `pointerup` to nothing
+     * this component renders, so the panel captures — but **only once the drag has
+     * engaged**, because capture retargets the compatibility `click` too and a tap
+     * on a row needs its own to arrive where it was aimed.
+     */
+    check(
+      "a release outside the viewport still ends the drag",
+      /dragged\.current = true;[\s\S]{0,900}?sheetRef\.current\?\.setPointerCapture\(event\.pointerId\)/.test(barCode),
+      true,
+    );
+    check("and nothing is captured before it engages", /onPointerDown[\s\S]{0,200}setPointerCapture/.test(barCode), false);
+    /*
+     * Opening is always at rest, and **nothing inline survives it**: a picker that
+     * reopened full-height because it was left that way would cover the message it
+     * is being opened for, and a pixel height left over from a drag would be
+     * inherited by whichever control this component draws next.
+     */
+    check(
+      "a reopened picker is back at rest, with nothing carried over",
+      /atRest\(\);\n\s+setExpanded\(false\);\n\s+setOpen\(true\);/.test(barCode),
+      true,
+    );
+    // And `atRest` is the absence of every property, not a second spelling of the
+    // defaults: a value written here is one the stylesheet can no longer correct.
+    check(
+      "and rest is written as nothing rather than as numbers",
+      /const atRest = \(\): void =>\n\s+paint\(\{\n\s+"--sheet-h": null,\n\s+"--sheet-y": null,\n\s+"--sheet-min": null,\n\s+"--sheet-max": null,\n\s+\}\);/.test(barCode),
+      true,
+    );
+    /*
+     * ⚠ **And the click a drag leaves behind is swallowed.** A touch that ends
+     * without the browser having scrolled anything still fires a `click` on
+     * whatever was under it, and at rest that is a model row — so dragging the
+     * sheet shut would also switch the model. One capture-phase guard on the panel
+     * rather than a flag each row has to remember to read.
+     */
+    check(
+      "a drag never also chooses the row it started on",
+      /onClickCapture=\{\(event\) => \{\n\s+if \(!dragged\.current\) return;/.test(barCode),
+      true,
+    );
+    // The move is on the scrim, which is the whole viewport: a finger that leaves
+    // the panel on the way up keeps moving it.
+    check(
+      "the move is heard across the whole screen",
+      /onPointerMove=\{dragMove\}\n\s+onPointerUp=\{\(event\) => dragEnd\(event\.pointerId\)\}/.test(barCode),
+      true,
+    );
+    /*
+     * Every section heading carries the chip's own glyph. One lookup — `label` —
+     * for the strip and for both presentations of the menu, so what opens a menu
+     * and what heads it cannot come to disagree about what a control looks like.
+     */
+    check(
+      "a section heading is drawn with the same glyph its chip is",
+      barCode.match(/<p className=\{`\$\{MENU_HEADING\} flex items-center gap-1\.5`\}>\n\s+\{label\(option\)\}/g)?.length,
+      2,
+    );
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -927,25 +1413,43 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
   /*
    * Which chips say their own name, and which are identified without it.
    *
-   * This replaced a `hidden sm:inline`, i.e. a width question answered with a
-   * breakpoint: the caption vanished on a phone for the controls that needed it
-   * and came back on a desktop for the ones that did not. The two silent ones are
-   * silent because they are identified twice over — an icon, and a value that is
-   * a proper noun. An unknown category is the case that decides the rule's shape:
-   * it has no icon, so a chip with no caption would be a bare value with nothing
-   * saying what it is, in the popover where there is no position to read it by.
+   * **The rule is the icon and nothing else now**: a caption is drawn exactly
+   * where `CATEGORY_ICON` has no entry. `mode` was the last category on the other
+   * side of it, kept there because "Manual" alone leaves nothing saying what is on
+   * manual — and dropped on the owner's word, because the glyph and the
+   * `aria-label` already say it and the word was the third copy, spending width on
+   * the narrowest strip in the app. Q3.559.
+   *
+   * Asserted over every category this client knows rather than over the three that
+   * are drawn, because the property is "an icon makes the name redundant" and the
+   * next category to get an icon has to answer it too.
    */
   check(
-    "model and effort say only their value",
-    [showsCaption({ category: "model" }), showsCaption({ category: "thought_level" })],
-    [false, false],
+    "a chip with a glyph says only its value",
+    ["mode", "model", "thought_level", "model_config"].map((category) => showsCaption({ category })),
+    [false, false, false, false],
   );
-  check("mode keeps its name, because Manual answers nothing on its own", showsCaption({ category: "mode" }), true);
   check(
-    "and so does a category we draw no icon for",
+    "and only a category we draw no icon for keeps its name",
     [showsCaption({ category: "unheard_of" }), showsCaption({ category: null })],
     [true, true],
   );
+  /*
+   * The pair, stated as the property rather than as two lists: every category with
+   * an icon is silent and every category without one is not. Two lists drift the
+   * day a glyph is added and only one of them is edited.
+   */
+  {
+    const bar = stripComments(readFileSync(new URL("../src/ui/AgentConfigBar.tsx", import.meta.url), "utf8"));
+    const iconed = [...bar.slice(bar.indexOf("const CATEGORY_ICON"), bar.indexOf("};", bar.indexOf("const CATEGORY_ICON")))
+      .matchAll(/^\s{2}(\w+):/gm)].map((match) => match[1] ?? "");
+    check("the icon table was found", iconed.length >= 4, true);
+    check(
+      "and nothing with a glyph draws its name",
+      iconed.filter((category) => showsCaption({ category })),
+      [],
+    );
+  }
 
   /*
    * And the width that stops moving.
@@ -971,60 +1475,23 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
     ],
   };
   /*
-   * **The reserved width depends on the category and on nothing else.**
+   * ⭐ **The daemon's own name for the row it appends, drawn as those exact bytes.**
    *
-   * It was the widest of *the agent's own* labels, which made claude's effort
-   * chip wider than kimi's: the same strip was a different shape depending on
-   * which session was open, so moving between two sessions moved every button.
-   * Asserted as an independence property rather than by listing the values —
-   * the same option shape under two agents' choice lists, and the same answer.
+   * ⚠ **This block used to be about a reserved width and is now about a string.**
+   * `CATEGORY_RESERVE` held one list per category so every chip was as wide as the
+   * longest ordinary value it could show, and `Ultracode` was in that list because
+   * a reserve that is *nearly* the drawn string buys nothing — it had been cut to
+   * `Ultrac…` while `Adaptive` sat in the list. The table is gone (Q3.564) and the
+   * chips hug their content, so there is no column to fit into; what survives is
+   * the half that was never about width, which is that this client draws the name
+   * the *daemon* invented rather than one of its own.
+   *
+   * The name lives at `src/registry.ts`'s `withUltracode` and `packages/web` cannot
+   * import from `src/`, so `webcheck.stream-and-http.ts` reads that file as text and
+   * pins the literal there; `daemoncheck` pins `ULTRACODE_CHOICE`, which is the
+   * *value*. This is the near half: what this client actually puts on the chip.
    */
-  const asChoices = (values: string[]) =>
-    values.map((value) => ({ value, name: value, description: null, group: null }));
-  check(
-    "the three controls on the strip hold a width open",
-    ["mode", "model", "thought_level"].map((category) =>
-      chipReserve({ category } as never),
-    ),
-    [
-      ["Accept Edits", "—"],
-      ["GPT-5.6-Luna", "—"],
-      ["Adaptive", "Ultracode", "—"],
-    ],
-  );
-  check(
-    "and it is the same width whatever the agent offers, which is the point",
-    [
-      chipReserve({ ...effortOption, choices: asChoices(["default", "low", "max"]) } as never),
-      chipReserve({ ...effortOption, id: "thinking", choices: asChoices(["off", "high"]) } as never),
-      chipReserve({ ...effortOption, id: "reasoning_effort", choices: [] } as never),
-    ],
-    [
-      ["Adaptive", "Ultracode", "—"],
-      ["Adaptive", "Ultracode", "—"],
-      ["Adaptive", "Ultracode", "—"],
-    ],
-  );
   {
-    /*
-     * ⭐ **The reserved string and the drawn string are the same bytes, which is the
-     * whole of "Ultracode fits".**
-     *
-     * A reservation is honest only because the browser renders it: the sizer and the
-     * value are one grid cell in the same font, so the column is exactly as wide as
-     * whichever candidate is widest — and the value, being `sm:absolute sm:inset-0`,
-     * can only ellipsise inside it. So a reserve that is *nearly* the drawn string
-     * buys nothing: `Ultracode` was cut to `Ultrac…` while `Adaptive` sat in the
-     * list, on the one control this client invents a row for.
-     *
-     * ⚠ Asserted by **identity against `chipValue`**, never against a literal here.
-     * The name lives at `src/registry.ts`'s `withUltracode` and `packages/web`
-     * cannot import from `src/`, so `CATEGORY_RESERVE` holds a hand-mirrored copy
-     * and nothing across that boundary checks the two agree — `daemoncheck` pins
-     * `ULTRACODE_CHOICE`, which is the *value*. This is the near half of that guard:
-     * it cannot see the daemon rename the choice, but it does catch the reserve
-     * drifting from whatever this client actually draws.
-     */
     const ultracode = {
       ...effortOption,
       value: "ultracode",
@@ -1035,29 +1502,9 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
     } as never;
     // `true` is `available`: the second argument is what decides between the real
     // value and `UNAVAILABLE_VALUE`, and omitting it silently asserts the placeholder.
-    const drawn = chipParts(ultracode, true).value;
-    check("the effort chip draws the daemon's own name for the row it adds", drawn, "Ultracode");
-    check(
-      "and the width it holds open is reserved for that exact string",
-      (chipReserve(ultracode) ?? []).includes(drawn),
-      true,
-    );
-    // The other half of the pair: the reserve is per *category*, so an agent that
-    // never sees this row holds the same width. Otherwise the strip would be a
-    // different shape on claude than on kimi, and every button beside it would move
-    // when somebody switched session.
-    check(
-      "on every agent, including the two that can never draw it",
-      chipReserve({ ...effortOption, id: "thinking" } as never),
-      chipReserve(ultracode),
-    );
+    check("the effort chip draws the daemon's own name for the row it adds", chipParts(ultracode, true).value, "Ultracode");
   }
 
-  check(
-    "a category drawn in the overflow column holds nothing open, having nothing beside it",
-    [chipReserve({ category: "unheard_of" } as never), chipReserve({ category: null } as never)],
-    [null, null],
-  );
   /*
    * The value somebody just chose is the value they see.
    *
@@ -1209,20 +1656,22 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
   }
 
   /*
-   * A control whose choices have gone still holds its width. That is the same
-   * sentence as the one about a category, read at the moment it matters most:
-   * an agent that has stopped offering a control is exactly when the chip must
-   * not resize.
+   * A control whose choices have gone still draws the same *shape*, which is what
+   * is left of "still holds its width" now that the reserve is gone (Q3.564): a
+   * caption where the category has one, and the placeholder where the value was.
+   * An agent that has stopped offering a control is when a chip is most likely to
+   * be redrawn from the wrong branch, which is why this is asserted at the empty
+   * list rather than only at the missing control.
    */
   check(
-    "a control with nothing left to choose still holds its width",
+    "a control with nothing left to choose still draws a chip rather than a hole",
     [
-      chipReserve({ ...effortOption, choices: [] } as never),
-      chipReserve({ ...effortOption, kind: "boolean", value: true, choices: [] } as never),
+      chipParts({ ...effortOption, choices: [] } as never, false),
+      chipParts({ ...effortOption, kind: "boolean", value: true, choices: [] } as never, false),
     ],
     [
-      ["Adaptive", "Ultracode", "—"],
-      ["Adaptive", "Ultracode", "—"],
+      { caption: null, value: "—" },
+      { caption: null, value: "—" },
     ],
   );
 

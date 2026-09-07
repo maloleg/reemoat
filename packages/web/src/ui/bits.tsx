@@ -60,13 +60,21 @@ import { toast } from "./Toast";
  * rather than per component, because per-component focus styling is how the fifth
  * copy of a control ends up with none.
  *
- * **One radius, and the circles are not an exception to it.** Everything that can
- * be pressed is `rounded-md`, which is what the textarea, the send button and
- * every attachment chip already were — the pills in the composer's own control
- * strip were the only round things in the composer, so the row that is *part* of
- * it did not look like it. What stays circular is `StatusDot`, `Dot`, `Spinner`
- * and `Skeleton`'s placeholders: those are marks rather than controls, and a
- * two-pixel radius on an eight-pixel dot is a smudge.
+ * **One radius, and a circle is a mark rather than a control.** Everything that
+ * can be pressed is `rounded-md`, which is what the textarea and every attachment
+ * chip already were — the pills in the composer's own control row were the only
+ * round things in the composer, so the row that is *part* of it did not look like
+ * it. What stays circular is `StatusDot`, `Dot`, `Spinner` and `Skeleton`'s
+ * placeholders: those are marks rather than controls, and a two-pixel radius on an
+ * eight-pixel dot is a smudge.
+ *
+ * **Two controls are exceptions and both are named here rather than discovered.**
+ * `tabPill`, and the composer's send slot — Send, Stop and the two spinner boxes,
+ * through `IconButton`'s `shape` prop. A filled square holding an arrow is the
+ * shape a *stop* control has, in the one slot where Stop genuinely appears a
+ * second later; the circle is what every phone chat client draws there and what
+ * keeps the two readings apart. The exception is bounded by being a prop with one
+ * call site rather than a class anybody can pass.
  *
  * **Two ways to reach 44px, and which is right is a question about neighbours.**
  * A control that owns its row — {@link Dropdown}'s full-width trigger, a form
@@ -82,16 +90,18 @@ import { toast } from "./Toast";
 /**
  * 32px of ink reaching a 44px target, **vertically only**.
  *
- * Exported because the composer's control strip is built from two different
+ * Exported because the composer's control row is built from two different
  * primitives — `ICON_BUTTON_SIZE.chip` here for the paperclip, `CHIP` in
- * `AgentConfigBar` for the pills and the two square buttons — and they sit in
- * one row. Written out twice they were byte-identical and had to stay that way
- * by hand, which is two different tap targets in one strip the first time
- * somebody tunes one of them.
+ * `AgentConfigBar` for the pills and the one square button — and they sit in one
+ * row. Written out twice they were byte-identical and had to stay that way by
+ * hand, which is two different tap targets in one row the first time somebody
+ * tunes one of them.
  *
  * Both halves of the asymmetry are measured rather than tidy. Up is 4px because
- * the textarea's own bottom edge is 6px above; down is 8px into the composer's
- * bottom padding, which holds a line of text and nothing you can press.
+ * the textarea's own bottom edge is 6px above — the row's `mt-1.5`, which is why
+ * that gap may not be tightened without re-reading this. Down is 8px, which lands
+ * in the composer box's `pb-1.5` and 2px past its border into the bar's own
+ * padding: nothing there is pressable, which is the whole of the licence.
  *
  * Vertical only, and that is the whole reason it is not `-inset-2.5`: these sit
  * `gap-1.5` apart, so a symmetric inset would put one control's target over its
@@ -1747,21 +1757,34 @@ const ICON_BUTTON_SIZE = {
    */
   sm: "relative h-6 w-6 after:absolute after:-inset-2.5 after:content-['']",
   /**
-   * 32px of ink, 44px of target — the height of the composer's control strip.
+   * 32px of ink, 44px of target — the whole of the composer's control row.
    *
    * It exists because the paperclip was the deleted `md`, 36px, which made it the
    * one control in that row that was not the height of the pills beside it — the
-   * measurement that survives its entry. Grown the same way `sm` is, and
+   * measurement that survives its entry. Send and Stop take it too now, so the
+   * row is one height from end to end and the filled circle is the same box as
+   * the chips rather than a third larger than them. Grown the same way `sm` is, and
    * **vertically only**, which is the difference between the two: these sit
    * `gap-1.5` apart, so a symmetric `-inset-2.5` would put this button's target
    * over the mode chip's *face*, and the chip beside it changes the model.
    *
-   * Both halves of the asymmetry are measured rather than tidy. Up is 4px because
-   * the textarea's own bottom edge is 6px above; down is 8px into the composer's
-   * bottom padding, which holds a line of text and nothing you can press.
+   * Both halves of the asymmetry are measured rather than tidy, and
+   * {@link TAP_GROW_Y} carries them: 4px up into the row's own `mt-1.5`, 8px down
+   * into the composer box's bottom padding and past its border, where nothing is
+   * pressable.
    */
   chip: `relative h-8 w-8 ${TAP_GROW_Y}`,
-  /** 44px — the platform tap minimum. The composer's send button, and nothing smaller. */
+  /**
+   * 44px of box — the platform tap minimum reached the plain way.
+   *
+   * ⚠ This used to read "the composer's send button, and nothing smaller", and
+   * the composer's send button is `chip` now: 44px of *filled black* was the
+   * loudest object in the box and was asked to come down. What the sentence was
+   * protecting is unharmed — `chip` reaches the same 44px of target through
+   * `TAP_GROW_Y` — and what it was really warning against was the deleted `md`,
+   * which reached 36px and stopped. Every entry in this table clears the floor;
+   * which of them a slot wants is a question about weight.
+   */
   lg: "h-11 w-11",
 } as const;
 
@@ -1802,6 +1825,7 @@ export function IconButton({
   onClick,
   tone = "ghost",
   size,
+  shape = "square",
   disabled = false,
   active,
   expanded,
@@ -1816,6 +1840,23 @@ export function IconButton({
   tone?: ButtonTone;
   /** Required, and not defaulted. See the ⚠ on this component. */
   size: keyof typeof ICON_BUTTON_SIZE;
+  /**
+   * `round` swaps this button's radius for a circle, and it is a **prop rather
+   * than a `className`** for a mechanical reason: Tailwind emits every utility at
+   * the same specificity inside one layer, so a `rounded-full` passed in would
+   * beat or lose to the `rounded-md` below by emission order rather than by
+   * intent. The same trap {@link ICON_BUTTON_SIZE} carries a ⚠ about.
+   *
+   * ⚠ **It is also an exception to this file's radius rule**, which reserves a
+   * circle for a *mark* — `StatusDot`, `Dot`, `Spinner` — and gives everything
+   * pressable `rounded-md`, with `tabPill` the one documented exception. There is
+   * a second now: the composer's send control, where a filled circle holding an
+   * arrow is the shape every phone chat client draws and a filled square reads as
+   * a stop button. It is deliberately narrow — one call site, one slot, and the
+   * three other things that occupy that slot (Stop and the two spinners) take it
+   * too, so the slot does not change shape under a thumb.
+   */
+  shape?: "square" | "round";
   disabled?: boolean;
   /** Renders as `aria-pressed`. Omit for buttons that are not a toggle. */
   active?: boolean;
@@ -1859,7 +1900,9 @@ export function IconButton({
       aria-expanded={expanded}
       aria-haspopup={haspopup}
       title={title ?? label}
-      className={`tap press inline-flex shrink-0 items-center justify-center rounded-md disabled:pointer-events-none disabled:opacity-40 ${ICON_BUTTON_SIZE[size]} ${ICON_BUTTON_TONE[tone]} ${className}`}
+      className={`tap press inline-flex shrink-0 items-center justify-center ${
+        shape === "round" ? "rounded-full" : "rounded-md"
+      } disabled:pointer-events-none disabled:opacity-40 ${ICON_BUTTON_SIZE[size]} ${ICON_BUTTON_TONE[tone]} ${className}`}
     >
       {/* The glyph comes down with the box: a 16px paperclip in a 32px square
           reads as a bigger control than the 11–13px glyphs on the chips beside

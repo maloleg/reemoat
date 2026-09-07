@@ -1041,7 +1041,7 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
       [/curl -fsSL/.test(browser), /curl -fsSL/.test(machines)],
       [false, false],
     );
-    check("the composer strip does not draw it", /installCommand/.test(newSession), false);
+    check("the new-session strip does not draw it", /installCommand/.test(newSession), false);
     /*
      * And the door-or-the-sentence property is untouched: the command sits inside
      * the `mayAddMachine` arm on both, so the state that says there is no way to

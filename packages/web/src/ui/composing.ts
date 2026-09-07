@@ -32,6 +32,16 @@ export function composerPlaceholder(state: {
    * to decide it. See {@link Composer}'s send path.
    */
   revising: boolean;
+  /**
+   * The `/` menu would have something in it.
+   *
+   * Only the idle line reads this, and it is a boolean rather than a count
+   * because the question is "is there anything to offer", not "how much". The
+   * caller passes `buildCommands`' whole list, unfiltered by what has been typed:
+   * what the placeholder promises is that the key does *something*, which is a
+   * property of the session rather than of the draft.
+   */
+  hasCommands: boolean;
 }): string {
   /*
    * **First, because it is the one state where `blocked` does not mean "wait".**
@@ -55,7 +65,27 @@ export function composerPlaceholder(state: {
    */
   if (state.reconnecting) return "reconnecting the agent…";
   if (state.working) return "agent is working…";
-  return "message…";
+  /*
+   * **The idle line teaches the one affordance nothing else on screen does.**
+   *
+   * `/` opens a menu holding the agent's own commands and the three controls it
+   * does not publish as commands, and until now the only way to find that out was
+   * to type the character and see. The strip below the box advertises the
+   * settings; nothing advertised the commands.
+   *
+   * **It says only that, with no "message" in front of it.** An empty box already
+   * reads as somewhere to write — that is what an empty box is — so the word was
+   * the half a placeholder does not have to carry, and the key is the half nothing
+   * else on screen says.
+   *
+   * ⚠ **It is conditional, and the condition is the whole reason this is not a
+   * constant string in the JSX.** A session whose agent is away publishes no
+   * commands, and `buildCommands` synthesizes the config controls from an
+   * `agentConfig` that is then also absent — so on a restored session the menu is
+   * empty, and a placeholder promising one would be the box lying about a key.
+   * The plain line is what that falls back to, which is what it always said.
+   */
+  return state.hasCommands ? "type / for commands" : "message…";
 }
 
 /**

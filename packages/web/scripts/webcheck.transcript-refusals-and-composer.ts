@@ -620,8 +620,24 @@ process.stdout.write("\nwho is working, and what the box says\n");
   );
 
   const say = (over: Record<string, boolean>): string =>
-    composerPlaceholder({ blocked: false, reconnecting: false, working: false, revising: false, ...over });
-  check("an idle box asks for a message", say({}), "message…");
+    composerPlaceholder({
+      blocked: false,
+      reconnecting: false,
+      working: false,
+      revising: false,
+      hasCommands: true,
+      ...over,
+    });
+  /*
+   * The idle line, and the pair is the assertion rather than either half. It
+   * teaches `/` — the one affordance in the composer nothing else advertises —
+   * and it may only do so where the key would open something. A session whose
+   * agent is away publishes no commands and has no `agentConfig` for the three
+   * synthesized controls to be built from, so an unconditional hint would be the
+   * box promising a key that does nothing on every restored session.
+   */
+  check("an idle box teaches the one key nothing else does", say({}), "type / for commands");
+  check("but only where that key opens something", say({ hasCommands: false }), "message…");
   check("a working one says so", say({ working: true }), "agent is working…");
   // Wins over `working`: it is the rarer fact, and the one explaining the spinner.
   check(

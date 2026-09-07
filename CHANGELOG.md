@@ -25,6 +25,88 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Changed
+
+- The composer is one box. The message field, the attachment chips, the paperclip,
+  the agent's controls and Send now sit inside a single rounded container instead
+  of a bordered field, a bordered send button and a separate strip of bordered
+  pills below it — seven outlines in two rows at the bottom of a phone. The chips
+  lost their borders with it: the box is what says a control is there, and each
+  chip's chevron is what says a list opens. A chip that cannot be tapped now dims
+  by dropping its ink rather than by fading the whole control, which is a
+  correction as much as a restyle — at 40% opacity the border it used to rely on
+  was already below the contrast it existed to hold. The rule that used to run
+  above the composer is gone; so is the backdrop blur, which was blurring a
+  backdrop nothing ever scrolled under.
+- Send is a circle with an arrow in it. A paper plane is a mail metaphor for
+  something that is not mail, and a filled hard-cornered square is the shape a
+  **stop** control has — in the one slot where Stop appears a second after a turn
+  starts. All four things that occupy that slot take the circle, so it never
+  changes shape under a thumb.
+- The mode chip says what it is set to and no longer also says "Mode". The glyph
+  beside it, its fixed position and its accessible name already said so, and the
+  word was spending width on the narrowest screen next to the value it was pushing
+  into a truncation. A chip now draws its own name exactly where no glyph does.
+- The controls below the message field rest a shade quieter, and are grouped by
+  spacing: a wider gap where the kind of control changes — the paperclip acts on
+  the message, the chips describe the turn, Send is the action — and a narrower one
+  inside each group.
+- Send sits on that row too, level with the attach control and the agent's
+  settings, which is what makes the composer read as one object rather than as a
+  field with a toolbar under it. On a narrow phone the row is now over its width
+  and the chip values truncate, which is what they have always done there under
+  pressure; there is no arrangement in which three pills and two icon buttons fit
+  a 390px line.
+- The empty composer says `type / for commands` instead of `message…`, because
+  `/` is the one thing in the box that nothing on screen advertised and an empty
+  box already reads as somewhere to write. It still says just `message…` on a
+  session whose agent is away, where that key would open nothing.
+- Send is smaller: the same 32px box as the controls beside it, so the row is one
+  height end to end and the filled circle is no longer the loudest object in the
+  composer. It still reaches the 44px tap minimum, the same way the chips do.
+- The picker sheet slides back down when it is dismissed instead of vanishing
+  between two frames, its section headings carry the same icon as the chip that
+  opened them, and the check beside the chosen row is heavier and now sits on the
+  line of the name rather than above it.
+- That sheet has two heights and a grab bar that stays put, and it moves with your
+  finger rather than after it. It opens at about three fifths of the screen with
+  its options not scrolling; dragging it, or dragging the list, takes it exactly as
+  far as you drag, and it settles onto whichever height is nearer when you let go —
+  full, where the options scroll, or back to where it started. Pulled far enough
+  below that, it closes. The bar used to scroll away with the first screenful of a
+  long model list and did nothing when you pulled on it, and every control opens to
+  full height now, not only the ones with more rows than fit. The sheet also stops
+  moving when it arrives: it used to spring back past the height it had settled on
+  and wind round to it a second time.
+- Less room above the grab bar at the top of that sheet, and a little more between
+  a control's icon and the word beside it — at four pixels the two were reading as
+  one shape.
+- On a phone the agent's settings open as a bottom sheet over a scrim instead of
+  as a small panel above the box, and the model control folds into the mode
+  picker rather than keeping a chip of its own — so the row is the attach button,
+  mode, effort and Send. On a desktop nothing changes: the same panel, in the same
+  place, with the model chip still on the row. Both are drawn and the browser
+  chooses, so a window dragged across the boundary can never show a picker that is
+  not there. The sheet is closed by Escape, by the scrim, or by choosing a row;
+  the platform Back button does not close it.
+- A chip is as wide as what it says again, capped at 128px and clipped past that,
+  and the space inside it between the glyph, the value and the chevron came down
+  from six pixels to four. Each chip used to hold open the width of the longest
+  value its control could ever show, which is why nothing moved when a value
+  changed — and why three chips sat side by side mostly empty. That trade is
+  reversed: they hug their content, and a value that grows moves its neighbours
+  again.
+
+### Removed
+
+- The context-window ring is gone from the web client. It reported how full an
+  agent's window was and reported nothing at all on kimi, which never sends the
+  notification it was built on, and nothing on any session waiting for its agent —
+  a control that was blank for most agents most of the time, in a row where
+  everything else changes what the next turn does. Nothing changed on the daemon:
+  the reading is still measured, still on every session snapshot, and still
+  printed by `pnpm client`.
+
 ### Added
 
 - An instance can point somebody who has no machine at somewhere to get one.

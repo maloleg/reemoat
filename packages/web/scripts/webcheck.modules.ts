@@ -72,18 +72,12 @@ export const { sessionLabel } = await import("../src/ui/bits.js");
 export const { openableHref } = await import("../src/ui/links.js");
 export const {
   chipParts,
-  chipReserve,
   chipValue,
   choiceLabel,
   configProse,
   drawnChoices,
-  contextHint,
-  contextPercent,
   drawnControls,
   labelFor,
-  pieLabel,
-  pieTone,
-  shortCount,
   showsCaption,
   unavailableHint,
   restartsAgent,

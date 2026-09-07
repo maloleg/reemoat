@@ -37,12 +37,6 @@ alone. Consequences: `StatusDot` goes through `statusTone`, and `POST
 /sessions/:id/prompt` joins `slowRoute`'s 90s budget unconditionally, because
 `request` sees only a method and a path.
 
-⚠ **`Composer.tsx` no longer early-returns on `showsAsEnded`, or on anything.
-Nothing takes the message box off the screen.** Sending into an ended session
-revives it — `autoResumable` answers `true` on the prompt trigger for every reason
-that has a conversation to return to. What is gated is Send, never the box.
-Q7.103.
-
 **A cancel is two more pure predicates in `wire.ts`.** `canCancelTurn` is
 `turn !== null && !isTerminal && status !== "stopping"` — deliberately **wider
 than `showsWorking` by exactly the blocked case**, because a session parked on a
@@ -93,8 +87,8 @@ have to enter. These are the rules a change here must not break:
   places reachability shows. An open question, not a settled trade. Q3.202.
 - **Nothing in a row mounts sideways into another control.** Three remedies:
   *delete it* when redundant; *reserve its slot* when it is the only copy (the
-  pin, the two spinners); *move it off the row* when it is neither (the context
-  percentage went into a popover). A mount only displaces what lies between it and
+  pin, the two spinners); *move it off the row* when it is neither (the working
+  caption went to the transcript). A mount only displaces what lies between it and
   the nearest `flex-1` sibling.
 - **Reserve the gutter**, `.scroll-stable`, on the transcript only — never on `*`,
   never on the rail or the content pane. Q3.203.
@@ -103,12 +97,15 @@ have to enter. These are the rules a change here must not break:
   fill at all** — `bg-raised` for the message you wrote, `bg-raised/50` for a plan,
   a wizard's panel and a well inside an expanded row; `ink` is the rail and not a
   step anything in the conversation may be built on. Q3.205, Q3.206.
-- **A control is drawn in the colour of what it sits on, so `edge-strong` is its
-  only identification.** Every field and every unfilled button matches its ground
-  (`bg-ink` in the rail, `bg-surface` on a sheet or in the composer) and is bounded
-  by `--color-edge-strong`, which is why that token has a ≥3:1 floor and `edge` is
-  never an alternative to it. The exceptions are the two values you must read once
-  — the one-time secret and the device code — and they take a real fill.
+- **A control on a plane of its own is drawn in the colour of what it sits on, so
+  `edge-strong` is its only identification** — every field and every unfilled
+  button in the rail, on a sheet or in a form; that token's ≥3:1 floor is why.
+  **Inside a container already bounded at `edge-strong` it carries none**, owing
+  3:1 on its own action glyph rather than on text or a fill and dimming to
+  `text-faint` rather than by `opacity`: `menuRow` in `MENU_PANEL`,
+  `ICON_BUTTON_TONE.ghost`, and the composer's box, whose own rule argues it.
+  The exceptions are the two values you must read once — the one-time secret and
+  the device code — which take a real fill.
 - **Machinery is `text-fg/85`, one value for every machinery row, failures
   included**; the `X` at full `fg` and `N failed` carry a failure instead of
   weight. A permission row reserves the kind-glyph slot **empty**, because it

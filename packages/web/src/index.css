@@ -496,6 +496,56 @@
     }
   }
 
+  /*
+   * The same two movements leaving, and they need **names of their own**.
+   *
+   * `sheet-close` two hundred lines down takes a leaving panel off the screen
+   * through a view transition, and it can only do that because `router.ts` wraps
+   * the navigation that unmounts it: the old frame still exists to animate.
+   * `AgentConfigBar`'s config picker has no route — see its own docblock for why
+   * it cannot be a `Sheet` — so nothing holds a snapshot of it, and it has to keep
+   * itself mounted for the length of its own exit instead.
+   *
+   * ⚠ **This was `sheet … reverse` and `scrim … reverse`, and it never played.**
+   * Reusing the arrival's keyframes and flipping the direction is the tidier
+   * description of one movement, and here it is a no-op: an element keeps its
+   * running animation for as long as the `animation-name` list is unchanged, so
+   * swapping `animate-sheet` for `animate-sheet-out` on the **same node** edits
+   * the direction and fill of an animation that finished 260ms ago rather than
+   * starting one. It stays in its after phase, and `both` then holds what
+   * reversal has made the final frame — the 0% keyframe, off the bottom of the
+   * screen. So the panel vanished in a single frame, on a phone, with every check
+   * green and the utility emitted: reported as *"it slides out but does not slide
+   * back"*. Distinct names restart it, and that is the whole of the fix.
+   *
+   * The numbers are therefore written twice after all, and what keeps the two
+   * halves one movement is that the easing is the arrival's curve **mirrored**
+   * — `cubic-bezier(1 - x2, 1 - y2, 1 - x1, 1 - y1)` — rather than a curve chosen
+   * again. `both` because the last frame has to hold, or the panel snaps back up
+   * between the animation ending and React unmounting it.
+   *
+   * ⚠ **260ms is also a number in `AgentConfigBar.tsx`**, which is what times the
+   * unmount. `webcheck` reads this file and asserts the two agree — a timer
+   * shorter than the animation cuts it off mid-slide, and a longer one leaves a
+   * finished panel sitting on the screen — and that neither exit names the
+   * keyframes its arrival does, which is the assertion the frame above cost.
+   */
+  --animate-sheet-out: sheet-out 260ms cubic-bezier(1, 0, 0.68, 0.28) both;
+
+  @keyframes sheet-out {
+    to {
+      transform: translateY(100%);
+    }
+  }
+
+  --animate-scrim-out: scrim-out 260ms ease-in both;
+
+  @keyframes scrim-out {
+    to {
+      opacity: 0;
+    }
+  }
+
   @keyframes blink {
     0%,
     100% {
@@ -1320,6 +1370,53 @@ ol.md-paren > li::marker {
     background-color 120ms ease,
     border-color 120ms ease,
     color 120ms ease;
+}
+
+/*
+ * The config sheet's whole geometry, as four custom properties with defaults.
+ *
+ * **A class rather than utilities, and properties rather than a `style` prop, for
+ * `AppShell`'s reason one control further in.** The rail's drag writes
+ * `--rail-w` straight onto the node instead of going through React, because a
+ * pointer moves sixty times a second and the alternative is sixty renders. This
+ * sheet is the same gesture over a worse list: opencode publishes 362 model rows
+ * and every one of them is a `<button>` this component draws, so a render per
+ * frame is a render of all of them, and the finger would arrive somewhere the
+ * panel had not.
+ *
+ * So the defaults **are** the resting sheet — content height, capped at 60dvh, no
+ * offset — and everything else is written on top of them by the gesture. React
+ * sets no `style` on this element at all, which is also what keeps the two out of
+ * each other's way: an inline property and a utility class settle by specificity
+ * and emission order, and this file's `FIELD` note is about exactly that trap.
+ *
+ * `--sheet-min` is not decoration. A `max-height` alone does nothing to a panel
+ * already shorter than it, so a four-row effort picker could not be pulled open
+ * while a model list could — one row, two chips, two behaviours.
+ *
+ * ⚠ **The duration is a literal and the *switching off* is an inline
+ * `transition: none`, which is a correction.** It was a fifth property,
+ * `--sheet-settle`, substituted into this shorthand and set to `0s` for the length
+ * of a gesture. A `var()` inside a shorthand makes every longhand it expands to a
+ * pending-substitution value, resolved after the cascade, and that is a thin place
+ * in more than one engine — it is also simply harder to reason about than a
+ * property nothing has to substitute. `AgentConfigBar` writes `style.transition`
+ * directly instead, which is one inline longhand that cannot lose to anything.
+ *
+ * 300 rather than `--animate-sheet`'s 260 because this is a settle from wherever a
+ * hand let go rather than a fixed journey, and that curve reads as abrupt over
+ * twenty pixels.
+ */
+.config-sheet {
+  height: var(--sheet-h, auto);
+  min-height: var(--sheet-min, 0);
+  max-height: var(--sheet-max, 60dvh);
+  transform: translateY(var(--sheet-y, 0));
+  transition:
+    height 300ms ease-out,
+    min-height 300ms ease-out,
+    max-height 300ms ease-out,
+    transform 300ms ease-out;
 }
 
 /*

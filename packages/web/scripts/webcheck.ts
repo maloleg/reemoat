@@ -58,7 +58,7 @@ await import("./webcheck.permission-card.js");
 await import("./webcheck.composer-and-config-bar.js");
 await import("./webcheck.decision-surfaces.js");
 await import("./webcheck.command-menu-and-browser.js");
-await import("./webcheck.context-chips-and-tail.js");
+await import("./webcheck.chips-and-tail.js");
 await import("./webcheck.tail-subagents-and-runs.js");
 await import("./webcheck.transcript-refusals-and-composer.js");
 await import("./webcheck.interrupted-and-spawn-routes.js");

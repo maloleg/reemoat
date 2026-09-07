@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 125 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 300 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 314 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 131 | `###` |
-| | | **865** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 132 | `###` |
+| | | **880** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 865 rather than the 456
+dividers. So the count is over **both** depths, and it says 880 rather than the 457
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -7011,7 +7011,8 @@ glance, and the exact figure is something to go and look at. Removing it also
 removed the last moving part in that row, since a ring is one width at every
 percentage where `9% → 10%` and `99% → 100%` each pushed the chips beside it.
 
-**Status.** Current
+**Status.** Superseded — Q3.558: the readout is deleted from the browser client,
+and the daemon still carries the field.
 
 #### Q3.49 — Should the context ring look like a readout or like a button?
 
@@ -7023,7 +7024,12 @@ does not survive contact with the strip: it is the one thing there that opens
 something when pressed while looking like it does not, and hover is not a state a
 phone has.
 
-**Status.** Reversed an earlier decision
+**What survived it.** The half about hover, which outlived the control: every
+borderless chip in the composer takes `active:bg-raised`, because a press is the
+state a phone does have. Q3.556.
+
+**Status.** Superseded — Q3.558: the readout is deleted from the browser client,
+and the daemon still carries the field.
 
 #### Q3.50 — What does the ring show when nothing has been measured?
 
@@ -7039,7 +7045,8 @@ empty track is not left to be read as nought percent, and it is the ordinary gly
 for "no reading". It is drawn rather than taken from the icon set because `Gauge`
 is already the effort chip two controls to the left in the same strip.
 
-**Status.** Reversed an earlier decision
+**Status.** Superseded — Q3.558: the readout is deleted from the browser client,
+and the daemon still carries the field.
 
 #### Q3.51 — Where does the client say the agent is working?
 
@@ -8495,7 +8502,10 @@ kimi with no context reporting — or on any restored session, which has no live
 agent to publish controls — the whole bar and the paperclip with it would have
 disappeared while claude was fine.
 
-**Status.** Current
+**Status.** Superseded — Q3.557. Both clauses of the decision are gone: there is
+no context readout, and the paperclip is the composer's own control rather than
+the strip's, so the failure this guarded cannot happen and the predicate that
+guarded it is deleted rather than narrowed.
 
 #### Q3.84 — Where does attachment-chip state live?
 
@@ -8961,7 +8971,11 @@ growth move nothing at all, one line and no reserved space. It was refused becau
 to solve a width problem trades a fixed layout question for a permanent
 readability one.
 
-**Status.** Current
+**Status.** Superseded in both halves, and by two entries. The caption half is
+Q3.559: `mode` was the only category this entry kept a name for and it draws none
+now, so "which chips say their own name" has one answer and no exceptions. The
+width half is Q3.564: there is no reserve, per category or otherwise, and the
+movement this entry measured is back by decision rather than by accident.
 
 #### Q3.418 — The composer's controls vanish during a restart, and flicker on every change. Why, and what fixed it?
 
@@ -9033,16 +9047,12 @@ before *and* after emptying the config, so an emptied `stopping` frame is
 ordinary and treating it as an answer would discard the memory on the one path
 this exists for.
 
-**Not held: the context readout.** "A dead agent's window occupancy is not a fact
-about anything." `contextPercent` already answers `null` and the ring already
-draws `unknown`, so it keeps its slot and says "cannot tell", which is true.
-
 **The flicker is a different cause.** One tap set a single `busy` for the whole
 bar and every control took `disabled={disabled || busy !== null}` with
 `disabled:opacity-40`. `.tap`'s transition list is three properties and
 deliberately excludes `opacity` — so the entire row snapped to 40% and snapped
-back, uneased, around a round trip often under a second, while the paperclip and
-the ring (which take no such flag) stayed bright. The serialization is worth
+back, uneased, around a round trip often under a second, while the two controls
+beside them that took no such flag stayed bright. The serialization is worth
 keeping — setting a model rebuilds the mode list, so two concurrent changes really
 do race — so the fix splits the prop rather than removing the lock: `disabled` is
 semantic and dimmed, `locked` is transient and inert but undimmed. What is left is
@@ -10402,7 +10412,10 @@ It got the answer exactly backwards at both ends: the caption vanished on a phon
 for the control that needed it, and came back on a desktop for the ones that did
 not.
 
-**Status.** Reversed an earlier decision
+**Status.** Superseded — Q3.559. The rejection above stands and outlived the rule
+it was written for: the breakpoint came back for one release and is gone again,
+this time by dropping `mode`'s caption outright rather than by hiding it at one
+width. `showsCaption` is now the icon and nothing else.
 
 #### Q3.402 — Should a chip reserve the width of what *this* agent published?
 
@@ -10424,7 +10437,9 @@ it to move.
 revision, which is a *shorter* name from the same family — proof that this list is a
 measurement rather than a first look.
 
-**Status.** Current
+**Status.** Superseded — Q3.564. The answer to the question in the heading is still
+"no", and it is now moot: there is no reserve at all. The chips hug their content
+under one cap, and what this entry measured is what that gave up.
 
 #### Q3.403 — Why are the width sizers `hidden sm:block`?
 
@@ -10437,7 +10452,8 @@ and no width depends on what anything says.
 **Measured.** All three reservations at once are ~510px of strip against a 390px
 phone.
 
-**Status.** Current
+**Status.** Superseded — Q3.564. The sizers are gone at every width, which is what
+this entry's own measurement was the strongest argument for.
 
 #### Q3.404 — How does a control that the agent stopped offering keep its slot?
 
@@ -10467,9 +10483,6 @@ existence. That is once per deploy, on every open session. The live agent always
 wins **including when it publishes nothing**, which is the arm that does the work:
 without `hasLiveAgent` telling an agent with no controls from a session with no
 agent, a dead set of chips would be pinned to a running session for ever.
-
-**Why the context ring is not held.** A dead agent's window occupancy is not a fact
-about anything, and the ring already says "cannot tell".
 
 **Status.** Current
 
@@ -10580,9 +10593,9 @@ that fades.
 
 **Why.** One tap used to disable every control in the row, and `opacity` is
 deliberately absent from `.tap`'s transition list, so the whole strip snapped to 40%
-and snapped back around a round trip that is often under a second — while the
-paperclip and the context ring, which take no such flag, stayed at full strength,
-making the row read as broken rather than busy. The exclusion itself is worth
+and snapped back around a round trip that is often under a second — while the two
+controls beside them, which take no such flag, stayed at full strength, making the
+row read as broken rather than busy. The exclusion itself is worth
 keeping: setting a model rebuilds the mode list, so two changes at once really do
 race, and the daemon refuses a config change mid-restart on purpose. The cost is a
 second or two in which a tap on another chip does nothing at all, taken
@@ -16652,6 +16665,775 @@ plus padding: two numbers that agree by arithmetic nobody will re-run.
 **Status.** Applied. `webcheck` asserts the row string and that no cell of the
 row carries a `py-` class.
 
+#### Q3.555 — Why is the composer one bordered box rather than a field with a strip under it?
+
+**Decision.** One `rounded-xl` container bounded at `edge-strong` holds the
+attachment chips, the textarea and one control row. The textarea has no border, no
+radius and no fill of its own; the box is its boundary.
+
+**Why.** Reported from a phone, and it is a count rather than a taste. The bottom
+of a 390px screen carried a bordered textarea, a bordered 44px send button beside
+it, and below that a separate strip with a bordered paperclip, a bordered mode
+pill, bordered model and effort pills, a bordered overflow button and a bordered
+context ring — seven-plus outlines in two rows, none of which said anything the
+others did not. Every mobile chat client draws the same controls as one object,
+and the reason it works is that a container drawn once removes six lines without
+removing a control.
+
+**The box was a `<div>` wrapping a smaller `<form>`, and that half is spent.**
+`Select`, `Absent`, `Toggle` and the choice rows are hand-rolled `<button>`, and a
+button inside a form defaults to `type="submit"` — so the container being a
+`<div>` was what stopped a tap on the model chip sending the draft, with the
+explicit `type="button"` on each and `webcheck`'s sweep as the second line. Q3.563
+moved Send onto the control row, a submit button has to be inside the form it
+submits, and the box is the `<form>` now: the sweep is the only guard left, which
+is why it reads every `<button` in both files rather than the four that were
+wrong. `CommandMenu` already carried the attribute, having been inside the form
+all along, which is what makes this a hazard the codebase has met rather than one
+imagined for this entry.
+
+**Two things the box may never take.** `overflow-hidden`, because `CommandMenu`,
+all three chip menus, `Absent`'s panel and the `…` popover are `bottom-full`
+children of it — the regression a rounded container invites. And any
+`focus-within` treatment: Q3.414 is about this box now, and a caret is a text
+control's own focus indicator.
+
+**Measured.** Resting height on a 390×844 phone goes 105px → 112px, seven pixels,
+taken out of the chrome above and the strip's own padding and spent on the box.
+Send stays 44px and stays beside the text it sends — see the alternative below.
+
+**Alternative taken out and then taken back in — Send in the control row.** It is
+what the reference screenshots show, it is what this was first drawn as, and it
+was refused here on the arithmetic: below `sm` a chip is 51px of chrome plus its
+value, so mode (91) + model (90) + effort (100) + paperclip (32) + three gaps (18)
+is 331px against 352px of box interior, and adding Send and its gap makes it 381,
+at which point all three chips truncate. The owner asked for it anyway, having
+been shown that number. Q3.563 is the decision and carries what it costs; this
+paragraph stays because the measurement did not stop being true.
+
+**Alternative taken out — keeping the rule above the composer.** `border-t
+border-edge` is 1.31:1 and sat eight pixels above a box border at 4.40:1, which is
+two hairlines saying one thing. `bg-surface/95 backdrop-blur` went with it, and
+that half is a measurement rather than a preference: `SessionView` makes the
+composer a **sibling** of the conversation region — the ask card's frame ends
+where the composer begins for exactly that reason — and `AppShell`'s pane does not
+scroll, every route owning its own scroller. Nothing has ever passed under this
+element, so the filter was re-rasterising a static white backdrop on every frame
+to blur nothing. `sticky bottom-0` stays as the guard for the day `<main>`'s
+`overflow-y-auto` backstop fires.
+
+**Status.** Current
+
+#### Q3.556 — What identifies a control once it is inside a bounded box?
+
+**Decision.** Its own **action glyph**, and nothing else. Every chip in the
+composer's row is borderless — `border` stays in `CHIP` and only the colour moves
+to the call sites — and what carries 3:1 is the `ChevronDown` at `text-faint`,
+6.23:1 on `surface`. **So the chevron is drawn at every width and may never take a
+breakpoint.**
+
+**Why this reverses an app-wide rule, and how far.** `web-shell.md` said every
+field and every unfilled button is bounded by `edge-strong`, full stop. The
+amended sentence keeps that for a control **on a plane of its own** and withdraws
+it for one **inside a container already bounded at `edge-strong`**: the box is the
+identification, and a second outline inside the first is the noise Q3.555 exists
+to remove. It is not a new exception so much as an unwritten one — `menuRow` draws
+no border in either state because `MENU_PANEL`'s box identifies its rows, and
+`ICON_BUTTON_TONE.ghost` is borderless and fill-less and already ships on the
+header's chevron, the browser's filter, both sheet closes and the attachment
+chip's own Remove, eight pixels from the paperclip that was until now the one
+bordered thing beside them.
+
+**What does not qualify, both measured.** Text alone: a borderless button whose
+whole content is a word is a caption, whatever its contrast. And a fill: `raised`
+on `surface` is 1.22:1, which is why `edge-strong` was written in the first place
+and why the answer here had to be a glyph.
+
+**The two bounding cases are respected rather than overruled.** `SystemsPanel`
+refuses `ghost` for an irreversible act on an open pane — a lone control, which is
+what the first sentence is for. And Q3.49 reversed the context ring *from*
+borderless *to* bordered because "hover is not a state a phone has at all", which
+is true and is answered by pressing: every borderless chip here takes
+`active:bg-raised`, since `.tap` transitions `background-color` and `.press`'s
+`scale(0.97)` is nearly invisible on a control with no edge to scale.
+
+**One chip keeps a border, and only in one state.** `Toggle` when it is **on**.
+`bg-raised` at 1.22:1 groups a chip and cannot carry a boolean's whole state, and
+with everything around it borderless an outline is available as a *meaning* rather
+than as chrome. It costs no width, because `border` never left `CHIP`. The
+duplicate `font-medium` that sat in both arms went at the same time, having
+differentiated nothing.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.557 — Who owns the composer's control row, and what did moving it retire?
+
+**Decision.** `Composer`. It lays out the paperclip, `AgentConfigBar`'s cluster
+and nothing else in one flex line inside the box; the strip takes no `leading`
+node and `configBarShows` is **deleted**.
+
+**Why.** The paperclip belongs to the component that owns `fileInput`,
+`slotsFull` and `attach`, and it was a `ReactNode` prop with a docblock explaining
+why it was a node rather than attachment props — a comment that existed only
+because of the coupling. What that coupling also produced was `configBarShows`,
+whose third clause guarded exactly one failure: no bar, so no paperclip, so no way
+to attach a file on a session with no live agent (Q3.83). With the paperclip out
+of the bar the failure is structurally impossible rather than asserted, and what
+was left of the predicate was `optionCount > 0` — an ordinary empty render and not
+a rule. A check whose subject cannot occur is not coverage.
+
+**And the strip stopped knowing an agent's name.** `agent: AgentId` was there for
+the context readout alone, by its own docblock. With that gone the file is keyed
+on ACP's `category` and on nothing else, which is the rule it always stated with
+one exception it no longer needs.
+
+**`gap-1.5` in that row is arithmetic, not taste.** `TAP_GROW_Y` grows a chip's
+target 4px upward and its docblock's "the textarea's own bottom edge is 6px above"
+*is* this gap. Tighten it and a tap aimed at the end of a draft opens a model menu.
+
+**Alternative taken out — `AgentConfigBar` keeping the row and gaining a
+`trailing` prop for Send.** It leaves `configBarShows` alive as a guard that is
+now always true, which is worse than deleting it; and it puts Send, Stop and both
+spinner branches — and therefore Q3.222 and Q7.103, which are `Composer`'s rules —
+a file away from the `send` and `cancelTurn` code they constrain, inside a
+component whose stated subject is ACP categories.
+
+**Status.** Current
+
+#### Q3.558 — Why is the context readout deleted from the browser rather than moved or hidden?
+
+**Decision.** Deleted. The ring component, its two paint tables, and the five pure
+functions behind it — the percentage, the label, the thresholds, the agent-specific
+"why is this empty" sentence and the short token count — are gone from
+`packages/web`, along with twenty-one `webcheck` assertions and the `usage` and
+`agent` props that fed them. They are named in prose rather than cited, because a
+name in backticks in this file has to grep to something and these no longer do.
+
+**Why.** The owner's call, and the reason is what it reported rather than where it
+sat. It was blank for the whole life of every kimi session — `usage_update`
+appears in kimi's bundle exactly once, inside the vendored schema for the
+protocol, a shape it can parse and never one it sends (Q7.26) — and blank on any
+session waiting for its agent, since a dead agent publishes no usage. A control
+that is empty on most agents most of the time is not worth a slot in a row whose
+every other member *sets* something.
+
+**Hiding it was already the answer and it had run out.** It was `hidden sm:flex`,
+so it had not been on a phone since that decision; what was left was a desk-only
+readout carrying two paint tables, a popover, an `overlay.ts` layer and an
+agent-name prop through the whole file.
+
+**What stays, and why that is not an oversight.** Everything on the daemon:
+`ContextUsage` in `src/events.ts`, `Session.contextUsage`, `usageWorthAnnouncing`
+and the snapshot mirror in `registry.ts`. Two non-browser clients read it —
+`scripts/client.ts` prints `ctx N%` and `scripts/harness.ts` prints a
+`context_usage` line — and `contextUsage` stays declared on `wire.ts`'s
+`SessionSnapshot`, which is the hand-mirrored copy Q3.406 requires. ⚠ **With
+nothing in `packages/web` reading that field, `webcheck.plugin-protocol.ts` is
+the only thing holding it there**, and it is worth knowing that before the next
+tidy-up: the assertion is about the mirror being complete, not about a consumer.
+
+**Alternative taken out — moving it into `…`.** The overflow popover is built
+from `slots`, a partition over the *agent's own* controls with an assertion
+counting every member. Putting a readout there means either lying to that
+partition or teaching it about a control no agent publishes.
+
+**Alternative taken out — keeping the pure functions.** They are cheap and they
+were asserted, which is the argument for keeping anything in this repository. But
+an asserted function with no caller is a rule about nothing, and Q7.9's own text
+says that list has to name functions that exist.
+
+**What is lost.** The one honest thing the popover did: on claude and codex it
+answered "how much room is left" without spending a turn. Anybody who wants it
+back has the field on the wire and `pnpm client` printing it today, and Q7.132
+records what a second attempt would owe.
+
+**Status.** Current
+
+#### Q3.559 — Why does the mode chip no longer say "Mode"?
+
+**Decision.** `showsCaption` is false for every category `CATEGORY_ICON` has an
+entry for. A chip draws its own name **exactly where no glyph does**, and then at
+every width; the caption's `hidden sm:inline` is deleted with the exception that
+needed it.
+
+**Why.** The owner's call, from a screenshot of the reference clients: theirs read
+"Default" where ours read "Mode Manual". The argument for keeping it — "Manual"
+alone leaves nothing saying what is on manual (Q3.401, Q3.417) — undercounted what
+else was already saying it. The chip draws `SlidersHorizontal`, sits in the fixed
+leftmost slot the mode control has had since the row existed, and answers "Mode" to
+a screen reader through an unconditional `aria-label`. The word was the third copy,
+and it was the third copy on the narrowest strip in the app, next to the value it
+was pushing into a truncation.
+
+**What falls out, and both halves are simplifications.** The row is one word
+shorter on every agent — about 38px at `sm` and above, where the caption was still
+drawn. And the breakpoint goes: a caption now belongs only to a chip with no glyph
+to hide behind, so there is no width at which hiding it is right. That is Q3.401's
+own rejection arriving a second time from the other end — it refused
+`hidden sm:inline` as a width question answered by a breakpoint, and the fix that
+replaced it grew one back.
+
+**⚠ The cost, stated because it is a real one.** `CAPTION_SILENT` is now the key
+list of `CATEGORY_ICON`, written out twice in two files. It cannot be one list:
+the icon table holds React components, so it lives in the `.tsx`, and importing it
+into `agentConfig.ts` would drag `ComponentType` and lucide into the one module
+`webcheck` evaluates with no DOM. Two lists that must agree is a defect unless
+something checks them, so `webcheck` reads the icon table off disk and asserts
+that nothing in it draws a caption. `model_config` is in the set for that reason
+alone — it has a glyph and is never drawn, being in the `hidden` slot — because a
+set that is *almost* the icon table is the version that rots.
+
+**Alternative taken out — dropping the caption below `sm` only**, which is what
+shipped and is what this replaces. It made the chip correct on a phone and left
+"Mode Manual" on every desktop, which is the same word saying the same nothing on
+the screen with the most room to notice it.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.560 — Why is the send control a circle with an arrow in it?
+
+**Decision.** A filled circle holding `ArrowUp`, through a `shape` prop on
+`IconButton` rather than a class. Stop and both spinner boxes take the same
+circle, and all four are `size="chip"` — 32px of ink, 44px of target through
+`TAP_GROW_Y`, the same box the chips beside them draw.
+
+**Why, on the glyph.** The paper plane is a *mail* metaphor and this is not mail:
+nothing is addressed, nothing is filed, and the reply lands in the same column a
+moment later. An arrow says "up, into the conversation above", which is what
+happens.
+
+**Why, on the shape, and this is the half that was actually wrong.** A filled,
+hard-cornered 44px square holding an icon is the shape a **Stop** control has —
+and Stop genuinely appears in that exact slot a second after a turn starts. The
+composer was drawing the two states in one shape and distinguishing them by a
+glyph inside it. A circle for the affirmative action and a square only for the
+one that halts is the distinction every phone chat client draws, and it costs
+nothing here because the slot's four occupants can all take it.
+
+**Why 32px and not 44.** Asked for: 44px of filled black was the loudest object in
+the composer. `ICON_BUTTON_SIZE.lg`'s docblock said "the composer's send button,
+and nothing smaller", and that sentence is amended rather than ignored — what it
+was protecting is the 44px *target*, which `chip` reaches the same way the
+paperclip does, and what it was warning against was the deleted `md`, which
+reached 36px and stopped there. A middle size was tried and taken back out:
+`h-9 w-9` with a growth mechanism clears the floor honestly, but
+`webcheck.decision-surfaces.ts` bans 36px in that table **under any name**, on the
+argument that the number reappearing is the old defect with its evidence removed.
+Editing that assertion to admit one call site is the move it exists to prevent, so
+the row is one height end to end instead.
+
+**⚠ It is the second exception to the app's one-radius rule**, after `tabPill`,
+and it is named in `bits.tsx` beside the rule rather than left to be discovered.
+The exception is bounded by being a **prop with one call site** rather than a
+class anybody can pass — which is also why it is a prop at all: Tailwind emits
+every utility at one specificity inside one layer, so a `rounded-full` handed in
+through `className` would beat or lose to the primitive's `rounded-md` by emission
+order rather than by intent, which is the trap `ICON_BUTTON_SIZE` already carries
+a ⚠ about.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.561 — How loud is a control below the message field, and how far from its neighbour?
+
+**Decision.** A live chip rests at `text-muted` and takes `text-fg` only under a
+pointer; the filled send control is the one dark thing in the box. The row has two
+gaps — wider between the paperclip and the agent's cluster, narrower inside it —
+and `CHIP`'s own gap was `gap-1`, four pixels between a chip's glyph, its value and
+its chevron rather than six. A chip is one control read as one word; at six the
+three parts read as three things, and it was 8px a chip on the row with the least
+width in the app. ⚠ **That half is reversed and is `gap-1.5` again** — measured on a
+phone it is the other failure: the glyph and the value *touch*, and a control whose
+whole identification is its glyph cannot afford it read as part of the word beside
+it. The width is affordable for the reason the row's own gap is, the model chip
+having folded away below `sm`, so it pays two chips rather than three.
+
+**Why the tone.** Requested against the reference clients, and the count is the
+argument: they draw one pill below the field and we draw three. Three near-black
+values read as three things asking for attention, none of which is the action.
+`text-muted` is 7.75:1 — well over the 4.5:1 floor for 12px — so nothing is
+harder to read; what changes is that the eye lands on Send first.
+
+**And it gave the refused state something to be.** With the live chip at
+`text-fg`, `text-faint` was an eleven-point drop; at `text-muted` it is one and a
+half, which is not a signal. What carries it instead is **flatness**: a live chip
+is two-tone — a `text-muted` value between `text-faint` glyphs — and a refused one
+is uniformly faint with no hover and no press fill anywhere on it. `stale` moves
+every chip in the row at once, so it reads as the row being away rather than as
+one dead control.
+
+**Why two gaps rather than one.** The paperclip acts on the *message*; the chips
+describe the *turn*. A single gap draws them as one undifferentiated run of five
+controls, which is what "spread them out so they divide logically" was about. 12px
+where the kind of control changes and 8px inside a group is the smallest pair that
+reads as two groups.
+
+**Measured.** Both clear the 6px `TAP_GROW_Y` was measured against, so neither
+tightens a tap target; both stay far under the 20px a symmetric grow would need,
+which is why that growth is still vertical-only. At 390px the row was 32 + 12 + 91
++ 8 + 90 + 8 + 100 = 341px of 352px of box interior, against 331 before — eleven
+pixels of slack where there were twenty-one, and the same truncation behaviour
+under pressure that was always the below-`sm` rule.
+
+**Status.** Current, with the numbers superseded by Q3.563: Send joined this row
+and the gaps took a breakpoint, `gap-2 sm:gap-3` and `gap-1.5 sm:gap-2`. The
+grouping is unchanged and so is the reason for it; what changed is that above `sm`
+it gets its full width and below `sm` it pays four pixels a gap to a row that no
+longer fits.
+
+#### Q3.562 — What does the empty composer say?
+
+**Decision.** `type / for commands` — and `message…`, which is what it always
+said, on any session where `/` would open nothing.
+
+**With no "message" in front of it**, which is the owner's correction to the first
+version of this line. An empty box already reads as somewhere to write; that is
+what an empty box *is*. The word was the half a placeholder does not have to
+carry, and the key is the half nothing else on screen says.
+
+**Why.** `/` is the only affordance in the composer that nothing on screen
+advertises. The strip below the box shows the settings; the attachment chips show
+what is staged; Send shows itself. The command menu — the agent's own published
+commands **and** the three controls it does not publish — was discoverable by
+typing a character and seeing what happened, which is discoverable by people who
+already know.
+
+**⚠ Why it is conditional, and why that is the whole reason this is not a string
+in the JSX.** A session whose agent is away publishes no commands, and
+`buildCommands` synthesizes `/model`, `/effort` and `/mode` from an `agentConfig`
+that is absent on exactly the same sessions — so the menu is empty there, and an
+unconditional hint would be the box promising a key that does nothing. That is
+common rather than rare: it is every restored session, for the whole window before
+the agent comes back. `composerPlaceholder` takes `hasCommands` and `webcheck`
+asserts the pair, because a hint and its condition are one rule and asserting only
+the hint is how the condition goes.
+
+**The caller passes the unfiltered list.** `entries` and not `matches`: the
+promise is that the key opens something *on this session*, which is true or false
+before anything has been typed into the box.
+
+**Status.** Current
+
+#### Q3.563 — Why is Send on the control row, given the arithmetic that refused it?
+
+**Decision.** On the row, `ml-auto`, after the agent's cluster. The box is the
+`<form>` again, since a submit button has to be inside what it submits.
+
+**Why.** Asked for, twice, against the measurement in Q3.555 — which is the record
+of it having been refused and is left standing there. The reference clients put
+the attach control, the model pill and Send on one line under the text, and the
+composer reads as one object rather than as a field with a toolbar when they are.
+That is a judgement about how the box reads, and it is the owner's to make.
+
+**What it costs, measured, because it is a real cost and not a rounding error.**
+A 390px screen gives the box 352px of interior. The row wants the paperclip (32),
+three chips at 51px of chrome plus their values — mode "Default" 46, model
+"Opus 5" 39, effort "Adaptive" 49 — a 44px filled Send, and four gaps: **399px**.
+The values are what give, since `min-w-0` and `truncate` are already how this row
+behaves below `sm`, and there is no width at which three pills and two icon
+buttons fit a phone. Above `sm` there is no contest: the same row with the width
+reserves on is 465px of 602.
+
+**Two things bought a little of it back and neither is a fix.** The gaps took a
+breakpoint — `gap-2 sm:gap-3` on the row, `gap-1.5 sm:gap-2` inside the cluster,
+about 8px — which is a *space* question answered by a breakpoint, the one thing a
+breakpoint is honestly for. And the mode caption had already gone (Q3.559), though
+that bought nothing at this width: it was `hidden sm:inline` and was never drawn
+on a phone.
+
+**Rejected — shrinking Send to 32px.** `ICON_BUTTON_SIZE.lg`'s docblock says "the
+composer's send button, and nothing smaller", and the deleted `md` is the entry
+that says why a size that misses 44px is the one a careless call site gets. Eight
+pixels is not worth reopening it.
+
+**Rejected — dropping a chip below `sm`.** "A control never leaves the strip" is
+Q3.404 and Q3.405, and it is the rule this row is built around: a button that
+vanishes moves everything beside it and explains nothing.
+
+**⚠ The structural consequence, which is the part to remember.** The box was a
+`<div>` wrapping a smaller `<form>`, and that arrangement was what kept the
+strip's hand-rolled `<button>`s — `Select`, `Absent`, `Toggle`, the choice rows —
+from inheriting `type="submit"` and sending the draft when a chip is tapped. Send
+inside the row means the row inside the form, so the structure is spent and the
+explicit `type="button"` on each is the whole of the guard. `webcheck` sweeps
+every `<button` in `AgentConfigBar.tsx` **and** in `Composer.tsx`,
+comment-stripped, and asserts the sweep found some — an emptiness that passes
+because nothing matched is the failure mode of every assertion in this style.
+
+**Status.** Current
+
+
+#### Q3.564 — Why do the chips size to their content again?
+
+**Decision.** No reserve. A chip is as wide as what it says, bounded above by
+`CHIP_MAX` (128px) and clipped with `truncate`. `chipReserve`, `CATEGORY_RESERVE`
+and `ChipParts.reserve` are deleted, and with them the invisible sizer spans and
+the `sm:absolute` value that made a reserve a width rather than a floor.
+
+**Why.** Asked for, looking at the row: a chip sized for `Ultracode` while saying
+`Max` is mostly empty box, and there were three of them side by side in the
+narrowest row in the app. The reserve was a correct answer to a question about
+*movement* and it was paying for that answer in permanent blank space, at every
+width, on every session.
+
+**⚠ What it costs, and none of it is new — it is Q3.402 and Q3.417 read backwards.**
+The right-hand cluster is right-aligned, so a chip that grows drags everything to
+its left: `Adaptive` → `Max` moves the model chip. Two sessions on two agents draw
+two shapes, so switching between them moves every button. And an unavailable slot
+saying `—` is now *narrower* than the control it stands for, which is the second
+half of Q3.404 — the first half, that it must not draw a **name** the live chip
+does not, is structural and survives.
+
+**What is left holding it together.** `chipParts` still returns a caption that does
+not depend on availability, so a withdrawn control changes one string and not the
+shape of the chip. `CHIP_MAX` stops a pathological value taking the row. And
+`webcheck` asserts the sizers are **gone** as well as the cap being present — a
+revert would bring the empty box back with them, so the absence is the assertion.
+
+**Measured.** 128px is about eighteen characters at `text-2xs`, which clears every
+ordinary value the four agents publish — `Accept Edits` (68px), `GPT-5.6-Luna`
+(75px), `Ultracode` (53px) — and clips the rare long one. The full text is in the
+menu and in the chip's `title` either way, which is what happened below `sm` all
+along: the sizers were `hidden sm:block`, so **this is what a phone has always
+drawn**, and what changed is that the desktop stopped being the exception.
+
+**One thing that went with it and did not need to.** `CATEGORY_RESERVE` was the
+client's reason for hand-mirroring the daemon's `Ultracode` *name*. The pin in
+`webcheck.stream-and-http.ts` stays, because the name is still what the chip
+draws — it is now asserted against `chipValue` rather than against a column it had
+to fit inside.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.565 — How does a config picker become a bottom sheet on a phone without a breakpoint in JavaScript?
+
+**Decision.** It draws **twice**. `Select` renders the anchored panel it always
+had, `hidden … sm:block`, and a portalled bottom sheet, `sm:hidden`, from one
+`open` state and one `useDismissible("menu")`. Below `sm` the model chip leaves
+the row — `hidden sm:contents` — and its choices fold into the mode picker as a
+third list, `narrow`, beside `nested`.
+
+**Why twice.** Asked for: a sheet on a phone, and the shell's rule that a
+breakpoint is known in CSS kept deliberately after being shown what it protects.
+Those two together leave one shape — render both, let `display` choose — because
+a window dragged across the breakpoint must not be able to draw a picker that is
+not there. That is `AppShell`'s own argument reaching one control further in.
+
+**⚠ Why it is not `Sheet`, which is the part worth reading before changing this.**
+`Sheet` is the app's bottom-sheet-on-a-phone, centred-card-above-`sm` component
+and it looks like exactly the right answer. It cannot be used here, for three
+reasons and the first is structural. It sets `inert` on `#root`, takes focus and
+registers a `"sheet"` layer **the moment it mounts** — side effects a `display`
+class cannot gate — so a `Sheet` rendered here would lock the whole app behind an
+*invisible* panel every time somebody opened a popover on a desktop. It is
+route-backed, and a route for this would be one the app's single `OverlaySheet`
+does not draw, which `nav.ts`'s five sheet predicates would all have to answer for
+anyway. And its panel is `sm:h-[min(44rem,88dvh)] sm:max-w-2xl`: a 704px card for
+a four-row list. What is borrowed is the shape and the scrim; what is not is the
+machinery that assumes a sheet is the only thing on screen.
+
+**So Back does not close it, and that is the cost.** Escape does, through the one
+registration both presentations share; so does the scrim, and so does choosing a
+row. That is exactly the posture the popover it replaces already had, so nothing
+regressed — but it is not the posture every *other* pop-up in this app has, and
+somebody will reasonably expect Back to work. `overlay.ts` counts only a `"sheet"`
+layer when it decides whether to inert, which is why registering as a `"menu"`
+leaves the desktop app reachable behind its own popover.
+
+**⚠ `narrow` is a rendering and not a slot.** `splitOptions` puts `model` in
+`right` at every width and the partition assertion is untouched — one option, one
+slot, drawn in two places. Making it a slot would have meant a member counted
+twice in the one sum that says nothing is lost, which is the assertion's whole
+job. `foldedBelowSm` reads `slots.right` and keys on the category like everything
+else in the file, so a session publishing no model control folds nothing.
+
+**⚠ And it folds only where there is somewhere to fold into.** The mode control
+is not guaranteed: an agent can publish none, and one this client draws from memory
+arrives in `unavailable`, where `Absent` draws a chip with one row and no nested
+sections at all. Either way a model chip hidden below `sm` would put its choices
+nowhere — a control unreachable on a phone, silently, which is what "a control
+never leaves the strip" is written against. `splitOptions` already makes exactly
+this test before it lets anything into `nested`; this is that rule applied to the
+same host. It is a question about what the agent published rather than about a
+width, so JavaScript is the right place to ask it.
+
+**`contents` and not `flex` on the chip's wrapper**, measured rather than
+guessed: at `sm` and up the wrapper has to leave the layout entirely, or the chip
+becomes a flex item inside a flex item and stops taking the row's own `gap`.
+
+**⚠ And a portal breaks the outside-press listener silently.** The sheet is
+rendered into `document.body`, so it is outside the anchored panel's `boxRef` by
+construction. Tested against that alone — which is what the first version of this
+did — every tap *inside* the sheet, a row included, was an outside press: it closed
+the picker on `pointerdown`, the sheet unmounted, and the `click` that would have
+chosen the value landed on nothing. The control did nothing at all on a phone and
+said nothing, which is the failure this listener is a `pointerdown` rather than a
+`blur` in order to avoid, arriving through the one door that shape does not cover.
+Two refs, and the scrim is deliberately outside the second so a press on it still
+closes.
+
+**What two copies of one list cost.** Ids. `ChoiceSection` takes `where` and
+namespaces every id it generates, because an id must be unique in the *document*
+and both presentations are in it: without that, a refusal line carries the same id
+twice and every `aria-describedby` pointing at it resolves to whichever copy the
+browser reaches first — on a phone, the one that is `display: none`.
+
+**Status.** Current
+
+#### Q3.566 — What does a picker sheet owe beyond appearing?
+
+**Decision.** Four things, all reported from a phone against the first version of
+it. It **leaves** the way it arrived rather than vanishing. Its section headings
+carry the same glyph the chip that opened them draws. Its check mark is 14px at
+`stroke-[2.5]` and centred on the row's own line box. And the composer's control
+row spends more of its width separating the icons from the settings —
+`gap-3 sm:gap-4` where it was `gap-2 sm:gap-3`.
+
+⚠ **Two of the four did not survive the next screenshot, and one of them never
+worked at all.** The exit *was* written and did not play — Q3.567 has the
+measurement, and the keyframes named here are the defect. The wider gap was
+reversed on the owner's word one round later: 12px stopped drawing the paperclip
+as one of the row's own controls and started drawing it as something parked to the
+left of them, and Send, which adds `pl-1` on top, sat 16px off the last chip in a
+352px row with none to spare. It is `gap-2 sm:gap-3` again, which is what Q3.561
+measured, and the two-gap *grouping* both entries argue for is untouched. The
+heading glyph reached only `Absent`'s panel and not `ChoiceSection`, so the
+sections a reader actually sees drew none until Q3.568.
+
+**The exit, and why it could not be borrowed.** `sheet-close` in `index.css`
+takes a leaving panel off the screen through a view transition, and it can do that
+only because `router.ts` wraps the navigation that unmounts it — the old frame
+still exists to animate. This picker has no route (Q3.565), so nothing holds a
+snapshot of it. It keeps **itself** mounted instead: `dismiss` sets `leaving`,
+`--animate-sheet-out` plays the arrival keyframe in reverse, and a timer unmounts
+it `SHEET_EXIT_MS` later.
+
+⚠ **That is one duration written in two files**, so `webcheck` reads `index.css`
+and asserts the two agree. A timer shorter than the animation cuts the slide off
+mid-travel; a longer one leaves a finished panel sitting on the screen. Neither is
+visible to a compiler, and the CSS half is a custom property Tailwind emits no
+error for. The keyframes were **reversed rather than written out again**, which is
+what the routed sheet's own close rule does and for the same reason: two
+descriptions of one movement drift the first time either is tuned. ⚠ That is the
+half that was wrong; Q3.567.
+
+**And only one of the two presentations lingers.** `open && !leaving` draws the
+anchored panel and `open` alone draws the sheet, because a popover on a desktop
+has to go *now* and a sheet on a phone has to be seen going. Re-entrancy is keyed
+on the timer's ref rather than on `leaving`, since `dismiss` is captured by an
+effect whose dependencies do not include it — reading the state there would be
+reading whatever it was when that effect last ran, and a second tap on the scrim
+would restart the clock.
+
+**The check mark was the lightest thing in the panel and the only one that says
+which row is the answer.** It was an 11px glyph at the default weight in a 12px
+box with `mt-0.5` — two pixels of guess against a 20px line, which put it above
+the cap height of the name beside it and visibly out of line on a two-line row.
+`menuRow("start")` aligns to the top, so the fix is to make the box **be** the
+line: `flex h-5 items-center` puts the glyph in the middle of the type's own line
+box rather than near it. The box is drawn whether or not it holds anything, or
+every unselected row would sit four pixels left of the selected one.
+
+**The heading glyph is `label`, which is the chip's own lookup**, so a heading and
+the chip that opened it cannot come to disagree about what a control looks like.
+It answers `null` for a category `CATEGORY_ICON` has never heard of — which is
+exactly the case where the heading is the only thing naming the control at all,
+and where a missing glyph therefore costs nothing.
+
+**The row's gap is affordable again**, which is why this is a refinement rather
+than a reversal of Q3.561. Below `sm` the model chip folds into the mode picker,
+so a 390px row carries the paperclip, two chips and a 32px Send against 352px of
+box interior — where the four-control row it replaced was overflowing by more than
+forty pixels.
+
+**Status.** Current for the check mark and for the exit *timer*. The exit's
+keyframes are superseded by Q3.567 and the row's gap is back at Q3.561's numbers,
+both as recorded above. The heading glyph is current and reaches both panels as of
+Q3.568.
+
+#### Q3.567 — Why does a sheet's exit need keyframes of its own rather than the arrival's, reversed?
+
+**Decision.** `--animate-sheet-out` and `--animate-scrim-out` name `sheet-out` and
+`scrim-out`, which are their own two-line `@keyframes` blocks. They were `sheet`
+and `scrim` with `reverse` on the end, sharing one definition with the arrival, and
+**that never played**. `webcheck` now asserts that neither exit names the keyframes
+its arrival does, and that the keyframes it does name exist.
+
+**Why the tidy version is a no-op.** CSS Animations restarts an animation when the
+element's `animation-name` list changes and **only** then. Every other property —
+duration, easing, direction, fill — updates the animation that is already there. So
+swapping `animate-sheet` for `animate-sheet-out` on the same node, which is what a
+class flip on a mounted panel is, edited an animation that had finished 260ms
+earlier instead of starting one. It stayed in its after phase, and `both` then held
+what reversal had made its final frame: the 0% keyframe, `translateY(100%)`, off
+the bottom of the screen. The sheet was on screen in one frame and gone in the
+next, which is precisely the complaint it was written to answer.
+
+**Why nothing caught it.** Every layer said yes. `typecheck` has no opinion about
+CSS. Tailwind emitted the utility — the custom property was well-formed and the
+keyframes it named existed — so the built stylesheet held `animate-sheet-out{
+animation:var(--animate-sheet-out)}` and grepping for the class, which is this
+repository's standing remedy for Tailwind's silent failure on unknown tokens, found
+it. `webcheck` asserted the two durations agreed, which they did. The defect was
+entirely in *when* the browser considers an animation to be a new one, and that is
+visible only on a screen. It was reported by the owner on a phone.
+
+**The cost of the fix, stated plainly.** The numbers are now written twice, which
+is what the reversal existed to avoid and what the routed `sheet-close` rules still
+do. What holds the two halves together instead is that the exit's easing is the
+arrival's curve **mirrored** — `cubic-bezier(1 - x2, 1 - y2, 1 - x1, 1 - y1)` —
+rather than a curve picked again, so tuning one and not the other is visible as an
+asymmetry rather than as nothing.
+
+**Status.** Current. Supersedes the exit half of Q3.566.
+
+#### Q3.568 — What does a picker sheet owe once its rows are taller than it is?
+
+**Decision.** Two detents and a pinned head. The sheet rests at 60dvh — which is
+`.config-sheet`'s own `--sheet-max` **default**, so a picker whose rows already fit
+is laid out by its content — with those rows **not scrolling**, and the gesture
+that would have scrolled them takes it to `SHEET_FULL` (92dvh), where they do. The
+grab bar is a `<button>` carrying `aria-expanded`, and it is a flex sibling of the
+scroller rather than its first child. A drag on it, or on the list at rest, moves
+the panel under the finger and settles onto the nearer detent when it lifts;
+downward past `SHEET_DISMISS_PX` below rest, it dismisses. Every section heading now
+draws the chip's own glyph, in both presentations.
+
+**The geometry is four custom properties on the panel, and the only React state in
+this gesture is which detent the *list* is drawn for.** `.config-sheet` declares
+`--sheet-h`, `--sheet-min`, `--sheet-max` and `--sheet-y` with defaults that **are**
+the resting sheet, and `paint` writes over them straight onto the node — so "at rest" is the absence of every write and cannot drift from what
+the stylesheet says rest is. This is `AppShell`'s `--rail-w` decision applied one
+control further in, and for a worse list: a pointer moves sixty times a second, a
+render here is every row of the open picker — 362 of them on opencode, each a
+`<button>` — and the panel would arrive where the finger had been. React therefore
+sets **no** `style` on the panel, which also keeps a single writer on those
+properties; two would settle by emission order, the trap `FIELD` records.
+
+**What was reported.** Three things, from a phone, against Q3.565's first sheet:
+the grab bar *"rides up with the window instead of being fixed"*, it *"is not
+functional"*, and the options *"scroll down by default — it should go full screen
+first"*. All three are one structure. The panel was a single `overflow-y-auto` box
+with the bar as its first child, so on the one control where scrolling happens at
+all — a model list, which on opencode is 362 rows — the bar scrolled away with the
+first screenful. It was `aria-hidden`, it had no handler, and it advertised a
+gesture that did nothing.
+
+**Why two detents rather than a taller sheet.** A picker that always covered 92% of
+the screen would hide the message somebody is choosing a model *for*, which is the
+whole reason this is a sheet over the conversation rather than a route. 60dvh is
+unmistakably a panel over something; 92 is `SHEET_PANEL`'s own phone height, so the
+two kinds of sheet in this app agree about what *full* means.
+
+⚠ **The full detent was `max-height` alone, and that made the gesture work on one
+chip and not the next.** The argument for it was that a cap leaves a short picker
+at its content height, so a three-row mode menu could not open as a 60dvh box with
+50dvh of white in it — and the cost was named at the time as *"expanding a sheet
+whose rows already fit does nothing at all"*. That cost was not a corner: the
+effort control is four rows on every agent and never comes near 60dvh, so it was
+simply immovable while the model control beside it obeyed the same drag. Two chips
+on one row answering one gesture differently is a defect, and the empty space under
+four rows in a sheet somebody deliberately pulled open is not — it is what every
+phone client draws. `SHEET_FULL` sets `min-height` **and** `max-height` now.
+Reported as *"effort should stretch too, and currently cannot"*.
+
+**Why the gesture follows the finger.** ⚠ **It did not for one round, and the
+reason given was wrong twice over.** The panel changed detent when a drag passed
+`SHEET_DRAG_STEP` and then animated there by itself — a button worked by swiping,
+moving a distance with no relation to the distance dragged, and ignoring the hand
+on it while it did. Reported as *"the menu does not follow the finger — it just
+changes state"*. The argument against following was that it needs the panel's own
+height in JavaScript, *"which is the measurement `AppShell`'s CSS-only rule keeps
+out of this app"*. That rule is about **which layout to draw**, and reading where a
+panel is against where a finger is decides no layout at all: the picker's two
+presentations are still chosen by `display`, and a resized window still cannot
+produce one that is not there. The second half — *"a rubber band nobody asked for"*
+— answered a feature nobody built.
+
+**How it follows.** The panel's height is measured once at `pointerdown` and every
+move is one subtraction against it: `from.height - travelled` is where the top edge
+wants to be. Above the resting height that *is* the height, capped at the full
+detent. Below it the height stops and a `transform` slides the panel instead —
+shortening past the rows would eat them from the bottom while the box stayed
+anchored, which reads as the content being consumed rather than as the panel
+leaving. Both arms come off one `wanted`, so the hand-off between them has no step
+in it. `SHEET_DRAG_STEP` survives as the slop that separates a drag from a tap on a
+row rather than as the whole decision, and the release picks the nearer detent —
+or dismisses, if the panel was pulled more than `SHEET_DISMISS_PX` below rest, in
+which case the offset is **kept**: `sheet-out` has no `from` of its own and takes
+the element's current transform as one, so clearing it would snap the panel back up
+before sliding it down.
+
+**Two numbers that are one number, and one that is in two files.** A drag has to
+compare a pixel height against the full detent and CSS will not hand one over, so
+92 is written as `92dvh` in `SHEET_FULL` and as `SHEET_FULL_SHARE = 0.92` beside
+it; `webcheck` reads both and asserts they agree, because drift there is invisible
+— the sheet settles a little short of the height it then snaps to when the inline
+height clears. And the settle's duration is in `AgentConfigBar.tsx` and in
+`.sheet-settle` in `index.css`, pinned equal for the reason `SHEET_EXIT_MS` is: the
+timer is what hands the height back to the detent classes, so a short one cuts the
+settle off and a long one leaves a pixel height pinning a sheet that has stopped
+moving.
+
+**Where the handlers sit.** `pointerdown` on the panel, `pointermove` and the
+release on the **scrim** — which is the whole viewport, so a finger that leaves the
+panel keeps moving it — and the panel takes `setPointerCapture` the moment the drag
+engages. ⚠ **Capture is not belt-and-braces here.** A finger dragged past the top of
+the viewport and lifted there delivers its `pointerup` to nothing this component
+renders, and the gesture would never end: the panel would sit pinned to its last
+pixel height with the transition switched off. And ⚠ **it is taken at engage rather
+than at `pointerdown`**, which is the whole of what made it usable. Capture
+retargets the compatibility `click` to the capture target, so capturing on every
+press would send a tap on a model row to the panel and the row would never be
+chosen. Taken after the slop, it only ever retargets a click a *drag* produced —
+which is the click the panel's capture-phase guard is already there to swallow.
+
+⚠ **A drag leaves a click behind, and it would have chosen a model.** A touch that
+ends without the browser having scrolled anything still fires `click` on whatever
+was under it, and at rest every row is a button — so dragging the sheet shut would
+also have switched the model, silently, on the way out. One capture-phase handler
+on the panel swallows that click, which is one guard for both sections rather than
+a flag each row has to remember to read.
+
+**And the heading glyph finally arrives.** Q3.566 put `label` on a heading and put
+it on `Absent`'s panel — the one drawn for a control the agent has *withdrawn*,
+which is the rarest thing here — while `ChoiceSection`, which draws every section
+of every live picker, was left as it was. So the change shipped and was invisible.
+It is asserted by count now, both call sites, rather than by presence.
+
+⚠ **The settle's last write may not animate, and that was a bounce at the end of
+every gesture.** When the timer hands the height back to the defaults it is moving
+`min-height` and `max-height`, both animated properties, from the gesture's free
+bounds to the detent's. Settling a long list to rest sent `--sheet-max` from 92dvh
+to the 60dvh default *over 300ms* while `--sheet-h` was cleared to `auto` in the
+same frame, so the panel sprang to full height and shrank back; opening a short
+picker was the mirror of it, `--sheet-min` climbing 0 → 92dvh while the height fell
+to its content. Neither is a movement anybody asked for — by then the panel is
+already exactly where it belongs and the write only says so. Reported as *"it goes
+back to where it started and then winds round again"*, against a drag that was
+otherwise following the finger correctly. `paintNow` is that write: the transition
+off, the properties set, and the transition back a frame later.
+
+**And the transition is a literal switched off *inline*.** It was a fifth custom
+property substituted into `.config-sheet`'s `transition` shorthand and set to `0s`
+for the length of a gesture. A `var()` inside a shorthand makes every longhand it
+expands to a pending-substitution value resolved after the cascade — a thin place in
+more than one engine, and harder to reason about than a number, on the one property
+whose whole job is to *not* apply at the moment it matters. `settling()` writes
+`style.transition` instead, one inline longhand that cannot lose to anything, and
+React writes no `style` on this element so there is nothing for it to lose to.
+
+**The head is 32px reaching 44px, not 44px of padding.** `min-h-11` put twenty
+pixels of nothing between the sheet's top edge and a four-pixel bar, which was
+reported as too much room above the grabber. It carries `TAP_GROW_Y` now — the
+chips' own arrangement, 4px up and 8px down from a 32px box — so the target is
+unchanged and the head is twelve pixels shorter. The growth reaches down over the
+first section's *heading*, which is text rather than a control, so nothing
+pressable sits under it.
+
+**Status.** Current. The `max-height`-only full detent and the discrete gesture
+are superseded above, both by measurement from the same phone that reported them;
+so are the `--sheet-settle` property, the flat 44px head, and Q3.561's `gap-1`.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -17339,12 +18121,12 @@ direction would turn a layering rule into a runtime dependency.
 | `packages/web/src/keys.ts` | Enter-to-send, the command menu's keys, and the bare-letter shortcut guards, as pure functions so `webcheck` can assert them with no DOM. Enter is claimed by two of them, and `composerKey` is where that collision is resolved — here rather than in a JSX prop, because the resolution is the part worth asserting |
 | `packages/web/src/ui/AppShell.tsx` | The adaptive layout. Rail beside content at `lg`, single column below, decided in CSS |
 | `packages/web/src/ui/Markdown.tsx` | Agent output rendered as markdown; code blocks with a lazily-loaded highlighter |
-| `packages/web/src/ui/Composer.tsx` | Where a prompt is written: Enter to send, auto-grow, optimistic echo, per-session draft, and the `/` menu. Takes the caret when the session changes under it — except on a coarse pointer, and except after `j`/`k` |
+| `packages/web/src/ui/Composer.tsx` | Where a prompt is written, and the **box** everything else at the bottom of the screen is inside: Enter to send, auto-grow, optimistic echo, per-session draft, the `/` menu, the attachment chips, the paperclip and the control row. Takes the caret when the session changes under it — except on a coarse pointer, and except after `j`/`k` |
 | `packages/web/src/ui/composing.ts` | What the empty composer says and who gets the caret, as pure functions. Holds the two captions that were deleted for moving the box somebody was typing in, the `j`/`k` one-shot flag that stops autofocus eating the next keystroke, and `focusWorthKeeping` — which focus is worth *not* taking, the clause whose first version made the whole feature dead on Chromium |
 | `packages/web/src/ui/commands.ts` | What a `/` in the composer means, as pure functions: where the token starts and ends, which entries exist and which of the two sources each came from, and how a query ranks them |
 | `packages/web/src/ui/CommandMenu.tsx` | The menu itself: the agent's own commands and the controls it does *not* publish as commands, in one list, in two stages. Never takes focus — the caret stays in the textarea, so rows are not tab stops and the highlight is an index that has to be scrolled into view by hand |
-| `packages/web/src/ui/AgentConfigBar.tsx` | The composer's control strip: mode left, model/effort/context right, everything else behind `…`. Drawn from ACP's `category`, never from an id. One height and one radius for everything in it, the paperclip included; the context readout is a ring you press for the numbers, and it holds its slot whether or not there is anything to report |
-| `packages/web/src/ui/agentConfig.ts` | Its rules as pure functions — slotting, labelling (`labelFor` for two agents' words for one *control*, `choiceOverride` for two agents' words for one *choice*, plus the two values named `Default` that no agent explains), the context readout (the percentage, what the popover says in words, and the thresholds the ring changes colour at), and the prose the snapshot strips — so `webcheck` can assert them with no DOM |
+| `packages/web/src/ui/AgentConfigBar.tsx` | The agent's own controls, as a cluster inside the composer's control row: mode left, model/effort right, everything else behind `…`. Drawn from ACP's `category`, never from an id — and, since the context readout went, from no agent's name either. One height and one radius for every chip; none of them draws a border, because the box around them does |
+| `packages/web/src/ui/agentConfig.ts` | Its rules as pure functions — slotting, labelling (`labelFor` for two agents' words for one *control*, `choiceOverride` for two agents' words for one *choice*, plus the two values named `Default` that no agent explains), and the prose the snapshot strips — so `webcheck` can assert them with no DOM |
 | `packages/web/src/ui/Bubble.tsx` | The user's own messages, right-aligned and hugging their content. One component, three call sites, so they cannot diverge again |
 | `packages/web/src/ui/settings/` | Settings as a list and a detail, since it stopped being one flat scroll: `SettingsNav` (the rail at `lg`, the whole screen below it, and the blocked count it owes the list it replaces), and one file per section — Account, Machines, Server settings and Users. `AgentsPanel` is what `ui/Settings.tsx` became: the wizard that drives an agent's own login under a pty, plus a paste box for a token minted elsewhere. Signing in is **not** a section of its own any more — it is a property of a machine, so `MachineSystemsSection` and `SystemsPanel` hang two depths down inside one, and `AgentsPanel`'s wizard is mounted from there and from the New session strip alike |
 | `packages/web/src/ui/SessionBrowser.tsx` | The fleet: a Pinned group above one collapsible section per machine, at two densities. A pinned row is in both — pinning is a second way to reach a session, not a relocation. Blocked rows say so on their own status dot and are counted on their machine's header — where the count replaces the live count rather than mounting beside it — so a closed section cannot hide one. No search box, and the comment where it was says why one must not come back as component state |
@@ -22067,7 +22849,7 @@ deal more screen.
 
 **Position.** By pushing rules *out* of the JSX and into pure functions, which is
 the only form `webcheck` can reach. `readInput`, `slotFor`, `chipValue`,
-`contextPercent`, `configProse`, `labelFor`, `sessionGroups`, `visibleRows`,
+`configProse`, `labelFor`, `sessionGroups`, `visibleRows`,
 `sessionLabel`, `buildTail`, `placeNodes`, `mergeUpdates`, `resolveTool`,
 `stripFence`, `toolSummary`, `slashQuery`, `buildCommands`, `filterCommands`,
 `completion`, `configChoices`, `typeableName`, `commandScope`, `completionKey`,
@@ -22075,20 +22857,21 @@ the only form `webcheck` can reach. `readInput`, `slotFor`, `chipValue`,
 `admitFiles`, `sendableAttachments`, `canSend`, `pastedName`, `relativeTo`,
 `filenameFor`, `endedWithDaemon`, `waitingForDaemon`, `resumeStalled`,
 `showsAsEnded`, `countsAsLive`, `statusTone`, `sessionNotice`,
-`resumeFailureText`, `resumeRetryable`, `slowRoute`, `configBarShows`,
+`resumeFailureText`, `resumeRetryable`, `slowRoute`,
 `showsInTranscript`, `latestWorkspaceWarnings`, `showsWorking`,
-`composerPlaceholder`, `shouldFocusComposer`, `focusWorthKeeping`, `pieLabel`,
+`composerPlaceholder`, `shouldFocusComposer`, `focusWorthKeeping`,
 `elicitationForm`, `elicitationAnswer`, `fieldValue`, `humanRequests`,
 `needsHuman`, `waitingCount`, `oldestWait`, `elicitationOutcome`,
 `answerAlreadyLanded`, `essentialContext`, `detailContext`, `withheldDetail`,
-`pieTone`, `contextHint`, `permissionDecisions`, `refused`, `machineSubline`,
+`permissionDecisions`, `refused`, `machineSubline`,
 `sublineWarns`, `choiceOverride`, `sameNode` and `optionShortcut` are all shaped
 that way deliberately.
 
 **Why not yet.** The list is an inventory rather than a gesture, so it has to
 name functions that exist: `toolDetail` was on it until the redesign folded it
 into `readInput` and `EventList`, and a name that greps to nothing turns the
-sentence after it into a claim nobody can check.
+sentence after it into a claim nobody can check. Five more came off with the
+context readout — Q3.558 — for the same reason and not for a different one.
 
 **What it would take.** Existing is the floor and not the bar — the extraction
 commit listed four of these while `webcheck` imported three, and `placeNodes`,
@@ -22156,8 +22939,10 @@ release.
 
 ### Q7.13 — What did the polish pass add, and who found it?
 
-**Position.** Thirteen functions, five of them added by the review of the other
-eight — which is the argument for the list rather than an aside.
+**Position.** Eleven functions, five of them added by the review of the other
+six — which is the argument for the list rather than an aside. It was thirteen
+until the context readout took its two label-and-threshold halves with it; those
+are deleted rather than moved, and Q3.558 is why.
 `permissionDecisions` and `refused`, because a merged permission row drew a
 refusal as an approval and nothing could have caught it; `focusWorthKeeping`,
 because the clause it replaces was browser-dependent and therefore invisible to
@@ -22166,8 +22951,7 @@ deciding whether a waiting session can be hidden was a four-arm ternary in JSX.
 
 **Why not yet.** `showsInTranscript` is a rule about what a person reads, so
 getting it wrong is invisible to a compiler and obvious to everybody else;
-`pieLabel` and `pieTone` are the two halves of a readout whose own width used to
-move its neighbours; `showsWorking` is a three-clause derivation of "the agent is
+`showsWorking` is a three-clause derivation of "the agent is
 busy" that a two-clause one gets wrong in the two states that matter, mid-turn
 permission and death mid-turn; and `shouldFocusComposer` holds the `j`/`k`
 collision, which works perfectly for whoever wrote it and breaks for the first
@@ -22177,11 +22961,12 @@ person who navigates with the keyboard.
 
 ### Q7.14 — What did the restart work add?
 
-**Position.** Eleven functions, three of them extractions. `slowRoute` is the
+**Position.** Ten functions, three of them extractions. `slowRoute` is the
 table `machine.ts` spends a page describing and nothing checked, whose failure
-mode is a *healthy* machine rendered unreachable. `configBarShows` guards the
-clause that would have failed on exactly one agent — and the case it fails on
-stopped being rare the moment the composer began surviving a restart.
+mode is a *healthy* machine rendered unreachable. It was eleven: `configBarShows`
+guarded a clause that would have failed on exactly one agent, and it is deleted
+rather than superseded, because the paperclip moving out of the control strip
+made the failure it guarded structurally impossible. Q3.557.
 
 **Why not yet.** The five restart predicates are asserted as a **partition**
 rather than case by case, because the way that set breaks is a new state falling
@@ -22379,14 +23164,20 @@ sends — while `claude-agent-acp` 0.63.0 constructs it in three places.
 **Why not yet.** On kimi the readout is empty for the life of every session, and
 saying "the agent has not said" reads as *yet*, as though a number were coming.
 
-**What it would take.** The popover names the agent instead and points at
+**What it would take.** The popover named the agent instead and pointed at
 `/usage`, which kimi publishes as a builtin (`availability: "always"`, described
 in its own registry as "Show session tokens + context window + plan quotas" — so
-it answers the question this readout cannot, plan quotas included).
+it answers the question this readout could not, plan quotas included).
 
-**Measured.** 2026-08-06 against kimi 0.29.2.
+**Measured.** 2026-08-06 against kimi 0.29.2. **The measurement is the part of
+this entry that outlives it**, and is why a future readout may not promise a
+number on kimi: the shape appears in kimi's bundle exactly once, inside the
+vendored zod schema for the protocol — a thing it can parse and never one it
+sends.
 
-**Status.** Known limitation.
+**Status.** Superseded — Q3.558. There is no readout in the browser client to be
+empty, and the answer to "why is it always blank on kimi" is now that it is blank
+on every agent because nothing draws it.
 
 ### Q7.27 — Could the daemon just ask an agent for its usage?
 
@@ -22424,7 +23215,10 @@ under the same rule that admitted that field — small, fixed-shape, and useful 
 answering *does anything anywhere need me*. A reset timestamp and a percentage
 qualify; the blob does not.
 
-**Status.** Not built.
+**Status.** Not built, and there is no longer a popover for it to be missing
+from — Q3.558. The daemon half of the argument stands: `contextUsage` is still
+on the snapshot and `_meta` is still dropped, so anything built on this starts
+where this entry left it.
 
 ### Q7.29 — What shape does a permission carrying a diff actually have?
 
@@ -23651,8 +24445,8 @@ colour. What survives that?
 
 **The mechanism that made it a one-file change.** Every pure function here already
 returned a **rank**, never a colour — `statusTone`, `machineSubline`,
-`sublineWarns`, `sessionNotice`, `pieTone` — with the colour confined to paint
-tables. So the whole first half of the rework changed **no asserted signature**,
+`sublineWarns`, `sessionNotice` — with the colour confined to paint tables. A
+fifth, the context ring's own threshold function, went with the readout; Q3.558. So the whole first half of the rework changed **no asserted signature**,
 and "no existing `webcheck` assertion may need editing" was usable as the
 acceptance criterion. `sublineWarns` keeps its name deliberately: "warn" now names
 a rank, not a hue, and renaming it would cost two assertion edits on the one screen
@@ -26521,3 +27315,39 @@ purpose, so it is the second candidate, not the first.
 removed, so the day this class grows on a machine it will be visible as a
 table that never shrinks rather than as transcripts that vanished.
 
+
+### Q7.132 — What did deleting the context readout cost, and what would bring it back?
+
+**Position.** One reading is gone from the client and nothing replaced it: on
+claude and codex, "how full is this window" was answerable at a glance without
+spending the session's one turn, and now it is not. Q3.558 is the decision; this
+is the debt beside it, because the argument that carried it — blank on kimi, blank
+on any session waiting for its agent — is an argument about *most* agents rather
+than about all of them.
+
+**What is still true and still on the wire.** The daemon measures it, rate-limits
+it to a whole percent of change (`usageWorthAnnouncing`), and puts it on every
+snapshot. `pnpm client` prints `ctx N%` today. So the cost of a second attempt is
+a browser control and nothing else — no protocol work, no daemon work, and no new
+route.
+
+**What a second attempt would owe, and this is the whole reason to write it
+down.** Three things the first one got wrong or could not do.
+
+It must not promise a number on kimi. Q7.26's measurement is why: `usage_update`
+is a shape kimi parses and never sends, so "the agent has not reported this" reads
+as *yet* for the life of every session, and somebody watching it stay at zero
+reasonably concludes the client is broken.
+
+It must not cost width in the row of controls. Q3.555's arithmetic is unforgiving
+at 390px — three chips and a paperclip already spend 331px of 352 — so a readout
+belongs somewhere that is not the composer's control row at all: the session
+header, the session menu, or a screen you go to.
+
+And it should carry what Claude Code's does and this one could not: the plan
+limits. That is a daemon change rather than a layout one — the agent sends them as
+`usage_update._meta._claude/rateLimit` and the daemon drops `_meta` entirely
+rather than putting an unbounded agent-shaped blob on a snapshot that
+`GET /sessions` returns sixty at a time. Q7.25 and Q7.28 hold that half.
+
+**Status.** Known limitation, taken deliberately.

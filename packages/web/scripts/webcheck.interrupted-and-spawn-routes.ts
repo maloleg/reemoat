@@ -577,7 +577,6 @@ process.stdout.write("\nwhat an interrupted session says\n");
 process.stdout.write("\nthe routes that spawn a process\n");
 {
   const { slowRoute } = await import("../src/machine.js");
-  const { configBarShows } = await import("../src/ui/agentConfig.js");
 
   /*
    * The table `machine.ts` spends a page describing and nothing checked. Its
@@ -725,16 +724,6 @@ process.stdout.write("\nthe routes that spawn a process\n");
   );
 
   /*
-   * The control strip's early return, extracted because its third clause is the
-   * half that fails on exactly one agent — and the case it fails on stopped
-   * being rare the moment the composer began surviving a restart.
-   */
-  check("a restored session still draws its bar, for the paperclip", configBarShows(0, null, true), true);
-  check("and without one there is nothing to draw", configBarShows(0, null, false), false);
-  check("a context readout alone is enough", configBarShows(0, 42, false), true);
-  check("and so is a single control", configBarShows(1, null, false), true);
-
-  /*
    * The controls do not blink out of existence while the agent is away.
    *
    * The daemon drops `agentConfig` the moment the agent dies — deliberately, and
@@ -873,12 +862,19 @@ process.stdout.write("\nthe routes that spawn a process\n");
   /*
    * The sequence that is the bug, walked end to end: a restart is a live frame,
    * then an emptied `interrupted` one, then an emptied `starting` one. The strip
-   * must draw the same controls at every step and must never fall to the state
-   * where `configBarShows` has only the paperclip to keep it alive.
+   * must draw the same controls at every step.
+   *
+   * ⚠ **A third field used to ride this walk, and it is gone with the predicate
+   * it called.** `configBarShows` guarded one failure — no bar, so no paperclip,
+   * so no way to attach a file on a session with no live agent — and the paperclip
+   * is the composer's own control now rather than the strip's `leading` prop, so
+   * that failure is structurally impossible instead of asserted. What was left of
+   * the predicate was `optionCount > 0`. The subject of this walk was always
+   * `ids` and `stale`.
    */
   {
     let held = holdConfig(undefined, { status: "idle", agentConfig: live });
-    const drawn: { ids: string[]; stale: boolean; shows: boolean }[] = [];
+    const drawn: { ids: string[]; stale: boolean }[] = [];
     for (const status of ["interrupted", "starting", "idle"] as const) {
       const snapshot = {
         status,
@@ -889,7 +885,6 @@ process.stdout.write("\nthe routes that spawn a process\n");
       drawn.push({
         ids: step.options.map((option) => option.id),
         stale: step.stale,
-        shows: configBarShows(step.options.length, null, true),
       });
     }
     /*
@@ -900,9 +895,9 @@ process.stdout.write("\nthe routes that spawn a process\n");
      * this very sequence's complaint arriving through the fix for another one.
      */
     check("across a whole restart the same controls stay on screen", drawn, [
-      { ids: ["mode", "model", ABSENT_EFFORT], stale: true, shows: true },
-      { ids: ["mode", "model", ABSENT_EFFORT], stale: true, shows: true },
-      { ids: ["mode", "model", ABSENT_EFFORT], stale: false, shows: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: false },
     ]);
   }
 
@@ -1161,10 +1156,15 @@ process.stdout.write("\nthe routes that spawn a process\n");
      * by a word and a gap and shoved the whole right-hand cluster sideways, which
      * is the one thing this strip must never do.
      *
-     * The property is structural: everything that decides a chip's width — the
-     * caption and the reserve — is the same in both states, so the only thing
-     * that changes is the string inside a box already sized for it. Over every
+     * The property is structural: the caption does not depend on availability, so
+     * the only thing that changes is the string inside the chip. Over every
      * category, because the next control to be dropped will not be this one.
+     *
+     * ⚠ **It used to say "does not change width", and it cannot any more.** The
+     * fixed reserve that made that literally true was withdrawn (Q3.564), so an
+     * unavailable chip saying `—` is narrower than the control it stands for and
+     * the cluster does move. What survives is the half that was the actual defect:
+     * the absent slot drawing a *name* the live chip does not.
      */
     const shape = {
       id: "one",
@@ -1182,39 +1182,44 @@ process.stdout.write("\nthe routes that spawn a process\n");
       const shown = chipParts(one, true);
       const gone = chipParts(one, false);
       check(`a ${category} chip keeps its caption when the agent stops offering it`, gone.caption, shown.caption);
-      check(`and reserves exactly the same width`, gone.reserve, shown.reserve);
       check(`while its value says there is nothing to choose`, gone.value, "—");
     }
-    check(
-      "and that placeholder is inside the width the chip reserved",
-      chipParts({ ...shape, category: "thought_level" } as never, false).reserve?.includes("—"),
-      true,
-    );
+    /*
+     * And nothing else rides `ChipParts`, which is the shape of the claim above:
+     * two fields, one of which is availability-independent. A third would be
+     * something a chip's rendering depends on that this loop does not compare.
+     */
+    check("a chip is a caption and a value and nothing else", Object.keys(chipParts(shape as never, true)).sort(), ["caption", "value"]);
 
     /*
-     * **The reserve is a width, not a floor**, and the only thing that says so is
-     * a class: a grid column is as wide as the widest thing in it, so while the
-     * value sat in flow beside the sizers, a value longer than all of them
-     * widened the chip. `GPT-5.6-Luna` is one character more than the string this
-     * list was measured from, and that was enough for two codex sessions to draw
-     * two different strips. Taking the value out of flow is what makes the column
-     * exactly the reserve.
+     * **A chip is bounded above and by nothing else**, and the only thing that
+     * says so is a class. The fixed reserve is gone (Q3.564), so what stops a
+     * pathological value taking the row is `CHIP_MAX` on the value span and on the
+     * caption beside it — and what stops it overflowing instead of clipping is
+     * `truncate` on the same span, with the full text in the menu and the `title`.
      *
-     * Read off disk because there is no DOM here and the rule is one word in a
-     * class string — the kind of thing a tidy-up deletes without noticing, and
-     * every pure assertion above stays green when it does.
+     * ⚠ **Asserted as an absence as well as a presence.** The sizers are what a
+     * revert would bring back, and they would bring the empty box back with them:
+     * a chip as wide as `Ultracode` while saying `Max`, three times over. Read off
+     * disk because there is no DOM here and both halves are one word in a class
+     * string — the kind of thing a tidy-up changes without noticing, and every
+     * pure assertion above stays green when it does.
      */
     const bar = readFileSync(new URL("../src/ui/AgentConfigBar.tsx", import.meta.url), "utf8");
     const inner = bar.slice(bar.indexOf("function chipInner"), bar.indexOf("function Absent"));
-    check("the sizers only hold the width open where there is room for it", inner.includes("hidden col-start-1 row-start-1 whitespace-pre sm:block"), true);
-    check("and the value cannot widen the column it sits in", inner.includes("sm:absolute sm:inset-0"), true);
+    check("the value is capped and clips rather than overflowing", /\$\{CHIP_MAX\} truncate/.test(inner), true);
+    check("the caption takes the same cap", (inner.match(/\$\{CHIP_MAX\}/g) ?? []).length, 2);
+    check("and the fixed sizers are gone rather than hidden", inner.includes("col-start-1 row-start-1"), false);
+    check("with nothing left holding a width open", /max-w-40|sm:absolute sm:inset-0/.test(inner), false);
   }
 
   /*
-   * The context readout is deliberately **not** held. "A dead agent's window
-   * occupancy is not a fact about anything" — the ring keeps its slot and says
-   * "cannot tell", which is true, and `drawnControls` has nowhere to put a usage
-   * even if somebody wanted to.
+   * `drawnControls` answers three keys and no more, which is worth pinning
+   * because a fourth is how a fact about the *agent* would get smuggled onto a
+   * memory of the agent's controls. It carried no usage even when there was a
+   * context readout to feed — "a dead agent's window occupancy is not a fact
+   * about anything" — and now there is no readout in this client at all, so the
+   * shape is the whole of the claim.
    */
   check("nothing about usage rides the controls", Object.keys(drawnFrom("interrupted", [], ["mode"])).sort(), [
     "options",
