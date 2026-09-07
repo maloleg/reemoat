@@ -2607,9 +2607,11 @@ export function createApp(options: ServerOptions): AppBundle {
    * and it is opt-in so no existing caller changes behaviour.
    *
    * **Truncation is only safe because the order changes with it.** With a `limit`
-   * the list is returned blocked-first, then everything else still live, then the
-   * most recent terminal sessions — so dropping the tail can only ever drop the
-   * rows nobody is waiting on. Returning creation order and cutting it would let a
+   * the list is returned blocked-first, then pinned, then everything else still
+   * live, then the most recent terminal sessions — so dropping the tail can only
+   * ever drop the rows nobody is waiting on. (`pinned` was missing from this
+   * sentence for as long as it has been in `listRank`. A *position* is absent from
+   * both on purpose — see the note there.) Returning creation order and cutting it would let a
    * limit hide the one blocked session the whole product exists to surface. The
    * reorder therefore happens exactly when a cut can happen, and not otherwise.
    *
@@ -3281,7 +3283,7 @@ export function createApp(options: ServerOptions): AppBundle {
     const body = await requireJson(c);
     if (body instanceof Response) return body;
 
-    const change: { title?: string | null; pinned?: boolean } = {};
+    const change: { title?: string | null; pinned?: boolean; rank?: number | null } = {};
 
     if ("title" in body) {
       const title = body["title"];
@@ -3303,8 +3305,26 @@ export function createApp(options: ServerOptions): AppBundle {
       change.pinned = pinned;
     }
 
-    if (change.title === undefined && change.pinned === undefined) {
-      return jsonError(c, 400, "bad_request", 'body must carry at least one of {"title"} or {"pinned"}');
+    /*
+     * Where this session sits in the list. `null` clears it back to "follows its
+     * age", exactly as `title: null` clears a name.
+     *
+     * ⚠ **`Number.isFinite`, not `typeof === "number"`.** `JSON.parse` answers
+     * `Infinity` for `1e400` and this value is compared against every other
+     * session's on every render — an infinite one pins a row to the top of its
+     * folder for ever, and `NaN` makes the comparator answer 0 for every pair,
+     * which is a total order the sort silently stops being.
+     */
+    if ("rank" in body) {
+      const rank = body["rank"];
+      if (rank !== null && !(typeof rank === "number" && Number.isFinite(rank))) {
+        return jsonError(c, 400, "bad_request", "rank must be a finite number or null");
+      }
+      change.rank = rank;
+    }
+
+    if (change.title === undefined && change.pinned === undefined && change.rank === undefined) {
+      return jsonError(c, 400, "bad_request", 'body must carry at least one of {"title"}, {"pinned"} or {"rank"}');
     }
 
     // The whole snapshot, never an echo — same reason `/config` above answers this
@@ -4768,9 +4788,34 @@ function errnoError(c: Context, error: unknown, fallback: 400 | 404): Response |
  * outranking an unpinned live one is likewise intended — the person said to keep
  * it, and a `?limit=` cut that dropped it would make the pin a lie.
  *
+ * ⚠ **`rank` is deliberately not read here, and it was for one release.** A tier
+ * of its own sat between the pin and liveness, on the argument that dragging a row
+ * is the pin's statement made through a different gesture. Two measurements took
+ * it back out, and both are about a position not being the rare, deliberate,
+ * per-row thing a pin is:
+ *
+ * - **It outranked liveness, and the window is sixty rows.** `SESSION_LIST_LIMIT`
+ *   in `packages/web/src/store.ts` is 60 per machine, so sixty positioned
+ *   *terminal* rows hid every running session on that machine from the rail. A pin
+ *   cannot reach that count by hand; a position can, because `resolveDrop`'s
+ *   re-space writes one to a whole folder at once.
+ * - **Which also made "they said something about this row" false of the row.**
+ *   After a re-space the daemon holds a `rank` for rows nobody touched, so reading
+ *   one as an expressed preference is exactly the inference the paragraph below
+ *   forbids.
+ *
+ * **A position is the reader's display order and buys no retention.** The startup
+ * prune in `store/sqlite.ts` reads `pinned` and never `rank`, and that is the
+ * agreed answer rather than a divergence somebody should close: a pin says "keep
+ * this", a position says "show it here". Restoring the tier means teaching the
+ * prune at the same time — the two have to move together, or this route promises a
+ * durability the sweep does not honour and a transcript goes at seven days.
+ *
  * This is the daemon's *truncation* order, which is a different question from the
- * client's *display* order (`sessionLists` in `packages/web`). They are allowed to
- * differ: this decides what survives a cut, that decides what a person reads first.
+ * client's *display* order (`orderSessions` in `packages/web`). They are allowed to
+ * differ: this decides what survives a cut, that decides what a person reads first
+ * — and since the client's order is the reader's own, nothing here may be derived
+ * from it at all.
  *
  * Derived from the pending arrays rather than from `status === "blocked"` so it
  * stays right if the derived status ever gains a state that also has something

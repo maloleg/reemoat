@@ -153,9 +153,14 @@ refused before it is resident. Q2.38.
   `-shm` beside it carrying the same transcript bytes; chasing those files loses
   because they are recreated, and `mkdirSync(mode)` applies its mode only to
   directories it created. Q5.91.
-- **`title` and `pinned` are the only columns in the upsert's `DO UPDATE`.** `agent`
-  and `created_at` are immutable identity, and an upsert that can rewrite them can
-  corrupt a row it was only meant to touch. Q5.28.
+- **Identity is absent from the upsert's `DO UPDATE`, and that is the property.**
+  `agent`, `created_at` and `custom_agent` are what a session *is*, and an upsert
+  that can rewrite them can corrupt a row it was only meant to touch. What the
+  clause carries is the record's mutable preferences — `title`, `pinned`,
+  `ultracode`, `rank` — plus derived runtime state. ⚠ **This read "`title` and
+  `pinned` are the only columns" and had been false since `ultracode`**: a rule
+  stated as a list goes stale the first time the list grows, where the same rule
+  stated as a property does not. Q5.28.
 
 ## Layout
 

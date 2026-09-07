@@ -342,3 +342,21 @@ disabled button, and not one that toasts when it is pressed. It lived in
 `web-composer.md` until the sheet work needed the characters, which is where it
 should have been all along: the button is `EventList.tsx`'s, and the composer has
 never drawn one.
+
+## Two rules that were filed under the shell
+
+They arrived in `web-shell.md` because that is where the palette was written down,
+and they are about **the transcript** — `EventList`, a permission's row, a card's
+own headline. Moved rather than copied: this file's globs are what summon them
+where they apply.
+
+- **Machinery is `text-fg/85`, one value for every machinery row, failures
+  included**; the `X` at full `fg` and `N failed` carry a failure instead of
+  weight. A permission row reserves the kind-glyph slot **empty**, because it
+  folds into a run. Q3.207.
+- **A title is clipped in code, and only when the clip pays for a line** —
+  `truncate` throws away "was anything cut", which decides whether a card can be
+  opened at all. `TITLE_CHARS` 80, `TITLE_OVERFLOW_MIN` 20; the body opens to the
+  title in full. `headlineWorthDrawing` is the same judgement one field over: a
+  value whose opening 24 characters already appear in the title is an echo.
+  Q3.208.

@@ -33,11 +33,24 @@ import { toast } from "./Toast";
  * nested route would unmount `NewSession` and take the machine, agent and folder
  * somebody has already chosen with it. This is a step inside a form rather than
  * a destination, and there is nothing in it worth linking to — the archive is on
- * their disk, not in the URL. Escape still does the right thing for free:
- * `Sheet` registers with `useDismissible`, and `overlay.ts` gives the key to the
- * most recently opened layer, so this closes and the form behind it stays. What
- * is genuinely lost is Android's Back closing only this one, and that is the
- * cost being accepted rather than an oversight.
+ * their disk, not in the URL.
+ *
+ * ⚠ **"Escape still does the right thing for free" was written here and was
+ * false, and nothing asserted it.** The arbitration was never the problem:
+ * `overlay.ts` did give the key to this layer, every time. The problem was what
+ * this layer did with it — `Sheet`'s `close` was `navigate(under, true)`, and
+ * `under` is the screen the **New session** overlay was drawn over, not this
+ * sheet's own. So Escape, the ✕ and a tap on the scrim each destroyed the whole
+ * flow and discarded the machine, the agent and the folder, which is precisely
+ * what the paragraph above says a nested route would have cost and what not
+ * having one was supposed to buy.
+ *
+ * It is bought now, by `onClose`: all three dismissals and the ◀ land on the form
+ * behind this sheet, and `webcheck` reads the four props off this file so the
+ * claim cannot go back to being prose. What is still genuinely lost is Android's
+ * Back closing only this one — it pops `/new/…` and takes both down — and that
+ * one remains the cost being accepted rather than an oversight. The asymmetry
+ * between Back and Escape is deliberate now rather than accidental.
  */
 
 type Phase =
@@ -143,6 +156,20 @@ export function ImportCode({
   }, [copied]);
   const input = useRef<HTMLInputElement>(null);
   const abort = useRef<AbortController | null>(null);
+  /**
+   * An upload nobody is watching is stopped when this unmounts.
+   *
+   * ⚠ **Owed by the close above having become cheap.** While ✕ tore down the whole
+   * New session flow nobody pressed it mid-upload; now that every dismissal is one
+   * tap back to the form, they will — and `POST /fs/import` is bounded at **one at
+   * a time per machine** (`409 import_busy`). An orphaned stream therefore holds
+   * the daemon's import lock, and the next attempt is refused with a sentence
+   * about a request the reader believes they already cancelled.
+   *
+   * `abort()` on a controller that has already settled is a no-op, so the
+   * successful path pays nothing for this.
+   */
+  useEffect(() => () => abort.current?.abort(), []);
   const busy = phase.kind === "sending" || phase.kind === "unpacking";
 
   const send = (file: File): void => {
@@ -254,6 +281,16 @@ export function ImportCode({
   return (
     <Sheet
       title="Import code"
+      /*
+       * All four ways out land on the form behind this sheet, and that is the
+       * whole of the repair above: `onClose` for the ✕, Escape and the scrim; `up`
+       * for a chevron that was simply not here, so the only way back was a footer
+       * button labelled `Done` — which reads as "finish", and which is replaced by
+       * `Cancel` for the length of an upload.
+       */
+      onClose={onClose}
+      up={onClose}
+      upLabel="New session"
       footer={
         <div className={SHEET_FOOT}>
           <p className="min-w-0 flex-1 truncate text-2xs text-muted">

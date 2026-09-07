@@ -13,6 +13,8 @@ paths:
   - packages/web/src/ui/groups.ts
   - packages/web/src/ui/keyboard.ts
   - packages/web/src/ui/rail.ts
+  - packages/web/src/ui/rowDrag.ts
+  - packages/web/src/sessionOrder.ts
   - packages/web/src/ui/overlay.ts
   - packages/web/src/ui/bits.tsx
   - packages/web/src/ui/settings/*
@@ -71,16 +73,16 @@ have to enter. These are the rules a change here must not break:
 - **An approval cannot be hidden.** A waiting session says so on the status dot
   every row already carries — a filled dot with a permanent ring — plus a
   **semibold row title** and a count on its folder's header, so a *collapsed*
-  folder still says how many rows under it are waiting and blocked rows sort first
-  inside it. Three signals rather than one, because with the palette monochrome
-  there is no amber left to spend. Only one machine's chats are on screen at a
+  folder still says how many rows under it are waiting. Three signals rather than
+  one, because with the palette monochrome there is no amber left to spend.
+  ⚠ **Blocked rows no longer hoist inside a folder** — the position is its
+  reader's. Q3.569. Only one machine's chats are on screen at a
   time, so `waitingFloor` in `groups.ts` carries the rest, computed by
   **subtraction** — everything blocked, minus everything this view can draw — so a
   new section, filter or needle cannot open a gap by accident. It ignores the
   filter and the needle deliberately, and `webcheck` asserts it as a **superset
   property** over every filter × every tab × a set of queries. Q3.200.
-  **`Sheet` draws no waiting count**, reversing Q3.201: it is a pop-up over the
-  rail now, so that was a second copy of numbers behind the scrim. Q3.434.
+  **`Sheet` draws no waiting count** (Q3.434, reversing Q3.201).
 - **`machineSubline` keeps `blocked` above `offline`**, and an unreachable machine
   is announced **nowhere in the rail** — it and `MachineTab.reach` have no caller
   outside `webcheck`. Settings → Machines and the New session picker are the only
@@ -105,17 +107,8 @@ have to enter. These are the rules a change here must not break:
   `text-faint` rather than by `opacity`: `menuRow` in `MENU_PANEL`,
   `ICON_BUTTON_TONE.ghost`, and the composer's box, whose own rule argues it.
   The exceptions are the two values you must read once — the one-time secret and
-  the device code — which take a real fill.
-- **Machinery is `text-fg/85`, one value for every machinery row, failures
-  included**; the `X` at full `fg` and `N failed` carry a failure instead of
-  weight. A permission row reserves the kind-glyph slot **empty**, because it
-  folds into a run. Q3.207.
-- **A title is clipped in code, and only when the clip pays for a line** —
-  `truncate` throws away "was anything cut", which decides whether a card can be
-  opened at all. `TITLE_CHARS` 80, `TITLE_OVERFLOW_MIN` 20; the body opens to the
-  title in full. `headlineWorthDrawing` is the same judgement one field over: a
-  value whose opening 24 characters already appear in the title is an echo.
-  Q3.208.
+  the device code — which take a real fill. **`nav` is the size of a head row's
+  own leading control**, alone at its edge and 32px reaching 44.
 - **What belongs to the row above it hangs off `border-l-2 border-edge`, and that
   is the transcript's only nesting idiom** — a subagent's steps, a folded run's
   children, an expanded tool call's own detail. A failure keeps neither a border
@@ -128,7 +121,9 @@ have to enter. These are the rules a change here must not break:
   `disabled`.** The box below it filters *this machine's* chats by title. Q3.211.
 - **`border-r` on the rail: the rule is the ratio**, measured in Q3.210.
 - **`visibleRows` in `groups.ts` is the single source of render order**, shared
-  with `keyboard.ts` so `j` cannot land on a row nobody can see. `pinnedFor` and
+  with `keyboard.ts` so `j` cannot land on a row nobody can see. The order is
+  `orderSessions`, applied where rows are *produced* — `rowsOf`, `underFilter`,
+  `allRows` — so this needs no edit and cannot disagree with the caret. `pinnedFor` and
   `orphansFor` are the two exported slices the JSX is **obliged** to call —
   `visibleRows` calls them too, and `webcheck` reads `SessionBrowser.tsx` off disk
   to assert it does. Any group added beside them owes the same pair. Q3.101.
@@ -145,22 +140,31 @@ have to enter. These are the rules a change here must not break:
   module state. A component `useState` makes `j`/`k` step onto rows the rail is not
   drawing. Q3.15.
 - **Tabs and folders are ordered by name, never by reachability or activity.**
-  Both flicker on the four-second poll, and a list that reorders while a thumb is
-  travelling is the one thing this cannot do. A machine with no sessions still gets
-  a tab, which gives it a create button. A folder holding a waiting session does
-  **not** hoist; that fact rides its header as a count. Q3.224. **Pinned is cut
+  Both flicker on the four-second poll, and a list reordering under a travelling
+  thumb is the one thing this cannot do. **Rows inside them are their reader's**:
+  `sessions.rank`, a position clock defaulting to `createdAt`, descending. A drag
+  writes it through `/meta`, with `pinned` beside it when the drop crossed Pinned;
+  an absent `rank` is a daemon that cannot store one and freezes that gesture
+  alone.
+  Q3.569. **A finger's drag begins on `touchstart`, never `pointerdown`** — setup
+  there bets the engine has not decided what the touch is for, which is what four
+  phone reports were; a mouse captures at `arm`, never at the press, since capture
+  retargets the `click` away from the `<button>` that opens the session. Only
+  `target.index === origin.index` is a no-op. The ⋮ is on **every** row. Q3.574,
+  Q3.576, Q3.577.
+  A machine with no sessions still gets a tab, and with it a create button. A folder holding a waiting session does
+  **not** hoist; that rides its header as a count. Q3.224. **Pinned is cut
   to the selected machine**; every pin under All. Q3.550.
 - **A path is cut against the daemon's own `REEMOAT_ROOTS`, and drawn once.**
   `displayCwd` cuts the longest matching root (`~/thing`); under none, or with no
-  roots yet, it falls back to `shortPath` — never an invented prefix. Fetched once
+  roots yet, it falls back to `shortPath`, never an invented prefix. Fetched once
   per machine into `rootsByMachine`. A row whose title *is* its directory does not
   repeat it underneath. Q3.441.
 - **A folder is a working directory**, keyed `git.repoRoot ?? requestedCwd` and
   scoped to a machine (` `, the one byte a POSIX path cannot hold — otherwise
   collapsing `~/api` on the laptop collapses it on the server). `repoRoot` is the
-  **main** repo root, never the per-session worktree. Sessions in subdirectories
-  collapse into one folder deliberately, and `rowSubpath` gives back only the part
-  the folder does not already say. Names are basenames widened to the shortest
+  **main** repo root, never the per-session worktree. Sessions in subdirectories collapse into one folder
+  deliberately, and `rowSubpath` gives back only the part the folder does not say. Names are basenames widened to the shortest
   unique suffix, and only where they collide.
 - Collapse state is module state seeded from `localStorage`, not `useState`: the
   phone's list → detail → back unmounts the list. So is the selected machine tab —
@@ -224,9 +228,8 @@ have to enter. These are the rules a change here must not break:
   reason. `data-nav` is cleared **only by the navigation that wrote it**, or a
   second tap loses its attribute to the first one's cleanup and strands the old
   frame over the new screen. ⚠ **`@media` adds no specificity**, so every rule that
-  animates a snapshot is keyed on `:root[data-nav…]`. The width gates were bare —
-  `(0,0,1)` against `(0,2,1)` — so the desktop kept every phone animation. Asserted
-  over the file, not on the two that were wrong. Q3.445.
+  animates a snapshot is keyed on `:root[data-nav…]` — asserted over the file
+  rather than on the two that were wrong. Q3.445.
 - **A sheet moves too, and nothing here teleports.** `section-push`/`pop` slide the
   sheet's **body** with the root pinned; `sheet-swap` cross-dissolves two pop-ups
   over one panel that holds still, and is tested **before** the depths because a
@@ -365,27 +368,27 @@ primitive adds `tap` itself and carries its own entry.
 |---|---|
 | `packages/web/src/wire.ts` | The daemon's vocabulary, hand-mirrored, and why it could not be imported |
 | `packages/web/src/ids.ts` | Branded `MachineId`/`SessionId`/`SessionKey`, and the three rules that make `(machineId, sessionId)` structural |
-| `packages/web/src/store.ts` | All client state, and `resume()` — the single wake path. `loadAll` pages a conversation in and does not stop until it reaches the start of it; `loadStop` is where it may stop, the daemon's own floor included; `transcriptNotice` reads the same five fields from the other end and is asserted as a total partition rather than as booleans in JSX; `historyRetry` is what a failed page costs and for how long (37.5s); `attachWanted` resumes a run that gave up |
+| `packages/web/src/store.ts` | All client state, and `resume()`, the single wake path. `loadAll` pages a conversation in and does not stop until it reaches the start of it; `loadStop` is where it may stop, the daemon's own floor included; `transcriptNotice` reads the same five fields from the other end and is asserted as a total partition rather than as booleans in JSX; `historyRetry` is what a failed page costs and for how long (37.5s); `attachWanted` resumes a run that gave up |
 | `packages/web/src/resume.ts` | Noticing the phone woke. Four triggers, one debounced call |
-| `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, and which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the four sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
+| `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the four sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
 | `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs`, `waitingFloor`, and `visibleRows`, still the **single** source of render order, deduplicated by key |
 | `packages/web/src/ui/overlay.ts` | Who owns Escape, and what paints above what. A LIFO stack of dismissible layers, one capture-phase listener installed lazily inside `push()`, the `inert` refcount on `#root`, and `LAYER` — the z-order as full class strings, in one table a driver can assert. Also the **two** bare-key predicates |
-| `packages/web/src/ui/rail.ts` | How wide the rail is: the bounds, `clampRailWidth` — the one place a width is bounded, and four ways in — and the module state seeded from `localStorage`. Holds **no DOM**, so `webcheck` can import it. The `--rail-w` custom property is written by `AppShell`, the impure shell; the width travels as that property and must not become a React prop, which would snap back to the start of the drag on every poll |
-| `packages/web/src/ui/Sheet.tsx` | The large route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone and a centred card above `sm`. **One element serves every route-backed pop-up**, owned by `OverlaySheet`, so two of them cross-dissolve rather than one unmounting and the next replaying `animate-sheet` (Q3.484); `sheetTitle`/`sheetUpLabel` decide its head, and only a railless pop-up gets a ◀ there (Q3.432, Q3.473). `footer` suits one screen; with several, each draws its bar inside `SHEET_BODY` via `SHEET_SCREEN` or `sheet-body` morphs mid-slide (Q3.472). Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` is a **definite** height, never a `max-h` it can shrink under, and `SHEET_BODY` is a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |
+| `packages/web/src/ui/rail.ts` | How wide the rail is: the bounds, `clampRailWidth` — the one place a width is bounded, four ways in — and module state seeded from `localStorage`. Holds **no DOM**, so `webcheck` can import it. `AppShell`, the impure shell, writes `--rail-w`; the width travels as that property and must not become a React prop, which would snap back to the start of the drag on every poll |
+| `packages/web/src/ui/Sheet.tsx` | Route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone, a centred card above `sm`. **One element serves every route-backed pop-up**, owned by `OverlaySheet`, so two cross-dissolve rather than one unmounting and the next replaying `animate-sheet` (Q3.484); `sheetTitle`/`sheetUpLabel` decide its head; only a railless pop-up gets a ◀ there (Q3.432, Q3.473). `footer` suits one screen; with several each draws its bar inside `SHEET_BODY` via `SHEET_SCREEN`, or `sheet-body` morphs mid-slide (Q3.472). Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` a **definite** height, never a `max-h` it can shrink under; `SHEET_BODY` a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |
 | `packages/web/src/ui/ProfileMenu.tsx` | Who you are signed in as, and the two things you can do about it. The sidebar's footer, and the only copy of the name in the chrome |
 | `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: the scroll is inside `SessionBrowser` so the account row can sit at the bottom and its popover can open upward without being clipped |
-| `packages/web/src/ui/SessionBrowser.tsx` | The whole left column: logo, machine tabs, the waiting floor, the chat search, Pinned above the selected machine's folders, orphans, and the footer. Mounted twice — the `lg` aside and the `lg:hidden` screen — with the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, carrying its own path |
+| `packages/web/src/ui/SessionBrowser.tsx` | The whole left column: logo, machine tabs, the waiting floor, the chat search, Pinned above the selected machine's folders, orphans, the footer. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
 | `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, read by Telegram's arrow). Its own module because `router.ts` reads `window.location` in its module body |
 | `packages/web/src/telegram.ts` | The mini-app bridge, hand-written: the injected `TelegramWebviewProxy` only, no SDK, and **no iframe transport** while `frame-ancestors 'none'` stands |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — used from the header and every list row, plus `RenameField` |
-| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm` and the whole sheet body below it. One file per section — Account, **API keys**, Machines, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION` and the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` holds the SMTP form, the test send and delivery trouble, and carries no delivery log (Q3.225). Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its own `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
+| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |
 
 ## Bounds
 
 | | |
 |---|---|
-| Web client | 3 live sockets (LRU), **16 MiB held per session and every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling) — no render window, and the only cut is the newest `context_cleared`. History pages backwards at **5000** and does not stop until the log's start, that cut, or those bytes; a failed page retries over 37.5s and `attachWanted` re-drives a run that spends it. **60 sessions per machine per poll**, which is why pinned outranks live in the daemon's `listRank`. 4s list poll, 15s re-probe when unreachable, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those spawning a process — which get 90s, `/prompt` unconditionally, because a deadline keyed on session state would be state leaking into the transport. `POST /sessions/:id/cancel` is deliberately *not* one, and `webcheck` pins it absent rather than forgotten. **Every number here is also in `docs/DECISIONS.md`'s Bounds table, which is the copy to change.** Q3.226 |
+| Web client | 3 live sockets (LRU), **16 MiB held per session, every event of it drawn** (`MAX_TRANSCRIPT_BYTES`, the **only** ceiling) — no render window; the only cut is the newest `context_cleared`. History pages backwards at **5000** and does not stop until the log's start, that cut, or those bytes; a failed page retries over 37.5s and `attachWanted` re-drives a run that spends it. **60 sessions per machine per poll**, which is why pinned outranks live in the daemon's `listRank`. 4s list poll, 15s re-probe when unreachable, 1.5s reachability probe, token refreshed at `exp − 90s`, socket rotated at `exp − 60s`. 15s per request, except those spawning a process — which get 90s, `/prompt` unconditionally, because a deadline keyed on session state would be state leaking into the transport. `POST /sessions/:id/cancel` is deliberately *not* one, and `webcheck` pins it absent rather than forgotten. **Every number here is also in `docs/DECISIONS.md`'s Bounds table, which is the copy to change.** Q3.226 |
 
 ## Known gotchas
 

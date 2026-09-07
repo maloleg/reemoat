@@ -25,7 +25,121 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- The session rail is ordered by you. Grab a chat with the mouse and drag it up or
+  down inside its folder; on a touch screen hold it briefly first, so the gesture
+  and scrolling the list stay apart. Drop it in Pinned to pin it, and drag it back
+  out to unpin. `Alt`+`↑`/`↓` on a focused row does the same from a keyboard. The
+  order is stored per machine on the daemon, so one set from a laptop is the one a
+  phone opens.
+- **Up one folder** in the New session directory picker, beside the path — a 44px
+  square with a ground of its own, sized for a thumb. Always drawn and greyed out
+  at the top of the tree rather than appearing when it becomes usable; the path
+  itself is still tappable segment by segment.
+- A way back from **Import code**. Its ✕, Escape and a tap outside now return to
+  New session with the machine, agent and folder still chosen, and there is a
+  chevron that says where it goes. Closing it mid-upload also stops the upload,
+  which used to hold the machine's import lock.
+- A second control on the error screen: **Go to sessions**, beside Reload. A
+  screen that throws every time it renders made Reload a loop.
+
 ### Changed
+
+- **Nothing in the rail reorders itself any more.** Rows used to sort by their most
+  recent event, and a chat waiting on you jumped to the top of its folder — so the
+  list moved under your thumb on every poll. A chat waiting on you still says so
+  three ways: the ring on its status dot, its title going semibold, and the count
+  on its folder's header. A new session appears at the top of its folder, which is
+  now the only thing that moves by itself.
+- The back and close controls in every pop-up are bigger — 32px of ink instead of
+  24px, with the same 44px target they always had.
+- The directory picker writes `~` instead of your home directory in full, and the
+  path reads as one string rather than one with wider gaps between some of its
+  slashes. The session header cuts the same prefix.
+- The `in <folder>` line at the foot of New session is gone. It named the folder
+  the picker above it was already showing.
+- A row you press down on says so straight away, instead of waiting out the hold
+  in silence — holding still is what starts a drag, and nothing on screen was
+  saying so. It now lifts under a shadow rather than a change of tone, which is
+  the cue a thumb covering the row does not hide, and a phone gives a short
+  vibration at the moment the chat comes off the list.
+- **The ⋮ menu is drawn on every row in the rail.** It used to appear on hover,
+  except on pinned rows, which drew it always — so two rows a few pixels apart,
+  alike in every other way, had a different number of controls. A row's only menu
+  should not be hidden until you are already pointing at the row.
+
+### Fixed
+
+- **A chat crossing into or out of Pinned jumped.** Making that group a row taller
+  pushes the folder below it — and the chat being carried — down by exactly one
+  row, which the drag did not know about because it measured from where the row had
+  been when the gesture started. It measures from where the row actually is now,
+  every frame. The room a group makes also animates on the same clock the rows do,
+  instead of appearing in one jump under rows that were still sliding.
+- **The last place in Pinned could not be reached.** Aiming at the end of the group
+  unpinned the chat instead: "still pinned, at the end" was a band half a row tall
+  with unpinning on the other side of it. Carrying a chat out of Pinned now takes a
+  deliberate movement past the group, and says **Release to unpin** at the pointer
+  while you are out there — it is the one outcome of a drag that dragging back does
+  not undo. (Fixed twice: the first attempt widened the boundary only for chats
+  already pinned, which left the same slot unreachable for one arriving from a
+  folder. The boundary between two groups is now simply whichever is nearer.)
+- **`Alt`+`↑`/`↓` on a pinned chat could move a chat on another machine.** The
+  keyboard walked every pin in the fleet while the rail draws only the selected
+  machine's, so the keypress computed a position among rows that are not on screen
+  — usually looking like nothing happened, and occasionally rewriting the positions
+  of another machine's pins.
+- **Moving a chat down by exactly one place did nothing**, in silence — which is
+  why the last slot of a group could not be reached from the row directly above
+  it, and why "I still cannot put anything in the last place in Pinned, I can only
+  carry the last one higher" was reported after the boundary was fixed. The drop
+  compared two positions counted in two different ways, one of them counting the
+  chat being dragged and the other not, and treated a genuine one-place move as
+  landing where it started.
+- **Pinned rode on top of the sessions under it** while a chat was carried into it
+  from a folder. Moving rows aside does not make room for one; the group being
+  joined now takes the height and the group being left gives it back, so nothing
+  past either of them moves.
+- **The ⋮ menu on a row stopped opening.** The drag took the pointer at the press
+  and the button never heard the click meant for it. The row is the drag surface
+  everywhere except where it already carries a control.
+- **Dragging on a phone did nothing, through four attempts.** The first two treated
+  a cancelled pointer as the gesture ending, which is right for a mouse and wrong
+  for a finger: on a touch screen it means the browser has decided the gesture is
+  its own, which it does the moment it commits to a scroll. The third moved the
+  drag itself onto touch events, which the browser goes on delivering. All three
+  left the *setup* — the hold, the listeners, the refusal of the platform's own
+  long press — in the pointer press, and that is the assumption none of them
+  questioned: that the pointer press arrives before the browser has decided what
+  the touch is for. Nothing requires that, and on a browser that decides first,
+  every one of those fixes was one event too late, every time. A finger's gesture
+  now begins, moves and ends on the touch stream, and the pointer handlers say in
+  their own text that they are a mouse's.
+- **A drag showed a line instead of moving anything.** The rows now step aside as
+  you go, exactly as they do on the agent list, and the drop changes nothing you
+  can see — which is what tells you it landed where you left it.
+- **Dragging a chat out of Pinned now unpins it** even when the folder it belongs
+  to is collapsed or hidden by the filter. It was refused when there was no list on
+  screen to drop into.
+- **"There is no room between those two rows"** is gone. A drop is never refused
+  for arithmetic; the positions around it are re-spaced and the drop happens.
+- **A drop at the top of a group sent the chat to the bottom.** Two branches of the
+  position arithmetic were the wrong way round, and the test covering them had been
+  written from the code rather than from what a drop means, so it agreed.
+- **Clicking a chat in the rail with the mouse stopped opening it**, which arrived
+  with the mouse drag and had not been noticed. Taking the pointer at the press
+  hands every later event to the row's wrapper, the click included, so the button
+  inside it that does the opening was never in the click's path. The pointer is
+  taken when the drag actually starts instead. Found by driving a real browser
+  through the debugging protocol rather than by reading.
+- **Dragging a session with the mouse did nothing.** A mouse was being asked to
+  long-press, which is a touch idiom: a finger has to be told apart from scrolling
+  the list, and a button does not. A press and 4px of movement start the drag now.
+- **And on a daemon that had not been restarted it could not have worked, silently.**
+  The column that stores the order arrives with the daemon's own migration. Trying
+  to drag a row on such a machine now says so. **Restart the daemon once after
+  updating.**
 
 - The composer is one box. The message field, the attachment chips, the paperclip,
   the agent's controls and Send now sit inside a single rounded container instead

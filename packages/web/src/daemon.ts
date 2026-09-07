@@ -752,12 +752,22 @@ export class DaemonClient {
   }
 
   /**
-   * Rename a session, or pin it to the top of its machine's section.
+   * Rename a session, pin it to the top of its machine's section, or move it.
    *
    * An absent field means "leave it alone"; `title: null` clears the name, which
-   * re-arms the daemon's derivation from the next prompt. The response is the
-   * whole snapshot rather than an echo, because a title is normalized on the way
-   * in and what was asked for is not necessarily what was stored.
+   * re-arms the daemon's derivation from the next prompt, and `rank: null` clears
+   * a position the same way — back to "wherever its age puts it". The response is
+   * the whole snapshot rather than an echo, because a title is normalized on the
+   * way in and what was asked for is not necessarily what was stored.
+   *
+   * ⚠ **`rank` has to be named here even though the request would carry it
+   * either way.** The body is `JSON.stringify(patch)`, and `store.ts` passes a
+   * variable rather than an object literal — so TypeScript applies no excess
+   * property check and a field missing from this type still reaches the wire.
+   * This is `wire.ts`'s hand-mirroring hazard one module over: the compiler
+   * connects neither half, so the only thing keeping the client's declared patch
+   * and `POST /sessions/:id/meta`'s three fields in step is that they are written
+   * to match.
    *
    * `POST` on a sub-resource rather than `PATCH` on the session: `PATCH` would
    * mean adding a verb to the daemon's shared CORS method list, which the relay
@@ -765,7 +775,7 @@ export class DaemonClient {
    */
   setSessionMeta(
     id: SessionId,
-    patch: { title?: string | null; pinned?: boolean },
+    patch: { title?: string | null; pinned?: boolean; rank?: number | null },
   ): Promise<{ session: SessionSnapshot }> {
     return this.machine.request(`/sessions/${encodeURIComponent(id)}/meta`, {
       method: "POST",

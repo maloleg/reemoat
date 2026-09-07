@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 125 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 314 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 324 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 132 | `###` |
-| | | **880** | |
+| | | **890** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 880 rather than the 457
+dividers. So the count is over **both** depths, and it says 890 rather than the 457
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -17433,6 +17433,710 @@ pressable sits under it.
 **Status.** Current. The `max-height`-only full detent and the discrete gesture
 are superseded above, both by measurement from the same phone that reported them;
 so are the `--sheet-settle` property, the flat 44px head, and Q3.561's `gap-1`.
+
+#### Q3.569 — Whose order is the session rail in, and where does it live?
+
+**Decision.** The reader's, and on the daemon: one nullable `sessions.rank`,
+written through `POST /sessions/:id/meta` beside `title` and `pinned`.
+
+**Both sorts the rail had are gone.** Blocked rows went to the top of their folder
+and everything else ordered by its most recent event, so a list somebody was
+reading rearranged itself under their thumb on the four-second poll. Each was
+defensible on its own and both were the app having an opinion about a list of
+somebody else's conversations. A row moves when somebody moves it.
+
+**The key is a position clock rather than an index**, and that is what makes the
+merge a comparison instead of a special case. Unit: one millisecond. Unset means
+`createdAt`. A drop writes a synthetic instant between two that have already
+passed. Three things fall out, and the third is the one an index cannot give:
+
+- A session nobody has touched has an **honest place** with nothing stored.
+- A **new** session is at the top of its folder, because its `createdAt` is now and
+  every dragged rank is a bisection of the past. `RANK_STEP` is one millisecond
+  precisely so a dragged row stays *below* sessions that do not exist yet; any
+  larger step would be this client deciding something nobody said.
+- A drop is **one write**, not a renumbering of its neighbours.
+
+**⭐ The `orderStrip` clause is right one module over and wrong here**, and the
+difference is the key rather than the taste. *Stored first in rank order, then
+everything the store has never heard of at the end* works for the agent strip
+because its membership changes when somebody installs a harness. This list gains a
+member on the commonest act in the product, so "at the end" buries the conversation
+somebody just started — and worse, it **inverts the default**: the first drag
+anybody performed would push every other row in that folder below the one they
+moved. What this list has that the strip does not is a natural key comparable with
+the stored one; `createdAt` and a rank are the same kind of number.
+
+**The comparator is total, and that is correctness.** Two sessions can share a
+millisecond and the *input* array is re-derived on every poll, so
+`Array.prototype.sort`'s stability guarantees nothing — a comparator answering 0
+for such a pair is two rows that swap on a timer, which is the exact behaviour
+being removed. It falls through to `createdAt` and then to the row key.
+
+**Running out of room is a real answer, not a `never`.** At a `createdAt` around
+1.77e12 a double's ulp is about 0.0005, so one millisecond admits **twelve**
+bisections before the midpoint *is* an endpoint — measured by the driver rather
+than reasoned about. Nobody reaches it by accident; what makes it worth detecting
+is that the failure is silent, two equal ranks with the tie-break deciding and a
+row that appears not to have moved. `rankBetween` answers `null` and the caller
+re-spaces a window.
+
+**A column on `sessions`, not a table beside it**, which is the opposite call from
+`agent_strip` (Q3.529) and for reasons that are all about *this* subject. Dropping
+a row into Pinned writes `pinned` **and** `rank`, and two statements into two
+stores half-apply into a session pinned with no position. `prune()` and `DELETE
+/sessions/:id` take a column with the row, where a side table would owe a
+hand-written cascade in both. And a position is the same category as a pin: a
+mutable preference on a row that already exists, written by the same route, read
+off the same snapshot. ⚠ **Two arguments for the side table were checked and were
+false**: `migrate()` has added nine columns to this table without moving
+`SCHEMA_VERSION`, and the "only `title` and `pinned` are in the `DO UPDATE`" rule
+had already been false since `ultracode` — the property it was standing in for is
+that *identity* is absent.
+
+**`rank === undefined` is how an old daemon is known**, never a version — rule 1 of
+`compatibility.md`. A daemon that can store an order always emits the field, `null`
+included, so an absent one names a daemon that cannot and freezes the gesture on
+that machine's rows alone. The degradation is not a blank list: `effectiveRank`
+reads absent and `null` alike as `createdAt`, so an old machine draws a *stable*
+creation-ordered list rather than the recency shuffle it drew before.
+
+**And `listRank` gains a tier**, between the pin and liveness. It is the pin's own
+argument word for word — a preference expressed once — and without it a terminal
+session somebody deliberately placed can be dropped by the 60-per-machine cut and
+vanish from where they put it, which is the promise this whole entry makes.
+
+⚠ **The tier was taken back out at the review before it landed on `main`, on the
+owner's word (D1, 2026-09-08): a position is display order and buys no retention.**
+The argument above is the pin's word for word and that is exactly what is wrong
+with it — a pin is a rare, deliberate, per-row act and a position is not. Two
+measurements:
+
+- **It outranked liveness against a sixty-row window.** `SESSION_LIST_LIMIT` is 60
+  per machine, so sixty positioned *terminal* rows hid every running session on
+  that machine from the rail. A person cannot pin their way to sixty rows by hand;
+  `resolveDrop`'s re-space writes a `rank` to a whole folder in one drop.
+- **So the entry's own rule about the reader's order was false of the row.** The
+  `listRank` docblock permits deriving nothing from a position beyond "they said
+  something about this row", and after a re-space the daemon holds one for rows
+  nobody touched.
+
+**And the durability half was never there to begin with**, which is what settled
+it: `SqliteSessionStore.prune` classifies inactive rows on `pinned` and never reads
+`rank` — it does not even `SELECT` it — so a positioned terminal session was
+protected from the recoverable `?limit=` cut and deleted, with its transcript, by
+the seven-day sweep. Keeping the tier meant teaching the prune as well; the two
+have to move together or the route promises a durability the sweep does not honour.
+`listRank` is back to `blocked, pinned, live, terminal`, and
+`daemoncheck.containment-and-session-routes.ts` pins the refusal on the row the cut
+already drops.
+
+**What it costs, stated rather than discovered.** Terminal rows interleave with
+live ones under the `all` filter, because one order per list admits no second rule
+and a rule pushing them down would silently undo a drop onto one; it is invisible
+under the default `active` filter. The All tab changes meaning from `lastActivity`
+to the same key, because an order that depended on which tab a conversation is read
+from is worse than either rule alone. And one rank serves both Pinned and the
+folder, so a drag *inside* Pinned also moves the row relative to folder-mates it is
+not on screen with — the price of pin-then-unpin being an identity round trip for a
+row nobody has dragged.
+
+**Superseding.** Q3.13's "blocked rows sort first inside their own section" is
+reversed: the badge on the header was always the mechanism and the hoist was
+redundancy, and redundancy that moves rows under a thumb costs more than it buys.
+Q3.224 stands for tabs and folders, which are still ordered by name. Q3.11 and
+Q3.12 stand: pinning still moves, `blockedCount` is still counted off what `place`
+returned, and a drag into Pinned is that same move performed by a finger.
+
+**Status.** Built.
+
+#### Q3.570 — Why may the session rail not carry `touch-none`, when the agent strip must?
+
+**Decision.** Because the row *is* the scroller. A long press arms the drag; a
+non-passive `touchmove` listener on the rail's own scroll box is what holds it.
+
+**This is the exact inversion of Q3.533**, which is worth stating plainly because
+that entry calls `touch-none` the load-bearing fix and it was: on the agent strip
+the handle is a 44px square inside a sheet, so taking every gesture on it costs
+nothing. Here `touch-action: none` on a row would make a phone unable to scroll its
+own session list from nine tenths of the rail — to buy a gesture that arms only
+after 400ms of stillness.
+
+**What makes the listener sufficient on its own is the arming.** `PRESS_MS` is
+400 — a tap is 60–150ms, UIKit's own long press is 500, and this is shorter because
+the surface underneath is a list you also scroll. `PRESS_SLOP` is 8px **in any
+direction**, which is below the ~10px at which engines commit a pan: the timer is
+dead before the scroller could have taken the touch, so on the first move after
+arming `event.cancelable` is still true and `preventDefault` owns the gesture.
+Horizontal counts because an edge swipe is the platform's own Back.
+
+**Still registered for the component's life rather than the gesture's**, which is
+Q3.533's finding unchanged: React attaches `onTouchMove` passively, so this can
+only be an `addEventListener`, and some engines decide at `touchstart` from whether
+such a listener *exists* — a decision already made by the time a gesture could add
+one.
+
+**No handle, and that is a rule about rows rather than a preference.** A permanent
+handle takes a fixed slot from the title on the list that is the whole phone
+screen, and the trailing slot is the kebab's. So the row is the surface — which
+costs the two things a handle gave for free, and both are paid: the `click` a drag
+leaves behind is eaten by an `onClickCapture` guard cleared on the next
+`pointerdown`, and the keyboard path is `Move up`/`Move down` in the kebab every
+row already carries. **A pointer gesture that is the only way to reorder is a
+control a keyboard cannot reach at all** — Q3.533's sentence, discharged
+differently.
+
+**And `dropIndex` could not be reused.** It divides travel by one measured row
+height, which is exact on a strip of uniform rows and meaningless on a rail that
+interleaves 36px section headers with 44–56px rows. Every slot is measured once
+when the drag arms, in the scroller's **content coordinates** — which also deletes
+the strip's `startY` fixup during auto-scroll, since a content coordinate does not
+move when the box under it does.
+
+**Two zones, never a third.** A folder is `git.repoRoot ?? requestedCwd`, a fact
+about where the work is — so a row may be dropped in Pinned or in its own folder,
+and every other folder is inert under the finger. That is what keeps the drop model
+small enough to be correct.
+
+⚠ **Reported as "the rows do not move at all, completely", and there were two
+causes stacked on one another.** The first was operational and the second was a
+design fault, and the second is the one that made the first invisible.
+
+**The daemon had not been restarted**, so `migrate()` had not run and `sessions`
+had no `rank` column — measured on the real database: `PRAGMA table_info` said no,
+and the process had been up since before the change. Every row therefore answered
+`rank === undefined`, which is exactly "this daemon cannot store an order", and the
+gesture was correctly refused on all of them. Verified the other way too, which is
+what makes it a diagnosis rather than a guess: opening a *copy* of that same
+twelve-session database with the new code adds the column, puts `rank` on every
+row, and leaves `user_version` at 6.
+
+**And the refusal said nothing.** The press did nothing and the kebab simply had
+two fewer rows, so there was no way to tell "this daemon cannot" from "this is
+broken" — the wrong half of the agent strip's `frozen`, which disables its controls
+**and** names the remedy. The sentence is **deferred to a press that travelled**
+rather than drawn at rest: a press is not yet a question, and a banner on every row
+about a capability nobody has asked for is noise on the fleets that do not need it.
+Twelve pixels — past a click's jitter and past `MOUSE_SLOP` — and one sentence per
+gesture.
+
+⚠ **The second cause would have survived the restart, and it is the deeper one: a
+mouse was being asked to long-press.** Reported the second time as *"I want to grab
+a chat with the mouse and drag it"*, which is the correct expectation and was
+simply not implemented — one arming rule was written, the touch one, and a pointer
+was made to obey it.
+
+**The hold is a touch idiom and exists for a reason a mouse does not have.** A
+finger's other verb on this surface is *scroll the rail*, and the two have to be
+separated before either commits; hence 400ms of stillness, and hence 8px of slop
+that hands the gesture back to the scroller. A pointer has a **button**. Pressing
+it already says which row — there is no second thing it could have meant — and the
+movement after it already says where. So there was nothing to disambiguate and
+nothing to wait for, and waiting put a 400ms window in front of the gesture in
+which the natural response *cancelled* it. `MOUSE_SLOP` is 4px, past a click's
+jitter and nothing more.
+
+**One `arm()`, reached two ways**, and that shape is the fix rather than a tidying:
+the decision and everything after it had been one block inside the timer, so there
+was nowhere for a second way in to *go*.
+
+⚠ **And a mouse takes the pointer at the press where a finger may not.** Before
+capture a `pointermove` goes to whatever is under the cursor, so a press that left
+the rail before travelling its 4px armed nothing — and a fast drag is the one that
+leaves soonest. Capture at `pointerdown` makes every move come back whatever it is
+over, which is what a native drag does and why one feels reliable. A finger may not
+have that: capturing at `touchstart` takes the gesture off the scroller *before*
+anybody has said whether they meant to scroll, which is the one thing the hold
+exists to decide.
+
+**The press is visible while it is being counted, on the path that counts.** The
+row takes `bg-raised` the moment a finger lands — this palette's own word for
+state, one step up from the half-strength hover already reaches. `pressing` is
+separate state from `dragging` because they answer different questions: *I heard
+you, keep holding* against *this row is moving*. A mouse needs none of it, arming
+in 4px.
+
+⚠ **And the zone travelled through the DOM as a NUL.** A `FolderId` is
+`${machineId}\u0000${path}` — the byte a POSIX path cannot hold, which is what
+makes it collision-proof — and `data-zone` is an attribute, where U+0000 is not a
+character that reliably survives: the HTML parser replaces it with U+FFFD, and
+whether one set through `setAttribute` reads back identically is an engine's
+business. It is `encodeURIComponent`d now. This one was found by reading rather
+than by report, and it would have failed as *the drop doing nothing* while the row
+still lifted — which is a different symptom from the one above and would have been
+diagnosed as the same thing.
+
+⭐ **The neighbours move; nothing draws a line.** The first build marked the drop
+with a 2px rule, which tells a reader *where* but not *what* — the list under it
+stays visibly unchanged until the drop, so the gesture reads as aiming rather than
+as moving, and reported as "some sort of line gets drawn". The agent strip's answer
+is the right one and is taken whole: every row between where the dragged one left
+and where it is going shifts by exactly one row, in the direction that opens the
+gap, and the drop then changes nothing anybody can see. The transition is on only
+while a drag is live and never on the row under the pointer — both Q3.533's
+measurements, unchanged.
+
+**Generalising it to two groups is one sentence twice.** Within a group it is
+`shiftFor` verbatim. Across two, the group being left closes its gap and the group
+being joined opens one, which is what makes a row crossing into Pinned read as two
+lists trading a row rather than as one list glitching.
+
+**Leaving Pinned unpins even where the folder is not drawn.** A collapsed folder,
+or one the filter is hiding, is still where that session lives — so the drop writes
+`pinned: false` and leaves the position alone, rather than refusing because it
+cannot see a list to place the row in. That is the `null` zone in `pickTarget`.
+
+⚠ **And a drop is never refused for arithmetic.** It answered *"there is no room
+between those two rows. Move a neighbour first."* — a sentence that hands the
+reader a problem they did not cause, cannot see and have no way to act on, in
+response to a gesture that plainly succeeded. The gap is this module's business:
+`resolveDrop` re-spaces the group and the drop happens. What changes is how many
+rows are written, which is a fact about the request rather than about the gesture.
+Re-spacing walks the group **up** from its own top rather than spreading it between
+its own extremes — those are exactly the values that ran out — so no pair can tie,
+at a cost of at most `n` milliseconds of drift against other folders, which only
+the All tab compares it with.
+
+⚠ **`rankBetween`'s two `null` arms were inverted, and the case that covered them
+agreed.** Nothing above means the row is going to the **top**, and the order is
+descending — so its position has to be *greater* than the row it will sit over, and
+the code returned *smaller*. Every drop at the top of a group therefore sent the row
+to the bottom. It survived because the assertion had been written from the
+implementation instead of from the intent: `check("a drop at the top is one step
+above what is there", rankBetween(null, 8), 8 - RANK_STEP)` reads like a claim and
+is a restatement. Found by writing the next case from what a drop *means* — which
+is the only reason to write one at all.
+
+**`Move up` and `Move down` are gone from the kebab**, asked for directly:
+reordering is a drag, and a menu row is a worse version of it for everybody who can
+use one. Q3.533's rule does not go with them — a pointer gesture that is the only
+way to reorder is a control a keyboard cannot reach at all — so the row itself
+takes `Alt`+arrows. Held with a modifier because the bare ones belong to the list,
+and `j`/`k` already walk it; `Alt` is unclaimed here and is the platform's own idiom
+for *move the thing* rather than *move among the things*. It costs no pixels, which
+is what the menu rows were really being charged for.
+
+⚠ **Four faults reported from one build, and three share a cause: a drag is not a
+translate.** Moving rows aside with `translateY` says where a row will go and
+changes nothing about the space it needs. So a row carried from a folder into
+Pinned made that group a row taller with no room for it, and the shifted rows
+painted over whatever followed — Pinned "riding on top of" the sessions beneath.
+The group being joined reserves the height and the group being left gives it back;
+the document does not change height, and nothing past either group moves.
+
+⚠ **The last place in Pinned was unreachable, and the boundary was why.** Its last
+slot means putting the pointer below the last row's middle, and with the group's
+own edge as the limit that band was half a row tall with *unpinning* on the far
+side. Overshoot it and the row silently left the group. `UNPIN_MARGIN` is 48px and
+is **asymmetric on purpose**: a row already in Pinned holds on past the edge, a row
+arriving from a folder is not leaving anything and needs no such grace. It also
+buys the right thing on its own terms — unpinning is the only outcome of this
+gesture that carrying the row back does not undo, so it is the one that should cost
+a deliberate movement.
+
+**And the one that does not undo is the one that says so first.** A chip reading
+*Release to unpin* follows the pointer while a pinned row is out of its group. It
+carries `text-danger`, this palette's only non-monochrome ink and otherwise
+reserved for acts nothing brings back: the deviation is narrow and deliberate —
+this is not destruction, it is the single irreversible branch of a gesture whose
+every other outcome is one more drag away, and it is on screen only while the
+pointer is out there. Its position is written to the DOM as one transform rather
+than held in state, for the reason the dragged row's own offset is.
+
+⚠ **The row's kebab stopped opening, and taking the pointer at the press is why.**
+A mouse captures at `pointerdown` so that a fast drag cannot escape the rail before
+it arms — and capture retargets everything after it, the `click` the menu needs
+included. The row is the drag surface **except where it already carries a
+control**: `data-no-drag` marks that on the markup rather than being tested by tag,
+so the next control added to that end of the row inherits it.
+
+⚠ **And a long press on a phone was being taken by the platform.** iOS opens its
+own selection callout on a long press and Android its context menu, and either
+fires `pointercancel` before a 400ms timer can run — a press that does nothing,
+with nothing on screen saying why. The callout and the selection are switched off
+for the length of a press, on the node rather than on the list, and `contextmenu`
+is refused for the whole press rather than only once armed: Android's own long
+press is about 500ms against this one's 400, which is close enough to race.
+
+⚠ **The last place in Pinned was fixed twice, and the first fix is the instructive
+one.** It widened the boundary by `UNPIN_MARGIN` *only for rows already pinned* —
+which is the right asymmetry for the consequence and the wrong shape for the
+geometry, so the identical bug came back for a row arriving from a folder and was
+reported a second time in the same words. An edge is the wrong instrument: the last
+slot of any group means "below the last row's middle", so against an edge it is
+always a band half a row tall with somewhere else on the far side. **Distance
+answers every case at once** — inside a group is zero, and the header gap between
+two groups splits down the middle, so nothing has an edge to fall off. The margin
+survives as what it always should have been: a *bias*, not a boundary, because
+leaving Pinned is the one outcome a drag cannot take back.
+
+⚠ **And the row jumped when it crossed, because its offset was measured from where
+it had been rather than from where it was.** Carrying a row up into Pinned makes
+that group a row taller, which pushes the folder it came from — and the row itself
+— down by exactly one row. The transform, anchored to an arm-time origin, knew
+nothing about it, so the row leapt a row's height at the crossing and leapt back on
+the way out. Recovering the base each frame costs one rect read and is
+self-correcting against *any* layout change: the reserved space animating in, an
+auto-scroll, a poll adding a row above. `roll` re-runs it every frame, so a still
+pointer over a moving layout stays glued. **And the room a group makes animates on
+the same clock the rows do** — the rows slid under `transition-transform` while the
+height they were sliding into appeared in one jump, which is the whole of "it
+jerks".
+
+⭐ **A finger's gesture runs on the touch stream, and that is the third attempt at
+"it still does not work on a phone".** The first two treated `pointercancel` as an
+ending, because for a mouse it is one. On a touch screen it is not an ending at
+all: it is the browser saying *I have decided this gesture is mine*, which it does
+the moment it commits to a scroll, off movement far smaller than a 400ms hold
+tolerates. The pointer stream stops there. **The touch stream does not** —
+`touchmove` keeps arriving for the same finger, and a non-passive listener can
+still refuse the default and take the gesture back. So the press and the drag are
+driven from `touchmove`/`touchend` for the life of one gesture, on the **document**
+rather than on the scroller, because a listener that has to be found in the event
+path is one more candidate for "nothing happened". `pointercancel` and
+`lostpointercapture` end a mouse drag and are ignored for a finger.
+
+**What this cost to find is worth writing down**: three rounds, each fixing a real
+thing that was not the cause — the callout, the context menu, the arming rule. The
+question that would have split them in one round is *does the row respond to the
+press at all*, and it went unasked while three plausible causes were fixed in the
+dark.
+
+**Two limits, stated rather than found.** The Pinned section is drawn only when
+something is pinned, so the **first** pin on a machine is a menu act — there is no
+zone to drag into yet. And the All tab has no folders at all, so its rows carry no
+gesture: a rank is a per-machine order, a cross-machine drop would mean nothing,
+and defining one against same-machine neighbours only would land the row somewhere
+other than where the finger pointed — "the list resisting", which Q3.533 already
+names. `Pin` and the two `Move` items stay in the kebab on every tab.
+
+**Status.** Built.
+
+#### Q3.571 — The way out of every pop-up was 24px of ink. What changed?
+
+**Decision.** A fourth `ICON_BUTTON_SIZE`, `nav`: a 32px box growing
+**symmetrically** by 6px to 44px. The three pane chevrons and the sheet's ✕ take
+it; `Header`'s pair stays `lg`.
+
+**The complaint was that they are hard to see, and the target was never the
+problem** — `sm` has reached 44px through `after:-inset-2.5` all along. What was
+small was the *visible* control: a 12px glyph in 24px of ink, on the thing a phone
+uses to leave every screen.
+
+**⚠ The reason `sm` was chosen has been on record and was measurably false.** Both
+`Sheet.tsx` and `webcheck` said 44px "would have made this row taller than the
+title beside it". `SHEET_HEAD` is `min-h-14` — 56px, with no vertical padding — so
+44px of ink does not reach that row's floor, let alone raise it. The real objection
+to `lg` is **weight**: the way out of a screen should not be the largest object in
+its head. 32px is also `WaitingHere`'s own height in that same row, so the head is
+one size end to end.
+
+**Neither existing entry could serve.** Redefining `sm` drags seventeen call sites
+that sit *on rows*, where `sm`'s own docblock argues a menu button must not
+outweigh the row under it. And `chip` is 32px already but grows **vertically
+only** — deliberately, because a symmetric inset would put its target on the mode
+chip's face — so moving a ✕ onto it would take that control's horizontal target
+from 44px down to 32px. A control can grow visually and shrink as a target, and
+that is the trap.
+
+**The glyph ternary became a table in the same change.** It was `size === "sm" ? 12
+: size === "chip" ? 14 : 16`, so the new entry took its 16 by falling off the end
+rather than by anybody choosing it. Here 16 was right; the next size added is the
+one where a silent default is a 16px glyph in a 24px box. It is keyed on the size
+table, so an entry with no glyph is a compile error, and `webcheck` additionally
+holds every glyph to 4px of ink margin a side — a fact about CSS no type can carry.
+
+**The settings and plugins panes grow 8px**, which the sentence claiming the move
+"buys no vertical chrome" no longer covers and now says so. The sheet head grows by
+nothing, having a 56px floor.
+
+**Status.** Built.
+
+#### Q3.572 — Escape closed Import code and took New session with it. Whose fault was the arbiter's?
+
+**Decision.** Not the arbiter's. `Sheet` gains an optional `onClose`, and the one
+pop-up with no route of its own says what its dismissals mean.
+
+**The file said the opposite in as many words**, and so did `code-import.md`:
+*"`Sheet` registers with `useDismissible`, and `overlay.ts` gives the key to the
+most recently opened layer, so this closes and the form behind it stays."* Every
+clause about the arbitration was true. The layer's own handler was not: `Sheet`'s
+`close` is `navigate(under, true)`, and `under` is the screen the **New session**
+overlay was drawn over. So Escape, the ✕ and a tap on the scrim each destroyed the
+whole flow and discarded the machine, the agent and the folder somebody had walked
+to — which is precisely the cost `ImportCode` not being a route was supposed to
+avoid.
+
+**It stood for four releases because prose was standing in for a check.** Nothing
+in `webcheck` read this file for dismissal behaviour. Four assertions do now, and
+one of them is on `Sheet` rather than the caller — `const close = onClose ??` — so
+the default cannot be quietly inverted for the four pop-ups the URL *does* name.
+
+**A ◀ as well, and it was simply absent.** The only way back was a footer button
+labelled `Done`, which reads as "finish" rather than "go back" and which is
+replaced by `Cancel` for the length of an upload. This does not disturb the rule
+that a head chevron belongs to the agent builder alone: `sheetUpLabel` answers for
+**routes**, and this pop-up is not one.
+
+**And the unmount now aborts the upload**, which the close having become cheap is
+what makes necessary. `POST /fs/import` is one at a time per machine (`409
+import_busy`), so an abandoned stream holds the lock and the next attempt is
+refused with a sentence about a request the reader believes they cancelled. Nobody
+pressed ✕ mid-upload while it cost them the whole flow.
+
+**Android's Back still takes both layers down.** That was already the accepted cost
+of not giving this step a route, and it is unchanged — the difference is that Back
+and Escape now differ on purpose rather than by accident.
+
+**Status.** Built.
+
+#### Q3.573 — The directory picker printed `/Users/rends` in full. Why, when nothing else does?
+
+**Decision.** `pathCrumbs` in `paths.ts`, sharing `displayCwd`'s own rule, so the
+first crumb reads `~` — and the separators became tight.
+
+**Two defects and only one of them was visible.** The bar built its crumbs inline,
+against `roots[0]` and with `path.startsWith(root)`. So a second, nested root drew
+**no crumbs at all** and the picker could not be walked; and `/Users/re` passed as
+a root of `/Users/rends/x`, after which every crumb addressed a directory that does
+not exist — the separator hole `relativeTo`'s docblock spends a paragraph on, one
+function away. Both are answers `displayCwd` had already.
+
+**The spacing was the reported half.** `gap-x-1` on the bar plus `gap-1` on a
+wrapper plus `px-1` on each button put about 8px on each side of the separators
+*between* crumbs, while the separators *inside* the first crumb were tight — two
+spacings for one character on one line. The separator moved **inside** the button
+before it, and every horizontal gap came off: the run reads as one string, each
+non-leaf crumb gains the slash's width as tap area (which is what rescues a `~`
+seven pixels wide), and a wrapped line starts with a segment while the line above
+ends with `/`.
+
+**⚠ The 44px target is kept vertically and may not be a pseudo-element here.** A
+`text-2xs` crumb is an 18px line box, so reaching 44px symmetrically needs 13px a
+side — 5px past this bar's border and onto the first folder row below it, a live
+target. `-my-2 min-h-11` costs nothing because the bar's own padding absorbs it;
+only the *horizontal* padding was ever the defect.
+
+**Then the footer line went entirely.** Cut against the roots it read `in ~/thing`
+— the folder the picker is standing in, named three inches under a bar whose whole
+subject is that path. Fixing the rendering made it a *tidy* second copy of one
+fact rather than an untidy one, and the right number of copies is one. The region
+stays mounted with an empty string, which is the arrangement its own docblock
+argues is the one reliably announced.
+
+**And the bar gained a way up.** ⚠ **Not an `IconButton` wearing a `ChevronLeft`,
+and the distinction is the reason it exists as its own control**: that glyph in
+this app always leaves a *screen*, for a fixed destination taken from the URL, and
+`Header`'s docblock spends a paragraph on never letting it become a history button.
+This walks a **filesystem** on a machine that is not this one and changes nothing
+about where you are in the app. One glyph for both and they become one thing in the
+reader's head — after which the day one of them goes back a screen from inside the
+picker is a bug nobody can describe. `CornerLeftUp` says *up a level*.
+
+**Drawn always and `disabled` at the top**, never conditionally rendered: a control
+that materialises moves its neighbours under a finger already travelling toward
+them, and at the root — the first thing this picker draws — it would be missing
+exactly while somebody is learning where the controls are. Its destination is the
+crumb before the last, so the button and the bar are one list read twice and cannot
+disagree about what "up" means. The crumbs stay tappable; this is the second way to
+do the commonest of the walks they offer.
+
+**Two neighbours went with it**, being the same inconsistency: New session's footer
+and the session header's `WorkspaceLine` both printed the raw absolute path. The
+header's was Q3.441's defect resurfaced — for an unnamed session `sessionLabel`
+already draws `~/thing` one line above `mac · /Users/rends/thing`. The footer takes
+the picker's roots through a prop rather than `store.rootsByMachine`, and that is
+not fussiness: `store.fetchRoots` swallows a refusal into `[]` by design, so its
+copy cannot tell "no roots" from "could not ask" — while the picker draws "could
+not be read" and a retry off exactly that distinction.
+
+**Status.** Built.
+
+#### Q3.574 — The same slot was still unreachable after its boundary was fixed. What was left?
+
+**Decision.** Only `target.index === origin.index` means "it did not move". The
+drop's early return also treated `origin.index + 1` as a no-op, and the two indices
+are counted in different lists.
+
+**The two coordinate systems, written down here because writing them down is the
+fix.** `origin.index` is the dragged row's place among the zone's rows *including
+itself*, taken from the DOM when the drag arms. `target.index` is a slot among the
+zone's other rows, the dragged one removed — which is what `resolveDrop` and
+`rankForMove` both take, and correctly. For a row at `i` in a list of `n`, dropping
+at slot `i` puts it back where it was; dropping at slot `i + 1` puts it one place
+*below*. So `i + 1` was a real move, refused in silence, and the refusal was
+invisible: no toast, no snap-back, the row simply returned to where it started
+because that is what the rest of the drag draws when nothing is written.
+
+**Which is why one report read as two.** "I cannot put anything in the last place
+in Pinned, I can only carry the last one higher" and "moving the second-to-last
+session into the last place does not go through" are the same sentence. The last
+slot of a group is reachable from the row immediately above it by a one-place move
+and by nothing else — every other row reaches it by two or more, which passed. The
+boundary work in Q3.567 was a real fix for a real second bug at the same slot, and
+fixing it uncovered this one rather than causing it.
+
+**⚠ And it was found by driving a browser, which is what should have happened three
+rounds earlier.** A harness page mounting the real `useRowDrag` against a fabricated
+six-row rail, driven through the Chrome DevTools Protocol with
+`Input.dispatchTouchEvent` and `Input.dispatchMouseEvent`, reproduces a drop in
+about a second. Under it the penultimate-to-last drop wrote nothing while a
+two-place drop wrote a rank — the same list, the same gesture, one slot apart,
+which is a difference no amount of reading the file had produced in two attempts.
+The positive control matters as much as the failure: without the two-place drop
+passing beside it, "no write" is equally consistent with the harness being wrong.
+
+**Status.** Built.
+
+#### Q3.575 — Three phone fixes, three real bugs, none of them the cause. What did all three assume?
+
+**Decision.** A finger's gesture begins on `touchstart` — not on `pointerdown` —
+and lives entirely on the touch stream. `bind`'s pointer handlers are a mouse's and
+say so in their own text.
+
+**The three that came before, each correct and each beside the point.** iOS's
+selection callout was being raised over a row about to move; Android's context menu
+races a 400ms hold at about 500ms; a mouse was being asked to long-press, which is a
+touch idiom. Then the drag itself moved onto `touchmove`, on the correct argument
+that `pointercancel` means *the gesture is over* for a pointer and *I have decided
+this gesture is mine* for a finger — the browser says the second the moment it
+commits to a scroll, and the pointer stream stops there while the touch stream does
+not.
+
+**What none of them questioned.** All four left the **setup** in `onPointerDown` —
+which row, the hold's timer, the listeners, the `-webkit-touch-callout` that stops
+iOS raising its own menu. That is a bet that `pointerdown` is dispatched before the
+engine has decided what the touch is for. Blink dispatches it first; nothing in the
+Pointer Events specification requires it, and on an engine that dispatches
+`touchstart` first, every one of those fixes was one event too late, every time, on
+that engine only. Which is exactly the shape of a bug that works on every desktop
+and has never once worked on a phone.
+
+**So the bet is gone rather than re-taken.** `touchstart` decides which row, finding
+it with `closest("[data-row-key][data-zone]")` from the event rather than from a
+closure, because these listeners belong to the scroller and outlive every row in it.
+They go on in the ref callback rather than in an effect: they have to exist before
+the first `touchstart` the node can receive, and only the callback answers the node
+being *replaced* by a route change. On the scroller and not on `document`, because a
+touch's target is latched at `touchstart` — so the scroller is in the path of every
+event of the gesture, including those delivered after the finger has left it — and
+because an ordinary element is clear of the passive-by-default treatment `window`,
+`document` and `body` receive.
+
+**⚠ What is still not proved.** Nine scenarios through the CDP harness pass, mouse
+and touch, including a realistic 60Hz thumb jitter through the hold, a re-render
+landing mid-hold, and a press-and-drag with no hold at all correctly handed back to
+the scroller. All nine ran in Blink, which is the engine this was never broken on.
+The reasoning above is about an engine the harness cannot reach. If the report comes
+back a fifth time, the question that splits it in one round is whether the row
+darkens and the phone buzzes under the hold: that separates *the press never
+arrives* from *the press arrives and the gesture is taken away*, and it went unasked
+for three rounds while three plausible causes were fixed in the dark.
+
+**And the hold now says so in the one channel a thumb does not cover.** A shadow
+rather than a change of tone — `bg-raised` on `ink` is 1.15:1, which under a thumb
+on a phone is nothing — plus `navigator.vibrate(12)` at the moment the row comes off
+the list, which is what both phone platforms use for exactly this moment in exactly
+this gesture. A shadow and never a `scale`, because `measure` reads the row's own
+height as it arms and a transformed rect reports the wrong one.
+
+**Status.** Built.
+
+#### Q3.576 — Taking the pointer at the press stopped a click from opening a session
+
+**Decision.** `setPointerCapture` moved from `onPointerDown` to `arm`. A press
+captures nothing.
+
+**A regression that shipped with the mouse drag and that nobody reported.** A
+captured pointer retargets everything that follows to the capturing element,
+including the `click` the browser synthesises from the press. The rail's row is a
+`<div>` holding a navigating `<button>` — the arrangement Q3.224 argues for, since a
+button inside a button is invalid and browsers resolve it by breaking the outer one
+— so the click was delivered to the wrapper and the button was never in its path.
+Its `onClick` never ran. Clicking a chat in the rail with a mouse did nothing, from
+the day the mouse drag landed.
+
+**Measured, with its own control.** Driving Chrome through the debugging protocol:
+`mousedown` targets the row's own label, `mouseup` and `click` target the wrapper.
+The control is the kebab, whose press returns before capturing anything — the same
+click there reaches its own button. That pair is the whole mechanism, and no reading
+of the file had produced it.
+
+**What capture at the press was buying, and why it was free to give back.** The four
+pixels before the drag arms: an uncaptured `pointermove` goes to whatever is under
+the cursor. Four pixels do not leave a 44px row; every row in the rail shares one
+handler set, so even a cursor that has crossed onto a neighbour is still calling the
+same code; and the document now carries the same two rules for the cursor that
+leaves the list entirely. Deliberately the same two rules rather than a second
+opinion about them.
+
+**Status.** Built.
+
+#### Q3.577 — Why did pinned rows have a ⋮ and the others not?
+
+**Decision.** Every row in the rail draws its menu. The class string on the kebab is
+a constant, which is what the check asserts.
+
+**The rule was defensible and wrong.** Reveal on hover, always present on a coarse
+pointer, keyed on a *pointer* query in CSS and never a width read in JavaScript —
+that half is right and is the house rule. Pinned rows were exempt on the reasoning
+that they are rows you return to. The result on screen is two rows a few pixels
+apart, alike in every other way, one of them carrying a control: reported as a
+rendering fault rather than as a rule, which is what a rule looks like when its
+reason is not visible from the outside.
+
+**And the reveal costs more than it saves.** A row's only menu, hidden until the
+pointer is already on the row, is undiscoverable — and a list spends almost all of
+its time being *read* rather than aimed at. The ink was already being spent in any
+case: pinned rows have drawn it unconditionally all along, so the row's width, its
+truncation point and the tap pad's reach past the scroller (Q3.529's measurement,
+which keeps a permanent horizontal scrollbar off the bottom of the rail) are exactly
+as they were.
+
+**⚠ The folder header's `+` keeps the reveal**, and the difference is which control
+is the only way in. The kebab is a row's sole route to rename, pin and stop; the `+`
+is an *addition* to a header that is already a button, and starting a session in
+that folder is reachable from New session in any case. Cited here because that
+control's docblock used to justify itself by pointing at the kebab, and now points
+at this.
+
+**Status.** Built.
+
+#### Q3.578 — `Alt`+`↓` on a pin looked like it did nothing, and sometimes moved another machine's rows
+
+**Decision.** `siblingsOf` cuts Pinned to the selected machine through `pinnedHere`,
+the same function the drawn list goes through.
+
+**Two lists, one of them not on screen.** The rail draws Pinned through `pinnedFor`,
+cut to the selected tab (Q3.550: a section drawn identically on every tab reads as
+the pins having been copied to each machine). `siblingsOf`, which is what the
+keyboard move walks, answered `groups.pinned` — every pin in the fleet. So under a
+tab drawing one pin, `Alt`+`↓` computed a position between two pins on *another*
+machine and wrote it: a real request, a real answer, and nothing on screen changed.
+The re-spacing path is worse, because it writes `also` — fresh positions for rows on
+a machine the reader is not looking at, with no visible cause anywhere.
+
+**⚠ The filter is still ignored, and that is not the same kind of hiding.** The
+docblock's original argument survives intact for its own case: a row the Ended
+filter is withholding is one the reader chose to hide, and stepping past it keeps
+one press meaning one place however that control happens to be set. A pin on another
+machine is not hidden by a choice about these rows — it is on a list this tab
+structurally cannot draw. The distinction is now written where the code makes it.
+
+**Found by a fleet of readers rather than by reading.** Five independent passes over
+the drag, each with its own lens, then every candidate handed to a fresh agent whose
+only instruction was to refute it; thirty-eight candidates, three survivors. The
+other two survivors were that nothing in `webcheck` or the doctrine had ever stated
+the kebab rule either way, which is why Q3.577 ships with both.
+
+**And the fixture could not have caught it, which is the more useful half.** The
+`what is actually on screen` block held exactly one pinned row, so every list of
+pins in it was the same list and "cut to the selected machine" was unfalsifiable
+there. A second pin, on the other machine, is what makes the assertion an assertion
+— the same shape as the note one fixture over about `createdAt`s that were all
+equal, and about an `ended` list that held nothing.
+
+**Status.** Built.
 
 ## Deployment, packaging and code layout
 

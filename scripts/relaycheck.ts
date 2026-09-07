@@ -9285,6 +9285,48 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
   }
 
   /*
+   * ⭐ **And the same squat spelled with one capital letter, which the fix above
+   * did not close.**
+   *
+   * `foldName` is trim + lower-case and `USER_NAME` admits mixed case, so `Victim`
+   * and `victim` fold alike while `users.name` holds them as two accounts. The
+   * arm's ownership test compared *folded* names, so a stranger's `Victim` row was
+   * called the caller's own: `nameTakenByAnother` let `victim` through (its
+   * `email_folded IS NOT ?` clause exempts a pending row on the same address, on
+   * purpose), the resend arm re-minted the **stored** name and hash, and the
+   * mailbox was sent a link creating `Victim` with the stranger's password and the
+   * address verified. Every assertion in the block above passes while that is
+   * open, because `pavel` and `rupert` do not fold alike.
+   *
+   * The answer is `409 name_taken`, which is what a fold-variant of an existing
+   * **user** already gets from `lower(name)` — the pending-row exemption was
+   * simply wider than the table's. Not the two-rows arm: `mintRegistration`
+   * supersedes on `(email_folded, name_folded)`, which these two share, so they
+   * would retire each other rather than stand beside each other.
+   */
+  {
+    const squat = await gpost("/v1/register", {
+      name: "Cased",
+      password: "the squatter's own password",
+      email: "cased@example.com",
+    });
+    check("a squatter's sign-up under a capitalised name is pending", squat.status, 200);
+    const squattersLink = tokenOf("register");
+
+    const owner = await gpost("/v1/register", {
+      name: "cased",
+      password: "the mailbox owner's password",
+      email: "cased@example.com",
+    });
+    check(
+      "the mailbox owner signing up as themselves is refused rather than handed the squatter's row",
+      await codeOf(owner),
+      [409, "name_taken"],
+    );
+    check("and nothing new was mailed to them", tokenOf("register"), squattersLink);
+  }
+
+  /*
    * The deletion itself — a route nobody calls that mails a link to any address
    * an anonymous caller names is not worth keeping for its own sake.
    *

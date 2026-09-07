@@ -201,10 +201,16 @@ route.** Q7.69 is right that a URL buys a deep link, a surviving reload and a fr
 Back button — and it does not transfer here: `App` draws the overlay from the
 *live* route, so a nested route would unmount `NewSession` and take the machine,
 agent and folder already chosen with it. This is a step inside a form, not a
-destination, and the archive is on somebody's disk rather than in the URL. Escape
-still works for nothing: `Sheet` registers with `useDismissible` and `overlay.ts`
-gives the key to the most recent layer. **What is lost is Android's Back closing
-only this one**, and that is the cost being accepted.
+destination, and the archive is on somebody's disk rather than in the URL.
+⚠ **"Escape still works for nothing" was written here and was false.** The
+arbitration was right all along — `overlay.ts` gave the key to this layer — but
+the layer's own handler was `Sheet`'s route-level close, and `under` is what the
+*New session* sheet was drawn over. So Escape, the ✕ and the scrim each destroyed
+the flow this argument exists to protect. `Sheet.onClose` is the repair: the one
+pop-up with no route of its own says what its dismissals mean, all four land on
+the form behind it, and `webcheck` reads the props rather than the prose. **What
+is still lost is Android's Back closing only this one** — it pops `/new/…` and
+takes both down — and that remains the cost being accepted.
 
 **An old daemon is detected by the shape of its refusal and never by its version.**
 A daemon with no such route answers Hono's bare 404, which `parseBody` turns into

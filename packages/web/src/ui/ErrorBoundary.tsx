@@ -58,9 +58,33 @@ export class RootErrorBoundary extends Component<{ children: ReactNode }, { erro
           <p className="mt-3 text-sm text-muted">
             Nothing on the machine is affected — agents keep running, and reloading re-attaches to them.
           </p>
-          <Button tone="primary" className="mt-4" onClick={() => window.location.reload()}>
-            Reload
-          </Button>
+          {/*
+           * ⚠ **Two controls, because Reload alone is a loop on the screen this is
+           * most likely to catch.** The docblock above says what somebody on a
+           * phone needs is "what happened, and a way back", and for four releases
+           * there was no way back: a render that throws *deterministically* — agent
+           * output quoting an untrusted repository is the named way in — re-throws
+           * the moment the same route re-mounts, so Reload returns to the same
+           * broken screen for ever.
+           *
+           * `window.location.assign` rather than `navigate`, and that is the whole
+           * of why this is not one line shorter: `state.error` is never cleared, so
+           * a client-side navigation would leave this panel drawn over wherever it
+           * went. Only a new document clears the boundary.
+           *
+           * `/` is a fixed destination taken from nothing, which is this app's
+           * standing rule for a leading control and the reason `history.back()` is
+           * banned everywhere else — here it would be the worse version of the same
+           * defect, since the entry behind this one is the route that just threw.
+           */}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button tone="primary" onClick={() => window.location.reload()}>
+              Reload
+            </Button>
+            <Button tone="plain" onClick={() => window.location.assign("/")}>
+              Go to sessions
+            </Button>
+          </div>
         </div>
       </div>
     );

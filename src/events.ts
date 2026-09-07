@@ -1155,6 +1155,19 @@ export interface PersistedSession {
    * being waited on.
    */
   pinned: boolean;
+  /**
+   * Where this session sits in the list, or `null` for wherever its age puts it.
+   *
+   * **Always present, and that is the compatibility contract.** A client reads a
+   * missing field as "this daemon cannot store an order" and disables the gesture
+   * for that machine's rows; `null` is the different, ordinary answer that this
+   * daemon can and nobody has. Nothing here branches on a version.
+   *
+   * A preference like `pinned`, and read the same way — but unlike `pinned` it is
+   * comparable with the age of a row that has none, which is what lets one order
+   * cover both.
+   */
+  rank: number | null;
 }
 
 export interface SessionStore {

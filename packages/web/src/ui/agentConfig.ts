@@ -81,8 +81,21 @@ const CATEGORY_SLOT: Record<string, Slot> = {
   collaboration_mode: "nested",
 };
 
+/**
+ * Which slot a control sits in, or `overflow` for a category nobody has named.
+ *
+ * ⚠ **`Object.hasOwn`, because `category` is a string the *agent* chose and this
+ * is a plain object.** A bare index inherits: `category: "toString"` answers
+ * `Object.prototype.toString`, a function, so `?? "overflow"` never fires and
+ * `splitOptions`' `out[slotFor(option)].push(…)` reads `undefined` and throws
+ * mid-render — which unmounts the app to `RootErrorBoundary` and blanks the
+ * origin holding `reemoat.credential`. `PluginConsent`'s `said` is the same guard
+ * for the same reason; the three tables in this file are the other place a
+ * value from the wire indexes a literal.
+ */
 export function slotFor(option: Pick<AgentConfigOption, "category">): Slot {
-  return CATEGORY_SLOT[option.category ?? ""] ?? "overflow";
+  const category = option.category ?? "";
+  return Object.hasOwn(CATEGORY_SLOT, category) ? (CATEGORY_SLOT[category] ?? "overflow") : "overflow";
 }
 
 /**
@@ -122,7 +135,10 @@ const CATEGORY_LABEL: Record<string, string> = {
 };
 
 export function labelFor(option: Pick<AgentConfigOption, "category" | "name">): string {
-  return CATEGORY_LABEL[option.category ?? ""] ?? option.name;
+  // `Object.hasOwn` for {@link slotFor}'s reason: an inherited member here is a
+  // function, and drawing one as a label is the same throw one function up.
+  const category = option.category ?? "";
+  return (Object.hasOwn(CATEGORY_LABEL, category) ? CATEGORY_LABEL[category] : undefined) ?? option.name;
 }
 
 /**
@@ -494,6 +510,11 @@ export function showsCaption(option: Pick<AgentConfigOption, "category">): boole
 /** Right-hand controls in a fixed reading order; the rest alphabetical. */
 const RIGHT_ORDER: Record<string, number> = { model: 0, thought_level: 1 };
 
+const rightOrder = (category: string | null): number => {
+  const key = category ?? "";
+  return (Object.hasOwn(RIGHT_ORDER, key) ? RIGHT_ORDER[key] : undefined) ?? 9;
+};
+
 /**
  * The options split into the three slots.
  *
@@ -542,7 +563,10 @@ export function splitOptions(options: readonly AgentConfigOption[]): Record<Slot
   }
   out.right.sort(
     (a, b) =>
-      (RIGHT_ORDER[a.category ?? ""] ?? 9) - (RIGHT_ORDER[b.category ?? ""] ?? 9) ||
+      // `Object.hasOwn` for {@link slotFor}'s reason. Milder here — an inherited
+      // member makes the subtraction `NaN`, so the comparator silently stops being
+      // one rather than throwing — and wrong in a way nobody would trace back.
+      rightOrder(a.category) - rightOrder(b.category) ||
       a.name.localeCompare(b.name),
   );
   out.overflow.sort((a, b) => a.name.localeCompare(b.name));

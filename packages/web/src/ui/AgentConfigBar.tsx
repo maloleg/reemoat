@@ -322,8 +322,12 @@ const SHEET_DISMISS_PX = 72;
 /**
  * How long the sheet takes to settle onto a detent once a finger lets go.
  *
- * ⚠ **The same number is `--sheet-settle`'s default in `index.css`**, and
- * `webcheck` asserts they agree for the reason it does for the exit: this timer is
+ * ⚠ **The same number is the literal in `.config-sheet`'s `transition` in
+ * `index.css`** — not a custom property, and naming one here would point a reader
+ * at re-adding the mechanism that file's own note records taking out: a `var()`
+ * inside a shorthand makes every longhand a pending-substitution value. `webcheck`
+ * reads the literal out of the stylesheet and asserts they agree, for the reason
+ * it does for the exit: this timer is
  * what hands the panel's height back to `.config-sheet`'s own defaults, so a
  * shorter one cuts the settle off mid-travel and a longer one leaves a pixel height
  * pinning a sheet that has stopped moving — which the next open would inherit.
@@ -1404,11 +1408,14 @@ function Select({
    * `ChoiceSection` was extracted to end — the chip and the menu row disagreeing
    * about what a value is called.
    *
-   * `where` reaches `ChoiceSection` and namespaces the `role="option"` ids it
-   * generates. Both presentations are in the document at once, so without it the
-   * same value would carry the same id twice and `aria-activedescendant` would
-   * resolve to whichever the browser found first — which on a phone is the one
-   * that is `display: none`.
+   * `where` reaches `ChoiceSection` and namespaces the one id it generates —
+   * `sharedId`, on the refusal line. Both presentations are in the document at
+   * once, so without it the same refusal would carry the same id twice and the
+   * option rows' `aria-describedby` would resolve to whichever copy the browser
+   * found first, which on a phone is the one that is `display: none`. The option
+   * rows themselves carry no `id` and there is no `aria-activedescendant` here:
+   * neither presentation implements arrow-key navigation, so there is nothing
+   * for an active descendant to point at.
    */
   const sections = (list: readonly AgentConfigOption[], where: string): ReactNode =>
     list.map((section, index) => (
@@ -1516,8 +1523,9 @@ function Select({
        * JavaScript, which is `AppShell`'s standing rule for this app: a resized
        * window cannot render a picker that is not there, because both are
        * rendered and `display` chooses. The cost is that the rows are in the
-       * document twice while this control is open — see `optionId`, which is why
-       * the two lists do not collide in the accessibility tree.
+       * document twice while this control is open — see `sharedId` and the
+       * `where` it is namespaced by, which is what keeps the two copies'
+       * `aria-describedby` from resolving into each other.
        *
        * ⚠ **It is not `Sheet`, and could not be.** That component sets `inert`
        * on `#root`, takes focus and registers itself the moment it mounts — side

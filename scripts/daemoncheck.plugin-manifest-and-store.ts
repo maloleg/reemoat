@@ -359,6 +359,129 @@ process.stdout.write("\nwhat a plugin manifest may say\n");
   );
 
   /* ---------------------------------------------------------------- *
+   * The refusals the contributed-agent release added, and the two modes they are
+   * asked in.
+   *
+   * ⚠ **These landed with no case here at all, and the inventory above went stale
+   * a second time in exactly the way its own ⚠ records the first.** It says
+   * "eighty-two" and "a thirty-eighth needs a line here"; eleven arrived and the
+   * number did not move, so nothing said the list had stopped describing the file.
+   * Nothing derives the count, which is why it is the comment that has to be kept
+   * true. **Thirteen arrived, so it is ninety-five** — derived twice rather than
+   * guessed: the refusal returns this branch adds to `manifest.ts` are fifteen
+   * lines, two of which are the old scheme check restructured rather than new, and
+   * a script applying the paragraph's own rule to both revisions answers the same
+   * delta of thirteen. They are `RESERVED_ENV_LOADERS`, `STRUCTURAL_HEADERS`, the
+   * env/routed-model collision, the two routable metadata addresses, the
+   * single-label host, the length after normalising, and `CONTROL_CHARS` on the
+   * plugin name, the description, a harness name, an authHint, a system name, a
+   * nativeModelPrefix, a model id and a model name.
+   * ---------------------------------------------------------------- */
+  says(
+    "an env slot that decides which binary runs rather than which service answers",
+    { scopes: ["harness"], contributes: { harnesses: [{ ...CONTRIBUTED_HARNESS, envNames: ["LD_PRELOAD"] }] } },
+    "decides which code runs",
+  );
+  says(
+    "one name used as both a credential slot and a routed-model variable",
+    {
+      scopes: ["harness"],
+      contributes: { harnesses: [{ ...CONTRIBUTED_HARNESS, envNames: ["ACME_KEY"], routedModelEnv: ["ACME_KEY"] }] },
+    },
+    "the model id would overwrite the key",
+  );
+
+  /*
+   * ⭐ **The SSRF half, and the two spellings that got past the arm that exists to
+   * stop them.** A trailing root label is kept by `URL` on a *named* host — so one
+   * character defeated the whole name arm of `isMetadataHost` — and two clouds
+   * answer metadata on routable addresses that 169.254/16 never covered.
+   */
+  const withBaseUrl = (baseUrl: string): Record<string, unknown> => ({
+    scopes: ["system"],
+    contributes: {
+      systems: [{ id: "acme", name: "Acme", apiType: "openai", baseUrl, models: [{ id: "m", name: "M" }] }],
+    },
+  });
+  says("the link-local metadata address", withBaseUrl("http://169.254.169.254/latest"), "metadata service");
+  says("Alibaba's, which is routable", withBaseUrl("http://100.100.100.200/latest"), "metadata service");
+  says("Oracle's, which is routable too", withBaseUrl("http://192.0.0.192/opc/v1"), "metadata service");
+  says(
+    "and the name arm with a root label on the end of it",
+    withBaseUrl("https://metadata.google.internal./computeMetadata/v1"),
+    "metadata service",
+  );
+  says(
+    "a single label, which resolves through whatever search domain this host carries",
+    withBaseUrl("https://inference/v1"),
+    "a host with a dot in it",
+  );
+  says(
+    "an auth header that frames the request rather than naming who is asking",
+    {
+      scopes: ["system"],
+      contributes: {
+        systems: [
+          {
+            id: "acme",
+            name: "Acme",
+            apiType: "openai",
+            baseUrl: "https://api.example.com",
+            authHeader: { name: "transfer-encoding" },
+            models: [{ id: "m", name: "M" }],
+          },
+        ],
+      },
+    },
+    "frames the request rather than naming who is asking",
+  );
+
+  /* ---------------------------------------------------------------- *
+   * Strict when somebody is agreeing to this, looser when a row already on disk is
+   * loaded — and the second mode is not a convenience.
+   *
+   * ⭐ **`SqlitePluginRecordStore.toRecord` re-parses `manifest_json` on every
+   * read**, and a row this build cannot validate is skipped: `list` omits it and
+   * `get` answers `null`. So every refusal added here is retroactive, and a plugin
+   * legal on the day it was installed vanishes on the next daemon start with its
+   * contributed agents and providers. `CONTROL_CHARS` is `\p{Cc}\p{Cf}` and U+200D
+   * is `Cf`, so an ordinary emoji ZWJ sequence in a name is enough to reach it.
+   *
+   * Both directions, because either alone is satisfied by the wrong build: the
+   * card's guards must refuse at install and must **not** refuse at load, and the
+   * refusals that bound what a plugin may *do* must hold in both.
+   * ---------------------------------------------------------------- */
+  {
+    const loose = (patch: Record<string, unknown>): ReturnType<typeof parseManifest> =>
+      parseManifest(JSON.stringify({ ...base, ...patch }), { presenting: false });
+    const zwj = "\u{1F468}\u200D\u{1F4BB} Dev Helper";
+    const override = "Claude\u202Ecode";
+
+    says("a plugin name carrying a right-to-left override", { name: override }, "control or formatting characters");
+    says("a description carrying one", { description: override }, "control or formatting characters");
+    says(
+      "and a harness name carrying an emoji joiner, which is the same category",
+      { scopes: ["harness"], contributes: { harnesses: [{ ...CONTRIBUTED_HARNESS, name: zwj }] } },
+      "control or formatting characters",
+    );
+
+    check(
+      "but a row already installed still loads, because no card is being drawn",
+      [loose({ name: override }).ok, loose({ description: override }).ok, loose({ name: zwj }).ok],
+      [true, true, true],
+    );
+    check(
+      "while what bounds the plugin holds in both modes",
+      [
+        loose({ scopes: ["harness"], contributes: { harnesses: [{ ...CONTRIBUTED_HARNESS, envNames: ["LD_PRELOAD"] }] } }).ok,
+        loose(withBaseUrl("http://100.100.100.200/latest")).ok,
+        loose(withBaseUrl("https://metadata.google.internal./computeMetadata/v1")).ok,
+      ],
+      [false, false, false],
+    );
+  }
+
+  /* ---------------------------------------------------------------- *
    * And the last character each of them allows, which is the half that makes the
    * import above load-bearing.
    *

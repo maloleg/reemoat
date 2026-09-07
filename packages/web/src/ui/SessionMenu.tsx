@@ -117,23 +117,27 @@ export function SessionMenu({
       .finally(() => setBusy(false));
   };
 
-  const setMeta = (patch: { pinned?: boolean }): void => {
-    const daemon = store.daemonFor(sessionRef.machineId);
-    if (daemon === undefined) {
-      // A sentence, and it names what did not happen. This said "that machine is
-      // not reachable" — a lower-case fragment stating a fact about the fleet next
-      // to a menu row that had visibly done nothing, leaving the reader to work out
-      // for themselves whether the pin they just tapped had taken. The one caller
-      // toggles `pinned`, so the consequence can be named exactly.
-      toast("error", "That machine is not reachable right now, so the pin was not changed.");
-      return;
-    }
-    setBusy(true);
-    void daemon
-      .setSessionMeta(sessionRef.sessionId, patch)
-      .then((result) => store.applySnapshot(sessionRef, result.session))
-      .catch((cause: unknown) => toast("error", errorText(cause)))
-      .finally(() => setBusy(false));
+  /**
+   * Pin, unpin, or move — all three through the store's one write path.
+   *
+   * ⚠ **It used to call the daemon here**, which was fine while the only field
+   * was a pin: a pin is a tap, and a tap that is not answered for a second is a
+   * tap nobody notices. A *position* is not — the rail is derived from the poll,
+   * so a move drawn only when the answer lands springs back under the finger
+   * first. The overlay, the ordering of two writes about one session and the
+   * restore on a refusal all live in `store.setSessionMeta` now, and this passes
+   * the sentence that says what did not take.
+   */
+  const setMeta = (patch: { pinned?: boolean; rank?: number | null }, whatDidNotHappen: string): void => {
+    /*
+     * ⚠ **No `busy` here, and the pair that used to bracket this was dead.** It
+     * survived the move of the await into `store.setSessionMeta`: with nothing
+     * asynchronous left between them, React batches both writes into one render
+     * and `busy` is never once observed `true`. The three call sites below still
+     * hold real awaits and still need it.
+     */
+    const issued = store.setSessionMeta(sessionRef, patch, (message) => toast("error", message));
+    if (!issued) toast("error", `That machine is not reachable right now, ${whatDidNotHappen}`);
   };
 
   /**
@@ -208,7 +212,7 @@ export function SessionMenu({
             label={pinned ? "Unpin" : "Pin"}
             onClick={() => {
               setOpen(false);
-              setMeta({ pinned: !pinned });
+              setMeta({ pinned: !pinned }, "so the pin was not changed.");
             }}
           />
 
@@ -282,6 +286,7 @@ function MenuItem({
   note,
   onClick,
   tone = "plain",
+  disabled = false,
 }: {
   icon: ComponentType<{ size?: number | string; className?: string }>;
   label: string;
@@ -303,11 +308,26 @@ function MenuItem({
   note?: string;
   onClick: () => void;
   tone?: "plain" | "danger";
+  /**
+   * Drawn and inert, rather than absent.
+   *
+   * The rule this exists for: an act that is unavailable *right now* keeps its
+   * pixels, so the row under it does not move onto them and take a tap aimed
+   * somewhere else — the mis-tap `TwoStep`'s ordering rule prevents one screen
+   * over. `text-faint` rather than `opacity`, this file's standing rule for a
+   * dimmed thing.
+   *
+   * No caller passes it today: the two rows that did — `Move up` and `Move down` —
+   * are gone, reordering being a drag. Kept because it is the shape of the
+   * question and the next inert row costs nothing to draw honestly.
+   */
+  disabled?: boolean;
 }): ReactNode {
   return (
     <button
       role="menuitem"
       onClick={onClick}
+      disabled={disabled}
       // The whole label, for a pointer that can hover. A phone gets the truncation
       // and nothing else, which is why the split above is the real fix rather than
       // this.
@@ -316,8 +336,8 @@ function MenuItem({
       // rows use rather than a second menu-row height living in this file. This
       // menu was 37px, which is under the platform minimum on the one popover in
       // the app containing `Stop`, described above as the action with no way back.
-      className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-raised ${
-        tone === "danger" ? "text-danger hover:bg-danger/15" : "text-fg"
+      className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm disabled:pointer-events-none disabled:text-faint ${
+        tone === "danger" ? "text-danger hover:bg-danger/15" : "text-fg hover:bg-raised"
       }`}
     >
       <Icon as={icon} size={13} className="shrink-0" />

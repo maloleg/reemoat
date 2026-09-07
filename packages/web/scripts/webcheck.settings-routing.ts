@@ -1161,13 +1161,20 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * target on the control a phone uses to leave every screen of this pop-up. There
    * is no default now — `md` is deleted and `size` is required — so omitting it
    * does not compile and naming a size that misses 44px is not expressible. What
-   * is left to protect is which one was picked: `sm` is 24px of ink reaching 44
-   * through a transparent `after:-inset-2.5`, which is what keeps this chevron
-   * flush in a head row that a 44px box would have made taller than the title
-   * beside it. `Header`'s pair went the other way on the same question and its
-   * docblock argues why; the two must not be quietly converged.
+   * is left to protect is which one was picked: `nav` is 32px of ink reaching 44
+   * through a symmetric `after:-inset-1.5`, and it is the size the settings pane
+   * and the plugins pane draw their own chevrons at, so the three are one object.
+   *
+   * ⚠ **This said `sm`, "which keeps this chevron flush in a head row that a 44px
+   * box would have made taller than the title beside it", and that reason was
+   * measurable and false.** `SHEET_HEAD` is `min-h-14` — 56px, no vertical padding
+   * — so 44px of ink does not reach the row's floor, let alone raise it. The real
+   * objection to `lg` is weight, and the real objection to `sm` is that a 12px
+   * glyph in 24px of ink was reported as hard to see while its target had been
+   * 44px all along. `Header`'s pair went the other way on the same question and
+   * its docblock argues why; the two must still not be quietly converged.
    */
-  check("at the settings pane's own size, which reaches 44px", /icon=\{ChevronLeft\}[\s\S]{0,400}size="sm"/.test(sheetSrc), true);
+  check("at the settings pane's own size, which reaches 44px", /icon=\{ChevronLeft\}[\s\S]{0,400}size="nav"/.test(sheetSrc), true);
   /*
    * The label names the destination rather than saying "Back" — `Header`'s rule,
    * and the whole difference between this control and the history button it must

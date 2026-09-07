@@ -5,10 +5,11 @@ import { forgetAsks } from "./ask";
 import { forgetChoices } from "./choices";
 import * as cp from "./cp";
 import { DaemonClient } from "./daemon";
-import { ApiError, isTransportFailure, meansLater } from "./http";
+import { ApiError, errorText, isTransportFailure, meansLater } from "./http";
 import type { InstanceConfig } from "./instance";
 import { keyOf, machineId, refOf, sessionId, type MachineId, type SessionKey, type SessionRef } from "./ids";
 import { describe, MachineConnection, type MachineState } from "./machine";
+import { mergeOptimistic } from "./sessionOrder";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
 import {
   countsAsLive,
@@ -1066,6 +1067,30 @@ class AppStore implements StreamSink {
    * is a request per machine per poll for a value that cannot change.
    */
   private readonly rootsByMachine = new Map<MachineId, readonly string[]>();
+
+  /**
+   * Position writes that have not been answered yet, per session.
+   *
+   * The rail is derived from `sessions`, and the four-second poll replaces that
+   * array whole — so without this a row dropped into place springs back under the
+   * finger and lands again when the answer arrives. Applied at **both** places a
+   * row is written, the poll and `onSnapshot`, because a socket frame is as able
+   * to carry the pre-write value as a listing is.
+   *
+   * ⚠ **The overlay lives exactly as long as a request does, and that is the whole
+   * of the concurrency argument.** `MachineAgentsSection` needs two sequence
+   * counters for its strip because it holds a *local list* that a stale answer can
+   * repaint; here there is no second copy — the daemon's snapshot is the row — so
+   * once nothing is in flight the truth is whatever the daemon last said, whether
+   * the last write succeeded or was refused. What makes that sound is that writes
+   * for one session are **chained**: `POST /sessions/:id/meta` assigns rather than
+   * merges, so two in flight over a relay could otherwise be applied either way
+   * round and the loser would be the one this client believed had won.
+   */
+  private readonly metaWrites = new Map<
+    SessionKey,
+    { patch: { pinned?: boolean; rank?: number | null }; inFlight: number; queue: Promise<unknown> }
+  >();
   private readonly pluginsByMachine = new Map<MachineId, readonly PluginSummary[]>();
   private machinesCache: MachineState[] | null = null;
   private sessionsCache: SessionRow[] | null = null;
@@ -1802,7 +1827,7 @@ class AppStore implements StreamSink {
         key,
         ref,
         machineName: name,
-        snapshot,
+        snapshot: mergeOptimistic(snapshot, this.metaWrites.get(key)?.patch),
         daemonNow: listed.now,
         fetchedAt,
         heldConfig: holdConfig(this.rows.get(key)?.heldConfig, snapshot),
@@ -2225,7 +2250,7 @@ class AppStore implements StreamSink {
       key,
       ref,
       machineName: existing?.machineName ?? this.connections.get(ref.machineId)?.state().name ?? "",
-      snapshot: session,
+      snapshot: mergeOptimistic(session, this.metaWrites.get(key)?.patch),
       heldConfig: holdConfig(existing?.heldConfig, session),
       daemonNow: existing?.daemonNow ?? unanchored,
       fetchedAt: existing?.fetchedAt ?? unanchored,
@@ -2692,6 +2717,80 @@ class AppStore implements StreamSink {
   }
 
   /**
+   * Rename a session, pin it, or move it — the one write path for all three.
+   *
+   * It is here rather than in `SessionMenu` because two callers need it now and
+   * they need different halves: the kebab writes one field on a tap, and a drag
+   * writes a position several times a second and must not have any of them
+   * reordered. Both need the same three things — the row drawn where it was put
+   * before the daemon answers, the answer folded in when it comes, and a refusal
+   * that puts back what the daemon actually holds rather than what was on screen
+   * one edit ago.
+   *
+   * ⚠ **It reports through a callback and never draws anything itself.** `toast`
+   * lives in a `.tsx` under `ui/`, and `webcheck` imports this module with a
+   * two-field `document` — so a store that reached for it would move a driver's
+   * failure from an assertion to a module-evaluation crash. It is also the wrong
+   * direction: `store.ts` is under every screen here.
+   *
+   * Answers whether the write was **issued**, not whether it succeeded. `false`
+   * means the machine is not reachable and nothing was sent, which is the one
+   * outcome the caller has to describe in its own words — *what did not take*,
+   * "so the pin was not changed", "so the row was not moved". A bare fact about
+   * the fleet leaves the reader working out for themselves whether the thing they
+   * just tapped landed.
+   */
+  setSessionMeta(
+    ref: SessionRef,
+    patch: { title?: string | null; pinned?: boolean; rank?: number | null },
+    report: (message: string) => void,
+  ): boolean {
+    const daemon = this.daemonFor(ref.machineId);
+    if (daemon === undefined) return false;
+    const key = keyOf(ref);
+    const held = this.metaWrites.get(key);
+    /*
+     * The overlay is the *accumulated* patch, so a second drop before the first
+     * has answered draws the second rather than blinking through the first. Only
+     * the position half is overlaid: a title is drawn from the same snapshot but
+     * nothing about it moves a row, so an optimistic name would be this client
+     * claiming something it has not been told.
+     */
+    const entry = held ?? { patch: {}, inFlight: 0, queue: Promise.resolve() };
+    if (patch.pinned !== undefined) entry.patch.pinned = patch.pinned;
+    if (patch.rank !== undefined) entry.patch.rank = patch.rank;
+    entry.inFlight += 1;
+    this.metaWrites.set(key, entry);
+    // Re-fold the row it is about, so the overlay is on screen this frame rather
+    // than at the next poll.
+    const current = this.rows.get(key);
+    if (current !== undefined) this.onSnapshot(ref, current.snapshot);
+
+    const settle = (): void => {
+      entry.inFlight -= 1;
+      // Nothing else outstanding, so the daemon's own answer is the truth — which
+      // is what a refusal must fall back to as well. Dropping the overlay here is
+      // what makes the failure path "restore what the daemon last confirmed"
+      // rather than "restore what was on screen one edit ago".
+      if (entry.inFlight <= 0) this.metaWrites.delete(key);
+    };
+    entry.queue = entry.queue.then(async () => {
+      try {
+        const result = await daemon.setSessionMeta(ref.sessionId, patch);
+        settle();
+        this.applySnapshot(ref, result.session);
+      } catch (cause: unknown) {
+        settle();
+        // The row is already back to what the daemon holds; the sentence says the
+        // act did not take, which is the half a reader cannot see for themselves.
+        report(errorText(cause));
+        void this.resume("action-failed");
+      }
+    });
+    return true;
+  }
+
+  /**
    * `POST /sessions/:id/prompt` has answered, and named the seq the message
    * landed at.
    *
@@ -2804,20 +2903,31 @@ export function sessionLists(state: AppState): SessionLists {
       blocked.push({ row, oldest: oldestWait(row.snapshot) });
     } else if (showsAsEnded(row.snapshot)) {
       // `showsAsEnded` and not `isTerminal`: a session the daemon ended is not
-      // one *anybody* ended, so it stays in Active — where `recentFirst` puts it
-      // near the top, which is where a conversation interrupted a minute ago
-      // belongs. Ended means somebody decided it was over.
+      // one *anybody* ended, so it stays in Active, where it keeps the place its
+      // reader gave it. Ended means somebody decided it was over.
       ended.push(row);
     } else {
       active.push(row);
     }
   }
 
+  /*
+   * **`blocked` is sorted and the other two are not, and the asymmetry is the
+   * whole of what this function decides now.**
+   *
+   * Oldest wait first, because `Sheet`'s `WaitingHere` takes `waiting[0]` and
+   * means *the one that has been waiting longest* — a queue question, and the only
+   * order here that any surface still reads.
+   *
+   * `active` and `ended` used to sort most-recent-first, and that was the rail's
+   * display order: a list that rearranged itself on the four-second poll while
+   * somebody was reading it. The rail's order belongs to its reader now
+   * (`orderSessions` in `sessionOrder.ts`, applied where `groups.ts` produces the
+   * rows), so these two are **memberships rather than orders** and sorting them
+   * would be arithmetic nothing looks at. Which bucket a row lands in is still
+   * exactly as load-bearing as it was.
+   */
   blocked.sort((a, b) => a.oldest - b.oldest);
-  const recentFirst = (a: SessionRow, b: SessionRow): number =>
-    (b.snapshot.lastEventAt ?? b.snapshot.createdAt) - (a.snapshot.lastEventAt ?? a.snapshot.createdAt);
-  active.sort(recentFirst);
-  ended.sort(recentFirst);
 
   listsCache = { blocked: blocked.map((entry) => entry.row), active, ended, countByMachine };
   listsFor = state.sessions;
@@ -2858,12 +2968,23 @@ export interface MachineGroup {
    */
   ownerDisabled: boolean;
   /**
-   * Blocked first, then most-recent first.
+   * This machine's live rows, as a membership rather than as an order.
    *
-   * Pinned rows **are** here, and are also in `pinned`. They used to be only in
-   * `pinned`, which made `liveCount` below disagree with what the section drew:
-   * that count comes from `countByMachine`, which never knew about pinning, so a
-   * machine whose one live session was pinned read "1 live" over an empty body.
+   * ⚠ **It said "blocked first, then most-recent first", and neither half is true
+   * any more.** What a reader sees is `orderSessions` applied where `groups.ts`
+   * produces the rows, so the sequence here decides nothing — the loops in
+   * `sessionGroups` fill this in bucket order only because `blockedCount` is
+   * counted off what `place` returned, which is Q3.12's rule and unrelated to
+   * sequence.
+   *
+   * ⚠ **And pinned rows are *not* here.** Pinning moves rather than copies
+   * (Q3.11), so `place` files them into `pinned` and answers `null`. The
+   * paragraph this replaces described the era when it copied, down to a
+   * `liveCount` defect that era fixed. The `liveCount` disagreement that does
+   * survive is the opposite one and is recorded rather than fixed: that count
+   * comes from `countByMachine`, which counts a pinned session as live, so a
+   * machine whose only live session is pinned reads "1 live" over a section that
+   * draws it one group higher up.
    */
   active: SessionRow[];
   ended: SessionRow[];

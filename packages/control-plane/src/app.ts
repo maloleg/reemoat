@@ -861,7 +861,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * constantly — `GET /v1/machines` every wake, `GET /v1/me`. Call sites that say
    * why they are there is the smaller thing to keep true.
    *
-   * There are **seven**, and there were two. `POST /v1/machines` and
+   * There are **nine**, and there were two. `POST /v1/machines` and
    * `POST /v1/machines/:id/revoke` are a loop that costs three fsync'd
    * transactions a turn under `PRAGMA synchronous = FULL`, on the file the relay
    * shares, and leaves permanent rows behind either way; `POST /v1/me/keys` and
@@ -1702,7 +1702,40 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * `idx_user_emails_verified` exists to prevent, reached by handing the
      * verification to the squatter.
      */
-    const mine = pending !== null && foldName(pending.name) === foldName(trimmed);
+    /*
+     * ⚠ **Exact, never folded, and folded was an account takeover that survived
+     * the fix above by one capital letter.** `foldName` is trim + lower-case, and
+     * `USER_NAME` admits mixed case, so `Victim` and `victim` fold alike while
+     * `users.name` holds them as two different accounts.
+     *
+     * Measured path: a stranger signs up as `Victim` against `victim@`.
+     * `nameTakenByAnother` then lets the real person through as `victim` — its
+     * `email_folded IS NOT ?` clause exempts a pending row on the *same* address,
+     * deliberately, so that re-submitting the form resends your own link. A folded
+     * `mine` called that row theirs, the resend arm re-minted `pending`'s **stored**
+     * name and hash, and the mailbox received a link creating `Victim` with the
+     * stranger's password and `victim@` marked verified. `verifiedOwnerOf` answers
+     * the stranger for ever after: the address can never be registered again, and
+     * `/v1/forgot` for it mails the victim on the stranger's behalf.
+     *
+     * The name half is `nameTakenByAnother`'s own rule, which already refuses a
+     * fold-variant of an existing **user** via `lower(name)`. The pending-row
+     * exemption was simply wider than the table's, and the refusal below narrows it
+     * to match.
+     */
+    const mine = pending !== null && pending.name === trimmed;
+    /*
+     * A live sign-up on this address under a name that folds onto the caller's but
+     * is not it. `409 name_taken` rather than the third arm below, and the second
+     * reason is the arm's own: `mintRegistration` supersedes on
+     * `(email_folded, name_folded)`, which these two share — so two rows here would
+     * retire each other in turn rather than standing beside each other, which is
+     * the property that arm rests on. Same answer, same status and same sentence a
+     * fold-equal existing user already gets.
+     */
+    if (pending !== null && !mine && foldName(pending.name) === foldName(trimmed)) {
+      return jsonError(c, 409, "name_taken", "somebody already has that name");
+    }
 
     if (existingOwner !== null || pending !== null) {
       if (existingOwner !== null && !noticeAlreadySent(folded, now) && mayMail(folded)) {
@@ -2079,9 +2112,21 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
          * instance where `send` is false always. Giving the attempt back is the
          * conservative direction: the caller received nothing, so charging them
          * for it converts an outage of ours into a lockout of theirs.
+         *
+         * ⚠ **`forgive` and never `succeed`, which is the rule this file's
+         * throttle states and which `/v1/login` already broke once on
+         * `addressKey`.** `succeed` deletes the whole entry, and that is right
+         * only for a counter one person spends against themselves.
+         * `resetMailKey` follows the **recipient**: any anonymous caller spends
+         * it for any address, so clearing it here would hand back all three
+         * attempts, not the one that was not used — and an attacker able to make
+         * `send` fail intermittently could then walk RESET_MAIL_THROTTLE's
+         * roughly-four-an-hour bound off a victim's mailbox indefinitely,
+         * two delivered messages at a time. One optimistic `fail`, one
+         * `forgive`.
          */
         if (!queued) {
-          resetMailThrottle.succeed(resetMailKey(checked.folded));
+          resetMailThrottle.forgive(resetMailKey(checked.folded));
           console.error("forgot: the outbox refused a recovery mail, so the attempt was given back");
         }
       } catch (error) {

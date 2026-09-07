@@ -487,6 +487,14 @@ function migrate(db: DatabaseSync): void {
   // nullable column an older daemon never selects is invisible to it.
   if (!hasSession("ultracode")) db.exec("ALTER TABLE sessions ADD COLUMN ultracode INTEGER");
 
+  // Where a session sits in the list somebody reads. Nullable on `ultracode`'s
+  // grounds rather than `pinned`'s: 0 is not "no position", it is the oldest
+  // position there is, so a default would sort every row that predates this
+  // column to the bottom of its folder on the day it shipped. NULL means
+  // "wherever its age puts it", which is what every one of them was.
+  // `SCHEMA_VERSION` does not move, for `resume_gave_up`'s reason above.
+  if (!hasSession("rank")) db.exec("ALTER TABLE sessions ADD COLUMN rank REAL");
+
   // Which assembled agent this session was started as, or NULL for one started
   // on a bare harness — which is every session written before this column.
   //
@@ -1099,8 +1107,10 @@ export class SqliteSessionStore implements SessionStore {
     // `last_seq`/`dropped` use scalar MAX so a stale writer can never walk a
     // cursor backwards.
     //
-    // `title` and `pinned` *are* in the clause, and are the only columns here that
-    // are meant to change after creation.
+    // `title`, `pinned`, `ultracode` and `rank` *are* in the clause: they are the
+    // record's mutable preferences, the things a later touch is *supposed* to
+    // rewrite. What may never be here is identity — `agent`, `created_at` and
+    // `custom_agent` — which is the property this paragraph is actually about.
     //
     // `owner_subject` is no longer written at all. The column is still in the
     // table — see the note on SCHEMA_VERSION for why it is not worth rewriting
@@ -1109,13 +1119,13 @@ export class SqliteSessionStore implements SessionStore {
       `INSERT INTO sessions (
          id, agent, created_at, updated_at, agent_session_id, agent_pid, status, exit_json,
          container_id, agent_pgid, container_started_at,
-         turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, pinned,
+         turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, pinned, rank,
          ultracode, custom_agent,
          workspace_json, workspace_mode, workspace_root, workspace_branch, workspace_base
        ) VALUES (
          :id, :agent, :created_at, :updated_at, :agent_session_id, :agent_pid, :status, :exit_json,
          :container_id, :agent_pgid, :container_started_at,
-         :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :pinned,
+         :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :pinned, :rank,
          :ultracode, :custom_agent,
          :workspace_json, :workspace_mode, :workspace_root, :workspace_branch, :workspace_base
        )
@@ -1123,6 +1133,7 @@ export class SqliteSessionStore implements SessionStore {
          updated_at       = excluded.updated_at,
          title            = excluded.title,
          pinned           = excluded.pinned,
+         rank             = excluded.rank,
          ultracode        = excluded.ultracode,
          agent_session_id = excluded.agent_session_id,
          agent_pid        = excluded.agent_pid,
@@ -1728,6 +1739,9 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     // that only flipped a pin would compare `true` against `1` and look dirty for
     // ever after.
     pinned: row.pinned ? 1 : 0,
+    // A number or NULL, with no conversion: it is already what SQLite stores, and
+    // NULL is the state ("follows its age") rather than a missing value.
+    rank: row.rank,
     // Three-valued, so the same 1/0 conversion with NULL kept as NULL — that is
     // the state, not a missing value: nobody has chosen. See the column.
     ultracode: row.ultracode === null ? null : row.ultracode ? 1 : 0,
@@ -1961,6 +1975,10 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       // session named "null" and render it as the row's label.
       title: row["title"] == null ? null : String(row["title"]),
       pinned: Number(row["pinned"] ?? 0) !== 0,
+      // Read by shape rather than coerced: `Number(null)` is 0, which is a real
+      // position and the oldest one, so a coercion here would silently move every
+      // row that has none to the bottom of its folder.
+      rank: typeof row["rank"] === "number" && Number.isFinite(row["rank"]) ? row["rank"] : null,
       // `== null` covers both NULL on disk and a column an older database does
       // not have at all, and both mean the same thing here: nobody chose, so
       // this session follows the machine's setting.
@@ -2553,7 +2571,17 @@ export class SqlitePluginRecordStore implements PluginRecordStore {
 
   private toRecord(row: Record<string, unknown>): InstalledPlugin | null {
     const id = String(row["id"] ?? "");
-    const parsed = parseManifest(String(row["manifest_json"] ?? ""));
+    /*
+     * ⚠ **`presenting: false`, because this runs on every read of a row that is
+     * already installed.** A refusal added to `manifest.ts` is otherwise applied
+     * retroactively here: `list` omits the row and `get` answers `null`, so a
+     * plugin whose manifest was legal the day it was installed silently vanishes
+     * on the next daemon start, with its contributed agents and providers. The
+     * flag drops the refusals that exist to protect the install-approval card —
+     * no card is being drawn here — and keeps every one that bounds what the
+     * plugin may do. See `parseManifest`'s own note for the split.
+     */
+    const parsed = parseManifest(String(row["manifest_json"] ?? ""), { presenting: false });
     if (!parsed.ok) {
       this.onDegraded?.(`plugin ${id} is on disk with a manifest this build cannot read: ${parsed.message}`);
       return null;

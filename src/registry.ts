@@ -1125,6 +1125,15 @@ export interface SessionSnapshot {
    */
   pinned: boolean;
   /**
+   * Where this session sits in the list, or `null` for wherever its age puts it.
+   *
+   * A **position clock**, not an index: the unit is a millisecond, and unset means
+   * `createdAt`. That is what lets one order cover a row somebody dragged and a
+   * row nobody has touched — both are instants, so they compare, and a session
+   * created a moment ago is at the top of its folder with nothing written here.
+   */
+  rank: number | null;
+  /**
    * How full the model's context window is, or `null` for "cannot tell".
    *
    * Three answers and not two, for the reason `Liveness` and `loggedIn` have
@@ -1396,6 +1405,7 @@ export interface ManagedSessionInit {
   resumeGaveUp?: ResumeGiveUp | null;
   title?: string | null;
   pinned?: boolean;
+  rank?: number | null;
   /**
    * What this session was last told about ultracode, or `null` for never told.
    *
@@ -1773,6 +1783,7 @@ export class ManagedSession {
    */
   private titleValue: string | null;
   private pinnedValue: boolean;
+  private rankValue: number | null;
 
   /**
    * What somebody chose about ultracode for this session, or `null` for nobody.
@@ -1911,6 +1922,7 @@ export class ManagedSession {
     // next unrelated touch would then persist over the truth.
     this.titleValue = init.title ?? null;
     this.pinnedValue = init.pinned ?? false;
+    this.rankValue = init.rank ?? null;
     this.ultracodeChoice = init.ultracode ?? null;
     this.ultracodeDefault = options.ultracodeDefault ?? (() => false);
 
@@ -1972,6 +1984,7 @@ export class ManagedSession {
         resumeGaveUp: isPersistedGiveUp(row.resumeGaveUp) ? row.resumeGaveUp : null,
         title: row.title,
         pinned: row.pinned,
+        rank: row.rank,
         ultracode: row.ultracode,
       },
     });
@@ -1985,6 +1998,11 @@ export class ManagedSession {
   /** Whether it is kept at the top of the list. */
   get pinned(): boolean {
     return this.pinnedValue;
+  }
+
+  /** Where it sits in the list, or `null` for wherever its age puts it. */
+  get rank(): number | null {
+    return this.rankValue;
   }
 
   /** Where the agent runs. Kept as a field-shaped accessor so callers are unchanged. */
@@ -2217,6 +2235,11 @@ export class ManagedSession {
       // is for `workspace` and `agentConfig` above.
       title: this.titleValue,
       pinned: this.pinnedValue,
+      // **Always emitted, `null` included**, and that is not tidiness: a client
+      // reads the field being *absent* as "this daemon cannot store an order" and
+      // takes the gesture away for that machine's rows. Omitting it when unset
+      // would make every fresh session look like an old daemon.
+      rank: this.rankValue,
       // Copied rather than referenced, like `workspace` above: `Object.freeze` is
       // shallow, and a frame built now must describe now.
       contextUsage:
@@ -3006,11 +3029,15 @@ export class ManagedSession {
    * the route so there is one answer to "what is a legal title", and the caller is
    * handed the snapshot rather than an echo because the two differ.
    */
-  setMeta(change: { title?: string | null; pinned?: boolean }): SessionSnapshot {
+  setMeta(change: { title?: string | null; pinned?: boolean; rank?: number | null }): SessionSnapshot {
     if (change.title !== undefined) {
       this.titleValue = change.title === null ? null : normalizeTitle(change.title);
     }
     if (change.pinned !== undefined) this.pinnedValue = change.pinned;
+    // `null` clears it back to "follows its age", the way `title: null` clears a
+    // name — absent is "leave it alone". Finiteness is the route's to refuse; by
+    // here the value has been through it.
+    if (change.rank !== undefined) this.rankValue = change.rank;
     this.touchSafe();
     return this.snapshot();
   }
@@ -4403,6 +4430,7 @@ export class ManagedSession {
       dropped: snapshot.dropped,
       title: snapshot.title,
       pinned: snapshot.pinned,
+      rank: snapshot.rank,
       // The *choice*, never `ultracodeWanted`. Folding the machine's default in
       // here would write it into the row on the next unrelated touch, and this
       // session would then be pinned to today's setting for ever — which is

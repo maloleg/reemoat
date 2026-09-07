@@ -377,7 +377,19 @@ function Form({
       }}
     >
       {block.fields.map((field) => (
-        <Field key={field.key} field={field} value={values[field.key] ?? ""} onChange={(value) => set(field.key, value)} />
+        <Field
+          key={field.key}
+          field={field}
+          /*
+           * `Object.hasOwn`, never a bare read — `PluginConsent`'s `said` for the
+           * same reason. The key is a plugin's own string that `clampField` only
+           * clips, and `set` above spreads into an object literal, so a field
+           * keyed `__proto__` would otherwise read back `Object.prototype`: an
+           * object, which `?? ""` lets through and React refuses as a child.
+           */
+          value={Object.hasOwn(values, field.key) ? (values[field.key] ?? "") : ""}
+          onChange={(value) => set(field.key, value)}
+        />
       ))}
       <div>
         {/*
@@ -550,7 +562,9 @@ function samePluginRow(a: PluginRow, b: PluginRow): boolean {
  *
  * ⚠ **Total over the five, and `type` is compared first** — the switch above has
  * an arm for each, so a block that changed shape must never compare equal to the
- * one it replaced. Exported with {@link samePluginRow} and for its reason.
+ * one it replaced. Local with {@link samePluginRow} and for its reason: both were
+ * exported "so a driver can reach it" and no driver ever did, and an export that
+ * pretends the claim is covered hides the gap.
  *
  * A `form`'s `value`s are compared even though {@link Form} reads them only once
  * per mount: what is being answered here is whether the *block* changed, and

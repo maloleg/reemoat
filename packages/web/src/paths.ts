@@ -83,18 +83,86 @@ export function relativeTo(root: string, path: string): string | null {
 export function displayCwd(cwd: string, roots: readonly string[]): string {
   const path = cwd.trim();
   if (path.length === 0) return path;
-  let best: string | null = null;
+  const match = matchRoot(path, roots);
+  if (match === null) return shortPath(path);
+  return match.rel.length === 0 ? "~" : `~/${match.rel}`;
+}
+
+/**
+ * Which root a path is under, and what is left of the path once it is cut.
+ *
+ * Extracted from {@link displayCwd} so the directory picker's breadcrumb bar and
+ * the sentence under it cannot disagree about where the home directory ends. The
+ * bar had its own copy of this rule, inline, and the copy was wrong twice: it
+ * tested `path.startsWith(root)` — the separator hole `relativeTo`'s own docblock
+ * spends a paragraph on, which makes `/Users/re` a "root" of `/Users/rends/x` and
+ * then builds crumbs addressing `/Users/re/nds`, a directory that does not exist —
+ * and it weighed `roots[0]` alone, so under a second, nested root the bar drew no
+ * crumbs at all and the picker could not be walked.
+ *
+ * `rel` is `""` for the root itself, which is a real answer rather than a miss:
+ * `relativeTo` says `null` there, correctly, since there is no *relative* part,
+ * and here that is the whole of it.
+ *
+ * The longest matching root still wins, for {@link displayCwd}'s reason — roots
+ * may nest (`~` and `~/work`) and the more specific one says more — and it is
+ * measured on `rel` rather than on the root, which is the same comparison the
+ * shorter remainder already expressed.
+ */
+function matchRoot(cwd: string, roots: readonly string[]): { base: string; rel: string } | null {
+  const path = cwd.trim();
+  if (path.length === 0) return null;
+  let best: { base: string; rel: string } | null = null;
   for (const root of roots) {
     const base = root.endsWith("/") ? root.slice(0, -1) : root;
     if (base.length === 0) continue;
-    // The root itself, which `relativeTo` answers `null` for — correctly, since
-    // it has no *relative* part. Here it is the whole answer.
-    if (path === base) return "~";
+    if (path === base) return { base, rel: "" };
     const rel = relativeTo(base, path);
     if (rel === null) continue;
-    if (best === null || rel.length < best.length) best = rel;
+    if (best === null || rel.length < best.rel.length) best = { base, rel };
   }
-  return best === null ? shortPath(path) : `~/${best}`;
+  return best;
+}
+
+/** One step of a path, and the absolute path that walking to it lands on. */
+export interface Crumb {
+  readonly label: string;
+  readonly path: string;
+}
+
+/**
+ * A working directory as a row of steps somebody can walk back up.
+ *
+ * The same cut {@link displayCwd} makes, kept as parts instead of joined — so the
+ * first step reads `~` rather than the literal home directory, which is the whole
+ * of Q3.441 applied to the one surface that was still printing it in full. On a
+ * 390px phone that prefix was most of the line and it is the one fact every
+ * session on the machine shares.
+ *
+ * `label` is what to draw and `path` is where a tap goes, and they are
+ * deliberately different for the first crumb only: `~` is a name for a directory
+ * whose address is still absolute. Every `path` is a prefix of the input at a
+ * separator, so no crumb can address a directory the input did not pass through.
+ *
+ * Empty for a path under no root — `cwd` is not confined, so that is ordinary
+ * rather than exotic, and it is the same state an older daemon, an unreachable
+ * one and a listing that has not landed yet all produce. The caller draws what it
+ * drew before rather than inventing a prefix.
+ */
+export function pathCrumbs(cwd: string, roots: readonly string[]): readonly Crumb[] {
+  const match = matchRoot(cwd, roots);
+  if (match === null) return [];
+  const crumbs: Crumb[] = [{ label: "~", path: match.base }];
+  let walked = match.base;
+  // `relativeTo` has already refused an empty segment, a `.` and a `..`, so this
+  // walk cannot build a path the input did not contain.
+  if (match.rel.length > 0) {
+    for (const part of match.rel.split("/")) {
+      walked = `${walked}/${part}`;
+      crumbs.push({ label: part, path: walked });
+    }
+  }
+  return crumbs;
 }
 
 /**

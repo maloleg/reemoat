@@ -122,6 +122,25 @@ CREATE TABLE IF NOT EXISTS sessions (
   title            TEXT,
   pinned           INTEGER NOT NULL DEFAULT 0,
 
+  -- Where this session sits in the list somebody reads, and NULL for "wherever
+  -- its age puts it".
+  --
+  -- A position clock rather than an index: the unit is a millisecond, unset means
+  -- created_at, and a drag writes a synthetic instant between its two new
+  -- neighbours. That is what lets a stored position and a never-touched row be
+  -- compared at all -- one number line, so a session nobody has moved has an
+  -- honest place on it and a session created a moment ago is still at the top of
+  -- its folder without anything being written here.
+  --
+  -- Nullable on ultracode's grounds rather than pinned's: 0 would be a real
+  -- position, and the oldest one, so every row that predates this column would
+  -- sort to the bottom of its folder the day it shipped.
+  --
+  -- REAL because a drop between two adjacent milliseconds has to land strictly
+  -- between them. The client detects the day that runs out and re-spaces the
+  -- window rather than writing a tie; see `rankBetween` in packages/web.
+  rank             REAL,
+
   -- Whether somebody chose ultracode for this session, and NULL for nobody has.
   --
   -- Nullable on owner_subject's grounds rather than pinned's: there is no honest

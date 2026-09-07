@@ -269,7 +269,13 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
             )}
           </>
         }
-        subtitle={<WorkspaceLine machineName={row.machineName} workspace={session.workspace} />}
+        subtitle={
+          <WorkspaceLine
+            machineName={row.machineName}
+            workspace={session.workspace}
+            roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
+          />
+        }
         close
       >
         {/*
@@ -583,10 +589,31 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
 function WorkspaceLine({
   machineName,
   workspace,
+  roots,
 }: {
   machineName: string;
   workspace: SessionSnapshot["workspace"];
+  /**
+   * The machine's own browse roots, so this line cuts the same prefix every row
+   * in the rail does. Empty is the older daemon, the unreachable one and the
+   * listing that has not landed, and `displayCwd` answers all three by falling
+   * back to `shortPath` — which is exactly what this line drew before.
+   */
+  roots: readonly string[];
 }): ReactNode {
+  /*
+   * ⚠ **This drew the absolute path, and one line above it `SessionTitle` was
+   * already drawing the short form of the same directory.** For a session nobody
+   * has named, `sessionLabel` falls back to `displayCwd`, so the header read
+   * `~/thing` over `mac · /Users/rends/thing`: one fact, two renderings, one row
+   * apart, and most of the second spent on the home directory every session on
+   * that machine shares. Q3.441's defect, resurfaced in the header.
+   *
+   * What is *not* fixed here, deliberately: the echo itself. `headlineWorthDrawing`
+   * refuses a subline that repeats its title, and the same judgement would drop
+   * the path from this line entirely — leaving `mac · main`, which is a different
+   * decision about what this line is for, not a rendering fix.
+   */
   const where = workspace.requestedCwd;
   const branch = workspace.git?.branch ?? null;
   return (
@@ -598,7 +625,7 @@ function WorkspaceLine({
           beside it is the one with room to give. */}
       <span className="shrink-0">{machineName}</span>
       <span className="shrink-0 text-faint">·</span>
-      <span className="truncate">{where}</span>
+      <span className="truncate" title={where}>{displayCwd(where, roots)}</span>
       {workspace.mode === "worktree" && branch !== null && (
         <>
           <span className="text-faint">·</span>

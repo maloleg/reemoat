@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { check } from "./webcheck.env.js";
+import { stripComments } from "./webcheck.source.js";
 import { type NavMove } from "./webcheck.modules.js";
 
 /* ------------------------------------------------------------------ *
@@ -520,7 +521,7 @@ process.stdout.write("\nwhat an unsent message carries\n");
 
 process.stdout.write("\nwhere a row says it works\n");
 {
-  const { displayCwd, shortPath } = await import("../src/paths.js");
+  const { displayCwd, pathCrumbs, shortPath } = await import("../src/paths.js");
   const home = ["/Users/rends"];
 
   check("a directory under a root loses the root", displayCwd("/Users/rends/2026-07-tare-reemoat", home), "~/2026-07-tare-reemoat");
@@ -552,9 +553,120 @@ process.stdout.write("\nwhere a row says it works\n");
   // A root that is empty or "/" must not turn every path into `~/…`.
   check("an empty root is not a prefix", displayCwd("/Users/rends/x", [""]), "…/rends/x");
 
+  /*
+   * **The directory picker's breadcrumb bar is the same cut, kept as parts.**
+   *
+   * It had its own copy of this rule, inline in `NewSession.tsx`, and the copy was
+   * wrong in two ways that only a fleet slightly unlike the developer's would
+   * show: it tested `startsWith`, and it weighed `roots[0]` alone. Both are the
+   * holes `relativeTo` and the longest-match loop above already answered, which is
+   * why the fix was to delete the copy rather than to patch it.
+   */
+  const labels = (path: string, roots: readonly string[]): string[] =>
+    pathCrumbs(path, roots).map((crumb) => crumb.label);
+
+  check("the crumb bar cuts the prefix a row cuts", labels("/Users/rends/a/b", home), ["~", "a", "b"]);
+  check("and the root itself is one crumb", labels("/Users/rends", home), ["~"]);
+  check("the most specific root wins here too", labels("/Users/rends/work/api", ["/Users/rends", "/Users/rends/work"]), ["~", "api"]);
+  check("whichever order they arrive in", labels("/Users/rends/work/api", ["/Users/rends/work", "/Users/rends"]), ["~", "api"]);
+  /*
+   * ⚠ **The defect the old copy shipped.** `"/Users/rends/x".startsWith("/Users/re")`
+   * is true, so the bar drew crumbs whose *addresses* were `/Users/re` and
+   * `/Users/re/nds` — two directories that do not exist, each one tap away.
+   */
+  check("a prefix that is not a segment boundary is not a root", labels("/Users/rends/x", ["/Users/re"]), []);
+  check("and a path under no root draws no crumbs at all", labels("/opt/thing", home), []);
+  check("nor does an empty root list", labels("/Users/rends/x", []), []);
+
+  /*
+   * **Every crumb addresses somewhere the path actually passed through**, which is
+   * the property the old builder lost. Checked as a prefix *at a separator*, since
+   * that is precisely the test `startsWith` was standing in for.
+   */
+  const walked = pathCrumbs("/Users/rends/a/b", home);
+  check(
+    "and every crumb addresses a directory on the way",
+    walked.map((crumb) => "/Users/rends/a/b".startsWith(crumb.path) && (crumb.path === "/Users/rends/a/b" || "/Users/rends/a/b"[crumb.path.length] === "/")),
+    [true, true, true],
+  );
+  check("with the last one being the folder itself", walked[walked.length - 1]?.path, "/Users/rends/a/b");
+
+  /*
+   * ⭐ **The bar and the sentence under it say the same thing**, proved rather than
+   * asserted twice. This is the whole reason `pathCrumbs` was extracted from
+   * `displayCwd` instead of written beside it: one rule, two renderings, and a
+   * driver that fails the day they part.
+   */
+  for (const [path, roots] of [
+    ["/Users/rends/2026-07-tare-reemoat", home],
+    ["/Users/rends/a/b/c", home],
+    ["/Users/rends", home],
+    ["/Users/rends/work/api", ["/Users/rends", "/Users/rends/work"]],
+  ] as const) {
+    check(
+      `the crumbs join to the sentence for ${path}`,
+      labels(path, roots).join("/"),
+      displayCwd(path, roots),
+    );
+  }
+
   const { sessionLabel } = await import("../src/ui/bits.js");
   const row = (title: string | null, cwd: string) =>
     ({ snapshot: { title, workspace: { requestedCwd: cwd } } }) as never;
+  /*
+   * **And the three surfaces that draw a working directory all go through the one
+   * rule.** Read off disk, because a placement is not a value: each of these was
+   * printing an absolute path beside something already drawing the short form.
+   */
+  const picker = readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8");
+  check("the picker draws its path against the roots rather than raw", /\bpathCrumbs\(/.test(picker), true);
+  check("and the inline copy that got it wrong is gone", /crumbs\.push\(\{ label: root/.test(picker), false);
+  check("and it holds every root, not the first one", /setRoots\(result\.roots\)/.test(picker), true);
+  /*
+   * ⚠ **The line under it used to say `in ~/thing` and no longer says anything.**
+   * It was one fact drawn twice on one screen — the folder the picker is standing
+   * in, three inches under a bar whose whole subject is that path — and the
+   * quieter of the two copies is the one that went. So what is asserted here is
+   * the *absence*, which is the half a reader cannot see from the other file.
+   */
+  check("and the footer does not repeat the folder the bar is drawing", /in <span className="font-mono/.test(picker), false);
+  /*
+   * The spacing fix, as a property rather than as the two classes that were wrong:
+   * a crumb button owns its own separator, so there is no horizontal gap anywhere
+   * on the line and no box between two boxes to put one in.
+   *
+   * ⚠ **Comment-stripped, unlike the `groups.pinned` pair one file over**, and the
+   * two want opposite things for the same reason. That one bans a *symbol*, so a
+   * mention in prose is a mention and the ban has to cover it. This one bans a
+   * *class the browser will receive*, and the docblock beside it quotes the class
+   * that used to be there — which is the record of why the rule exists and may not
+   * be the thing that fails it.
+   */
+  const pickerCode = stripComments(picker);
+  const barAt = pickerCode.indexOf("const crumbs = pathCrumbs");
+  const bar = pickerCode.slice(barAt, pickerCode.indexOf("{error !== null", barAt));
+  /*
+   * The crumb buttons alone, not the bar: **up one folder** sits in the same row
+   * and legitimately carries horizontal padding, being at the row's edge with no
+   * crumb on its left to be spaced away from.
+   */
+  const crumbButton = bar.slice(bar.indexOf("crumbs.map"), bar.indexOf("</button>", bar.indexOf("crumbs.map")));
+  check("the crumbs are one continuous string", [/gap-x-/.test(bar), /px-/.test(crumbButton)], [false, false]);
+  check("and each still answers to a finger", /-my-2 inline-flex min-h-11/.test(crumbButton), true);
+  /*
+   * ⭐ **Up one folder is drawn always and disabled at the root**, never
+   * conditionally rendered: a control that materialises moves the ones beside it
+   * under a finger already travelling, and at the root — the first thing this
+   * picker shows — it would be missing exactly while somebody is learning where
+   * the controls are.
+   */
+  check("the picker offers a way up its own tree", /aria-label="Up one folder"/.test(picker), true);
+  check("drawn always and disabled at the top, never conditionally rendered", /disabled=\{parent === null\}/.test(pickerCode), true);
+  check("and it is not this app's back control wearing a folder's job", /icon=\{ChevronLeft\}/.test(picker), false);
+
+  const header = readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8");
+  check("and so does the session header's own line", /displayCwd\(where, roots\)/.test(header), true);
+
   check("an unnamed session is called by where it works", sessionLabel(row(null, "/Users/rends/api"), home), "~/api");
   check("a named one is called by its name", sessionLabel(row("fix the build", "/Users/rends/api"), home), "fix the build");
   /*

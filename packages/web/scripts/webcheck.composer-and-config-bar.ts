@@ -336,9 +336,23 @@ process.stdout.write("\nthe session lists\n");
   const state = { sessions, machines: [] } as never;
   const lists = sessionLists(state);
 
-  // Blocked first, oldest wait first: the point of the whole screen.
+  /*
+   * **Oldest wait first, and this is the one order in here that is still an
+   * order.** `Sheet`'s `WaitingHere` takes `waiting[0]` and means *the one that
+   * has been waiting longest*, which is a queue question and nothing to do with
+   * where a row is drawn in the rail.
+   */
   check("blocked sessions sort by their oldest pending permission", lists.blocked.map((r) => r.snapshot.id), ["d", "c"]);
-  check("active sessions sort most-recent first", lists.active.map((r) => r.snapshot.id), ["e", "f", "a", "g"]);
+  /*
+   * ⚠ **This read "active sessions sort most-recent first", and that sort is
+   * deleted rather than moved.** It was the rail's display order, and a list that
+   * rearranged itself on the four-second poll is what the reader's own order
+   * replaced (`sessionOrder.ts`). What survives here is which bucket a row lands
+   * in, which is as load-bearing as it ever was — so the assertion is set
+   * equality, and asserting a sequence again would be pinning arithmetic nothing
+   * reads.
+   */
+  check("the live buckets are memberships rather than orders", lists.active.map((r) => r.snapshot.id).sort(), ["a", "e", "f", "g"]);
   // `b` alone. `f` ended in exactly the same *status* and is not here, which is
   // the whole point: nobody ended it, so calling it ended would be answering a
   // question the reader did not ask.

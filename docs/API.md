@@ -104,7 +104,7 @@ plugin *manifest* does name all three, disclosed in `consent.adds` on
 | `POST /sessions/:id/prompt` | Answers 202; the turn runs on the daemon |
 | `POST /sessions/:id/cancel` | Stop the turn. The conversation stays loaded |
 | `POST /sessions/:id/config` | The agent's own controls — mode, model, effort |
-| `POST /sessions/:id/meta` | Title, pin |
+| `POST /sessions/:id/meta` | Title, pin, and where the row sits in the list. `rank` is a position clock — a millisecond, `null` for "follows its age" — and it is **always** on the snapshot, so an absent field names a daemon that cannot store an order. A drop into the pinned group carries `pinned` and `rank` in one request, which is why this is not a route of its own |
 
 ### Being asked something
 

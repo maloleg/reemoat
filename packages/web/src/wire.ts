@@ -984,6 +984,22 @@ export interface SessionSnapshot {
   title?: string | null;
   /** Kept at the top of its group, and never dropped by a `?limit=` cut. */
   pinned?: boolean;
+  /**
+   * Where this session sits in the list, or `null` for wherever its age puts it.
+   *
+   * ⚠ **Three-valued, and `undefined` is the compatibility signal rather than a
+   * missing value.** A daemon that can store an order always sends the field, so
+   * an absent one names a daemon that cannot — and that machine's rows lose the
+   * drag and the Move items while everything else about them works. `null` is the
+   * ordinary answer from a daemon that can: nobody has moved this row.
+   *
+   * Nothing branches on `DAEMON_VERSION`; an old daemon is known by the shape of
+   * what it answers, which is `compatibility.md`'s rule 1. And the degradation is
+   * not a blank list — `effectiveRank` reads both absent and `null` as
+   * `createdAt`, so an old machine draws a stable, creation-ordered list rather
+   * than the recency shuffle it drew before.
+   */
+  rank?: number | null;
   /** Absent on an older daemon, and on every session it has no reason to resume. */
   resume?: SessionResumeState;
 }

@@ -1775,6 +1775,33 @@ const ICON_BUTTON_SIZE = {
    */
   chip: `relative h-8 w-8 ${TAP_GROW_Y}`,
   /**
+   * 32px of ink, 44px of target, grown **symmetrically** — a head row's own
+   * leading or trailing control.
+   *
+   * The ◀ and the ✕ in a pop-up's head were `sm`, so a 12px glyph in 24px of ink
+   * was the way out of every settings screen, every plugin screen and the agent
+   * builder. Reported as hard to see rather than hard to hit, which is exactly
+   * what it was: the target had been 44px all along.
+   *
+   * **32px rather than `lg`'s 44px**, and the reason is weight rather than height:
+   * `SHEET_HEAD` is `min-h-14` with no vertical padding, so a 44px box does not
+   * reach that row's floor, let alone raise it — the docblock on `Sheet`'s chevron
+   * said it would and was wrong for four releases. What 44px of ink *would* do is
+   * put the largest object in the head beside a 28px title line, on a control
+   * nobody is looking for until they want it. 32px is also `WaitingHere`'s own
+   * height in that same row, so the head is one size from end to end.
+   *
+   * **Symmetric, unlike `chip`, and that is a fact about neighbours rather than a
+   * preference.** These sit alone at the end of a `gap-2` row, so 6px a side lands
+   * in the gap with 2px to spare; `chip` may not do that because the mode chip is
+   * 6px away and changes the model. And `sm`'s 10px cannot serve here for the same
+   * reason in reverse — it is 2px onto whatever shares the row.
+   *
+   * ⚠ **One per row edge.** Two of these adjacent at zero gap overlap by 12px of
+   * invisible target, which is a mis-tap with nothing on screen explaining it.
+   */
+  nav: "relative h-8 w-8 after:absolute after:-inset-1.5 after:content-['']",
+  /**
    * 44px of box — the platform tap minimum reached the plain way.
    *
    * ⚠ This used to read "the composer's send button, and nothing smaller", and
@@ -1787,6 +1814,26 @@ const ICON_BUTTON_SIZE = {
    */
   lg: "h-11 w-11",
 } as const;
+
+/**
+ * The glyph each box holds, as a table rather than as a ternary.
+ *
+ * ⚠ **It was `size === "sm" ? 12 : size === "chip" ? 14 : 16`, and the fourth
+ * entry would have taken its 16 by falling off the end of that chain rather than
+ * by anybody choosing it.** Here 16 happened to be right; the next size added is
+ * the one where a silent default is a 16px glyph in a 24px box. Keyed on the size
+ * table itself, so an entry with no glyph is a compile error — the same move
+ * {@link ICON_BUTTON_TONE} makes one line down.
+ *
+ * At least 4px of ink margin a side in every row, which is what keeps a glyph
+ * from touching the hover ground it sits on; `webcheck` holds the arithmetic.
+ */
+const ICON_BUTTON_GLYPH: Record<keyof typeof ICON_BUTTON_SIZE, number> = {
+  sm: 12,
+  chip: 14,
+  nav: 16,
+  lg: 16,
+};
 
 const ICON_BUTTON_TONE: Record<ButtonTone, string> = {
   // A *background* on hover, not just a colour. That is the whole point of this
@@ -1907,7 +1954,7 @@ export function IconButton({
       {/* The glyph comes down with the box: a 16px paperclip in a 32px square
           reads as a bigger control than the 11–13px glyphs on the chips beside
           it, which is the mismatch `chip` exists to remove. */}
-      <Icon as={icon} size={size === "sm" ? 12 : size === "chip" ? 14 : 16} />
+      <Icon as={icon} size={ICON_BUTTON_GLYPH[size]} />
     </button>
   );
 }

@@ -417,8 +417,19 @@ process.stdout.write("\nthe machine limit\n");
      * host itself, so the poll re-lists an empty fleet every tick and re-reads
      * `me` — the count the limit is enforced against — once the first machine
      * lands. Both halves pinned on `store.ts`, since neither has a screen.
+     *
+     * ⚠ **The second alternative used to be `createMachine\(`, and it went
+     * vacuous when that function was deleted from `cp.ts`** — a negative naming a
+     * string nothing in the tree can write any more, which is the anti-pattern
+     * the note above warns about, reached by deletion rather than by a move. The
+     * route is what survives it: this screen may not `POST /v1/machines` under
+     * any spelling, whatever the client function is called.
      */
-    check("nothing on this screen adds a machine by name", /machinesChanged\("machine-added"\)|createMachine\(/.test(src), false);
+    check(
+      "nothing on this screen adds a machine by name",
+      /machinesChanged\("machine-added"\)|"\/v1\/machines",\s*\{\s*method:\s*"POST"/.test(src),
+      false,
+    );
     {
       const storeSrc = strip(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
       check("an empty fleet is re-listed by the poll rather than waiting for a wake", /resume\(this\.snapshot\.phase === "loading" \? "cp-retry" : "awaiting-first-machine"\)/.test(storeSrc), true);
@@ -1281,6 +1292,32 @@ process.stdout.write("\nimporting a codebase\n");
    * the only thing it can see. So the sentence above was unreachable in exactly
    * the case it exists for, and the ordering is what makes it reachable.
    */
+  /*
+   * ⭐ **The four ways out of this sheet, and that they all mean the same thing.**
+   *
+   * This pop-up has no route of its own, so `Sheet`'s own `close` — `navigate(under,
+   * true)` — reached past it to whatever the *New session* overlay was drawn over.
+   * The ✕, Escape and the scrim therefore each destroyed the machine, the agent and
+   * the folder somebody had walked to, while the file's own docblock said the
+   * opposite in as many words. Prose is what stood in for this check for four
+   * releases, which is the whole argument for reading the props off disk.
+   *
+   * `onClose` is asserted on **both** files: the caller handing it over, and the
+   * primitive taking it as an override rather than as the rule — so the default
+   * cannot be quietly inverted for the four pop-ups the URL does name.
+   */
+  const sheet = stripComments(readFileSync(new URL("../src/ui/Sheet.tsx", import.meta.url), "utf8"));
+  check("the import sheet closes back to the form rather than out of it", /onClose=\{onClose\}/.test(src), true);
+  check("and its chevron goes to the same place", /up=\{onClose\}/.test(src), true);
+  check("and names where that is", /upLabel="New session"/.test(src), true);
+  check("which is a thing only a caller can hand over", /const close = onClose \?\?/.test(sheet), true);
+  /*
+   * And the cost of that close having become cheap: `POST /fs/import` is one at a
+   * time per machine (`409 import_busy`), so an upload nobody is watching holds the
+   * lock and the next attempt is refused for a reason nothing on screen explains.
+   */
+  check("an abandoned upload does not keep the machine's import lock", /useEffect\(\(\) => \(\) => abort\.current\?\.abort\(\), \[\]\)/.test(src), true);
+
   check("the route is probed before any bytes are sent", /importSupported\(\)/.test(src), true);
   check(
     "and the upload only starts once that has answered",
