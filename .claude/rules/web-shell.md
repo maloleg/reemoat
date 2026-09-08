@@ -152,9 +152,8 @@ have to enter. These are the rules a change here must not break:
   retargets the `click` away from the `<button>` that opens the session. Only
   `target.index === origin.index` is a no-op. The ⋮ is on **every** row. Q3.574,
   Q3.576, Q3.577.
-  A machine with no sessions still gets a tab, and with it a create button. A folder holding a waiting session does
-  **not** hoist; that rides its header as a count. Q3.224. **Pinned is cut
-  to the selected machine**; every pin under All. Q3.550.
+  A machine with no sessions still gets a tab, and with it a create button.
+  **Pinned is cut to the selected machine**; every pin under All. Q3.550.
 - **A path is cut against the daemon's own `REEMOAT_ROOTS`, and drawn once.**
   `displayCwd` cuts the longest matching root (`~/thing`); under none, or with no
   roots yet, it falls back to `shortPath`, never an invented prefix. Fetched once
@@ -250,12 +249,15 @@ have to enter. These are the rules a change here must not break:
   `refreshMe()` at that moment so an admin does not silently lose the Users
   section. Q3.97.
 
-**A machine row carries its id, because the name is not unique.** `nameVisibleTo`
-refuses a duplicate on the five routes that *name* a machine, but `PUT
-/v1/admin/grants` reaches the same state without naming anything;
-`resolveMachineRef` then silently picks the owned one, so the id is on the row. A
-machine that is not yours carries a **`shared` badge** rather than a subline; one
-badge per row, and a limit or enrolment badge outranks it. Q3.543.
+**A machine row carries its id only where the name is ambiguous**
+(`ambiguousNames`): `PUT /v1/machines/:id/grants` collides without naming
+anything, and `resolveMachineRef` picks the owned one. A machine that is not
+yours carries a **`shared` badge**, never a subline; one badge per row, and
+a limit or enrolment badge outranks it. Q3.543. It also carries **`enrolledBy`**
+on a subline of its own — never a badge, never a clause on the truncating
+`standing` line — since nothing else discloses a substitution no route may
+refuse; `enrolledByText` is that one string, `null` where there is nothing to
+say. Q1.637.
 
 **Systems live inside a machine, and there is no top-level section for them.**
 `/settings/machines/:machineId/systems[/:systemId]`: the machine rides the URL for
@@ -276,8 +278,8 @@ it is what `aria-labelledby` resolves to. Q3.427.
 **Creating a session asks three things** — machine, agent, folder — and neither
 whether to use a worktree nor the first prompt. Q3.86, Q3.87.
 
-**What it deliberately does not do: no admin UI for grants** — sharing one machine
-between two people is still `cpctl admin grant`. Users and machines both have one:
+**What it deliberately does not do: no UI for sharing a machine** — that is the
+owner's `cpctl share`; the admin route is deleted. Users and machines both have one:
 an admin creates, bans and deletes people under Settings → Users, and anybody adds
 their own machine under Settings → Machines. Also **no workspace changes screen**
 — the working copy against its base, `GET /sessions/:id/changes` and
@@ -368,7 +370,7 @@ primitive adds `tap` itself and carries its own entry.
 |---|---|
 | `packages/web/src/wire.ts` | The daemon's vocabulary, hand-mirrored, and why it could not be imported |
 | `packages/web/src/ids.ts` | Branded `MachineId`/`SessionId`/`SessionKey`, and the three rules that make `(machineId, sessionId)` structural |
-| `packages/web/src/store.ts` | All client state, and `resume()`, the single wake path. `loadAll` pages a conversation in and does not stop until it reaches the start of it; `loadStop` is where it may stop, the daemon's own floor included; `transcriptNotice` reads the same five fields from the other end and is asserted as a total partition rather than as booleans in JSX; `historyRetry` is what a failed page costs and for how long (37.5s); `attachWanted` resumes a run that gave up |
+| `packages/web/src/store.ts` | All client state, and `resume()`, the single wake path. `loadAll` pages a conversation in and does not stop until it reaches the start of it; `loadStop` is where it may stop, the daemon's own floor included; `transcriptNotice` reads the same five fields from the other end and is asserted as a total partition rather than as booleans in JSX; `historyRetry` is what a failed page costs |
 | `packages/web/src/resume.ts` | Noticing the phone woke. Four triggers, one debounced call |
 | `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the four sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
 | `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs`, `waitingFloor`, and `visibleRows`, still the **single** source of render order, deduplicated by key |

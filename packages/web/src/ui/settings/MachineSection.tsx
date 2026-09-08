@@ -9,6 +9,7 @@ import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
 import { agentStripPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
+import { enrolledByText } from "../../wire";
 import {
   Button,
   ChoiceRow,
@@ -124,6 +125,12 @@ export function MachineSection({
    * reachable…" about a host the registry can already prove has never dialled in.
    */
   const setupOffered = owned && !machine.enrolled && !machine.overLimit;
+  /*
+   * The same string the list's row draws, from the same function, because two
+   * spellings of one disclosure are two disclosures and only one of them would
+   * survive the next shortening pass. See `enrolledByText`.
+   */
+  const provenance = enrolledByText(machine.enrolledBy);
   const listable = machine.enrolled && read === "readable";
 
   const mint = (): void => {
@@ -225,6 +232,32 @@ export function MachineSection({
       <p className="text-xs text-muted">
         Belongs to <code className="text-muted/80">{machine.id}</code> only. Plugins run there as you.
       </p>
+
+      {/*
+       * **Who brought this machine online, under the lede and not inside it.**
+       *
+       * ⚠ **This is not the status the docblock above bars from this screen.**
+       * That rule is about reachability — a fact about the *fleet*, carried on
+       * every row of the list one level up, and restating it here is the
+       * repetition the heading was doing when it drew the machine's name. This
+       * is provenance: it does not change on the poll, the list cannot be relied
+       * on to have been read, and it is the one fact that separates a machine
+       * somebody registered *for* you from one that has been substituted under
+       * the name you lost. It sits beside the id for that reason — both are what
+       * this machine *is* rather than how it is doing.
+       *
+       * Its own `<p>` rather than a fourth clause on the lede: that sentence is
+       * fixed, counted at nine words in its own docblock, and true of every
+       * machine, while this one is conditional and true of few. The full stop is
+       * this surface's own — `enrolledByText` returns the fragment the list
+       * draws as a subline, and the lines here are sentences.
+       *
+       * `enrolledByText` is `null` for every case that means *unknown* — you
+       * enrolled it, the machine predates the column, the control plane predates
+       * the field — so nothing is drawn rather than a line reassuring somebody
+       * it was them.
+       */}
+      {provenance !== null && <p className="mt-1 text-xs text-muted">{provenance}.</p>}
 
       {/*
        * ⚠ **A rule above it again, where this deliberately had none.** It was the

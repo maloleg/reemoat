@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 125 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 130 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 324 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 132 | `###` |
-| | | **890** | |
+| | | **895** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 890 rather than the 457
+dividers. So the count is over **both** depths, and it says 895 rather than the 462
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -1012,12 +1012,21 @@ cannot remove a workspace on their own hardware.
 
 **Rejected.** Also moving the *previous* owner's grant. Ownership and access are
 different things here — two people may hold a grant on one machine — and taking
-somebody's access away is `DELETE /v1/admin/grants`, its own verb with its own
-audit story. A revoked machine is refused rather than adopted, because revoking is
-what *frees* the label and the slot and handing one back would spend both on
-something nothing can reach.
+somebody's access away is its own verb with its own audit story. A revoked machine
+is refused rather than adopted, because revoking is what *frees* the label and the
+slot and handing one back would spend both on something nothing can reach.
 
-**Status.** Current
+⚠ **Superseded in part, and named here rather than quietly rewritten.** That verb
+used to be `DELETE /v1/admin/grants`, which is deleted: taking somebody's access
+away is the machine owner's `DELETE /v1/machines/:id/grants` now, because a grant
+is full access to a machine that runs agents as its owner (Q1.633). And the case
+this paragraph leaves the previous owner's grant alone *for* is one this route can
+no longer reach: it refuses `403 machine_owned` on any transfer away from a live
+owner (Q1.635), so the only previous owner left to leave alone is the same user
+being handed the machine back. Read it as the reason `releaseOwner` is followed by
+an insert rather than by a sweep of `grants`.
+
+**Status.** Current, amended by Q1.633 and Q1.635
 
 ### Q1.44 — Is the enrollment paste shell data or shell source?
 
@@ -2164,18 +2173,26 @@ tests both, so nothing can check one rule and forget the other.
 
 ### Q1.501 — Can a grant put two machines with the same name in one list?
 
-**Position.** Yes, and it is knowingly left open. `PUT /v1/admin/grants` is a
-sixth path that reaches the same state as the five `nameVisibleTo` guards
+**Position.** Yes, and it is knowingly left open. `PUT /v1/machines/:id/grants`
+is a sixth path that reaches the same state as the five `nameVisibleTo` guards
 (Q1.48), without naming anything: a grant hands somebody a machine that is
 already called something, so the collision arrives with no write to a label or a
 name and no check on the way.
 
-**Why it is not refused.** Refusing would refuse an admin a share over a
-collision only the grantee can see, on the one route `cpctl admin grant` drives
-and the only remaining way to share a machine at all. What it costs is
+**Why it is not refused.** Refusing would refuse a share over a collision only
+the **grantee** can see — and which the sharer cannot see either, since it is
+composed of a name on their side and a label on the other. What it costs is
 reachability rather than authority: `POST /v1/tokens` still checks the grant
 after resolving, so the worst outcome is that `resolveMachineRef` picks one of
 the two by name and the other must be addressed by id.
+
+⚠ **That paragraph used to end "on the one route `cpctl admin grant` drives and
+the only remaining way to share a machine at all", and that half is spent.**
+`PUT`/`DELETE /v1/admin/grants` are deleted and sharing is the owner's `PUT
+/v1/machines/:id/grants` (Q1.633). It is recorded rather than swapped because the
+two halves are not the same argument: the spent one was a reason to leave *that
+admin route* open, and the collision reasoning survives the move unchanged,
+because it was never about who was asking.
 
 **Why it is written down.** Four guarded routes in a row read as coverage. The
 gap is in the fifth thing somebody would assume was covered.
@@ -3363,6 +3380,310 @@ origin between somebody and starting work is the worst instance of a control
 leaving the strip. Signing the address so the far side could trust it: it
 protects a form default — the order is built from the POST body either way — at
 the cost of a shared secret spanning two repositories with no rotation story.
+
+### Q1.633 — May an admin hand somebody a grant on a machine they do not own?
+
+**Decision.** No, and the routes that did it are deleted rather than guarded.
+`PUT /v1/admin/grants` and `DELETE /v1/admin/grants` are gone. Sharing is the
+owner's verb — `GET`, `PUT` and `DELETE /v1/machines/:id/grants`, driven by
+`cpctl shares`, `cpctl share` and `cpctl unshare`. `GET /v1/admin/grants` is
+kept.
+
+**Why.** The two deleted routes upserted and removed any `{userId, machineId,
+scopes}` behind `requireAdmin` alone: no check that the caller owned the machine,
+no consent from the person who did, and nothing on any screen afterwards. A grant
+is *full access* to a machine (Q1.11), and that machine runs agents as its
+owner's uid with no sandbox, so the pair was **one request from an admin
+credential to arbitrary code execution on somebody's computer**. It is the same
+class of escalation Q7.74 spent a whole change removing — an admin credential
+becoming somebody else's — arriving through the door marked *access* rather than
+the one marked *identity*, which is why deleting the identity routes left it
+standing.
+
+**Why it survived so long, and why that argument is now spent.** It was the only
+way to share a machine at all — the sentence `machines.ts` used to justify
+leaving the name collision at `nameVisibleToGrantees` open (Q1.501). Deleting it
+on its own would have removed co-working rather than a privilege. So this is a
+*move*, and the replacement differs by one line: `ownedMachine(c)`, the resolver
+`PATCH /v1/machines/:id`, `POST /v1/machines/:id/enrollments` and `POST
+/v1/machines/:id/revoke` already use. A machine you do not own answers `404
+machine_not_found` rather than 403, for that resolver's reason: nobody may map
+the fleet by watching which ids answer differently.
+
+**The invariant this buys**, stated over the service rather than over a route —
+the shape Q7.74 used for `api_keys`, and greppable the same way. `INSERT INTO
+grants` appears in exactly three places: `createOwnedMachine` (a machine coming
+into existence, granted to the owner it is created for), `PUT
+/v1/admin/machines/:id/owner` (Q1.635) and the owner's own route. **No route
+under `/v1/admin` adds or widens a grant on a machine that already has an owner,
+for anybody other than that owner.** ⚠ The last clause is not decoration: the
+same-owner re-label falls through Q1.635's guard and re-upserts that owner's own
+all-scopes grant, so the shorter wording would be false against the code, and
+widening a grant somebody already holds in full is not the power that was
+removed. `DELETE /v1/admin/users/:id`'s `DELETE FROM grants WHERE user_id = ?` is
+a sweep inside an account ceasing to exist, not a fact about a grant.
+
+**What is deliberately kept, and why a read is not the power.** `GET
+/v1/admin/grants` stays. An operator who cannot see the grant table cannot answer
+*why can this person reach that machine* at all, and the audit is the half of
+this that has to survive the deletion of the write.
+
+**The body is read before the machine is resolved, and the order is the fix
+rather than the style.** It was the other way round first, and an `await
+readJsonObject(c)` between `ownedMachine(c)` and the `INSERT` is a window the
+caller controls: send a valid `content-length`, let the ownership check pass, have
+the machine revoked, then finish the body. The insert lands on a machine with no
+owner, and the `DELETE` then answers 404 — a grant its owner cannot remove. With
+every `await` ahead of the check, the check and the write are one synchronous run
+of the event loop and the window is not expressible. `relabelMachine` states the
+same rule for the same shape.
+
+**Both writes cost a write-throttle slot** (`spendWrite`, as `machine_share` and
+`machine_unshare`), which took that budget from nine call sites to eleven. They
+are one row each rather than a transaction, which is why they were nearly missed;
+what earns them a slot is that sharing is reachable by *every* signed-in owner and
+each request leaves a permanent `grants` row behind, on the file the relay shares.
+
+**⚠ What none of this buys, so that nobody infers it.** Whoever operates this
+control plane holds `signing_keys.private_pem` and can sign a token for any
+machine with any `sub`; the daemon checks the signature, the issuer and the
+audience and never compares the subject to anything (`src/auth.ts`). This closes
+the door an admin *credential* opens. No route deletion closes the operator's
+reach, and self-hosting stays the only version of "not trusted" this system has —
+`SECURITY.md` says so in the same breath as the claim, on purpose.
+
+**Alternatives taken out.** Guarding the admin routes with an ownership check
+instead of deleting them: two spellings of one verb, and the one no client drives
+is the one that rots — the shape Q7.74's `withKey` was deleted for. Keeping
+`DELETE /v1/admin/grants` alone, on the argument that an admin should be able to
+take access away: the denial side an admin still has is revoking the machine,
+which the owner can see, where a silently removed grant is a change to somebody's
+access with nothing anywhere saying so. Leaving both routes and dropping the
+`cpctl` verbs: a route no client reaches is not a route nobody can reach — the
+credential is an HTTP one.
+
+**Status.** Applied. `relaycheck` asserts both admin writes answer `[404, 404]`
+while the read still answers 200, that a non-owner sharing a machine is told `404
+machine_not_found` rather than 403, that an admin cannot get the machine into
+their own list because there is no admin door left to do it with, and the owner's
+whole path: share, list, widen, take back, a second un-share as
+`404 grant_not_found`, and both refusals of the owner's own grant as `409
+grant_is_owner`.
+
+### Q1.634 — Who is a share addressed to, and why is there no name box?
+
+**Rule.** A user id, typed in full. `PUT /v1/machines/:id/grants` takes `userId`
+and nothing else; the person being shared with reads their own id off `GET /v1/me`
+(`cpctl me`) and says it out loud. `GET /v1/machines/:id/grants` answers with the
+name beside the id, because by then the owner has already been told who that is.
+
+**Why not a name.** There is no directory an ordinary account may read, and a name
+lookup here would create one — a user-enumeration oracle on a route *every*
+signed-in person can reach, answering `404 user_not_found` for a name nobody has
+and 200 for one somebody does. That is a **new** oracle rather than a second copy
+of an old one: Q7.78 concedes registration's and bounds it, and
+`registration.enabled` can be switched off, which closes that door while leaving
+this one open. Addressing by id is not the same exposure, because an id is
+unguessable where a name is the thing its owner tells people: probing ids
+enumerates nothing, which is the whole of why the harder-to-use form is the one
+that ships.
+
+**What it costs, said plainly.** Sharing is a two-step human protocol: one person
+reads an id off their own account, the other types it. That is worse than a name
+box and it is the price of the route being reachable by everybody rather than by
+an admin. A share-by-name flow is a product decision with its own oracle to weigh,
+and it is deliberately not this change.
+
+**A suspended account is refused rather than written**, matching `POST
+/v1/provision` and `POST /v1/admin/users/:id/invite`, which both name the state
+(`409 user_disabled`). A grant written to a disabled account is inert while
+`callerAuth` reads `disabled_at` live, and then goes live the moment somebody
+re-enables them, with nothing on the owner's screen ever having said so. The share
+the owner would have wanted is the one they make after the account is back.
+
+**The owner's own grant is refused on both writes** (`409 grant_is_owner`) rather
+than upserted. It exists already and carries every scope, so the only thing `PUT`
+could do to it is narrow it — taking `machine:admin` off the owner's own hardware
+with no way back through this route — and `DELETE` would leave somebody owning a
+machine that appears in no list, since `GET /v1/machines` joins `grants`. That is
+the exact failure user-owned machines exists to remove, and the lesson
+`createOwnedMachine` already records. Retiring the machine is the verb for giving
+up your own access.
+
+**Status.** Known limitation
+
+### Q1.635 — May an admin take a machine from the person who owns it?
+
+**Decision.** No. `PUT /v1/admin/machines/:id/owner` answers `403 machine_owned`
+whenever the machine has a live owner who is not the target, so what it can still
+do is adopt an *ownerless* row and re-label a machine for the owner it already
+has. An ownerless row somebody already holds a grant on may be adopted only **to
+one of those grantees** (`403 machine_granted`). Adoption burns the machine's
+outstanding enrollment codes and reports `enrollmentCodesInvalidated`.
+
+**Why the first guard.** Taking a machine from somebody was one request:
+`releaseOwner`, an insert, and a grant with every scope — with the previous
+owner's own grant deliberately left in place (Q1.43), so that nothing they can see
+changes. Full authority on a working machine, invisible to the person on it.
+
+**Why the second, which is the class the first misses.** Both guards were first
+written as *an ownerless row has nobody to ask*, which quietly reads **no owner**
+as **no users**. A machine registered before ownership existed can be enrolled,
+online and carrying other people's grants — precisely the state
+`nameVisibleToGrantees` exists for. Keyed on `ownerOf` alone, an admin could adopt
+such a row with every scope and be answered 200. `dependants` answers both halves
+— the owner and the grantees — and it is what this route and Q1.636's guard both
+read. A genuinely
+orphan row (enrolled, no owner, no grants) has nobody to ask and stays the
+operator's, which is the case the guards were justified by in the first place.
+
+**Why adopting to an existing grantee stays open.** It is what the route was
+written for, and it is also the answer to what Q1.633 took away: deleting the
+admin grant writes left legacy grantees with no way to list, re-scope or revoke a
+share, because every replacement route resolves through `ownedMachine`.
+Regularising the row to one of them gives the machine a person to ask and gives
+them the owner's verbs. An operator who wants it for themselves revokes it, which
+is the denial side and is visible.
+
+**Why the codes are burned in the same transaction.** ⚠ Q1.636's guard protects
+*minting* and not *redemption*, so without this it is one request out of order
+away from nothing: mint a code for an enrolled ownerless row while it is still
+nobody's, adopt it to somebody, then redeem the code you kept. A fresh mint now
+answers 409 while the retained one still returns a tunnel key and replaces the
+daemon — the machine acquires an owner and is substituted *after* they have it.
+`burnMachineCodes` is the same act `POST /v1/machines/:id/revoke` and the account
+sweep already perform, and it costs the adopting owner nothing they cannot redo,
+since minting is their own route now.
+
+**403 rather than 404**, against the 404 rule the owner's routes follow. The
+caller is an admin who can already list every machine and its owner through `GET
+/v1/admin/machines`, so there is nothing here to conceal, and a 404 over a row
+they were just shown would be a lie about existence rather than a refusal.
+
+**Status.** Applied. `relaycheck` asserts the refusal *and* that the ownership row
+and `acquiredAt` are unchanged after it — ⚠ the assertion it replaced proved the
+opposite, that a real transfer moves the date, which is what a driver written
+against the old behaviour is for — and that an ownerless legacy row is still
+adoptable, so a guard written as "refuse every owned machine" fails here rather
+than shipping.
+
+### Q1.636 — May an admin mint an enrollment code for a machine that is already enrolled?
+
+**Decision.** Not while somebody depends on it. `POST
+/v1/admin/machines/:id/enrollments` answers `409 machine_enrolled` for a machine
+that has enrolled **and** has an owner or grantees.
+
+**Why.** Redeeming a code calls `issueTunnelKey`, which *retires* the machine's
+current tunnel credential. So minting one here and redeeming it on another host
+does not read somebody's machine — it **replaces** it. The owner's daemon is
+dropped from the relay as superseded, and every grant-holder's traffic for that
+machine, prompts and uploads and bearer tokens included, is delivered into the new
+process, while the owner's list still reads owned, enrolled and online.
+
+**Why the owner's twin route allows exactly this.** `POST
+/v1/machines/:id/enrollments` says so in its own docblock: re-enrolling takes the
+machine away from whatever holds it, *"but since only the owner can ask, the thing
+it takes it away from is their own daemon, which is what re-installing a host
+means."* That sentence is the entire justification and it does not transfer to a
+caller who is not the owner. This route carried no restriction at all.
+
+**Why owned, and not enrolled alone.** Both legitimate uses survive the narrower
+condition. `deploy/install.sh`'s daemon wizard runs `cpctl admin addmachine
+--owner` and then `cpctl admin enroll` against a row created one line earlier, so
+`enrolled_at` is null and nothing changes. And a machine registered before
+ownership existed has nobody to ask, so an operator re-installing their own
+admin-managed host is untouched — refusing there would leave no path rather than
+move one.
+
+**409 rather than 403.** The machine is not forbidden; it is in a state that makes
+this the wrong verb, and the message names the person who holds the right one.
+
+**Status.** Applied. `relaycheck` drives a machine that is created, enrolled and
+then refused, rather than asserting over a row it wrote by hand: a guard on
+`enrolled_at` that has never seen a real redemption presents as *the machine did
+not enrol* and passes for the wrong reason.
+
+### Q1.637 — What is left after those refusals, and why is it disclosed rather than refused?
+
+**Position.** Machine **substitution** is left. It cannot be refused without
+restoring defects this record already closed, so it is made *visible* instead:
+`GET /v1/machines` carries **`enrolledBy`**, naming whoever's enrollment code
+brought a machine online when that was not the person reading the list.
+
+**The composition, in three requests each of which has to stay.** Revoke somebody's
+machine — `releaseOwner` frees the label in the same transaction (Q1.43). Register
+a new one *for them* under that freed name — `nameVisibleTo` filters `revoked_at
+IS NULL`, so the name passes (Q1.48). Mint its first code — the machine has never
+enrolled, so Q1.636's guard does not fire — and redeem it on your own hardware.
+Their list then draws the name they just lost, `owned: true`, enrolled and online,
+and it is your computer. No single route is wrong, which is why the driver for it
+runs all three end to end: a test per route passes while the composition stands.
+
+**Why neither obvious refusal is taken.** Keeping the label on revoke reinstates
+Q1.43's own defect — revoke `laptop`, create `laptop` again, and get a 409 naming
+a machine that appears in no list and can never be reached. Teaching
+`nameVisibleTo` about revoked rows refuses the owner their own recreate. And
+registering a machine for somebody is what `deploy/install.sh`'s daemon wizard
+does from the host being installed, which is a real flow rather than an attack.
+
+**Read off `machines.enrolled_by`, and the derived version is the lesson.** The
+column is added in `migrate()` and written at the redemption that sets
+`enrolled_at`, from the same statement, holding whatever minted the code — a user
+id, or a `pk_` provisioning-key id. It was derived from `enrollment_codes` first
+and was wrong four ways, ⚠ **all four reverting to `null`, which the route reports
+as *you enrolled this yourself***:
+
+- the rows are swept seven days after a code is used, so the answer expired;
+- `created_by` is deliberately left dangling on `DELETE /v1/admin/users/:id`, so
+  an `INNER JOIN users` dropped it the moment the enroller's account went;
+- `POST /v1/provision` writes a `pk_` id no `users` row matches, so every
+  provisioned machine named nobody at all;
+- `used_at` is stamped by four *burn* paths as well as by redemption
+  (`superseded`, `revoked`, `user_disabled`, `user_deleted`), so an owner pressing
+  "new enrollment code" twice — the likeliest reaction to noticing something odd —
+  overwrote the other person's name with their own.
+
+The shape is worth more than the four: provenance read out of a table that is
+swept, mutated by burns and joined to rows somebody may delete is not provenance.
+
+**Measured.** The derived version also scanned and sorted the whole fleet's
+`enrollment_codes` per request — no machine filter, no index on `used_at` — on a
+route the web client polls every four seconds per machine, against a table any
+signed-in caller can grow as fast as `WRITE_THROTTLE` allows: **168 ms of
+synchronous event-loop block at 200k retained rows**, on the file the relay
+shares. The column costs one `IN` over the handful of ids a listing actually
+names, bounded by `MAX_MACHINES_PER_USER` at fifty. The `grants` read beside it
+got the index it had never had — `idx_grants_machine`, after the same listing
+measured 0.8 ms at 10k grants against **62.5 ms at 500k**, to return a single row.
+
+**Three answers rather than a name or nothing**, because collapsing the other two
+into `null` is what made the predecessor lie. `enrolledByFor` answers `null` only
+for the caller's own id or an absent one; a `pk_` id is *a provisioning key* —
+`POST /v1/provision` creates a machine for any account with no account at all,
+only `REEMOAT_CP_PROVISION_KEY`, so it is the **most** alarming case rather than
+the absent one — and an id with no `users` row is *a deleted account*.
+
+**⚠ The limit, stated because a disclosure that overstates itself is worse than
+none.** A name here does not by itself mean a substitution: `install.sh`'s daemon
+wizard is `admin addmachine --owner` then `admin enroll`, so *every*
+wizard-installed machine names the admin who ran the installer, and a substitution
+draws exactly the row a normal install draws. It is a name to recognise rather
+than a flag to trust, and the honest remedy for one you do not recognise is to
+re-enroll the machine yourself, which sets the field back to you.
+
+**Where it is drawn, and why it is one string.** `cpctl machines` prints
+`[enrolled by …]` last on the row, so it never pushes the columns above it out of
+line, and the browser renders the same fact from one function: `enrolledByText`
+answers `null` for every case that means *unknown* — you enrolled it, the machine
+predates the column, the control plane predates the field — so `MachinesSection`
+grows a subline and `MachineSection` a sentence **only** in the case the
+disclosure is about, rather than a line reassuring somebody it was them. One
+function rather than two spellings, because two spellings of one disclosure are
+two disclosures and only one of them survives the next shortening pass; the
+punctuation is each surface's own, the list's sublines being fragments where the
+machine screen's lines are sentences.
+
+**Status.** Known limitation
 
 ## Session lifecycle, questions and attachments
 

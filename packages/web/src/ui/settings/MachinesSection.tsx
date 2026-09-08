@@ -11,7 +11,7 @@ import {
 import { navigate } from "../../router";
 import { settingsPath } from "../../settings";
 import type { AppState } from "../../store";
-import { ambiguousNames, lastSeenText } from "../../wire";
+import { ambiguousNames, enrolledByText, lastSeenText } from "../../wire";
 import {
   Badge,
   Dot,
@@ -240,6 +240,34 @@ function MachineRow({
               .join(" · ")
           : "waiting for the daemon to dial in";
 
+  /*
+   * **Who brought this machine online, on a line of its own — not a clause on
+   * `standing`, and not a badge.**
+   *
+   * Not a badge because the row already spends its one badge on the fact that
+   * has to be *fixed* first, and this is not a fault: most rows that carry it
+   * are ordinary wizard installs naming the admin who ran the installer. A
+   * second box beside a truncating name is also the collapse the one-badge rule
+   * exists to prevent.
+   *
+   * ⚠ **And not joined into `standing` with a ` · `, which is where the same
+   * mistake was made once already.** " · not yours to rename or retire" rode
+   * that line, and on a 390px phone the one fact telling you a row was inert was
+   * the part that got cut; it is a badge now for exactly that reason. The line
+   * below truncates too, but it truncates in the *name* — "Enrolled by " is
+   * still there to be read, and the name is what the reader is being asked to
+   * recognise or not.
+   *
+   * They are also two different kinds of fact, which is why one line cannot hold
+   * both honestly: `standing` is about *now* and changes on the four-second
+   * poll, while this is provenance and changes only when somebody re-enrolls the
+   * machine. `enrolledByText` answers `null` wherever there is nothing to say —
+   * a machine you enrolled yourself, one that predates the column, and a control
+   * plane that has never heard of the question — so the row grows a line only in
+   * the case the disclosure is about.
+   */
+  const provenance = enrolledByText(machine.enrolledBy);
+
   return (
     <button
       onClick={() => navigate(settingsPath("machines", machine.id))}
@@ -268,6 +296,12 @@ function MachineRow({
             {standing}
           </span>
         )}
+        {/* Under the standing line, because standing is what the dot beside it
+            is already about and this is a fact of a different kind. Same
+            `text-2xs text-muted` as the line above: it is a subline, not a
+            warning, and there is no tone here that would be honest for "an
+            ordinary install, or the one row you should look at twice". */}
+        {provenance !== null && <span className="block truncate text-2xs text-muted">{provenance}</span>}
       </span>
       {/* The glyph says rows open. This list interleaves rows with headings, a
           command line and two empty states, and one of its rows may be a machine

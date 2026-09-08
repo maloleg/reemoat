@@ -37,9 +37,10 @@ import { OneTimeSecret } from "./OneTimeSecret";
  *
  * `CLAUDE.md` used to list an admin UI as a deliberate non-goal — "no admin UI
  * for users, machines or grants (that stays `cpctl`)". Two thirds of that is
- * reversed here. **Grants are not**: sharing a machine with a second person is
- * still `cpctl admin grant`, because it is the one operation with no obvious
- * shape on a phone and no demand behind it. The screen used to open with that
+ * reversed here. **Grants are not**, and they are not an admin's to write at
+ * all any more: sharing a machine with a second person is its *owner's*
+ * `cpctl share <machineId> <userId>`, because it is the one operation with no
+ * obvious shape on a phone and no demand behind it. The screen used to open with that
  * sentence — the first line an admin read was a limitation of a CLI they may
  * never use — and it is a fact for this docblock and `web-shell.md`, not for the
  * screen (decision 11A: CLI on a settings screen is a white-list of three lines,

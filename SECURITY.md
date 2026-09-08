@@ -188,6 +188,70 @@ is the remedy for a leaked database; the visit to every machine is the part it
 does not remove. `deploy/backup.sh` snapshots that file, which is also to say that
 a backup of it is the same secret again.
 
+**An admin credential no longer reaches a machine on its own, and that is a much
+smaller claim than it sounds.** Three routes were the whole of it and are gone or
+narrowed: `PUT`/`DELETE /v1/admin/grants` (deleted — sharing is the owner's `PUT
+/v1/machines/:id/grants`), `PUT /v1/admin/machines/:id/owner` (refuses a transfer
+away from a live owner, and refuses adopting an ownerless machine somebody holds a
+grant on unless they are the one being handed it — so it adopts rows nobody
+depends on and re-labels for the owner a machine already has), `POST
+/v1/admin/machines/:id/enrollments` (refuses a machine that is enrolled and has an
+owner *or grantees*, because redeeming a code retires the running daemon's tunnel
+key and so replaces the machine rather than reading it). `db.prepare("INSERT INTO
+grants` appears in `app.ts` twice and in `machines.ts` once, and no route under
+`/v1/admin` adds or widens a grant, on a machine that already has an owner, for
+anybody other than that owner.
+
+⚠ **Read "ownerless" as "nobody depends on it", which is the correction rather
+than the claim.** Both guards were written keyed on ownership alone, which quietly
+reads *no owner* as *no users*: a machine registered before ownership existed can
+be enrolled, online and carrying other people's grants, and an admin could adopt
+it with every scope or re-enroll it out from under those people, both answering
+200. They key on owner-or-grantee now. A genuinely orphan row — enrolled, owned by
+nobody, granted to nobody — has nobody to ask and stays the operator's, which is
+the only case they were ever justified by.
+
+**Read that as narrowly as it is written: it is a statement about the HTTP
+surface and about admin *credentials*, and it is not a boundary.** Whoever
+operates this control plane still holds `signing_keys.private_pem` and can sign a
+token for any machine with any `sub` — the daemon checks the signature, the issuer
+and the audience, and never compares the subject to anything — so the operator's
+reach is unchanged and no route deletion can change it. They also serve the web
+client from their own image, terminate TLS at the relay, and hold the database.
+What the deletions buy is that an admin account, on its own, is no longer one
+request from somebody else's computer; **an operator is still trusted completely,
+and self-hosting is the only version of "not trusted" this system has.**
+
+**Machine substitution is open, and is disclosed rather than refused.** An admin
+can revoke your machine, register a new one for you under the name that frees, and
+enroll it on their own hardware — your list then draws the name you lost, owned
+and online, and it is their computer. Every step has to stay: revoking is the
+denial side, and registering a machine for somebody is what `install.sh`'s wizard
+does. Both obvious refusals restore bugs already fixed. So `GET /v1/machines`
+carries **`enrolledBy`**, which names whoever's enrollment code brought a machine
+online when that was not you — drawn on the machine row in the web UI and printed
+by `cpctl machines`, because a disclosure only a `curl` reader sees is not one.
+
+It is read off `machines.enrolled_by`, written at the redemption it describes.
+Derived from `enrollment_codes` instead — which is what shipped first — it was
+wrong four ways and **every one of them answered `null`, which the route reports
+as "you enrolled this yourself"**: that table is swept seven days after a code is
+used; `created_by` is deliberately left dangling when an account is deleted, so an
+inner join dropped the row with the account; `POST /v1/provision` writes a
+provisioning key's id that matches no user at all; and `used_at` is stamped by
+four *burn* paths as well as by redemption, so the owner pressing "new enrollment
+code" twice — the likeliest reaction to noticing something odd — overwrote the
+name with their own. A column written once, at the moment that knows, has none of
+those states.
+
+⚠ **A name is not by itself a substitution, and that is this field's real limit.**
+`install.sh`'s daemon wizard registers the machine and enrolls it on an admin's
+code, so *every* wizard-installed machine names the admin who ran the installer,
+and a substitution draws the same row as a normal install. What the field buys is
+that you can tell *somebody else brought this online* from *I did*, and recognise
+the name or not. The remedy for a name you do not recognise is to re-enroll the
+machine yourself, which sets it back to you.
+
 **A daemon makes exactly one control-plane request, ever** — the enrollment
 exchange. That is what makes a control-plane outage cost reachability rather than
 work in flight, and it is the same property that makes revocation slow: nothing is
@@ -260,7 +324,20 @@ used to authorize anything. Sessions and their origins are swept 7 days after
 revocation; email tokens and unconfirmed sign-ups are swept on expiry.
 `enrollment_codes` is swept 7 days after a code is used or expires, whichever
 applies — `used_from` is the only forensic trail here, so a code is not dropped on
-the tick of expiry. There is **no access log**:
+the tick of expiry.
+
+⚠ **`machines.enrolled_by` is the one fact here that outlives every sweep and
+every deletion, and it names a person.** It holds whoever minted the code a
+machine enrolled with, and it is deliberately not cascaded: deleting an account
+leaves the id behind, and the machine's owner is shown "a deleted account" rather
+than the reassuring nothing an inner join gave. That is the point of it — the
+disclosure above is worthless if the person it discloses can erase it — but it is
+a record about somebody that survives them asking to be forgotten, so it is
+written down here rather than left to the schema. It is scoped: only somebody who
+can already see the machine can read it, and it is a display name rather than an
+id or an address.
+
+There is **no access log**:
 nothing writes a row per request or per relay CONNECT, so there is no record of
 who reached which machine when.
 

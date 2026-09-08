@@ -25,8 +25,37 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Removed
+
+- **`PUT` and `DELETE /v1/admin/grants`, and with them `cpctl admin grant` and
+  `cpctl admin ungrant`.** A grant is full access to a machine that runs coding
+  agents as its owner, with no sandbox — and these wrote one for *any* machine on
+  an admin credential alone, with no consent from the person whose machine it was
+  and nothing on any screen afterwards. Sharing is the owner's verb now (below).
+  The two `cpctl` verbs answer with the replacement rather than "unknown command",
+  because the old spellings are in scripts and in shell history. `GET
+  /v1/admin/grants` is kept: seeing who holds what is not the power that was
+  removed, and an operator who cannot read that table cannot answer "why can this
+  person reach that machine".
+
 ### Added
 
+- **Share a machine you own** — `GET` · `PUT` · `DELETE /v1/machines/:id/grants`,
+  driven by `cpctl shares` / `share` / `unshare`. The other person is named by
+  **user id**, which they read off `cpctl me` and tell you: there is no directory
+  an ordinary account may read, and a name lookup here would be a way for anyone
+  signed in to test whether an account exists. Your own grant is refused on both
+  writes — narrowing it would take `machine:admin` off your own hardware, and
+  removing it would hide the machine from its owner. Retiring the machine is the
+  verb for giving up your own access.
+- **`enrolledBy` on `GET /v1/machines`**, and drawn on the machine row: whoever's
+  enrollment code brought a machine online, when that was not you. It is the
+  disclosure for a composition no single refusal closes — revoke somebody's
+  machine, register a new one under the name that frees, enroll it on your own
+  hardware, and their list draws the name they lost, owned and online. Every step
+  has to stay, so the composition is made visible instead. A name is something to
+  recognise rather than an alarm: the installer's wizard enrolls on an admin's
+  code too.
 - The session rail is ordered by you. Grab a chat with the mouse and drag it up or
   down inside its folder; on a touch screen hold it briefly first, so the gesture
   and scrolling the list stay apart. Drop it in Pinned to pin it, and drag it back
@@ -46,6 +75,22 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Changed
 
+- **An admin may no longer take a machine off the person who has it.** `PUT
+  /v1/admin/machines/:id/owner` answers `403 machine_owned` for a machine with a
+  live owner other than the target, and `403 machine_granted` when adopting an
+  ownerless machine somebody already holds a grant on unless they are the one
+  being handed it. What it still does is what it was written for: adopting a row
+  registered before ownership existed, and re-labelling a machine for the owner it
+  already has. Adopting now also burns that machine's outstanding enrollment codes
+  — the guard below protects minting, and a code kept from before an adoption
+  would otherwise still replace the daemon afterwards.
+- **`POST /v1/admin/machines/:id/enrollments` answers `409 machine_enrolled`** for
+  a machine that is enrolled and has an owner or grantees. Redeeming a code
+  retires the running daemon's tunnel credential, so minting one for somebody
+  else's live machine does not read it — it replaces it, and every grant-holder's
+  traffic lands in the new process while the owner's list still says owned and
+  online. Its owner mints their own. A machine that has never enrolled is
+  untouched, which is what the installer's wizard does.
 - **Nothing in the rail reorders itself any more.** Rows used to sort by their most
   recent event, and a chat waiting on you jumped to the top of its folder — so the
   list moved under your thumb on every poll. A chat waiting on you still says so

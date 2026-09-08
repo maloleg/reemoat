@@ -173,7 +173,7 @@ plugin_failed` for anything the plugin's own code raised.
 
 ---
 
-## The control plane — 58 routes
+## The control plane — 59 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -212,6 +212,7 @@ these, so a new route is private by doing nothing. "Public" is not
 | `GET` · `POST /v1/machines` · `PATCH /v1/machines/:id` | The machines you own: list, add, rename |
 | `POST /v1/machines/:id/enrollments` | Mint a single-use code; minting burns the previous |
 | `POST /v1/machines/:id/revoke` | Retire one, which gives its slot back to the limit |
+| `GET` · `PUT` · `DELETE /v1/machines/:id/grants` | Share a machine **you own**, and take it back. A grant is **full access** to the machine, so this is the owner's verb: the admin routes that wrote one are deleted. Addressed by user id — there is no directory an ordinary account may read, so the other person reads theirs off `GET /v1/me`. `404 machine_not_found` for one you do not own, which is the anti-mapping rule rather than a lie; `409 grant_is_owner` for your own grant on both writes (narrowing it would take `machine:admin` off your own hardware, removing it would hide the machine from its owner — retiring it is the verb for that); `404 user_not_found`; `409 user_disabled` for a suspended account, which would otherwise become live the moment somebody re-enabled them; `400 bad_request` for a `userId` that is missing on either verb; `404 grant_not_found` on an unshare that removed nothing |
 | `POST /v1/tokens` | The short-lived token a browser uses. Quota is checked **after** the grant is proved |
 
 ### Admin
@@ -225,8 +226,8 @@ password change is refused all of it by a second positional gate.
 | `POST /v1/admin/users/:id/disable` · `/enable` · `/invite` | Suspend and restore an account, or mail an invitation |
 | `PUT` · `DELETE /v1/admin/users/:id/machine-limit` | The commercial limit, per person |
 | `GET` · `POST · PATCH /v1/admin/machines[/:id]` | Every machine in the fleet, whoever owns it |
-| `POST /v1/admin/machines/:id/enrollments` · `/revoke` · `PUT /v1/admin/machines/:id/owner` | Mint a single-use enrollment code, revoke a machine, hand one to somebody else |
-| `GET` · `PUT` · `DELETE /v1/admin/grants` | A grant is **full access** to the machine |
+| `POST /v1/admin/machines/:id/enrollments` · `/revoke` · `PUT /v1/admin/machines/:id/owner` | Mint a code, revoke a machine, adopt an ownerless one. **The enrollment mint refuses a machine that is enrolled and has an owner *or grantees*** (`409 machine_enrolled`) — redeeming a code retires the running daemon's tunnel key, so it would replace somebody's machine rather than read it; its owner mints their own. **The owner route refuses a transfer away from a live owner** (`403 machine_owned`), and refuses adopting an ownerless machine somebody holds a grant on unless they are the one being handed it (`403 machine_granted`) — so what it adopts is a row nobody depends on, and what it re-labels is a machine for the owner it already has. Adopting burns that machine's outstanding codes and says how many |
+| `GET /v1/admin/grants` | Who holds what, paged. **The `PUT` and `DELETE` are deleted** — a grant is full access to a machine that runs agents as its owner, and an admin writing one for a machine they do not own was one request from that. Sharing is `PUT /v1/machines/:id/grants`; the read is kept, because an operator who cannot see this table cannot answer "why can this person reach that machine" |
 | `GET` · `PUT /v1/admin/settings` · `POST /v1/admin/settings/test` | Env-seeded, database-owned; the answer says which side won |
 | `GET /v1/admin/mail` · `POST /v1/admin/mail/:id/retry` | The outbox, and pushing a stuck message again |
 | `GET` · `POST /v1/admin/signing-keys` · `DELETE /v1/admin/signing-keys/:kid` | Rotate publishes **both**; retire once the fleet has re-enrolled |

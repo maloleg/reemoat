@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS user_session_origins (
 -- Users mint their own enrollment codes now, so "may this caller manage this
 -- machine" needs an answer the admin cannot change by accident. `grants` cannot
 -- give it: a grant is full access and several people may hold one, so the owner
--- would be the earliest grantee and `DELETE /v1/admin/grants` would silently
+-- would be the earliest grantee and `DELETE /v1/machines/:id/grants` would silently
 -- transfer ownership. `enrollment_codes.created_by` cannot either — it is per
 -- code, absent until one is minted, and burned when a machine is revoked.
 --
@@ -303,6 +303,16 @@ CREATE TABLE IF NOT EXISTS grants (
 -- Grants are users × machines, so this is the one admin list that grows with the
 -- product of the fleet. It is paged, and the page is ordered by creation.
 CREATE INDEX IF NOT EXISTS idx_grants_created_at ON grants (created_at);
+
+-- The PRIMARY KEY leads with `user_id`, so the two reads that ask about a
+-- *machine* had no index to use and planned as a full scan of the index above:
+-- `GET /v1/machines/:id/grants` (who this machine is shared with) and
+-- `nameVisibleToGrantees`. Measured against this schema with one grant per
+-- machine, the listing went 0.8 ms at 10k grants to 62.5 ms at 500k — to return
+-- a single row, synchronously, on the file the relay shares. Composite rather
+-- than `(machine_id)` alone so the listing's `ORDER BY g.created_at` is served
+-- too, which is the temp B-tree the plan showed as its other half.
+CREATE INDEX IF NOT EXISTS idx_grants_machine ON grants (machine_id, created_at);
 
 -- The keys that sign tokens.
 --

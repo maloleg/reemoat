@@ -290,6 +290,44 @@ function migrate(db: DatabaseSync): void {
    */
   addColumn(db, has("daemon_agents"), "ALTER TABLE machines ADD COLUMN daemon_agents TEXT");
   /*
+   * Whose enrollment code brought this machine online, as an id — a user's, or a
+   * provisioning key's, because `POST /v1/provision` mints with the *key's* id
+   * and that is the case most worth naming rather than the one to discard.
+   *
+   * ⚠ "discard" rather than the SQL verb, and not by accident: `deploycheck`
+   * reads this whole function body — comments included — and refuses the two
+   * destructive keywords anywhere in it, because a migration that removes or
+   * renames a column is a deliberate two-release change rather than a line here.
+   * The matcher is blunt on purpose, so prose has to route around it too.
+   *
+   * **It is a column rather than a join to `enrollment_codes`, and that is the
+   * whole point of it.** Derived from that table it was wrong four ways, each
+   * one reverting to `null` — which the route reports as *you enrolled this
+   * yourself*: the rows are swept seven days after a code is used, so the answer
+   * expired; `created_by` is left dangling on `DELETE /v1/admin/users/:id` on
+   * purpose (`schema.sql` says so at `users.disabled_at`), so an `INNER JOIN
+   * users` dropped it the moment the enroller's account went; `POST
+   * /v1/provision` writes a `pk_` id no `users` row matches, so every
+   * provisioned machine reported nothing at all; and `used_at` is stamped by
+   * four *burn* paths as well as by redemption (`superseded`, `revoked`,
+   * `user_disabled`, `user_deleted`), so the owner pressing "new enrollment
+   * code" twice — the likeliest reaction to noticing something odd — overwrote
+   * the name with their own. Written at the redemption that sets `enrolled_at`,
+   * from the same statement, none of the four is reachable.
+   *
+   * Nullable with no DEFAULT, for the reason every column above is: NULL is the
+   * honest answer for a machine that predates this and for one that has never
+   * enrolled. So NULL means *unknown*, and the route reports it as such rather
+   * than as "you" — an id that matches the caller is what reports nothing.
+   *
+   * ⚠ **A name here does not by itself mean a substitution.** `install.sh`'s
+   * daemon wizard is `cpctl admin addmachine --owner` then `cpctl admin enroll`,
+   * so *every* wizard-installed machine names the admin who ran the installer.
+   * The field says who brought this online, which the owner is expected to
+   * recognise; it does not say whether they should have.
+   */
+  addColumn(db, has("enrolled_by"), "ALTER TABLE machines ADD COLUMN enrolled_by TEXT");
+  /*
    * When somebody last chose their own password, and when a key last signed a
    * request — two facts the settings screen draws beside the row they belong to
    * ("Changed 3 mo ago", "last used 2 d ago"). Both nullable with no DEFAULT,

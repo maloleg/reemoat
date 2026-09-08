@@ -548,6 +548,80 @@ process.stdout.write("\nthe machine limit\n");
     check("the retire toast carries no facts nothing can re-read", /enrollment code.*stopped working|expire within/.test(machineSrc), false);
     // The unreachable arm no longer restates its own position.
     check("the unreachable line names the reason and stops", /so its systems, agents and plugins/.test(machineSrc), false);
+    /*
+     * ⭐ **Who brought a machine online, said on both surfaces and said nowhere
+     * when there is nothing to say.**
+     *
+     * `GET /v1/machines` answers `enrolledBy`: `null` where this caller enrolled
+     * the machine themselves or where nothing knows, a display name where
+     * somebody else's code did, and the two literal strings `"a provisioning
+     * key"` and `"a deleted account"` for the cases the control plane
+     * deliberately refuses to collapse into the reassuring one. It exists
+     * because an admin can revoke a machine — which frees its label — register a
+     * new one for the same person under that freed name and enroll it on their
+     * own hardware; every step is a route that has to stay, so the composition
+     * is **disclosed rather than refused**, and this line is the whole of the
+     * disclosure. A client that quietly drew nothing would leave the composition
+     * with no disclosure at all and nothing failing anywhere.
+     */
+    {
+      const { enrolledByText } = await import("../src/wire.js");
+      /*
+       * The sentence, and the two silences that draw none of it. `null` is the
+       * server saying *unknown* rather than "you", and `undefined` is a control
+       * plane that predates the field — the same silence here on purpose, which
+       * is the one place this client is allowed to collapse two absences.
+       */
+      check("nobody is named where the reader enrolled it themselves", enrolledByText(null), null);
+      check("nor on a control plane that predates the field", enrolledByText(undefined), null);
+      check("somebody else's code names them", enrolledByText("casey"), "Enrolled by casey");
+      check("a provisioning key is named as one", enrolledByText("a provisioning key"), "Enrolled by a provisioning key");
+      check("and so is an account that has gone since", enrolledByText("a deleted account"), "Enrolled by a deleted account");
+      /*
+       * **No full stop in the shared string**, which is what lets one function
+       * feed two registers: the list's sublines are fragments beside "online"
+       * and "last seen 3 h ago", and the machine's own screen ends the sentence
+       * itself. Pinned because the natural tidy-up is to move the stop in here,
+       * which puts one in the middle of a row that is a fragment.
+       */
+      check("the fragment carries no punctuation of its own", /[.!?]$/.test(enrolledByText("casey") ?? ""), false);
+    }
+    /*
+     * ⚠ **Nothing typed can hold a placement**, so both surfaces are read off
+     * disk. Three facts per surface: the line is drawn, it is guarded on the
+     * function's `null` so a machine you enrolled yourself grows no row, and the
+     * sentence comes from `enrolledByText` rather than a second spelling — a
+     * disclosure with two homes is two disclosures, and only one of them
+     * survives the next shortening pass.
+     */
+    check("the list row draws it as a subline of its own", /\{provenance !== null && <span className="block truncate text-2xs text-muted">\{provenance\}<\/span>\}/.test(src), true);
+    check("the machine's own screen draws it as a sentence", /\{provenance !== null && <p className="mt-1 text-xs text-muted">\{provenance\}\.<\/p>\}/.test(machineSrc), true);
+    check(
+      "both from the one shared sentence",
+      [
+        /const provenance = enrolledByText\(machine\.enrolledBy\);/.test(src),
+        /const provenance = enrolledByText\(machine\.enrolledBy\);/.test(machineSrc),
+      ],
+      [true, true],
+    );
+    check(
+      "and neither spells it by hand",
+      [/["`>]Enrolled by/.test(src), /["`>]Enrolled by/.test(machineSrc)],
+      [false, false],
+    );
+    /*
+     * ⚠ **And it may not ride the `standing` line**, which is the lesson the
+     * `shared` badge above already had to learn: " · not yours to rename or
+     * retire" was a clause on that truncating subline, so on a 390px phone the
+     * one fact worth reading was the part that got cut. `standing` is also about
+     * *now* and turns over on the four-second poll, while this changes only when
+     * somebody re-enrolls the machine — one line cannot be both. Asserted on the
+     * expression itself rather than on a distance in the file, so the two cannot
+     * be joined by moving either of them.
+     */
+    const standingExpr = /const standing =([\s\S]*?);\n/.exec(src)?.[1] ?? "";
+    check("the standing line is still there to be kept clear of", standingExpr.length > 0, true);
+    check("and carries no part of the provenance", /provenance|enrolledBy/.test(standingExpr), false);
   }
 
   {

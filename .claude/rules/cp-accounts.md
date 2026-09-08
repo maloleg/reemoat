@@ -34,6 +34,11 @@ pnpm cpctl admin mail                # what went out, and what failed
 pnpm cpctl admin testmail [<addr>]   # queue a test message
 pnpm cpctl sessions [--all]          # where you are signed in; --all signs them all out
 pnpm cpctl addmachine <name>         # a machine of your own, enrolled in one step
+pnpm cpctl shares <machineId>        # who you shared one of yours with
+pnpm cpctl share <machineId> <userId>   # share one of yours. There is no `admin grant`: a grant is
+                                     #   full access to a machine that runs agents as its owner, so
+                                     #   only its owner may write one. They read their id off `me`
+pnpm cpctl unshare <machineId> <userId> # take it back
 pnpm cpctl provision <user> <machine> # add a daemon for somebody else. Needs
                                      #   REEMOAT_CP_PROVISION_KEY and **no account at all** — the one
                                      #   verb here taking no REEMOAT_CP_KEY. Creates the machine,

@@ -1822,6 +1822,33 @@ export function lastSeenText(at: number | null | undefined, now = Date.now()): s
 }
 
 /**
+ * Who brought this machine online, as the line a screen draws — or `null` where
+ * there is nothing to say.
+ *
+ * **One string for two surfaces**, the machine list's row and the machine's own
+ * screen, for the reason the control plane's own `labelOrName` gives one file
+ * over: a rule with two homes has no way to keep them agreeing, and this one is
+ * a *disclosure* — two spellings of it would be two disclosures, one of which
+ * somebody would eventually shorten. `lastSeenText` beside it is the same shape
+ * for the same reason.
+ *
+ * **The punctuation is deliberately not here.** The list's sublines are
+ * fragments ("online", "last seen 3 h ago") and take no full stop; the machine
+ * screen's lines are sentences and do. The *fact* is shared and the register
+ * belongs to the surface, so each caller ends the line the way its neighbours
+ * end theirs.
+ *
+ * `null` in is every case that means *unknown* — see `MachineRecord.enrolledBy`,
+ * which is where the argument for the field lives — and `null` out is what
+ * makes "only render it when there is something to render" a property of this
+ * function rather than a condition each screen re-derives.
+ */
+export function enrolledByText(who: string | null | undefined): string | null {
+  if (who === undefined || who === null || who.length === 0) return null;
+  return `Enrolled by ${who}`;
+}
+
+/**
  * The names that name more than one machine in this list, case-folded.
  *
  * **This is what lets a row draw its id only where the id is doing something.**
@@ -1916,6 +1943,50 @@ export interface MachineRecord {
    * owns: a banned owner cannot reach this app at all.
    */
   ownerDisabled?: boolean;
+  /**
+   * Whose enrollment code brought this machine online, where that was not the
+   * person reading the list.
+   *
+   * **This is the whole of a disclosure that could not be a refusal.** An admin
+   * may revoke a machine — which frees its label — register a new one for the
+   * same person under that freed name, mint its first code and redeem it on
+   * their own hardware. The row that then appears in the victim's list carries
+   * the name they just lost, `owned: true`, enrolled and online, and it is
+   * somebody else's computer. Every step is a route that has to stay: revoking
+   * is the denial side, and registering a machine *for* somebody is what
+   * `deploy/install.sh`'s daemon wizard does from the host being installed,
+   * which is a real flow rather than an attack. So the composition is made
+   * **visible** instead, and this field is the visibility.
+   *
+   * Four answers, and the last three are named rather than collapsed into the
+   * first — collapsing them is exactly what made the control plane's first
+   * attempt at this reassuring and wrong:
+   *
+   * * **`null` or absent** — you enrolled it yourself, or nothing knows: a
+   *   machine that predates the column, one that has never enrolled, or a
+   *   control plane that predates the field. *Unknown*, never "you", which is
+   *   why nothing at all is drawn for it rather than a line naming the reader.
+   * * **a display name** — somebody else's code brought this machine online.
+   * * **`"a provisioning key"`** — `POST /v1/provision`, which needs no account
+   *   at all, only `REEMOAT_CP_PROVISION_KEY`. The *most* alarming case, so it
+   *   is the one that must never read as the absent one.
+   * * **`"a deleted account"`** — the enroller's account has gone since. The
+   *   column is deliberately left dangling there and says so.
+   *
+   * ⚠ **A name is not by itself a substitution, and that is this field's stated
+   * limit.** The daemon wizard runs `cpctl admin addmachine --owner` then `cpctl
+   * admin enroll`, so *every* wizard-installed machine names the admin who ran
+   * the installer, and a substitution draws the same row as a normal install.
+   * What it buys is that the owner can tell *somebody else brought this online*
+   * from *I did*, and recognise the name or not; the remedy for one they do not
+   * recognise is to re-enroll the machine themselves, which sets this back to
+   * nothing.
+   *
+   * Optional, per the mirror's rule for a field added after the first release:
+   * an older control plane sends nothing, and nothing is the same silence as the
+   * `null` this side could not tell it apart from anyway.
+   */
+  enrolledBy?: string | null;
   scopes: Scope[];
   relayUrl: string | null;
   relayOnline: boolean;
