@@ -74,6 +74,9 @@ export function MachineOffer({ config, me }: { config: InstanceConfig | null; me
           word. It is what makes the two doors read as alternatives. */}
       <div className="flex items-center gap-2">
         <span className="h-px flex-1 bg-edge" />
+        {/* Not `MENU_HEADING`, though it is nearly it: no `font-semibold` and no
+            padding. This is not a heading — it is the word between two doors, and
+            weight here would make it read as one. */}
         <span className="shrink-0 text-2xs tracking-wider text-faint uppercase">or</span>
         <span className="h-px flex-1 bg-edge" />
       </div>

@@ -6,11 +6,16 @@ import { Button, FIELD } from "../bits";
 /**
  * The label a settings *field* wears, as distinct from a section heading.
  *
- * `SETTINGS_HEADING` at `text-2xs` is the 10px letter-spaced caps this screen
- * uses for a section; a field's name at 10px was the smallest type on a form
- * somebody fills in from a phone. 12px floor (`text-xs`), same weight and
- * tracking, so the two still read as one family and a label is not mistaken for
- * a section.
+ * `SETTINGS_HEADING` at `text-2xs` is the letter-spaced caps this screen uses for
+ * a section; a field's name at that size was the smallest type on a form somebody
+ * fills in from a phone. One step up (`text-xs`), same weight and tracking, so the
+ * two still read as one family and a label is not mistaken for a section.
+ *
+ * ⚠ **Written as steps rather than as pixels, because the pixels moved.** This
+ * argued 10px against a 12px floor; the scale then went up a notch and the pair is
+ * 12px against 13px. The gap is narrower than the one measured, the ordering is
+ * what the rule was ever about, and a docblock naming absolute sizes is a second
+ * copy of `index.css` that nothing keeps in step.
  */
 export const FIELD_LABEL = "text-xs font-semibold tracking-wider text-muted uppercase";
 

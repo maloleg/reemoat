@@ -173,7 +173,7 @@ plugin_failed` for anything the plugin's own code raised.
 
 ---
 
-## The control plane — 59 routes
+## The control plane — 60 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -209,10 +209,11 @@ these, so a new route is private by doing nothing. "Public" is not
 
 | | |
 |---|---|
-| `GET` · `POST /v1/machines` · `PATCH /v1/machines/:id` | The machines you own: list, add, rename |
+| `GET` · `POST /v1/machines` · `PATCH /v1/machines/:id` | The machines you own: list, add, rename. Each listed machine carries **`enrolledBy`**, whose enrollment code it enrolled with where that was not yours: a display name, or `"a provisioning key"` (`POST /v1/provision` needs no account, only `REEMOAT_CP_PROVISION_KEY`, so it is the most alarming answer rather than the absent one), or `"a deleted account"` where the enroller's account has gone since, or `"somebody this control plane did not record"` for a machine that enrolled before the column existed — which on an upgraded instance is every machine, and is named rather than folded into the absent case. **Absent or `null`** is your own code, a machine that has never enrolled, or a control plane too old to send the field. It names who **minted** the code, never who redeemed it: `POST /v1/enroll` is public and a daemon presents no account, so a leaked code of your own reports you. It is the disclosure for a substitution no refusal closes; `SECURITY.md` carries the argument and the limits |
 | `POST /v1/machines/:id/enrollments` | Mint a single-use code; minting burns the previous |
 | `POST /v1/machines/:id/revoke` | Retire one, which gives its slot back to the limit |
 | `GET` · `PUT` · `DELETE /v1/machines/:id/grants` | Share a machine **you own**, and take it back. A grant is **full access** to the machine, so this is the owner's verb: the admin routes that wrote one are deleted. Addressed by user id — there is no directory an ordinary account may read, so the other person reads theirs off `GET /v1/me`. `404 machine_not_found` for one you do not own, which is the anti-mapping rule rather than a lie; `409 grant_is_owner` for your own grant on both writes (narrowing it would take `machine:admin` off your own hardware, removing it would hide the machine from its owner — retiring it is the verb for that); `404 user_not_found`; `409 user_disabled` for a suspended account, which would otherwise become live the moment somebody re-enabled them; `400 bad_request` for a `userId` that is missing on either verb; `404 grant_not_found` on an unshare that removed nothing |
+| `DELETE /v1/machines/:id/grants/me` | **Give up a share somebody made to you.** The three routes above all resolve through ownership, so a grantee could reach none of them — and a share is written for any `userId` with no consent asked, so what somebody can do to you unasked now has something you can do about it. Your own grant only, and there is no `userId` parameter: the caller is the subject, and a route that took an id would be `DELETE /v1/admin/grants` under another name. `409 grant_is_owner` on a machine you own, because `GET /v1/machines` joins `grants` and an owner without one owns a machine in no list — retiring it is the verb for that; `404 grant_not_found` for both "no such grant" and "no such machine", which is the same anti-mapping rule |
 | `POST /v1/tokens` | The short-lived token a browser uses. Quota is checked **after** the grant is proved |
 
 ### Admin

@@ -667,7 +667,15 @@ process.stdout.write("\nwhere a row says it works\n");
   const header = readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8");
   check("and so does the session header's own line", /displayCwd\(where, roots\)/.test(header), true);
 
-  check("an unnamed session is called by where it works", sessionLabel(row(null, "/Users/rends/api"), home), "~/api");
+  /*
+   * ⚠ **`api`, not `~/api` — the marker went when a name stopped being a path.**
+   * `sessionLabel` takes `folderLabel` now: this string is a *name*, going in a
+   * rail row and a header where somebody is scanning for a word, and `~/` says
+   * which root rather than which folder. The line below still asserts
+   * `displayCwd(where, roots)` on the session header's own path, which keeps the
+   * marker — that one is a path being read as a path. Q3.581.
+   */
+  check("an unnamed session is called by where it works", sessionLabel(row(null, "/Users/rends/api"), home), "api");
   check("a named one is called by its name", sessionLabel(row("fix the build", "/Users/rends/api"), home), "fix the build");
   /*
    * Defaulted rather than required, and the default is the honest one: every

@@ -64,6 +64,10 @@ const USAGE = `cpctl — drive the Reemoat control plane
                                             and a name lookup here would be a way to test
                                             whether an account exists
   unshare <machineId> <userId>              take that back
+  leave <machineId>                         give up a share somebody made to you. The three
+                                            verbs above are the sharer's; this is the only one
+                                            the other person can run, and a share is written
+                                            without asking them
   token <machine>                           mint a short-lived token for one machine
 
   admin users                               every user
@@ -781,6 +785,24 @@ async function main(): Promise<void> {
       );
       return;
     }
+    /*
+     * The one grant verb the *other* person can run. `unshare` above resolves
+     * through ownership and answers 404 to a grantee, so before this there was no
+     * way to refuse a share — and a share is written for any user id without
+     * asking them.
+     */
+    case "leave": {
+      const machineId = rest[0];
+      if (!machineId) fail("usage: cpctl leave <machineId>");
+      const body = await api<{ outstandingTokensExpireWithinSeconds: number }>(
+        `/v1/machines/${machineId}/grants/me`,
+        { method: "DELETE" },
+      );
+      show(body, () =>
+        out(`left. Tokens already issued keep working for up to ${body.outstandingTokensExpireWithinSeconds}s.`),
+      );
+      return;
+    }
     case "me": {
       const me = await api<{ id: string; name: string; isAdmin: boolean }>("/v1/me");
       show(me, () => out(`${me.name}  ${me.id}${me.isAdmin ? "  (admin)" : ""}`));
@@ -795,9 +817,11 @@ async function main(): Promise<void> {
           scopes: string[];
           relayOnline: boolean;
           /*
-           * Whoever's enrollment code brought this online, where that was not
-           * you: a name, or `a provisioning key`, or `a deleted account`. `null`
-           * is you, or a machine old enough to predate the column.
+           * Whose enrollment code this machine enrolled with, where that was not
+           * yours: a name, `a provisioning key`, `a deleted account`, or
+           * `somebody this control plane did not record` for a machine that
+           * enrolled before the column existed. `null` is your own code, or a
+           * machine that has never enrolled.
            *
            * Printed rather than available on `--json`, because it is the whole
            * of what stands between an owner and a machine that is not theirs

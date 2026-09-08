@@ -11,7 +11,7 @@ import {
 import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import { errorText } from "../http";
 import { listNavKey, nextOptionIndex } from "../keys";
-import { displayCwd, shortPath } from "../paths";
+import { folderLabel, shortPath } from "../paths";
 import type { OfflineReason, Reach } from "../machine";
 import {
   isTerminal,
@@ -119,17 +119,58 @@ export const TAP_GROW_Y =
  * style preference; it is the thing every reading surface bounds and this one did
  * not.
  *
- * It is a shared constant rather than three copies of `max-w-3xl` because the
- * three have to be the *same* width or the card and the composer stop lining up
- * with the text they belong to — which is visible immediately and was the
- * complaint. Below the breakpoint it resolves to full width with the padding the
- * caller already had, so the phone is unchanged.
+ * It is a shared constant rather than a copy per surface because they all have to
+ * be the *same* width or the card and the composer stop lining up with the text
+ * they belong to — which is visible immediately and was the complaint. Seven call
+ * sites: the transcript, the composer, both ask cards, and in `SessionView` a
+ * load skeleton and two banners.
+ *
+ * ⚠ **There is no breakpoint here, and this sentence used to say there was.** It
+ * is a `max-w`, so it simply stops binding once the pane is narrower than the
+ * number — and that width moves every time the number is tuned. Below it the
+ * column is full width with the padding the caller already had, so a phone is
+ * untouched by any change to it. `Bubble`'s docblock carries the same correction
+ * from the other side, where the moving edge actually shows.
+ *
+ * ⚠ **`45rem` — 720px — fitted to a reference by *proportion*, not by pixels.**
+ * The stock `3xl` step (48rem) read too wide, `× 0.85` took it to 40.8, `+7%`
+ * brought it back to 43.66, and then the shape wanted was named by pointing at a
+ * screenshot of another product's conversation. In that screenshot the text
+ * column fills **56.9% of the pane beside the rail**; 45rem puts this one at
+ * 57.0% of the same pane.
+ *
+ * ⚠ **The pass before this one matched the screenshot's *pixels* and was wrong,
+ * which is the whole reason the sentence above says proportion.** It read the
+ * reference's measure as 927px, inferred a 1:1 capture from its line spacing, and
+ * set 60rem — landing within a pixel of that number and looking nothing like the
+ * reference, because the two captures were at different zoom. Measured on the
+ * result, the column filled **76%** of its pane against the reference's 56.9%. A
+ * pixel count off a screenshot carries the capture's scale with it; the fraction
+ * of the pane and the ratios inside it do not. **Fit those.**
+ *
+ * ⚠ **`Bubble`'s cap is not a fraction of this, and the decoupling is the thing
+ * to know before touching either number.** For one pass both moved by a single
+ * factor and the cap held at exactly three quarters of the column, and two
+ * docblocks leaned on that ratio as though it were a rule. It was arithmetic. The
+ * cap is 26rem now, fitted to the same screenshot's message-to-measure ratio
+ * rather than to this number, and **nothing in the build or the drivers relates
+ * the two**. `Bubble`'s docblock carries the current pair and is the only place
+ * the pixel arithmetic lives.
+ *
+ * ⚠ **Both step names above are written without their utility prefix on
+ * purpose.** Tailwind's scanner reads this file as text, not as code, and it does
+ * not know a comment from a class attribute — spelling the old utility out here
+ * put a dead rule for the retired step straight back into the built stylesheet,
+ * for a width nothing renders. Measured twice: once when this docblock first
+ * named it, and again when the sentence *explaining* that named it a second time.
+ * `webcheck`'s own sweeps strip comments before matching, for the same reason
+ * from the other side.
  *
  * Deliberately not applied to the scroll box itself: the scrollbar belongs at the
  * edge of the window, not at the edge of the text, and `scroll-stable` is
  * measuring that box.
  */
-export const COLUMN = "mx-auto w-full max-w-3xl";
+export const COLUMN = "mx-auto w-full max-w-[45rem]";
 
 /**
  * A text field's chrome, once.
@@ -280,12 +321,21 @@ export function sessionLabel(
    * with no roots to hand — an older daemon, a machine that has not answered
    * `/fs/roots`, a driver — gets exactly the label this drew before roots
    * existed. See `displayCwd`.
+   *
+   * ⚠ **`folderLabel`, not `displayCwd`: no `~/` on a name.** An unnamed session
+   * *is* called after its directory, and a name is a name — the marker saying
+   * which root it hangs off is path grammar, and this is the string that goes in
+   * a rail row and a header where a person is scanning for a word. It also has to
+   * match: `SessionLine` suppresses the subline when it would repeat the title,
+   * by comparing the two strings, and a title reading `~/thing` beside a subline
+   * reading `thing` draws one folder twice — which is the exact defect that
+   * comparison was added to prevent.
    */
   roots: readonly string[] = [],
 ): string {
   const title = row.snapshot.title?.trim();
   if (title !== undefined && title.length > 0) return title;
-  return displayCwd(row.snapshot.workspace.requestedCwd, roots);
+  return folderLabel(row.snapshot.workspace.requestedCwd, roots);
 }
 
 /**
@@ -2136,11 +2186,31 @@ export function menuRow(align: "start" | "center"): string {
   const cross = align === "center" ? "items-center" : "items-start";
   return `tap flex min-h-11 w-full ${cross} gap-2 rounded-md px-2.5 py-3 text-left text-xs`;
 }
+/**
+ * The caps heading *inside a popover*, and the only one of the three that carries
+ * its own padding.
+ *
+ * The same type as {@link SETTINGS_HEADING} at one tone quieter — `text-faint`
+ * rather than `text-muted` — because a menu's heading sits on `MENU_PANEL` above
+ * rows that are themselves the content; on a settings screen the heading is the
+ * loudest thing in its band. The padding is here rather than at the caller for the
+ * opposite reason to {@link SETTINGS_HEADING}'s: every popover heading in the app
+ * wants the same `px-2.5` as the rows under it, and a heading that did not share
+ * that left edge is the one arrangement worth preventing.
+ *
+ * ⚠ It had no docblock at all for four releases and was documented only *by
+ * reference*, from {@link SETTINGS_HEADING} and from three call sites — which is
+ * how the caps idiom came to be written out by hand instead. Measured for Q5.115
+ * on 2026-09-08: the trio `uppercase` + `tracking-wider` + `font-semibold` appears
+ * **fifteen times across thirteen files**, and **nine** of those sites used none
+ * of the three constants that already owned it. The count is Q5.115's rather than
+ * restated here, for the reason the rule gives one file over.
+ */
 export const MENU_HEADING =
   "px-2.5 py-1.5 text-2xs font-semibold tracking-wider text-faint uppercase";
 
 /**
- * The settings screen's one heading, and the one section it heads.
+ * The app's section heading — a named band of anything, not only of settings.
  *
  * Written out **fourteen times** across five files before this, and the string
  * itself had not yet drifted — what had drifted is everything around it.
@@ -2162,6 +2232,14 @@ export const MENU_HEADING =
  * `text-faint` with popover padding, and not the nav's heading either, which
  * composes this with `px-4 pt-4 pb-1` so it shares a left edge with its rows.
  * Layout stays with the caller, for the reason {@link FIELD} gives.
+ *
+ * **The name is narrower than the reach and stays that way.** It also heads a
+ * field on the gate and the sign-in screen, a column on a plugin's view and a
+ * table in the key list — seven call sites that had written the string out by
+ * hand. Renaming it to match would break the citation `docs/DECISIONS.md` makes
+ * of this symbol, which `docscheck` asserts; the sentence is cheaper than the
+ * churn. `.claude/rules/web-typography.md` is where the three of these are
+ * distinguished, and the distinction is a *colour*, never a size.
  */
 export const SETTINGS_HEADING = "text-2xs font-semibold tracking-wider text-muted uppercase";
 /** A settings section below the first: the gap, the rule, and the gap under it. */

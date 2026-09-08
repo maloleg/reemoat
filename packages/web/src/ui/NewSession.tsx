@@ -31,6 +31,7 @@ import {
   Empty,
   Icon,
   SHEET_FOOT,
+  SETTINGS_HEADING,
   SHEET_SCREEN,
   Spinner,
   reachText,
@@ -2224,7 +2225,7 @@ function MachineLine({
 
 function FieldLabel({ children }: { children: ReactNode }): ReactNode {
   return (
-    <h2 className="pb-1.5 text-2xs font-semibold tracking-wider text-muted uppercase">{children}</h2>
+    <h2 className={`pb-1.5 ${SETTINGS_HEADING}`}>{children}</h2>
   );
 }
 
@@ -2681,6 +2682,9 @@ function DirectoryPicker({
         <ImportCode
           machineId={id}
           into={path}
+          /* The same roots the crumbs above are cut against, so the sheet's footer
+             and the bar behind it name one folder one way. */
+          roots={roots}
           onClose={() => setImporting(false)}
           /* Straight into it, for the reason creating a folder walks into the one
              it just made: the folder somebody imported is the folder they meant to

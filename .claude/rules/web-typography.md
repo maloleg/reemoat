@@ -1,0 +1,165 @@
+---
+paths:
+  # The stylesheet that *defines* the scale and both families was in no rule's
+  # globs at all, so opening it summoned nothing. That is the gap this file
+  # closes, and it is why `bits.tsx` is claimed here as well as by
+  # `web-shell.md`: the three heading constants live there, and a change to one
+  # of them is a typography change before it is a shell change.
+  - packages/web/src/index.css
+  - packages/web/src/ui/bits.tsx
+  - packages/web/src/paths.ts
+  - packages/web/src/ui/EventList.tsx
+  - packages/web/src/ui/PermissionCard.tsx
+  - packages/web/src/ui/DiffView.tsx
+  - packages/web/src/ui/Markdown.tsx
+  - packages/web/src/ui/ImportCode.tsx
+  - packages/web/src/ui/settings/*
+  - packages/web/scripts/webcheck.typography.ts
+---
+
+## Two families, and what decides which
+
+**This app is a system sans in which monospace is reserved, not a monospace app.**
+There are exactly **two** `font-family` declarations in the whole front end, both
+tokens: `body` at `--font-sans` and `pre, code, kbd` at `--font-mono`, in
+`index.css`. Every other mono is an explicit `font-mono` at a call site, and
+`webcheck` prints how many rather than this file stating it — the number was
+written here by hand as *38* and was wrong inside the same change that wrote it,
+because two call sites were added three files away. A count restated in prose is
+the one kind of claim this repository has learned not to keep.
+**There is no web font and there will not be one**: YaHei and Segoe UI are
+Microsoft's and cannot be shipped, and a free CJK substitute is 2–4 MB of woff2 out
+of the control plane's own container to a phone on LTE. Q3.579.
+
+The terminal feel is not the default face. It is *which surfaces* landed in the mono
+channel — the transcript, diffs, paths, keys, command lines — which is to say the
+ones people look at longest.
+
+**The rule a change here must not break:**
+
+> **A machine-written string a person may retype or compare character by character
+> is drawn in mono. A machine-written string that is prose is drawn in sans.**
+
+`DirectoryPicker` states it at one of the places that got it right, and the sentence
+is worth keeping in mind because it is the whole test: *"that family is here because
+those are paths, and this is a sentence about one there is no path for."*
+
+- **Mono**: paths, ids, keys, a one-time secret, commands, diff bodies, code
+  fences — anything transcribed into a terminal or compared against one.
+- **Sans**: the agent's replies, refusal text, every sentence *about* a path.
+- **⚠ Never both for one fact.** This rule was followed from memory for four
+  releases and had already been missed four times, all of them one workspace path
+  drawn in mono by the picker and in sans everywhere else. Q3.579, Q3.580.
+
+**A row in the session list is sans throughout — title *and* subline — and that is
+the rule's one deliberate exemption.** A row is the tightest slot in the app: at
+390px the subline shares its width with the age and the overflow control. Mono's
+~0.6em average advance against sans's ~0.5em spends about a fifth of the characters
+on the family, and a row exists to be *scanned*, so characters are the whole of what
+it has to spend. `sessionLabel` answers a human-typed title or, failing that,
+`displayCwd`; the subline names the agent, the machine and what is left of the path.
+All of it is sans, at one size, because a line that changed family halfway is what
+made the row unreadable when this was first tried.
+
+Mono is for where a path is being read *as a path* and there is room to read it: the
+session header's subtitle, the picker's crumbs, a diff's header, the import sheet.
+
+**⚠ A mono run inside a sans line takes the step below it.** Mono reads *larger*
+than sans at an equal nominal size — SF Mono's x-height and advance against SF
+Pro's — so it does not inherit the line's size, it states one. The session row
+proved it twice over: made mono and left to inherit its line's `text-xs`, the path
+landed level with the row's own `text-sm` title (*"the folder name is the size of
+the session name"*), and stepped down to `text-2xs` it was still too wide to read
+(*"too few characters fit"*) — which is what took that row out of mono altogether.
+Every path drawn in mono is `text-2xs`: `DiffView`'s header, the picker's crumbs,
+and the two that inherit a `text-2xs` line already (the session header's subtitle,
+via `Header`, and the import sheet's footer). **12px is the floor**, so a path can
+never be the thing a reader's eye lands on first.
+
+**Everything that names a path goes through `displayCwd` or `pathCrumbs`**
+(`paths.ts`), never through a local helper. The import sheet had its own,
+disagreeing with the breadcrumb bar three inches above it, and its docblock claimed
+parity it did not have. Q3.580.
+
+## The scale
+
+Six steps in `index.css`, `--text-2xs` through `--text-xl`, each with its own
+line-height. **The root `font-size` is deliberately unset**, so `1rem` stays the
+reader's setting.
+
+The app lives at 12–13px: `text-2xs` and `text-xs` are ~300 of ~430 uses,
+`text-2xl` and `text-3xl` do not exist. That is a density decision, not an
+oversight.
+
+- **Every size comes from the scale.** There is exactly **one** arbitrary size in
+  the app — `text-[11px]` on the installer line in `CommandLine.tsx` — and it is
+  named in the driver's allowlist rather than tolerated silently. A second one
+  fails `webcheck`.
+- **⚠ Form controls are exempt and the exemption is unlayered.** `input, textarea,
+  select` are `max(16px, 1em)`, reverted under `@media (pointer: fine)`. iOS Safari
+  zooms the viewport on focus into a field under 16px and does not zoom back out.
+  The rules are unlayered so they beat Tailwind's utilities without `!important`.
+  Cost: on a touch device every field is larger than its class says, mono ones
+  included.
+- **Do not restate a pixel count in a docblock.** The scale moved up a notch once
+  and left four comments describing sizes that no longer existed — `MENU_HEADING`
+  called 10px when it is 12px, a 12px floor that is now 13px. Argue in *steps*,
+  which is what every one of those comments was actually about. The exception is a
+  pixel that is genuinely the subject rather than a restatement of the scale: the
+  16px zoom threshold above is a fact about iOS Safari, not about `--text-sm`.
+
+## The three caps constants
+
+`text-2xs font-semibold tracking-wider … uppercase` — small caps with tracking — is
+one idiom with three owners, and **which one is a colour decision, never a size
+decision.** Compose layout onto them; never restate the type.
+
+| Constant | Where | Tone |
+|---|---|---|
+| `SETTINGS_HEADING` | a named band of anything — a section, a form field's label on the gate, a plugin's column, a table head | `text-muted` |
+| `MENU_HEADING` | inside a popover; carries its own `px-2.5 py-1.5` because it shares a left edge with the rows under it | `text-faint` |
+| `FIELD_LABEL` | a field's name on a settings form. One step larger on purpose: a heading is scanned, a label is read off a form somebody is filling in from a phone | `text-muted` |
+
+`SETTINGS_HEADING`'s name is narrower than its reach and stays that way — renaming
+it would break the citation `docs/DECISIONS.md` makes of the symbol, which
+`docscheck` asserts.
+
+**Extracting a constant does not retire an idiom.** The string was written out
+fourteen times before `SETTINGS_HEADING` existed; the count did not fall afterwards,
+it moved — fifteen copies in thirteen files, nine of them using none of the three
+constants, two of them byte-identical local `const label` declarations in two files
+that never imported from each other. Nothing had ever swept for the idiom, so the
+second wave was invisible until somebody counted. Q5.115.
+
+Three sites are outside the constants **on purpose**, and each says so at the code:
+`SessionBrowser`'s waiting-elsewhere band (`text-fg`, louder than its rows),
+`MachineSection`'s `RETIRE_HEADING` (`text-danger`), and `MachineOffer`'s `or` (no
+`font-semibold` — the word between two doors is not a heading).
+
+**⚠ A colour cannot be appended to one of these.** `` `${SETTINGS_HEADING}
+text-danger` `` is a silent no-op: two members of one family, resolved by Tailwind's
+alphabetical emission and not by the order in the string. `RETIRE_HEADING` is spelled
+out for exactly that reason. The same trap is what `menuRow(align)` exists to close,
+and `webcheck` sweeps every shared class string for it.
+
+## What is checked
+
+`webcheck.typography.ts`. Nothing checked any of this before — a changed stack, a new
+web font or a drift from the landing page would have passed all eight drivers.
+
+1. **Two families, and both are tokens.** A third `font-family` anywhere in
+   `index.css` fails, as does a literal stack written in place of a token.
+2. **No web font loads** — `@font-face`, `googleapis`, `gstatic`, `.woff` over the
+   stylesheet and the HTML shell. Comments are stripped first, because
+   `--font-sans`'s own docblock discusses woff2 in prose.
+3. **Every size is from the scale**, with the one exception named in the driver.
+4. **The landing page has not drifted** — and it **`skip()`s in CI**. Q7.133.
+   `services/landing/index.html` is a hand-copy of both stacks and five of the six
+   scale steps, and it lives in the *other* repository, so the comparison only runs
+   where both are on one disk. Absent, it says so and is counted; it must never
+   print `ok`. Its scale is asserted as a **subset**, because the landing has no
+   `--text-xl` and legitimately should not.
+
+**Every sweep here carries a floor.** A regex that matches nothing passes silently,
+which is the failure mode of every source-text assertion in `webcheck` — see
+Q5.114, which is four of them found green over broken code.

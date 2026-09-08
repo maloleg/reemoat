@@ -73,6 +73,7 @@ export const { RANK_STEP, canReorder, compareRows, effectiveRank, orderSessions,
   "../src/sessionOrder.js"
 );
 export const { sessionLabel } = await import("../src/ui/bits.js");
+export const { displayCwd, folderLabel } = await import("../src/paths.js");
 export const { openableHref } = await import("../src/ui/links.js");
 export const {
   chipParts,

@@ -12,7 +12,7 @@ import { echoFor, echoVersion, subscribeEchoes } from "../echo";
 import { permissionContext } from "../permission";
 import { keyOf, type SessionRef } from "../ids";
 import { describe, missingRowReason } from "../machine";
-import { displayCwd, downloadablePath, relativeTo } from "../paths";
+import { displayCwd, downloadablePath, folderLabel, relativeTo } from "../paths";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, store, type AppState, type SessionRow } from "../store";
@@ -450,14 +450,17 @@ function SessionTitle({
   onRenaming,
 }: {
   row: SessionRow;
-  /** This machine's browse roots, so the fallback name is `~/thing`. */
+  /** This machine's browse roots, so the fallback name is `thing`, not `…/rends/thing`. */
   roots: readonly string[];
   renaming: boolean;
   onRenaming: (next: boolean) => void;
 }): ReactNode {
   // The same string `sessionLabel` falls back to, which is what makes the rename
-  // box's placeholder show exactly what the header is showing.
-  const fallback = displayCwd(row.snapshot.workspace.requestedCwd, roots);
+  // box's placeholder show exactly what the header is showing. **`folderLabel`,
+  // so it stays that string** — `sessionLabel` dropped the `~/` and a placeholder
+  // still carrying one would offer to name the session something the header has
+  // never displayed.
+  const fallback = folderLabel(row.snapshot.workspace.requestedCwd, roots);
 
   if (renaming) {
     return (
@@ -604,10 +607,14 @@ function WorkspaceLine({
   /*
    * ⚠ **This drew the absolute path, and one line above it `SessionTitle` was
    * already drawing the short form of the same directory.** For a session nobody
-   * has named, `sessionLabel` falls back to `displayCwd`, so the header read
+   * has named, `sessionLabel` falls back to the directory, so the header read
    * `~/thing` over `mac · /Users/rends/thing`: one fact, two renderings, one row
    * apart, and most of the second spent on the home directory every session on
    * that machine shares. Q3.441's defect, resurfaced in the header.
+   *
+   * The two are `thing` over `mac · ~/thing` now — `sessionLabel` names a session
+   * and takes `folderLabel`, this line draws a path and keeps `displayCwd`'s `~/`,
+   * which is the marker saying what the rest hangs off. Q3.581.
    *
    * What is *not* fixed here, deliberately: the echo itself. `headlineWorthDrawing`
    * refuses a subline that repeats its title, and the same judgement would drop
@@ -625,7 +632,11 @@ function WorkspaceLine({
           beside it is the one with room to give. */}
       <span className="shrink-0">{machineName}</span>
       <span className="shrink-0 text-faint">·</span>
-      <span className="truncate" title={where}>{displayCwd(where, roots)}</span>
+      {/* `font-mono` because this is a path: a string somebody compares against
+          their own shell, character by character. See `.claude/rules/web-typography.md`
+          — the session's *name* above is prose and stays sans, and these two lines
+          drawing one workspace in two families is what that rule was written for. */}
+      <span className="truncate font-mono" title={where}>{displayCwd(where, roots)}</span>
       {workspace.mode === "worktree" && branch !== null && (
         <>
           <span className="text-faint">·</span>

@@ -1,7 +1,7 @@
 import { memo, useState, type ReactNode } from "react";
 import { seedForm } from "../plugins";
 import type { PluginBlock, PluginField, PluginOpen, PluginRow, PluginView as PluginViewShape } from "../wire";
-import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, Spinner } from "./bits";
+import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, SETTINGS_HEADING, Spinner } from "./bits";
 import { Trash2 } from "lucide-react";
 
 /**
@@ -128,7 +128,7 @@ export const PluginBlockView = memo(function PluginBlockView({
              * fit exactly; past that it scrolls, which is the honest answer.
              */
             <section key={index} className="min-w-0 flex-1 sm:min-w-40">
-              <h3 className="mb-1.5 text-2xs font-semibold tracking-wider text-muted uppercase">{column.title}</h3>
+              <h3 className={`mb-1.5 ${SETTINGS_HEADING}`}>{column.title}</h3>
               {column.rows.length === 0 ? (
                 <p className="text-sm text-muted">—</p>
               ) : (

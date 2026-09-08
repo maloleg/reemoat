@@ -39,6 +39,10 @@ pnpm cpctl share <machineId> <userId>   # share one of yours. There is no `admin
                                      #   full access to a machine that runs agents as its owner, so
                                      #   only its owner may write one. They read their id off `me`
 pnpm cpctl unshare <machineId> <userId> # take it back
+pnpm cpctl leave <machineId>         # give up a share somebody made to you. The three above are the
+                                     #   sharer's and resolve through ownership; this is the only
+                                     #   grant verb the other person can run, and a share is written
+                                     #   without asking them
 pnpm cpctl provision <user> <machine> # add a daemon for somebody else. Needs
                                      #   REEMOAT_CP_PROVISION_KEY and **no account at all** — the one
                                      #   verb here taking no REEMOAT_CP_KEY. Creates the machine,

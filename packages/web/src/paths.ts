@@ -89,6 +89,35 @@ export function displayCwd(cwd: string, roots: readonly string[]): string {
 }
 
 /**
+ * The same answer as {@link displayCwd}, without the `~/` that says which root.
+ *
+ * For a **list row**, where the folder is the whole of what the line has room to
+ * say. Every session on a machine is under the same root in the ordinary case, so
+ * `~/` is two characters of pure agreement repeated down the rail — and it is the
+ * two characters nearest the reader's eye, ahead of the name they are scanning
+ * for. `~/2026-07-taskmanager` becomes `2026-07-taskmanager`.
+ *
+ * ⚠ **Only the prefix goes; the cut itself is still `displayCwd`'s.** This is not
+ * `basename` — a session three levels inside a root keeps all three
+ * (`work/api/packages/web`), because those levels are what tell two rows apart,
+ * which is the whole reason `displayCwd` cuts against the daemon's own roots
+ * rather than keeping a fixed number of segments.
+ *
+ * Two answers pass through unchanged, and both are correct rather than missed.
+ * `~` — the root itself — has nothing below it to name, so it stays the marker;
+ * stripping it would leave an empty row. And a path under **no** root already came
+ * back from `shortPath` with no marker on it.
+ *
+ * The header above a folder is a different question with a different answer:
+ * `folderNames` in `groups.ts` picks the shortest suffix that separates it from
+ * its siblings, which it can only do knowing all of them.
+ */
+export function folderLabel(cwd: string, roots: readonly string[]): string {
+  const shown = displayCwd(cwd, roots);
+  return shown.startsWith("~/") ? shown.slice(2) : shown;
+}
+
+/**
  * Which root a path is under, and what is left of the path once it is cut.
  *
  * Extracted from {@link displayCwd} so the directory picker's breadcrumb bar and

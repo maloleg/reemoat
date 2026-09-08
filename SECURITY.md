@@ -197,10 +197,16 @@ grant on unless they are the one being handed it — so it adopts rows nobody
 depends on and re-labels for the owner a machine already has), `POST
 /v1/admin/machines/:id/enrollments` (refuses a machine that is enrolled and has an
 owner *or grantees*, because redeeming a code retires the running daemon's tunnel
-key and so replaces the machine rather than reading it). `db.prepare("INSERT INTO
-grants` appears in `app.ts` twice and in `machines.ts` once, and no route under
+key and so replaces the machine rather than reading it). `INSERT INTO grants`
+appears in `app.ts` twice and in `machines.ts` once, and no route under
 `/v1/admin` adds or widens a grant, on a machine that already has an owner, for
 anybody other than that owner.
+
+That string is quoted without `db.prepare(` in front of it on purpose, because an
+invariant nobody can check by hand is not one: both `app.ts` writers break the line
+after `db.prepare(`, so the longer form greps to **one** of the three and reads as
+though the other two do not exist. `relaycheck` matches
+`/db\.prepare\(\s*"INSERT INTO grants/` for that reason and says so.
 
 ⚠ **Read "ownerless" as "nobody depends on it", which is the correction rather
 than the claim.** Both guards were written keyed on ownership alone, which quietly
@@ -228,8 +234,8 @@ enroll it on their own hardware — your list then draws the name you lost, owne
 and online, and it is their computer. Every step has to stay: revoking is the
 denial side, and registering a machine for somebody is what `install.sh`'s wizard
 does. Both obvious refusals restore bugs already fixed. So `GET /v1/machines`
-carries **`enrolledBy`**, which names whoever's enrollment code brought a machine
-online when that was not you — drawn on the machine row in the web UI and printed
+carries **`enrolledBy`**, which names whose enrollment code a machine enrolled with
+when that was not yours — drawn on the machine row in the web UI and printed
 by `cpctl machines`, because a disclosure only a `curl` reader sees is not one.
 
 It is read off `machines.enrolled_by`, written at the redemption it describes.
@@ -248,9 +254,30 @@ those states.
 `install.sh`'s daemon wizard registers the machine and enrolls it on an admin's
 code, so *every* wizard-installed machine names the admin who ran the installer,
 and a substitution draws the same row as a normal install. What the field buys is
-that you can tell *somebody else brought this online* from *I did*, and recognise
-the name or not. The remedy for a name you do not recognise is to re-enroll the
-machine yourself, which sets it back to you.
+that you can tell *this enrolled with somebody else's code* from *with mine*, and
+recognise the name or not. The remedy for a name you do not recognise is to
+re-enroll the machine yourself, which sets it back to you.
+
+⚠ **Three further things it does not cover, stated because a disclosure nobody has
+bounded is trusted past what it says.**
+
+It names who **minted** the code, never who **redeemed** it. `POST /v1/enroll` is
+public — the credential *is* the body, and a daemon presents no account — so there
+is no redeemer to record; `used_from` keeps the address and is forensic rather than
+shown. A code **you** minted that leaks and is redeemed on somebody else's hardware
+therefore reports you, which draws nothing. Minting again supersedes the old code,
+which is the remedy for that shape; this field is not evidence about it.
+
+It is **not retroactive.** The column is written at redemption, so every machine
+that enrolled before it shipped has no value — which on the day of the upgrade is
+all of them. Those rows say *somebody this control plane did not record* rather
+than nothing, because folding them into the reassuring answer is the exact failure
+the column was built to end. There is no backfill: the table it would read from is
+swept seven days after a code is used, and the four defects below apply to a
+backfill identically.
+
+And it moves when the machine list is **read**, not on the four-second poll — a
+wake, or a reload. `packages/web/src/machine.ts` says so at the fold.
 
 **A daemon makes exactly one control-plane request, ever** — the enrollment
 exchange. That is what makes a control-plane outage cost reachability rather than

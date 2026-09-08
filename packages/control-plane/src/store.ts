@@ -290,9 +290,27 @@ function migrate(db: DatabaseSync): void {
    */
   addColumn(db, has("daemon_agents"), "ALTER TABLE machines ADD COLUMN daemon_agents TEXT");
   /*
-   * Whose enrollment code brought this machine online, as an id — a user's, or a
+   * **Whose code this machine enrolled with**, as an id — a user's, or a
    * provisioning key's, because `POST /v1/provision` mints with the *key's* id
    * and that is the case most worth naming rather than the one to discard.
+   *
+   * ⚠ **Who *minted* the code, never who redeemed it, and the difference is this
+   * field's sharpest limit.** The value is `enrollment_codes.created_by`, set by
+   * `mintEnrollmentCode` for whoever asked. `POST /v1/enroll` is a public route —
+   * it sits above `app.use("/v1/*", callerAuth(db))` because *the credential is
+   * the body*, and a daemon redeeming a code presents no account at all — so
+   * there is no identity of a redeemer to record. `used_from` records the address
+   * and is deliberately forensic rather than shown.
+   *
+   * So the shape this does **not** catch: a code *you* minted, leaked, and
+   * redeemed on somebody else's hardware. `created_by` is your own id, the route
+   * reports `null`, and the row draws nothing — which reads as *I enrolled this
+   * myself*, because you did mint it. What the field catches is the composition it
+   * was built for, where the machine is registered and enrolled by somebody else;
+   * a leaked code of your own is a different failure with a different remedy
+   * (mint again, which supersedes), and this column is not evidence about it.
+   * Every sentence about this field says "enrolled with" for that reason, and any
+   * that says "brought online" has drifted back.
    *
    * ⚠ "discard" rather than the SQL verb, and not by accident: `deploycheck`
    * reads this whole function body — comments included — and refuses the two
@@ -317,8 +335,17 @@ function migrate(db: DatabaseSync): void {
    *
    * Nullable with no DEFAULT, for the reason every column above is: NULL is the
    * honest answer for a machine that predates this and for one that has never
-   * enrolled. So NULL means *unknown*, and the route reports it as such rather
-   * than as "you" — an id that matches the caller is what reports nothing.
+   * enrolled.
+   *
+   * ⚠ **NULL means *unknown*, and the route must not report it as "you" — which
+   * it did.** `enrolledByFor` folded the empty value and the caller's own id into
+   * one `null`, and both surfaces draw nothing for `null`, so on the day this
+   * shipped every already-enrolled machine in the fleet read as self-enrolled. It
+   * splits on `enrolled_at` now: NULL **and** enrolled says so out loud, NULL and
+   * never-enrolled keeps the silence it has earned, and only an id matching the
+   * caller reports nothing. The predicate `enrolled_at IS NOT NULL AND enrolled_by
+   * IS NULL` is total for "before this was recorded", which is why the column is
+   * written as NULL rather than `''` at the one place that writes it.
    *
    * ⚠ **A name here does not by itself mean a substitution.** `install.sh`'s
    * daemon wizard is `cpctl admin addmachine --owner` then `cpctl admin enroll`,

@@ -1958,29 +1958,40 @@ export interface MachineRecord {
    * which is a real flow rather than an attack. So the composition is made
    * **visible** instead, and this field is the visibility.
    *
-   * Four answers, and the last three are named rather than collapsed into the
-   * first — collapsing them is exactly what made the control plane's first
-   * attempt at this reassuring and wrong:
+   * Five answers, and the last four are named rather than collapsed into the
+   * first — collapsing them is exactly what made the control plane's first two
+   * attempts at this reassuring and wrong:
    *
-   * * **`null` or absent** — you enrolled it yourself, or nothing knows: a
-   *   machine that predates the column, one that has never enrolled, or a
-   *   control plane that predates the field. *Unknown*, never "you", which is
-   *   why nothing at all is drawn for it rather than a line naming the reader.
-   * * **a display name** — somebody else's code brought this machine online.
+   * * **`null` or absent** — you enrolled it yourself, this machine has never
+   *   enrolled, or the control plane predates the field. Nothing is drawn.
+   * * **a display name** — this machine enrolled with somebody else's code.
    * * **`"a provisioning key"`** — `POST /v1/provision`, which needs no account
    *   at all, only `REEMOAT_CP_PROVISION_KEY`. The *most* alarming case, so it
    *   is the one that must never read as the absent one.
    * * **`"a deleted account"`** — the enroller's account has gone since. The
    *   column is deliberately left dangling there and says so.
+   * * **`"somebody this control plane did not record"`** — the machine enrolled
+   *   before the column existed. ⚠ **This is the answer the first release
+   *   folded into `null`**, and it was not an edge: `machines.enrolled_by` is
+   *   written only at redemption, so on the day the column shipped it was the
+   *   answer for *every machine in the fleet* — the whole disclosure reading as
+   *   "I enrolled this myself" on the screen built to say otherwise.
    *
    * ⚠ **A name is not by itself a substitution, and that is this field's stated
    * limit.** The daemon wizard runs `cpctl admin addmachine --owner` then `cpctl
    * admin enroll`, so *every* wizard-installed machine names the admin who ran
    * the installer, and a substitution draws the same row as a normal install.
-   * What it buys is that the owner can tell *somebody else brought this online*
-   * from *I did*, and recognise the name or not; the remedy for one they do not
-   * recognise is to re-enroll the machine themselves, which sets this back to
-   * nothing.
+   * What it buys is that the owner can tell *this enrolled with somebody else's
+   * code* from *with mine*, and recognise the name or not; the remedy for one they
+   * do not recognise is to re-enroll the machine themselves, which sets this back
+   * to nothing.
+   *
+   * ⚠ **And the field names who *minted* the code, never who redeemed it.**
+   * `POST /v1/enroll` is public — the credential is the body, and a daemon
+   * redeeming a code presents no account — so there is no redeemer to record.
+   * A code **you** minted that leaks and is redeemed on somebody else's hardware
+   * therefore reports *you*, which is `null`, which draws nothing. That shape is
+   * outside what this field is evidence about; `store.ts` carries the argument.
    *
    * Optional, per the mirror's rule for a field added after the first release:
    * an older control plane sends nothing, and nothing is the same silence as the

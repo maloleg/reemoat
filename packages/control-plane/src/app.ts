@@ -861,7 +861,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * constantly — `GET /v1/machines` every wake, `GET /v1/me`. Call sites that say
    * why they are there is the smaller thing to keep true.
    *
-   * There are **eleven**, and there were two. `POST /v1/machines` and
+   * There are **twelve**, and there were two. `POST /v1/machines` and
    * `POST /v1/machines/:id/revoke` are a loop that costs three fsync'd
    * transactions a turn under `PRAGMA synchronous = FULL`, on the file the relay
    * shares, and leaves permanent rows behind either way; `POST /v1/me/keys` and
@@ -895,6 +895,12 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * a budget is that sharing is a route *every* signed-in owner can reach and
    * each request leaves a permanent `grants` row behind, on the file the relay
    * shares.
+   *
+   * The twelfth is `DELETE /v1/machines/:id/grants/me`, and it is counted for the
+   * half of that argument that survives being pointed the other way: it is one row
+   * on the same shared file, reachable by every signed-in account, and unlike the
+   * two above it takes no ownership lookup ahead of the write — so the throttle is
+   * the only thing standing between it and a loop.
    */
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
@@ -1401,10 +1407,18 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * The value is whatever minted the code: a user id, or a `pk_` provisioning
      * key id. It is stored as it stands and resolved to a name at read time, so
      * an account deleted later leaves a row that still says *somebody else*.
+     *
+     * ⚠ **NULL rather than `""` on the branch that cannot happen.**
+     * `enrollment_codes.created_by` is `NOT NULL` and this row was just matched by
+     * `code_hash`, so the fallback is unreachable today — but it used to write
+     * `""`, which is a second on-disk spelling of *unknown*, and this column has
+     * exactly one predicate worth keeping total: `enrolled_by IS NULL`. There are
+     * no down-migrations here, so one stray `''` would be permanent.
      */
+    const enroller = row?.["created_by"];
     db.prepare("UPDATE machines SET enrolled_at = ?, enrolled_by = ? WHERE id = ?").run(
       now,
-      String(row?.["created_by"] ?? ""),
+      typeof enroller === "string" && enroller.length > 0 ? enroller : null,
       machineId,
     );
 
@@ -3496,8 +3510,19 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * `WRITE_THROTTLE` allows. Measured at 200k retained rows it was 168 ms of
      * synchronous event-loop block per poll, on the file the relay shares.
      *
-     * `MAX_MACHINES_PER_USER` bounds the set at fifty, so the placeholder list
-     * is bounded by the same thing the listing is.
+     * ⚠ **This used to say `MAX_MACHINES_PER_USER` bounds the set at fifty, and
+     * that is false in the direction that matters.** That ceiling is counted over
+     * `machine_owners`, in `createOwnedMachine`, so it bounds what a caller
+     * **owns**. This listing selects from `grants` with no `LIMIT`, and a grant is
+     * something *other people* write: `PUT /v1/machines/:id/grants` lets any owner
+     * add a permanent row to any account's listing, and the recipient has no verb
+     * for removing one. So both the row set and this placeholder list grow with
+     * shares received, which nothing caps.
+     *
+     * The placeholder list is the smaller half of that — it is one entry per
+     * *distinct enroller*, not per row — but it is written down here because the
+     * sentence it replaces was the one licensing the growth. Whether shares
+     * received should be bounded is Q7's question, not this route's.
      */
     const enrolledByName = new Map<string, string>();
     if (enrolledByIds.size > 0) {
@@ -3518,8 +3543,32 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * been deleted since; `enrollment_codes.created_by` was already documented
      * as deliberately dangling, and this column inherits that and says so.
      */
-    const enrolledByFor = (id: string): string | null => {
-      if (id.length === 0 || id === caller.userId) return null;
+    /*
+     * ⚠ **The empty case is split on `enrolled_at`, and that split is the whole
+     * of what this disclosure is worth on an upgraded instance.**
+     *
+     * `enrolled_by` is written at redemption and nowhere else, so **every machine
+     * that enrolled before this column shipped carries NULL** — which is to say,
+     * on the day this deploys, all of them. Collapsed into the caller's own `null`
+     * the row draws nothing, and nothing is what a machine you enrolled yourself
+     * draws: the entire existing fleet would have read as *you did this*, on the
+     * one screen built to say when somebody else did. That is the fifth instance
+     * of the failure the four in `store.ts` are about, arriving through the
+     * migration rather than through the query.
+     *
+     * `enrolled_at IS NOT NULL AND enrolled_by IS NULL` is exactly "enrolled
+     * before this was recorded" — no derivation, no guessing — so the state is
+     * named rather than folded. A machine that has never enrolled keeps the
+     * silence, because there is genuinely nothing to have recorded.
+     *
+     * There is no backfill and there cannot be a trustworthy one: the rows it
+     * would read are swept seven days after a code is used, and the four ways
+     * deriving this from `enrollment_codes` was wrong apply to a backfill
+     * identically.
+     */
+    const enrolledByFor = (id: string, hasEnrolled: boolean): string | null => {
+      if (id.length === 0) return hasEnrolled ? "somebody this control plane did not record" : null;
+      if (id === caller.userId) return null;
       if (id.startsWith("pk_")) return "a provisioning key";
       return enrolledByName.get(id) ?? "a deleted account";
     };
@@ -3572,12 +3621,20 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
          */
         lastSeenAt: lastSeenAt(String(row["id"])),
         /*
-         * `null` where this caller enrolled it themselves, or where the code has
-         * been swept. A name here means somebody else's code brought this
-         * machine online, which for an owned machine is the one fact that
-         * distinguishes a substitution from the machine it is imitating.
+         * `null` in exactly two cases now: this caller's own code, and a machine
+         * that has never enrolled. A machine enrolled *before* the column existed
+         * says so instead — see `enrolledByFor`, where that split is argued.
+         *
+         * ⚠ **Not "where the code has been swept"**, which is what this used to
+         * say — that was true of the `enrollment_codes` derivation this replaced
+         * and is the first of the four failures `store.ts` enumerates; the value
+         * is read off `machines.enrolled_by` now, which the sweeper never touches.
+         *
+         * A name here means the machine enrolled with somebody else's code, which
+         * for an owned machine is the one fact that distinguishes a substitution
+         * from the machine it is imitating.
          */
-        enrolledBy: enrolledByFor(String(row["enrolled_by"] ?? "")),
+        enrolledBy: enrolledByFor(String(row["enrolled_by"] ?? ""), row["enrolled_at"] !== null),
       })),
     });
   });
@@ -3980,12 +4037,19 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       return jsonError(c, 409, "grant_is_owner", "you own this machine, so you already hold every scope on it");
     }
     /*
-     * Disabled is refused rather than written, matching `POST /v1/provision` and
-     * `POST /v1/admin/users/:id/invite`, which both name the state. A grant
-     * written to a suspended account is inert while `callerAuth` reads
-     * `disabled_at` live — and then becomes live the moment somebody re-enables
-     * them, with nothing on the owner's screen having said so. The share the
-     * owner would have wanted is the one they make after the account is back.
+     * Disabled is refused rather than written. A grant written to a suspended
+     * account is inert while `callerAuth` reads `disabled_at` live — and then
+     * becomes live the moment somebody re-enables them, with nothing on the
+     * owner's screen having said so. The share the owner would have wanted is the
+     * one they make after the account is back.
+     *
+     * ⚠ **409, and the precedent is `POST /v1/admin/users/:id/invite` alone.**
+     * This paragraph used to cite `POST /v1/provision` beside it as if the two
+     * agreed; that route answers **403** `user_disabled`, as do the four other
+     * sites in this file that name the state. The one this follows is the invite,
+     * and for its reason: the account is not forbidden to the caller, it is in a
+     * state that makes this the wrong moment — the remedy is to enable it and ask
+     * again, which is a conflict rather than a refusal.
      */
     const target = db.prepare("SELECT id, disabled_at FROM users WHERE id = ?").get(userId);
     if (!target) {
@@ -4039,6 +4103,65 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     // The daemon is never asked, so an outstanding token keeps working until it
     // expires. Said here rather than implied, as `POST /v1/machines/:id/revoke`
     // says it.
+    return c.json({ revoked: true, outstandingTokensExpireWithinSeconds: tokenTtlSeconds });
+  });
+
+  /**
+   * Give up a share somebody made to you.
+   *
+   * ⚠ **Sharing had no exit, and moving it off `/v1/admin` is what made that
+   * matter.** `PUT /v1/machines/:id/grants` writes a permanent `grants` row for
+   * any `userId`, with no consent asked and none of the three verbs above
+   * reachable by the person it names: they all resolve through `ownedMachine`, so
+   * a grantee gets 404 on every one. Under the deleted admin routes that was an
+   * operator's problem; now it is every signed-in account's, and what somebody can
+   * do to you unasked should have something you can do about it.
+   *
+   * What the row costs the recipient is not nothing. `GET /v1/machines` selects
+   * from `grants` with no `LIMIT`, the web client builds a `MachineConnection` per
+   * listed row and mints a token for each on resume, and `POST /v1/tokens` is
+   * counted against the same per-account write throttle as everything else — so a
+   * large enough listing of machines somebody else pushed in crowds out the
+   * requests for the machines that are actually theirs.
+   *
+   * **Your own grant only, and never on a machine you own** — that is the
+   * `grant_is_owner` rule from the two routes above, read from the other side:
+   * `GET /v1/machines` joins `grants`, so an owner who dropped their own would own
+   * a machine that appears in no list. Retiring it is the verb for that.
+   *
+   * No `userId` parameter, in the path or in a query. The caller is the subject,
+   * and a route that took an id would be `DELETE /v1/admin/grants` again with a
+   * different spelling.
+   */
+  app.delete("/v1/machines/:id/grants/me", (c) => {
+    const writeGuard = spendWrite(c, "grant_leave");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const machineId = c.req.param("id") ?? "";
+    /*
+     * The owner check is by ownership rather than by `ownedMachine`, because this
+     * route wants the *opposite* answer from the three above: they refuse a
+     * machine you do not own, and this one refuses a machine you do.
+     */
+    const owner = ownerOf(db, machineId);
+    if (owner !== null && owner.userId === caller.userId) {
+      return jsonError(
+        c,
+        409,
+        "grant_is_owner",
+        "you own this machine; retiring it is the verb for giving up your own access",
+      );
+    }
+    /*
+     * One answer for "no such grant" and "no such machine", which is the
+     * anti-mapping rule the three routes above follow: a caller must not learn
+     * which machine ids exist by watching which ones answer differently.
+     */
+    const changed = db.prepare("DELETE FROM grants WHERE user_id = ? AND machine_id = ?").run(caller.userId, machineId);
+    if (changed.changes !== 1) return jsonError(c, 404, "grant_not_found", "no such grant");
+    // The same sentence the unshare above ends on, and true for the same reason:
+    // the daemon is never asked, so a token already issued outlives this.
     return c.json({ revoked: true, outstandingTokensExpireWithinSeconds: tokenTtlSeconds });
   });
 
@@ -5225,7 +5348,57 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
        * names the admin and `burnUserCodes` cannot see it.
        */
       codesInvalidated = burnGranteeCodes(db, userId, "user_deleted", removedAt);
+      /*
+       * ⚠ **Which ownerless machines this delete is about to strand, read before
+       * the grants that name them are gone.**
+       *
+       * `dependants()` is what the two admin guards key on, and it reads *live*
+       * `grants` rows. So an admin who wants a machine those guards protect can
+       * manufacture the state instead of finding it: delete the account of its
+       * last grantee, and an ownerless enrolled row that somebody depended on a
+       * moment ago is a "genuinely orphan row" — adoptable with every scope, or
+       * re-enrollable out from under nobody. Two requests. The guards' own
+       * justification is that such a row *has nobody to ask*, which reads as a
+       * state the operator discovers rather than one they create.
+       *
+       * The fix is not a guard on the guards, it is that this route should not
+       * leave the row behind at all. A machine with no owner and no grants is
+       * enrolled, dialling the relay, holding a tunnel and in **nobody's** list —
+       * the exact failure user-owned machines exists to remove, and the same thing
+       * this route already refuses to leave when the deleted account *owned* it.
+       *
+       * Scoped to machines this user actually held a grant on: legacy ownerless
+       * rows that were already grantless are none of this delete's business, and
+       * sweeping those would revoke hardware unrelated to the account going away.
+       */
+      const mayStrand = db
+        .prepare(
+          "SELECT g.machine_id FROM grants g JOIN machines m ON m.id = g.machine_id " +
+            "WHERE g.user_id = ? AND m.revoked_at IS NULL " +
+            "AND NOT EXISTS (SELECT 1 FROM machine_owners o WHERE o.machine_id = g.machine_id)",
+        )
+        .all(userId)
+        .map((row) => String(row["machine_id"]));
       db.prepare("DELETE FROM grants WHERE user_id = ?").run(userId);
+      /*
+       * Now that the grants are gone, the ones nobody is left on. Revoked with the
+       * same three statements the owned loop below runs, for the same reasons and
+       * in the same transaction, so a partial delete cannot leave a machine marked
+       * revoked with a live code on it.
+       */
+      for (const machineId of mayStrand) {
+        const stillGranted = db.prepare("SELECT 1 AS hit FROM grants WHERE machine_id = ? LIMIT 1").get(machineId);
+        if (stillGranted !== undefined) continue;
+        const marked = Number(
+          db
+            .prepare("UPDATE machines SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+            .run(removedAt, machineId).changes,
+        );
+        if (marked === 1) {
+          codesInvalidated += burnMachineCodes(db, machineId, removedAt);
+          machinesRevoked += 1;
+        }
+      }
       /*
        * The address and every link that could reach it.
        *
@@ -5775,6 +5948,45 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         "machine_enrolled",
         "this machine is enrolled and somebody depends on it; redeeming a new code would take it away " +
           "from their daemon, so its owner mints their own from POST /v1/machines/:id/enrollments",
+      );
+    }
+
+    /*
+     * ⚠ **And not over a live code somebody else minted, which is the same
+     * denial primitive one route earlier.**
+     *
+     * The guard above keys on `enrolled_at`, so it says nothing about a machine
+     * that is **owned but has not enrolled yet** — and that is precisely the
+     * window an install is in. `mintEnrollmentCode` opens with `UPDATE
+     * enrollment_codes SET used_at = ?, used_from = 'superseded' … WHERE
+     * machine_id = ? AND used_at IS NULL`, so an admin minting here kills whatever
+     * the owner is holding. Their install then fails against the deliberately
+     * undifferentiated `409 code_unusable`, with nothing on their screen saying
+     * why, and it can be repeated: `enrolled_at` never leaves NULL, so the guard
+     * above never starts applying. `PUT /v1/admin/machines/:id/owner` had this
+     * exact shape and was narrowed to `isAcquisition` for this exact reason.
+     *
+     * **The condition is somebody else's live code, not any live code**, because
+     * the two legitimate uses both survive it. `install.sh`'s wizard mints on a
+     * row created one line earlier, which has no code at all. And an admin
+     * re-minting their own — the ordinary "I lost the paste" retry — names
+     * themselves in `created_by` and supersedes only what they are replacing.
+     *
+     * 409 for the reason the guard above is one: the machine is not forbidden,
+     * this is the wrong moment, and the remedy is somebody else's to run.
+     */
+    const outstanding = db
+      .prepare(
+        "SELECT created_by FROM enrollment_codes WHERE machine_id = ? AND used_at IS NULL AND expires_at > ?",
+      )
+      .get(machineId, Date.now());
+    if (outstanding !== undefined && String(outstanding["created_by"]) !== c.get("caller").userId) {
+      return jsonError(
+        c,
+        409,
+        "code_outstanding",
+        "somebody else minted a code for this machine and it has not been used yet; minting here would " +
+          "kill it silently, so wait for it to expire or have its owner mint their own",
       );
     }
 

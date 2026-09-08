@@ -4,7 +4,7 @@ import { gateNotice, showsGateLink } from "../gate";
 import { navigate } from "../router";
 import { store } from "../store";
 import type { InstanceConfig } from "../instance";
-import { Button, FIELD, LINK } from "./bits";
+import { Button, FIELD, LINK, SETTINGS_HEADING } from "./bits";
 
 /**
  * Two fields, and nothing else.
@@ -112,7 +112,7 @@ export function SignIn({
               source text is read off disk by `webcheck`. */}
           <label
             htmlFor="signin-name"
-            className="mt-4 block text-2xs font-semibold tracking-wider text-muted uppercase"
+            className={`mt-4 block ${SETTINGS_HEADING}`}
           >
             Username or email
           </label>
@@ -131,7 +131,7 @@ export function SignIn({
 
           <label
             htmlFor="signin-password"
-            className="mt-3 block text-2xs font-semibold tracking-wider text-muted uppercase"
+            className={`mt-3 block ${SETTINGS_HEADING}`}
           >
             Password
           </label>

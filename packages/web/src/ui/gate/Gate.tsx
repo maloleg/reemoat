@@ -12,7 +12,7 @@ import {
 } from "../../gate";
 import { navigate } from "../../router";
 import { store, type AppState } from "../../store";
-import { Button, FIELD, Spinner } from "../bits";
+import { Button, FIELD, SETTINGS_HEADING, Spinner } from "../bits";
 import { SignIn } from "../SignIn";
 import { BackToSignIn, GateCard } from "./GateCard";
 
@@ -46,7 +46,7 @@ import { BackToSignIn, GateCard } from "./GateCard";
  */
 
 const field = `mt-1 w-full ${FIELD}`;
-const label = "mt-3 block text-2xs font-semibold tracking-wider text-muted uppercase";
+const label = `mt-3 block ${SETTINGS_HEADING}`;
 
 /**
  * A field's name, and whether it has to be filled in.

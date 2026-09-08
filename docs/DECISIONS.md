@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 130 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 324 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 327 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 132 | `###` |
-| | | **895** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 133 | `###` |
+| | | **900** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 895 rather than the 462
+dividers. So the count is over **both** depths, and it says 900 rather than the 463
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -7209,13 +7209,45 @@ so the next reader knows the sweep happened and stopped on purpose.
 transcript, the composer and the card.
 
 **Why.** All three were full-bleed, so on a desktop a one-line reply ran the whole
-width of a 1600px window. It is one constant rather than three copies of
-`max-w-3xl`, because they have to be the *same* width or the card and the composer
+width of a 1600px window. It is one constant rather than a copy per surface,
+because they have to be the *same* width or the card and the composer
 stop lining up with the text they belong to, which is visible immediately. It is
 deliberately **not** on the scroll box: the scrollbar belongs at the window's
 edge, which is what `scroll-stable` is reserving a gutter for. The composer's
 rule, background and drop target stay full width, because they are chrome and a
 centred rule with gaps either side reads as a card.
+
+⚠ **The value was the stock 3xl step — 48rem — and is `45rem`, fitted to a
+reference by proportion.** 48 read too wide, `× 0.85` took it to 40.8, `+7%`
+brought it back to 43.66, and then the shape wanted was named by pointing at a
+screenshot of another product's conversation. In that screenshot the text column
+fills **56.9% of the pane beside the rail**; 45rem puts this one at 57.0%.
+
+⚠ **The pass before that matched the screenshot's *pixels*, and it is recorded
+here because the failure is the reusable part.** Its measure was read as 927px,
+the capture inferred as 1:1 from its line spacing, and the column set to 60rem —
+landing within a pixel of that figure and looking nothing like the reference,
+because the two captures were at different zoom. Measured on the result, the
+column filled 76% of its pane against the reference's 56.9%. **A pixel count off a
+screenshot carries the capture's scale with it; the fraction of the pane and the
+ratios inside it do not.** Fit those, and verify by re-measuring the result the
+same way rather than by trusting the number.
+
+⚠ **`Bubble`'s cap is not a fraction of this, and the decoupling is the part worth
+knowing.** For one pass both moved by a single factor, so the cap held at exactly
+three quarters of the column and two docblocks leaned on that ratio as though it
+were a rule. It was arithmetic. The cap is 26rem now, fitted to the same
+screenshot's message-to-measure ratio (60.6%) rather than to the column. **Neither
+number derives from the other**, nothing in the build or the drivers relates them,
+and `Bubble`'s own docblock is the single place the pair and its pixel arithmetic
+are written down together. ⚠ The reference message was `w-fit` on one line, so that
+ratio is a lower bound on what the product caps at rather than its cap.
+
+⚠ **A step name is written here without its utility prefix on purpose**, the same
+rule `bits.tsx` states at the constant: Tailwind's scanner reads a file as text and
+cannot tell a comment from a class attribute, so naming a retired utility in prose
+emits a dead rule for it. It bit twice in one edit — once in the docblock, once in
+the sentence explaining the docblock.
 
 **Status.** Current
 
@@ -17303,7 +17335,7 @@ longer fits.
 
 #### Q3.562 — What does the empty composer say?
 
-**Decision.** `type / for commands` — and `message…`, which is what it always
+**Decision.** `Type / for commands` — and `message…`, which is what it always
 said, on any session where `/` would open nothing.
 
 **With no "message" in front of it**, which is the owner's correction to the first
@@ -18458,6 +18490,143 @@ there. A second pin, on the other machine, is what makes the assertion an assert
 equal, and about an `ended` list that held nothing.
 
 **Status.** Built.
+
+#### Q3.579 — The rule about which strings are monospace existed only in people's heads
+
+**Question.** Is this app monospace? It reads as a terminal, and the question was
+asked as a design one — should it lean further in, or back out?
+
+**Decision.** Neither: it is a system sans with mono reserved for one class of
+string, and the rule is now written down at `.claude/rules/web-typography.md`.
+**A machine-written string a person may retype or compare character by character
+is drawn in mono; a machine-written string that is prose is drawn in sans.**
+
+**Measured**, 2026-09-08, over 122 files of `packages/web/src`: the whole front end
+declares **two** `font-family` rules, both tokens — `body` at `--font-sans`
+(`index.css:618`) and `pre, code, kbd` at `--font-mono` (`index.css:773`). Every
+other mono is one of 38 explicit `font-mono` classes at a call site. There is no web
+font at all: `@font-face`, `googleapis`, `gstatic` and `.woff` are zero matches,
+which is policy (`--font-sans`'s own docblock: YaHei and Segoe UI are Microsoft's
+and cannot be shipped, and a free CJK substitute is 2–4 MB of woff2 to a phone on
+LTE) and was held by nothing.
+
+**Why it mattered.** The rule was real and followed from memory, so it had already
+been missed in four places — the same workspace path drawn in mono by the directory
+picker and in sans by the session header, the browser subline and the import sheet.
+`DirectoryPicker` even states the distinction in its own comment — *"that family is
+here because those are paths, and this is a sentence about one there is no path
+for"* — which is the rule, written once, at one of the places that got it right.
+That is the whole finding: not too little mono, but a rule with no home.
+
+**A session's *name* is a name, even when it falls back to a path**, and that is the
+one carve-out. `sessionLabel` answers a human-typed title or, failing that,
+`displayCwd`; its two renderers stay sans. Drawing half a list in each family reads
+as broken, and mono averages ~0.6em against sans's ~0.5em — about a fifth of the
+characters in the rail slot that is already tightest.
+
+**⚠ Changing the family changes the apparent size, and the first cut of this got
+that wrong.** Mono reads *larger* than sans at an equal nominal size — SF Mono's
+x-height and advance against SF Pro's. The session row's subpath was made mono and
+left to inherit its subline's `text-xs`, which put it level with the row's own
+`text-sm` title; reported within the hour as *"the folder name is the size of the
+session name"*. **A mono run inside a sans line states a size a step below it
+rather than inheriting one**, and `text-2xs` is the floor for every path in the app
+— which is what `DiffView`'s header and the picker's crumbs already did, and what
+the two inheriting sites get from lines that are `text-2xs` anyway. Pinned at all
+five places a path is drawn, including the two inheritors as pairs, since a span
+with no size of its own passes a size assertion trivially.
+
+**And then the row rejected mono outright, which is the more useful result.** At
+`text-2xs` the path no longer competed with the title and was still too wide to
+read — *"too few characters fit"* — because mono's advance is a fixed 0.6em where
+sans averages about 0.5em, and a row is the tightest slot in the app. So the
+session list is now sans throughout, title and subline, at one size. That is not an
+exception to the rule; it is the carve-out the rule already made for `sessionLabel`
+one paragraph up, applied to the whole row for the same reason: **a row exists to be
+scanned, so characters are the whole of what it has to spend.** Mono stays where a
+path is read *as* a path and there is room — the session header, the picker's
+crumbs, a diff, the import sheet.
+
+Both corrections arrived from a person looking at one row, within an hour of each
+other. The useful half is that neither was a font bug: every size was on the scale
+and every family was a token throughout. They were a hierarchy failure and then a
+density failure, produced by correct-looking one-word changes — and nothing in a
+type system, and nothing in the other seven drivers, could have had an opinion about
+either. What the driver can hold is the *outcome*, so it does: the row's subline is
+pinned sans, at one size, with the path still on it, as one assertion whose halves
+cannot go quiet separately.
+
+**Rejected: making the whole app monospace.** One line, `body { font-family:
+var(--font-mono) }`, and it is not a one-line change: every `truncate` and every
+fixed slot is re-measured, and it contradicts `--font-mono`'s own docblock, whose
+CJK tail (`Sarasa Mono SC`) exists to hold the grid *inside a code fence* rather
+than to be the interface face. Reconsider only under a brand requirement, and then
+as a measured pass over each truncation rather than as a refactor.
+
+**Status.** Current
+
+#### Q3.580 — The import sheet named the folder differently from the picker drawing it
+
+**Question.** `ImportCode`'s footer said `Unpacks into app`. The breadcrumb bar three
+inches above it said `~/reemoat-prod/app`. Both are the same folder. Which is right?
+
+**Decision.** The bar. `ImportCode` takes a `roots` prop from the picker that draws
+it and goes through `displayCwd`, in mono; the private last-segment helper beside it
+is deleted. (Deliberately not named here: it no longer exists, and this file's own
+rule is that a cited symbol greps to something.)
+
+**Why it mattered.** That helper's one-line docblock read *"the folder an import
+lands in, named the way the picker names it"* — and it returned the bare last path
+segment, which is not what the picker does at all. The comment was the specification
+and the code had never matched it. It is also the cheapest possible collision: a
+private helper duplicating a shared one badly, in a file that imported neither
+`displayCwd` nor `pathCrumbs`, so nothing pointed at the disagreement.
+
+`roots` is required rather than defaulted. An empty array is a real answer here —
+`displayCwd` falls to `shortPath` — and making the prop required is what stops a
+second caller quietly re-introducing a bare-segment label.
+
+**Status.** Current
+
+#### Q3.581 — A rail row spent its first two characters on the root every row shares
+
+**Question.** A row with no folder header above it — Pinned, All, the waiting floor,
+the orphans — named its directory with `displayCwd`, so it read
+`claude · ~/2026-07-taskmanager`. Every session on a machine is under the same root
+in the ordinary case. What is that `~/` buying?
+
+**Decision.** Nothing there, and it goes: those rows draw `folderLabel`, which is
+`displayCwd` with the root marker cut off — `2026-07-taskmanager`. The cut itself is
+unchanged, so a session three levels inside a root still keeps all three
+(`work/api/packages/web`); only the marker goes. `displayCwd` keeps it everywhere a
+path is drawn *as a path* and there is room to read it: the session header's
+subtitle, the picker's crumbs, the import sheet.
+
+**Why it mattered.** The prefix is two characters of pure agreement repeated down
+the rail, and they are the two nearest the reader's eye — ahead of the word being
+scanned for, in the narrowest line in the app.
+
+**⚠ Rejected, and it was built first: withholding the folder itself.** The report
+said the folder a session is launched from should not be on the row, and the obvious
+reading was that a pinned row should be cut against its own folder the way a row
+inside a folder section is — `folderPath={folderPathOf(row)}`. That is wrong in a
+way worth recording: `rowSubpath` answers `null` when a session sits at its folder's
+root, which is most sessions, so the folder did not get shorter, **it disappeared**.
+Reported back in one line: *"now the folders just disappeared. The folder should be
+there."* The complaint was never that a row named a directory. It was about the
+prefix on the front of it, and the two readings differ by exactly the `~/`.
+
+**And a name is not a path, which is the coupling that made this more than a
+one-line change.** `sessionLabel` falls back to the directory for a session nobody
+has named, and `SessionLine` suppresses the subline when it would repeat the title
+**by comparing the two strings** (Q3.441). Changing one side alone would have made a
+title reading `~/thing` sit above a subline reading `thing` — one folder drawn
+twice, the exact defect that comparison exists to prevent. So `sessionLabel` takes
+`folderLabel` too, and with it the rename box's placeholder, which is documented as
+being the same string the header shows. The split that falls out is the honest one:
+**a folder named as a name loses the marker; a path drawn as a path keeps it.**
+
+**Status.** Current
 
 ## Deployment, packaging and code layout
 
@@ -22466,6 +22635,48 @@ its own coverage with a change to the product that nobody needs.
 **Status.** Current
 
 
+#### Q5.115 — One caps heading, fifteen copies, three constants that already owned it
+
+**Rule.** The letter-spaced small-caps heading is `SETTINGS_HEADING`,
+`MENU_HEADING` or `FIELD_LABEL`, and **which one is a colour decision, never a size
+decision**. A call site composes layout onto it and never restates the type.
+
+**Measured**, 2026-09-08: `uppercase` + `tracking-wider` + `font-semibold` appears
+**15 times in 13 files**, in two sizes and four colours, while all three constants
+that own it already existed and **nine** of those sites used none of them. Two files
+— `gate/Gate.tsx` and `ForcedPasswordChange.tsx` — carried byte-identical local
+`const label` declarations, and `SignIn.tsx` is the third member of that family and
+did not even name it.
+
+**Why it mattered.** `SETTINGS_HEADING`'s own docblock records that the string was
+written out **fourteen times across five files** before the constant was extracted.
+The count did not fall afterwards — it moved. That is the useful half: extracting a
+constant does not retire an idiom, and nothing here had ever swept for the idiom, so
+the second wave was invisible until somebody counted.
+
+`FIELD_LABEL` is the one people re-typed rather than imported, and its 13px step is
+deliberate and argued in three separate docblocks: a section heading is scanned, a
+field's name is read off a form somebody is filling in from a phone.
+
+**Three sites stay outside the constants and each now says why**, so the next sweep
+does not "fix" them: `SessionBrowser`'s waiting-elsewhere band (`text-fg` — louder
+than the rows under it, on purpose), `MachineSection`'s `RETIRE_HEADING`
+(`text-danger`), and `MachineOffer`'s `or` (no `font-semibold`, because it is the
+word between two doors rather than a heading). ⚠ `RETIRE_HEADING` is spelled out
+rather than composed for a real reason: `` `${SETTINGS_HEADING} text-danger` `` is a
+**silent no-op**, two colours of one family resolved by Tailwind's alphabetical
+emission rather than by the line — the same trap Q3 records for `items-center`
+appended to `MENU_ROW`.
+
+**Rejected: renaming `SETTINGS_HEADING`.** It now heads a gate field, a sign-in
+field, a plugin's column and a key table, so the name is narrower than the reach.
+The rename would break this file's own citation of the symbol, which `docscheck`
+asserts, and buy nothing the widened docblock does not. `MENU_HEADING` had no
+docblock at all and has one now.
+
+**Status.** Current
+
+
 ## Measured behaviour of the agents and the tools
 
 ### Q6.1 — Why did `session_started` land in the log *after* the first `prompt` event?
@@ -24584,12 +24795,22 @@ Without that, the second person to call a machine "laptop" would be told that
 somebody else has one by that name.
 
 **What an admin can still do.** `POST /v1/admin/machines` takes an `ownerId`, and
-`cpctl admin addmachine --owner` uses it — which is what the daemon wizard needs,
-and it grants nothing new, because an admin can already mint an API key for any
-user and act as them. Without an owner it still registers an ownerless machine and
+`cpctl admin addmachine --owner` uses it — which is what the daemon wizard needs.
+Without an owner it still registers an ownerless machine and
 now says so, because that is what every machine in an existing database already is.
 
-**Status.** Current.
+⚠ **That paragraph used to end "and it grants nothing new, because an admin can
+already mint an API key for any user and act as them", and that sentence is
+false.** Q1.631 deleted every admin route touching somebody else's keys and Q7.74
+deleted the two that issued a credential for another account, leaving the property
+*no route in this service issues a credential for an account other than the
+caller's own*. So registering a machine for somebody is no longer covered by a
+larger power the admin already had: it is its own power, and what bounds it is
+that the owner's list names whoever enrolled it — `enrolledBy` on
+`GET /v1/machines`, Q1.637. `app.ts` and `deploy/install.sh` carry the same
+correction at the code it is about.
+
+**Status.** Current, amended by Q1.637.
 
 ### Q7.56 — Was the control plane's route gate ever fail-closed?
 
@@ -28376,3 +28597,39 @@ rather than putting an unbounded agent-shaped blob on a snapshot that
 `GET /sessions` returns sixty at a time. Q7.25 and Q7.28 hold that half.
 
 **Status.** Known limitation, taken deliberately.
+
+### Q7.133 — The landing page's typography is a hand-copy, checked only where both repositories are on one disk
+
+**Question.** `services/landing/index.html` duplicates `--font-sans` and
+`--font-mono` character for character, and copies five of the app's six scale steps.
+Its own header says so: *"Palette, type scale and control styles lifted from
+app.reemoat.com."* Nothing compared them. Can that be checked?
+
+**Decision.** Partly, and the honest half is the skip. `webcheck.typography.ts` reads
+`../../../../services/landing/index.html`, compares both stacks whitespace-normalised
+and asserts the landing's scale keys are a **subset** of the app's — subset rather
+than equality, because the landing legitimately has no `--text-xl`. Where the file is
+absent it calls `skip()` naming the path it wanted.
+
+**Why it is only half.** `app/` is `rends-east/reemoat` and is going public;
+`services/` is the private `rends-east/reemoat-prod`, whose `.gitignore` excludes
+`/app/`. CI checks out one of them, so **the skip branch is what runs on every
+push** and the comparison only ever runs on a development box or the stand. This is
+the same shape as the plugin catalogue mirror, and it uses the same primitive for
+the same reason: `skip()` is counted and printed in `finish()`'s summary precisely
+so a run that checked nothing cannot read as a run that agreed.
+
+**Measured**, 2026-09-08: the two stacks are `IDENTICAL` on both halves today, and
+the landing carries three divergences nobody chose — `-webkit-font-smoothing:
+antialiased` (so the same face renders a shade lighter there than in the app on
+macOS), three `clamp()` display sizes, and seven negative tracking values against
+the app's zero. Those are **not** asserted: they are a different page with a
+different job, and pinning them would be inventing a rule rather than recording one.
+What is pinned is the pair of values that are meant to be one value.
+
+**Rejected: a driver on the landing's side.** `services/landing` is a static file
+and an nginx config with no `package.json`, unlike `services/plugins` and
+`services/premium`, which do carry `pnpm check`. Standing a Node package and a CI
+workflow up to compare two font stacks costs more than the drift it catches.
+
+**Status.** Known limitation, taken deliberately

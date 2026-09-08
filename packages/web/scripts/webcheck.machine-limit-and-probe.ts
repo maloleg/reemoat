@@ -574,9 +574,31 @@ process.stdout.write("\nthe machine limit\n");
        */
       check("nobody is named where the reader enrolled it themselves", enrolledByText(null), null);
       check("nor on a control plane that predates the field", enrolledByText(undefined), null);
+      /*
+       * The third silence, and the only one of the three the guard tests
+       * separately: `who.length === 0`. Nothing sends `""` today, and that is the
+       * point — an upstream `?? ""` is exactly the kind of change that would
+       * arrive without a screen, and what it would draw is a bare "Enrolled by"
+       * on both surfaces.
+       */
+      check("nor on an empty name, which would otherwise draw a sentence with nobody in it", enrolledByText(""), null);
       check("somebody else's code names them", enrolledByText("casey"), "Enrolled by casey");
       check("a provisioning key is named as one", enrolledByText("a provisioning key"), "Enrolled by a provisioning key");
       check("and so is an account that has gone since", enrolledByText("a deleted account"), "Enrolled by a deleted account");
+      /*
+       * ⚠ **The fifth answer, and the one the first release did not have.** A
+       * machine that enrolled before `machines.enrolled_by` existed was folded
+       * into `null` and drew nothing — which is what a machine you enrolled
+       * yourself draws — so on the day the column shipped the disclosure was
+       * silent for **every machine in the fleet**. The control plane names the
+       * state now; this side has only to carry it through, and carrying it
+       * through is the whole of what a client can get wrong here.
+       */
+      check(
+        "a machine enrolled before this was recorded says so rather than nothing",
+        enrolledByText("somebody this control plane did not record"),
+        "Enrolled by somebody this control plane did not record",
+      );
       /*
        * **No full stop in the shared string**, which is what lets one function
        * feed two registers: the list's sublines are fragments beside "online"

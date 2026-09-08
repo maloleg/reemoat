@@ -85,7 +85,21 @@ export function composerPlaceholder(state: {
    * empty, and a placeholder promising one would be the box lying about a key.
    * The plain line is what that falls back to, which is what it always said.
    */
-  return state.hasCommands ? "type / for commands" : "message…";
+  /*
+   * ⚠ **Capitalised, alone among the six.** The other five are lowercase
+   * fragments — "message…", "agent is working…", "reconnecting the agent…" — and
+   * this one is now sentence-cased on the owner's instruction. It is defensible
+   * rather than accidental: the five describe a *state the box is in* and read as
+   * captions, while this one is an **instruction to the reader**, the only string
+   * here that asks them to do something. `ElicitationCard`'s "Type your own answer
+   * here" and `AgentBuilder`'s "Or type a model id" are the two other placeholders
+   * that instruct, and both are capitalised already — so the split is by register
+   * and this line has moved to the side it belongs on.
+   *
+   * The fallback stays lowercase because it is not an instruction: it names what
+   * the box is for and nothing else.
+   */
+  return state.hasCommands ? "Type / for commands" : "message…";
 }
 
 /**

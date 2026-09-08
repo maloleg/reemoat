@@ -734,8 +734,10 @@ body {
  * iOS Safari zooms the viewport when a text field whose font is under 16px takes
  * focus, and it does not zoom back out afterwards — the app is left panned and
  * oversized until you pinch it back by hand, on every single tap into the
- * composer. `--text-sm` is 13px and `--text-xs` is 12px, and every input,
- * textarea and select in this app is one of those, so that is every field.
+ * composer. `--text-sm` is 14px and `--text-xs` is 13px, and every input,
+ * textarea and select in this app is one of those, so that is every field —
+ * still under 16px after the scale moved up a notch, which is what keeps this
+ * rule load-bearing rather than historical.
  *
  * The other cure is `maximum-scale=1` (or `user-scalable=no`) in the viewport
  * tag, which fixes it by switching pinch zoom off for everybody — including the

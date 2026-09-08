@@ -5597,13 +5597,43 @@ process.stdout.write("\nmachines somebody owns\n");
       const acquiredAt = (): number =>
         Number(db.prepare("SELECT created_at FROM machine_owners WHERE machine_id = ?").get(held)?.["created_at"]);
 
+      /*
+       * ⭐ **And it must not burn the owner's outstanding code, which was the
+       * half nothing here proved.** `isAcquisition` gates two things — the
+       * `created_at` below and `burnMachineCodes` — and only the first was
+       * asserted, so deleting `if (isAcquisition)` and burning unconditionally
+       * passed every check in this file.
+       *
+       * What that costs is written at the code: an admin re-labels a machine, a
+       * legitimate act with no ownership change, and the owner's in-flight code
+       * dies against the deliberately undifferentiated `409 code_unusable` with
+       * nothing on their screen. Repeated, it holds `enrolled_at` at NULL, which
+       * is the exact window the admin mint guard keys on.
+       *
+       * Minted through the owner's own route, so `created_by` is the owner and
+       * the burn — if it happened — would be the admin taking something that was
+       * not theirs.
+       */
+      await post(`/v1/machines/${held}/enrollments`, {}, keeper.headers);
+      const liveCodes = (): number =>
+        Number(
+          db
+            .prepare("SELECT COUNT(*) AS n FROM enrollment_codes WHERE machine_id = ? AND used_at IS NULL")
+            .get(held)?.["n"] ?? 0,
+        );
+      check("the owner holds a live code going in", liveCodes(), 1);
+
       const before = acquiredAt();
-      await send(`/v1/admin/machines/${held}/owner`, {
-        method: "PUT",
-        headers: admin.headers,
-        body: JSON.stringify({ userId: keeper.id, label: "renamed" }),
-      });
+      const relabelled = (await (
+        await send(`/v1/admin/machines/${held}/owner`, {
+          method: "PUT",
+          headers: admin.headers,
+          body: JSON.stringify({ userId: keeper.id, label: "renamed" }),
+        })
+      ).json()) as { enrollmentCodesInvalidated: number };
       check("re-labelling a machine its owner already owns keeps when they acquired it", acquiredAt(), before);
+      check("and burns none of their enrollment codes", relabelled.enrollmentCodesInvalidated, 0);
+      check("which is a fact about the table, not only about the answer", liveCodes(), 1);
 
       /*
        * ⭐ **This assertion used to prove the opposite, and that is the point of
@@ -6192,6 +6222,55 @@ process.stdout.write("\nmachines somebody owns\n");
     const row = db.prepare("SELECT created_by, used_from FROM enrollment_codes WHERE machine_id = ?").get(theirs.machine.id);
     check("burned as a deletion rather than as a revocation", row?.["used_from"], "user_deleted");
     check("and the audit row still names who minted it", row?.["created_by"], leaving.id);
+
+    /*
+     * ⭐ **A machine this delete would otherwise strand, which is how an admin
+     * *manufactures* the state the two guards protect.**
+     *
+     * `dependants()` reads live `grants` rows, so "a genuinely orphan row has
+     * nobody to ask" is only true while nobody's account is being deleted. Delete
+     * the last grantee of an **ownerless enrolled** machine and it becomes
+     * adoptable with every scope, or re-enrollable out from under nobody — two
+     * admin requests, and the guards read as though they found the state rather
+     * than made it.
+     *
+     * The answer is not a guard on the guards: this route should not leave the row
+     * behind at all. A machine with no owner and no grants is enrolled, dialling
+     * the relay and in **nobody's** list, which is the same failure this route
+     * already refuses to leave when the account *owned* it.
+     *
+     * Both halves asserted, because the sweep has to be narrow: the machine the
+     * deleted account was the last grantee of goes, and a legacy row that was
+     * already grantless — none of this delete's business — stays exactly as it
+     * was.
+     */
+    const lastGrantee = withKey("last-grantee");
+    const stranded = newId("m");
+    const bystander = newId("m");
+    for (const machineId of [stranded, bystander]) {
+      db.prepare("INSERT INTO machines (id, name, created_at, enrolled_at) VALUES (?, ?, ?, ?)").run(
+        machineId,
+        `${machineId}-name`,
+        Date.now(),
+        Date.now(),
+      );
+    }
+    db.prepare("INSERT INTO grants (user_id, machine_id, scopes, created_at) VALUES (?, ?, ?, ?)").run(
+      lastGrantee.id,
+      stranded,
+      "session:read",
+      Date.now(),
+    );
+    const revokedAt = (machineId: string): unknown =>
+      db.prepare("SELECT revoked_at FROM machines WHERE id = ?").get(machineId)?.["revoked_at"];
+    check("both legacy rows are live going in", [revokedAt(stranded), revokedAt(bystander)], [null, null]);
+
+    const swept = (await (
+      await send(`/v1/admin/users/${lastGrantee.id}`, { method: "DELETE", headers: admin.headers })
+    ).json()) as { machinesRevoked: number };
+    check("the delete counts the machine it would have stranded", swept.machinesRevoked, 1);
+    check("which is revoked rather than left ownerless and enrolled", revokedAt(stranded) !== null, true);
+    check("while a legacy row nobody was on is left alone", revokedAt(bystander), null);
   }
 
   /* -- a code a *disabled* user was holding ------------------------------- */
@@ -6259,9 +6338,25 @@ process.stdout.write("\nmachines somebody owns\n");
      * therefore already covered.
      */
     const holder = withKey("handed-a-code");
-    const theirs = (await (await post("/v1/machines", { name: "handed-box" }, holder.headers)).json()) as {
-      machine: { id: string };
-    };
+    /*
+     * ⚠ **Registered through the admin door rather than by the holder, and the
+     * difference is a guard rather than a preference.** `POST /v1/machines` mints
+     * a code as part of creating the machine, with the *owner* as `created_by`,
+     * and `POST /v1/admin/machines/:id/enrollments` now refuses to mint over a
+     * live code somebody else made (`409 code_outstanding`, pinned below). The
+     * admin route creates the row and mints nothing, which is exactly the state
+     * `install.sh`'s wizard leaves — so this is the wizard's own shape, and what
+     * the block is about is untouched: the code below is still one an admin
+     * minted *for* somebody, which is the column `burnUserCodes` cannot see.
+     */
+    const theirs = { machine: { id: "" } };
+    theirs.machine.id = String(
+      (
+        (await (
+          await post("/v1/admin/machines", { name: "handed-box", ownerId: holder.id }, admin.headers)
+        ).json()) as { id: unknown }
+      ).id,
+    );
     // Flat, unlike the owner's own route — that one answers `{machine,
     // enrollment}` and this one answers the code directly.
     const handed = (await (
@@ -6429,20 +6524,37 @@ process.stdout.write("\nmachines somebody owns\n");
     const share = (headers: Record<string, string>, userId: string, scopes: string[]): Promise<Response> =>
       send(`/v1/machines/${box}/grants`, { method: "PUT", headers, body: JSON.stringify({ userId, scopes }) });
 
+    /*
+     * ⚠ **Read off the `code`, never the status — this asserted the status alone
+     * and the `DELETE` half passed with the route restored.** The deleted handler
+     * was `DELETE FROM grants …` then `if (changed.changes !== 1) return
+     * jsonError(c, 404, "grant_not_found")`, and `guest` holds no grant on `box`
+     * until seventeen lines below this, so a restored route matched zero rows and
+     * answered 404 too. `app.notFound` answers `not_found` where nothing is
+     * registered, and no handler on this path would; the same discriminator the
+     * keys section states at length and reaches through `vanished`.
+     */
     check(
       "the admin write routes are gone rather than guarded",
       [
-        (
+        await outcome(
           await send("/v1/admin/grants", {
             method: "PUT",
             headers: admin.headers,
             body: JSON.stringify({ userId: guest.id, machineId: box, scopes: ["session:read"] }),
-          })
-        ).status,
-        (await send(`/v1/admin/grants?userId=${guest.id}&machineId=${box}`, { method: "DELETE", headers: admin.headers }))
-          .status,
+          }),
+        ),
+        await outcome(
+          await send(`/v1/admin/grants?userId=${guest.id}&machineId=${box}`, {
+            method: "DELETE",
+            headers: admin.headers,
+          }),
+        ),
       ],
-      [404, 404],
+      [
+        [404, "not_found"],
+        [404, "not_found"],
+      ],
     );
     // Kept on purpose: seeing who holds what is not the power that was removed,
     // and an operator who cannot read this table cannot answer "why can this
@@ -6514,6 +6626,99 @@ process.stdout.write("\nmachines somebody owns\n");
       ),
       [404, "grant_not_found"],
     );
+
+    /*
+     * ⭐ **The listing's order, which is what the composite index was added for
+     * and what one grantee could not exercise.** `ORDER BY g.created_at ASC,
+     * g.user_id ASC` was asserted only against a single-element array, where every
+     * ordering is the same ordering — and `idx_grants_machine (machine_id,
+     * created_at)` names the second column precisely to serve it.
+     *
+     * The tiebreak matters as much as the order: `created_at` is `Date.now()`, so
+     * two shares made in one millisecond are a real state and not a contrived one,
+     * and without the `user_id` arm the answer would be whatever the b-tree
+     * happened to hand back.
+     */
+    {
+      const first = withKey("order-first");
+      const second = withKey("order-second");
+      await share(sharer.headers, first.id, ["session:read"]);
+      await share(sharer.headers, second.id, ["session:read"]);
+      const listedIds = async (): Promise<string[]> =>
+        ((await (await send(`/v1/machines/${box}/grants`, { headers: sharer.headers })).json()) as {
+          grants: { userId: string }[];
+        }).grants.map((grant) => grant.userId);
+      /*
+       * ⚠ **Both timestamps are written straight to the table, including the one
+       * that looks like it needs no help.** `created_at` is `Date.now()` and two
+       * `share` calls in a row land on one millisecond often enough to matter:
+       * asserting "the order they were made" against the wall clock failed on its
+       * first run here and passed on its second, which is a flake in a driver that
+       * has no way to retry. Stamped apart, this asserts the `created_at` arm; the
+       * tie below asserts the `user_id` arm. Neither is a fact about how fast this
+       * process happens to be.
+       */
+      const apart = Date.now();
+      db.prepare("UPDATE grants SET created_at = ? WHERE machine_id = ? AND user_id = ?").run(apart, box, first.id);
+      db.prepare("UPDATE grants SET created_at = ? WHERE machine_id = ? AND user_id = ?").run(
+        apart + 1,
+        box,
+        second.id,
+      );
+      check("two shares list oldest first", await listedIds(), [first.id, second.id]);
+
+      const tied = Date.now();
+      db.prepare("UPDATE grants SET created_at = ? WHERE machine_id = ? AND user_id IN (?, ?)").run(
+        tied,
+        box,
+        first.id,
+        second.id,
+      );
+      check(
+        "and a same-millisecond tie still ranks, by user id",
+        await listedIds(),
+        [first.id, second.id].sort((a, b) => (a < b ? -1 : 1)),
+      );
+      await send(`/v1/machines/${box}/grants?userId=${first.id}`, { method: "DELETE", headers: sharer.headers });
+      await send(`/v1/machines/${box}/grants?userId=${second.id}`, { method: "DELETE", headers: sharer.headers });
+    }
+
+    /*
+     * ⭐ **The one grant verb the other person can run**, and the reason it
+     * exists: `PUT` above writes a permanent row for any `userId` with nothing
+     * asked of them, and all three routes around it resolve through
+     * `ownedMachine` — so before this the person named had no way to refuse.
+     *
+     * Asserted as the pair that matters: the grantee can leave, and the *owner*
+     * cannot use it to drop their own grant, which would leave them owning a
+     * machine that appears in no list.
+     */
+    {
+      await share(sharer.headers, guest.id, ["session:read"]);
+      check("a share arrives without the other person being asked", await sees(guest.headers), true);
+      check(
+        "and the person it was made to can give it up",
+        await outcome(await send(`/v1/machines/${box}/grants/me`, { method: "DELETE", headers: guest.headers })),
+        [200, "ok"],
+      );
+      check("after which it is gone from their list", await sees(guest.headers), false);
+      check(
+        "and leaving again is a 404 rather than a silent success",
+        await outcome(await send(`/v1/machines/${box}/grants/me`, { method: "DELETE", headers: guest.headers })),
+        [404, "grant_not_found"],
+      );
+      check(
+        "a machine nobody shared with them is the same 404, not a different one",
+        await outcome(await send(`/v1/machines/m_nosuch/grants/me`, { method: "DELETE", headers: guest.headers })),
+        [404, "grant_not_found"],
+      );
+      check(
+        "and the owner may not leave their own machine",
+        await outcome(await send(`/v1/machines/${box}/grants/me`, { method: "DELETE", headers: sharer.headers })),
+        [409, "grant_is_owner"],
+      );
+      check("so the owner still sees it", await sees(sharer.headers), true);
+    }
 
     /*
      * ⭐ **The `DELETE` half resolves through `ownedMachine` too, and that was
@@ -6742,6 +6947,47 @@ process.stdout.write("\nmachines somebody owns\n");
       "the installer's wizard is untouched, because that machine has never enrolled",
       (await post(`/v1/admin/machines/${fresh.id}/enrollments`, {}, admin.headers)).status,
       201,
+    );
+    check(
+      "and the admin may re-mint over their own code, which is the lost-the-paste retry",
+      (await post(`/v1/admin/machines/${fresh.id}/enrollments`, {}, admin.headers)).status,
+      201,
+    );
+
+    /*
+     * ⭐ **The guard above keys on `enrolled_at`, so it says nothing about the
+     * window an install is actually in — and that window is a denial primitive.**
+     *
+     * `mintEnrollmentCode` opens by stamping `used_at = 'superseded'` on every
+     * live code for the machine. So on a machine that is **owned but has not
+     * enrolled yet**, an admin minting here kills whatever the owner is holding:
+     * their install fails against the deliberately undifferentiated `409
+     * code_unusable`, nothing on their screen says why, and it repeats — because
+     * `enrolled_at` never leaves NULL, the guard above never starts applying. It
+     * is the same shape `isAcquisition` was added to close on `PUT
+     * /v1/admin/machines/:id/owner`, one route over.
+     *
+     * The condition is **somebody else's** live code, which is what keeps the two
+     * legitimate uses: the wizard mints on a row with no code at all (above), and
+     * an admin re-minting their own supersedes only what they are replacing
+     * (also above).
+     */
+    const holder = withKey("mid-install");
+    const installing = (await (await post("/v1/machines", { name: "installing-box" }, holder.headers)).json()) as {
+      machine: { id: string };
+      enrollment: { code: string };
+    };
+    check(
+      "an admin may not mint over a live code its owner is holding",
+      await outcome(await post(`/v1/admin/machines/${installing.machine.id}/enrollments`, {}, admin.headers)),
+      [409, "code_outstanding"],
+    );
+    check(
+      "and the owner's code is still theirs to redeem, which is the half a status cannot show",
+      await outcome(
+        await post("/v1/enroll", { code: installing.enrollment.code }, { "content-type": "application/json" }),
+      ),
+      [200, "ok"],
     );
     // No owner to ask, so refusing here would leave no path at all rather than
     // moving one to the person who should have it.
@@ -7174,6 +7420,66 @@ process.stdout.write("\nmachines somebody owns\n");
       "and the grantee reads the owner's name, which is true and is not an alarm",
       await enrolledBy(shareVisitor.headers, ownBox.machine.id),
       "share-host",
+    );
+
+    /*
+     * ⭐ **The fifth answer, and the one that was worth the whole fleet.**
+     *
+     * `enrolledByFor`'s first arm reads `id.length === 0`, which is the column
+     * being NULL, and every case above reaches this route through a redemption
+     * that writes it — so the NULL source of `null` was driven by nothing. It is
+     * not an edge: `machines.enrolled_by` is written at redemption and nowhere
+     * else, so on the day the column shipped **every already-enrolled machine in
+     * the fleet** had NULL, and folded into the caller's own `null` all of them
+     * drew nothing, which is what a machine you enrolled yourself draws. The
+     * disclosure would have been silent for exactly the population it was for.
+     *
+     * Stood up the way the state actually arises — a row that is enrolled with no
+     * `enrolled_by` — rather than by asking the route to imagine it. And asserted
+     * as a **pair** with the never-enrolled case, because that is the other side
+     * of the same split: NULL means *nothing was recorded*, and only a machine
+     * that has actually enrolled has something that was not.
+     */
+    const legacyOwner = withKey("legacy-owner");
+    const legacyEnrolled = newId("m");
+    const legacyFresh = newId("m");
+    for (const [machineId, enrolledAt] of [
+      [legacyEnrolled, Date.now()],
+      [legacyFresh, null],
+    ] as [string, number | null][]) {
+      db.prepare("INSERT INTO machines (id, name, created_at, enrolled_at) VALUES (?, ?, ?, ?)").run(
+        machineId,
+        `${machineId}-name`,
+        Date.now(),
+        enrolledAt,
+      );
+      db.prepare("INSERT INTO machine_owners (machine_id, user_id, label, created_at) VALUES (?, ?, ?, ?)").run(
+        machineId,
+        legacyOwner.id,
+        machineId === legacyEnrolled ? "legacy-enrolled" : "legacy-fresh",
+        Date.now(),
+      );
+      db.prepare("INSERT INTO grants (user_id, machine_id, scopes, created_at) VALUES (?, ?, ?, ?)").run(
+        legacyOwner.id,
+        machineId,
+        "session:read",
+        Date.now(),
+      );
+    }
+    check(
+      "a machine enrolled before the column existed says so rather than nothing",
+      await enrolledBy(legacyOwner.headers, legacyEnrolled),
+      "somebody this control plane did not record",
+    );
+    check(
+      "while one that has never enrolled has nothing to have recorded",
+      await enrolledBy(legacyOwner.headers, legacyFresh),
+      null,
+    );
+    check(
+      "and neither is confused with a machine you enrolled yourself",
+      (await enrolledBy(legacyOwner.headers, legacyEnrolled)) !== (await enrolledBy(legacyOwner.headers, legacyFresh)),
+      true,
     );
   }
 }
@@ -8031,6 +8337,77 @@ process.stdout.write("\nthe web client, and what may be cached\n");
     relay: registry,
     webRoot,
   });
+
+  /*
+   * ⭐ **The error envelope for an unrouted path, asserted in the shape that
+   * actually ships.**
+   *
+   * `app.notFound` is registered unconditionally, but `app.get("*")` is registered
+   * only when a `webRoot` is configured — and it matches *every* GET, so on the
+   * deployed shape the SPA fallback is what answers a GET and `notFound` answers
+   * everything else. The pins for this live in the keys section, which builds an
+   * app with **no** `webRoot`: the one arrangement the control plane's image never
+   * runs. That is the same mistake `app.ts`'s own docblock is about — a rule
+   * covered on one method of one deployment shape — reproduced one level up in
+   * this driver.
+   *
+   * Three cases, because they are three different handlers agreeing: a GET under
+   * `/v1` takes the SPA fallback's explicit arm, a non-GET takes `notFound`, and a
+   * client-side route must still be the page. The third is the one with teeth —
+   * a `notFound` that shadowed the fallback would turn every deep link into JSON
+   * on a phone with no console.
+   */
+  {
+    const outcomeOf = async (response: Response): Promise<[number, string]> => [
+      response.status,
+      ((await response.json()) as { error?: { code?: string } }).error?.code ?? "ok",
+    ];
+    /*
+     * ⚠ **With a credential, because `callerAuth` sits above the route table and
+     * answers first.** An unknown `/v1` path with no key is `401 missing_api_key`
+     * and stays that way — that is the fail-closed gate, pinned in its own section
+     * — so driving these unauthenticated would assert the gate a second time and
+     * say nothing at all about `notFound`. A credential by SQL, the way the
+     * machines section makes them, since nothing here is about how it was issued.
+     */
+    const nosy = newId("u");
+    const nosyKey = newApiKey();
+    db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, ?, ?, ?)").run(nosy, "webroot-nosy", 0, now);
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      newId("ak"),
+      nosy,
+      nosyKey.prefix,
+      nosyKey.hash,
+      now,
+    );
+    const signedIn = { authorization: `Bearer ${nosyKey.key}`, "content-type": "application/json" };
+
+    check(
+      "an unknown /v1 path answers this service's envelope, not a page",
+      await outcomeOf(await Promise.resolve(app.request("/v1/nope", { headers: signedIn }))),
+      [404, "not_found"],
+    );
+    check(
+      "and so does a verb on a route this build deleted",
+      await outcomeOf(
+        await Promise.resolve(app.request("/v1/admin/grants", { method: "PUT", headers: signedIn, body: "{}" })),
+      ),
+      [404, "not_found"],
+    );
+    // Outside `/v1`, so no gate at all — this is `notFound` on its own, which is
+    // the arm that did not exist before and answered Hono's plain text.
+    check(
+      "and a method on a path outside /v1 that this build does not serve",
+      await outcomeOf(await Promise.resolve(app.request("/settings", { method: "POST" }))),
+      [404, "not_found"],
+    );
+    const deepLink = await Promise.resolve(app.request("/m/m_abc/s/s_def"));
+    check(
+      "while a client-side route is still the page, which is what a reload on a session is",
+      [deepLink.status, (await deepLink.text()).includes('<div id="root">')],
+      [200, true],
+    );
+  }
 
   /*
    * ⭐ **The bundle went out gzipped under the *uncompressed* length, and two of

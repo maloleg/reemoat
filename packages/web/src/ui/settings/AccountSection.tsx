@@ -31,6 +31,7 @@ import {
   shortDuration,
 } from "../bits";
 import { toast } from "../Toast";
+import { FIELD_LABEL } from "./SettingField";
 
 /**
  * Your own account: who you are, the password, the address, the devices, and
@@ -142,14 +143,18 @@ export function AccountSection({
 }
 
 /**
- * A field's name, at 12px.
+ * A field's name, one step above a section heading.
  *
- * Deliberately **not** `SETTINGS_HEADING`, which is `text-2xs`: that size is
- * for section headings, which sit over whitespace; a field label sits over a
- * box somebody is about to type into and 10px there is the smallest type on the
+ * Deliberately **not** `SETTINGS_HEADING`, which is `text-2xs`: that size is for
+ * section headings, which sit over whitespace; a field label sits over a box
+ * somebody is about to type into, and at `text-2xs` it is the smallest type on the
  * screen naming the one thing they must get right.
+ *
+ * That size *is* `FIELD_LABEL`, and this composes it rather than restating it —
+ * the string was written out here, in `UsersSection` and in `SettingField` with
+ * nothing holding the three in step.
  */
-const fieldLabel = "mt-3 block text-xs font-semibold tracking-wider text-muted uppercase";
+const fieldLabel = `mt-3 block ${FIELD_LABEL}`;
 
 /**
  * **`block` is load-bearing, not decoration.** An `<input>` is `inline-block`

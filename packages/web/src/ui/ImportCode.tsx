@@ -5,6 +5,7 @@ import { store } from "../store";
 import { ApiError, errorText } from "../http";
 import { MAX_IMPORT_BYTES } from "../wire";
 import { IMPORT_SKILL } from "../importSkill";
+import { displayCwd } from "../paths";
 import type { MachineId } from "../ids";
 import { Button, Icon, SHEET_FOOT, SHEET_SCROLL } from "./bits";
 import { Sheet } from "./Sheet";
@@ -126,12 +127,23 @@ export function importFailure(error: unknown): string {
 export function ImportCode({
   machineId,
   into,
+  roots,
   onClose,
   onImported,
 }: {
   machineId: MachineId;
   /** The folder the picker is standing in. The import lands inside it. */
   into: string;
+  /**
+   * The machine's browse roots, so this names the folder the way the bar three
+   * inches above it does — `~/thing` rather than `…/rends/thing`.
+   *
+   * Passed rather than read, because this component is drawn by the picker that
+   * already holds them. Defaulted nowhere: an empty array is a real answer here
+   * (`displayCwd` falls to `shortPath`), and making the prop required is what
+   * stops a second caller quietly re-introducing the bare-segment label below.
+   */
+  roots: readonly string[];
   onClose: () => void;
   /** The new folder's absolute path, for the picker to walk into. */
   onImported: (path: string) => void;
@@ -293,8 +305,13 @@ export function ImportCode({
       upLabel="New session"
       footer={
         <div className={SHEET_FOOT}>
-          <p className="min-w-0 flex-1 truncate text-2xs text-muted">
-            Unpacks into {folderLabel(into)}
+          {/*
+            `font-mono`, and `displayCwd` rather than a private helper: this is a
+            path, and it is the *same* path the picker's breadcrumb bar is drawing
+            above this sheet. See `.claude/rules/web-typography.md`.
+          */}
+          <p className="min-w-0 flex-1 truncate text-2xs text-muted" title={into}>
+            Unpacks into <span className="font-mono">{displayCwd(into, roots)}</span>
           </p>
           {busy ? (
             <Button
@@ -485,12 +502,6 @@ export function ImportCode({
       </div>
     </Sheet>
   );
-}
-
-/** The folder an import lands in, named the way the picker names it. */
-function folderLabel(path: string): string {
-  const segments = path.split("/").filter((part) => part.length > 0);
-  return segments.at(-1) ?? path;
 }
 
 function Step({ n, text, children }: { n: number; text: string; children?: ReactNode }): ReactNode {

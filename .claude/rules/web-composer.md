@@ -189,7 +189,7 @@ a target, and all stay far under the 20px a symmetric grow would need — which 
 that growth is still vertical-only. Q3.561, Q3.563.
 
 **The empty box teaches `/`, and only where `/` opens something.**
-`composerPlaceholder`'s idle line is `type / for commands` and nothing else — the
+`composerPlaceholder`'s idle line is `Type / for commands` and nothing else — the
 one affordance in the composer nothing else advertises, the strip below it having
 covered the settings, and no "message" in front of it because an empty box already
 reads as somewhere to write. It falls back to `message…` when `buildCommands` returns

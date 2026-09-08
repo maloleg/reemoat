@@ -1730,7 +1730,7 @@ function ChoiceSection({
        *
        * It earns more here than on a chip. A sheet stacks a control's sections one
        * under the other — mode, then collaboration, then, on a phone, the model
-       * that folded in behind it — and `MENU_HEADING` is 10px uppercase at
+       * that folded in behind it — and `MENU_HEADING` is `text-2xs` uppercase at
        * `text-faint`, which is the quietest type in the app. The glyph is what
        * makes the boundary between two sections findable at a glance instead of
        * read. `null` for a category `CATEGORY_ICON` has never heard of, where the

@@ -47,6 +47,13 @@ import { OneTimeSecret } from "./OneTimeSecret";
  * fill, never more than one control in a view — is untouched: the section still
  * holds exactly one destructive control.
  */
+/*
+ * `SETTINGS_HEADING` at `text-danger`, and named rather than composed: the colour
+ * is the whole of what this heading says, so writing it as
+ * `` `${SETTINGS_HEADING} text-danger` `` would be a silent no-op — two colours of
+ * one family, decided by Tailwind's alphabetical emission and not by this line.
+ * See `.claude/rules/web-typography.md`.
+ */
 const RETIRE_HEADING = "text-2xs font-semibold tracking-wider text-danger uppercase";
 
 /**

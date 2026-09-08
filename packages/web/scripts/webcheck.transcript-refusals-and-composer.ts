@@ -636,8 +636,17 @@ process.stdout.write("\nwho is working, and what the box says\n");
    * synthesized controls to be built from, so an unconditional hint would be the
    * box promising a key that does nothing on every restored session.
    */
-  check("an idle box teaches the one key nothing else does", say({}), "type / for commands");
+  check("an idle box teaches the one key nothing else does", say({}), "Type / for commands");
   check("but only where that key opens something", say({ hasCommands: false }), "message…");
+  /*
+   * **The capital is asserted, and the pair beside it is why it needs asserting.**
+   * The idle line is the one string here that instructs rather than describes, and
+   * it is sentence-cased for that reason while the five state captions are not — a
+   * split a later tidy-up would read as an inconsistency and "fix" in whichever
+   * direction it noticed first. Both halves pinned, so either direction reddens.
+   */
+  check("the instruction is sentence-cased", /^[A-Z]/.test(say({})), true);
+  check("while the state captions are not", [say({ hasCommands: false }), say({ working: true })].every((line) => /^[a-z]/.test(line)), true);
   check("a working one says so", say({ working: true }), "agent is working…");
   // Wins over `working`: it is the rarer fact, and the one explaining the spinner.
   check(

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } fro
 import type { MachineId, SessionKey } from "../ids";
 import { installCommand } from "../enrollment";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
-import { displayCwd } from "../paths";
+import { folderLabel } from "../paths";
 import { navigate, newPath, sessionPath } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, sessionGroups, sessionLists, type AppState, type SessionRow } from "../store";
@@ -961,6 +961,10 @@ function WaitingElsewhere({
 }): ReactNode {
   return (
     <div className="shrink-0 border-y border-edge bg-raised">
+      {/* Not `SETTINGS_HEADING`: this is the same type at `text-fg` rather than
+          `text-muted`, and the tone is the point — a floor of sessions waiting on
+          another machine is the one band in this list that should read louder than
+          the rows under it. See `.claude/rules/web-typography.md`. */}
       <p className="px-3 pt-2 pb-1 text-2xs font-semibold tracking-wider text-fg uppercase">
         Waiting elsewhere · {rows.length}
       </p>
@@ -1472,9 +1476,24 @@ function SessionLine({
    * withholding the path left the pinned rows as the only ones in the rail that
    * did not say where they work, which is the thing a folder was a folder for.
    *
-   * No caller passes it now. It is kept as a parameter rather than deleted
-   * because it is the shape of the question, and the day a group has a real
-   * reason to withhold a path this is where that reason goes.
+   * ⚠ **And turning it back on overshot, which is why Pinned is still not the
+   * caller this was waiting for.** On it, a pin drew its whole `displayCwd` and
+   * became the only row in the rail that named the directory it was *launched
+   * from* — the one thing the reader already knew, since they pinned it. But the
+   * fix is not this switch and it is not `folderPath` either: cutting a pinned row
+   * against its own folder was tried and blanked the line for every session
+   * launched at its repository root, which is most of them. That history is
+   * written once, at `located` below, where the arm it is about lives.
+   *
+   * What Pinned actually passes is **neither** — no `showPath={false}` and no
+   * `folderPath` — so it takes `located`'s folderless arm and draws `folderLabel`:
+   * the whole directory minus the `~/` marker every row on a machine shares. The
+   * complaint was never that a pin named a directory; it was that it spent the
+   * row's first characters on the part that is the same everywhere. Q3.581.
+   *
+   * No caller passes this switch now. It is kept as a parameter rather than
+   * deleted because it is the shape of the question, and the day a group has a
+   * real reason to withhold a path this is where that reason goes.
    */
   showPath?: boolean;
   /**
@@ -1525,8 +1544,8 @@ function SessionLine({
    * of them mostly `/Users/rends`.
    *
    * Two separate faults, and this is both fixes. The path is cut against the
-   * daemon's own roots now (`displayCwd`, reached through `sessionLabel` and
-   * `rowSubpath`), so it reads `~/2026-07-tare-reemoat`. And a session **nobody
+   * daemon's own roots now (`folderLabel` and `rowSubpath`, both reaching
+   * `displayCwd`'s own cut), so it reads `2026-07-tare-reemoat`. And a session **nobody
    * has named** has a title that *is* its directory — `sessionLabel` falls back
    * to exactly this string — so repeating it below is one fact drawn twice, in a
    * row 40 characters wide. `headlineWorthDrawing` in `tail.ts` refuses an echo
@@ -1535,12 +1554,26 @@ function SessionLine({
    * Compared rather than keyed on `title`, because the two are only *usually* the
    * same question: a folder row draws a subpath the title never had, and a named
    * session draws both because they say different things.
+   *
+   * **A row with no folder header above it draws `folderLabel`, not `displayCwd`
+   * — the folder, without the `~/` that says which root.** Pinned, All, the
+   * waiting floor and the orphans all name the directory in full because nothing
+   * else on screen does; what they drop is the prefix every row on a machine
+   * shares. `~/2026-07-taskmanager` is `2026-07-taskmanager` here, and the two
+   * characters go from the end nearest the reader's eye.
+   *
+   * ⚠ **Withholding the folder itself was tried here and was wrong.** Cutting a
+   * pinned row against its own `folderPathOf` blanked the line for every session
+   * launched at its repository root, which is most of them — the folder vanished
+   * instead of getting shorter. The complaint was never that a pin named a
+   * directory; it was that it spent the row's first characters on the part of the
+   * path that is the same on every row. Q3.581.
    */
   const located =
     !showPath
       ? null
       : folderPath === null
-        ? displayCwd(row.snapshot.workspace.requestedCwd, roots)
+        ? folderLabel(row.snapshot.workspace.requestedCwd, roots)
         : rowSubpath(row, folderPath);
   const subpath = located === label ? null : located;
   // Only when the daemon actually gave up. A session it is still working
@@ -1720,7 +1753,29 @@ function SessionLine({
              * it joins the sentence that was already being written: agent, then
              * where, in one `text-muted` line under the title.
              */
-            <div className="mt-0.5 truncate text-xs text-muted">
+            /*
+             * ⚠ **Sans, and `text-2xs` — this line is the one place a path is *not*
+             * drawn in mono, and the reason is the same one that keeps the title
+             * above it sans.**
+             *
+             * A row is the tightest slot in the app: at 390px this line shares its
+             * width with the age and the overflow control, and mono's ~0.6em average
+             * advance against sans's ~0.5em spends about a fifth of the characters on
+             * the family. Measured on the reported row — `~/2026-07-ta…` was as far as
+             * 12px mono reached; sans at the same step carries roughly a quarter more,
+             * and the whole line dropping from `text-xs` adds to that.
+             *
+             * That is not an exception to `.claude/rules/web-typography.md`, it is the
+             * carve-out that rule already makes one paragraph up: what a row draws is a
+             * *name* — the thing you scan a list for — and a name is prose. Mono is for
+             * where a path is being read as a path and there is room to read it: the
+             * session header, the picker's crumbs, a diff, the import sheet.
+             *
+             * One size and one family for the whole line, rather than the path
+             * differing from the two names beside it. A subline that changed font
+             * halfway is what made this row unreadable in the first place.
+             */
+            <div className="mt-0.5 truncate text-2xs text-muted">
               {row.snapshot.agent}
               {showMachine && ` · ${row.machineName}`}
               {/* The path left this row when the folder took it. What comes back

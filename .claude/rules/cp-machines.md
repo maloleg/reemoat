@@ -50,6 +50,30 @@ account may read, and a name lookup would be an account-existence oracle. `GET
 that *no route under `/v1/admin` adds or widens a grant on a machine that already
 has an owner*.
 
+**A share is written without asking, so it has an exit.** `PUT` takes any
+`userId`, writes a permanent row and never consults the person named — and all
+three verbs above resolve through ownership, so the grantee could reach none of
+them. `DELETE /v1/machines/:id/grants/me` is theirs: their own grant only, no
+`userId` parameter (the caller *is* the subject, and a route taking an id would be
+`DELETE /v1/admin/grants` under another name), `409 grant_is_owner` on a machine
+they own, and the same `404 grant_not_found` for both "no such grant" and "no such
+machine". ⚠ **What the listing costs the recipient is why this is not cosmetic**:
+`GET /v1/machines` selects from `grants` with **no `LIMIT`** — the ceiling is over
+`machine_owners`, so nothing bounds shares *received* — the client builds a
+connection per row and mints a token for each on resume, and those tokens are
+counted against the same per-account write throttle as everything else.
+
+**Two admin guards key on state an admin can manufacture, and both are closed at
+the route that made it.** `dependants()` reads live `grants`, so deleting the last
+grantee of an ownerless enrolled machine turned it into a "genuinely orphan row" —
+adoptable with every scope. `DELETE /v1/admin/users/:id` now revokes such a machine
+rather than leaving it, scoped to rows that account was actually on. And `POST
+/v1/admin/machines/:id/enrollments` refuses `409 code_outstanding` over a live code
+somebody else minted: minting supersedes, so on an owned-but-not-yet-enrolled
+machine it silently killed the owner's in-flight install, repeatably, because
+`enrolled_at` never left NULL for the `machine_enrolled` guard to catch. The
+carve-outs are the wizard (a row with no code) and an admin re-minting their own.
+
 **Ownership is releasable and reassignable, but never away from a live owner.**
 Revoking drops the `machine_owners` row in the same transaction (`releaseOwner`),
 giving back the label and one of `MAX_MACHINES_PER_USER`. `PUT

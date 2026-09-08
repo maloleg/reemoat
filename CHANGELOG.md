@@ -38,8 +38,23 @@ it — so a citation here would be the one kind nothing checks.
   removed, and an operator who cannot read that table cannot answer "why can this
   person reach that machine".
 
+- The context-window ring is gone from the web client. It reported how full an
+  agent's window was and reported nothing at all on kimi, which never sends the
+  notification it was built on, and nothing on any session waiting for its agent —
+  a control that was blank for most agents most of the time, in a row where
+  everything else changes what the next turn does. Nothing changed on the daemon:
+  the reading is still measured, still on every session snapshot, and still
+  printed by `pnpm client`.
+
 ### Added
 
+- **Give up a share somebody made to you** — `DELETE /v1/machines/:id/grants/me`,
+  driven by `cpctl leave <machineId>`. Sharing writes a permanent row for any user
+  id with nothing asked of the person named, and the three verbs beside it all
+  resolve through ownership — so until now the only account that could undo a share
+  was the one that made it. Your own grant only, and never on a machine you own:
+  the machine list is a join over `grants`, so an owner without one would own a
+  machine that appears in no list. Retiring it is the verb for that.
 - **Share a machine you own** — `GET` · `PUT` · `DELETE /v1/machines/:id/grants`,
   driven by `cpctl shares` / `share` / `unshare`. The other person is named by
   **user id**, which they read off `cpctl me` and tell you: there is no directory
@@ -48,14 +63,27 @@ it — so a citation here would be the one kind nothing checks.
   writes — narrowing it would take `machine:admin` off your own hardware, and
   removing it would hide the machine from its owner. Retiring the machine is the
   verb for giving up your own access.
-- **`enrolledBy` on `GET /v1/machines`**, and drawn on the machine row: whoever's
-  enrollment code brought a machine online, when that was not you. It is the
+- **`enrolledBy` on `GET /v1/machines`**, and drawn on the machine row: whose
+  enrollment code a machine enrolled with, when that was not yours. It is the
   disclosure for a composition no single refusal closes — revoke somebody's
   machine, register a new one under the name that frees, enroll it on your own
   hardware, and their list draws the name they lost, owned and online. Every step
   has to stay, so the composition is made visible instead. A name is something to
   recognise rather than an alarm: the installer's wizard enrolls on an admin's
   code too.
+
+  Machines that enrolled **before** this column existed — which on the day of the
+  upgrade is all of them — say *somebody this control plane did not record* rather
+  than nothing, because nothing is what a machine you enrolled yourself draws and
+  folding them together would have left the disclosure silent for exactly the
+  population it is for. There is no backfill: the table it would read from is swept
+  seven days after a code is used.
+
+  Two limits, stated because a disclosure nobody has bounded gets trusted past what
+  it says. It names who **minted** the code, never who redeemed it — `POST
+  /v1/enroll` is public and a daemon presents no account, so a code of your own
+  that leaks and is redeemed elsewhere reports you. And it moves when the machine
+  list is read, on a wake or a reload, not on the four-second poll.
 - The session rail is ordered by you. Grab a chat with the mouse and drag it up or
   down inside its folder; on a touch screen hold it briefly first, so the gesture
   and scrolling the list stay apart. Drop it in Pinned to pin it, and drag it back
@@ -73,8 +101,43 @@ it — so a citation here would be the one kind nothing checks.
 - A second control on the error screen: **Go to sessions**, beside Reload. A
   screen that throws every time it renders made Reload a loop.
 
+- An instance can point somebody who has no machine at somewhere to get one.
+  `REEMOAT_CP_MACHINES_OFFER_URL` in the control plane's environment takes an
+  `https://` address, and the three screens that already print the one-line
+  installer draw a second, quieter link beside it. Environment-only on purpose:
+  it names one particular shop, and a runtime setting would draw it on the
+  Server settings screen of every instance. **Empty by default**, and an instance that never sets it
+  looks exactly as it did before. The signed-in person's email address travels in
+  the link as `?email=`, so a checkout on the far side can prefill its own form;
+  it goes only when they tap it, and every response here already carries
+  `referrer-policy: no-referrer`, so nothing else about the instance goes with it.
+  The address is configured rather than compiled in because this is AGPL software
+  and forks run their own control planes.
+  The offer is drawn only where a machine may still be added: at or over the
+  machine limit a bought host would be refused at the dial, so offering one there
+  would sell something this control plane will not connect.
+
 ### Changed
 
+- **An admin may no longer mint an enrollment code over a live one somebody else
+  made.** `POST /v1/admin/machines/:id/enrollments` answers `409 code_outstanding`.
+  Minting supersedes the machine's current code, so on a machine that is owned but
+  has not enrolled yet — which is what an install in progress looks like — an admin
+  minting here killed whatever the owner was holding: their install failed against
+  the deliberately undifferentiated `409 code_unusable`, nothing on their screen
+  said why, and it could be repeated for as long as somebody cared to, because
+  `enrolled_at` never left NULL and the guard beside it never started applying.
+  The two uses that stay are the two it was for: `install.sh`'s wizard mints on a
+  row that has no code at all, and an admin re-minting their own supersedes only
+  what they are replacing.
+- **Deleting an account no longer strands a machine it was the last person on.**
+  `DELETE /v1/admin/users/:id` already revoked the machines the account *owned*; a
+  machine it merely held a grant on was left ownerless, enrolled, dialling the
+  relay and in nobody's list. That is the failure user-owned machines exists to
+  remove, and it was also a way to *manufacture* the state the two admin guards
+  protect — delete the last grantee, and an ownerless enrolled row becomes
+  adoptable with every scope. Scoped to machines the deleted account was actually
+  on: a legacy row that was already grantless is left exactly as it was.
 - **An admin may no longer take a machine off the person who has it.** `PUT
   /v1/admin/machines/:id/owner` answers `403 machine_owned` for a machine with a
   live owner other than the target, and `403 machine_granted` when adopting an
@@ -216,7 +279,7 @@ it — so a citation here would be the one kind nothing checks.
   and the chip values truncate, which is what they have always done there under
   pressure; there is no arrangement in which three pills and two icon buttons fit
   a 390px line.
-- The empty composer says `type / for commands` instead of `message…`, because
+- The empty composer says `Type / for commands` instead of `message…`, because
   `/` is the one thing in the box that nothing on screen advertised and an empty
   box already reads as somewhere to write. It still says just `message…` on a
   session whose agent is away, where that key would open nothing.
@@ -255,35 +318,6 @@ it — so a citation here would be the one kind nothing checks.
   changed — and why three chips sat side by side mostly empty. That trade is
   reversed: they hug their content, and a value that grows moves its neighbours
   again.
-
-### Removed
-
-- The context-window ring is gone from the web client. It reported how full an
-  agent's window was and reported nothing at all on kimi, which never sends the
-  notification it was built on, and nothing on any session waiting for its agent —
-  a control that was blank for most agents most of the time, in a row where
-  everything else changes what the next turn does. Nothing changed on the daemon:
-  the reading is still measured, still on every session snapshot, and still
-  printed by `pnpm client`.
-
-### Added
-
-- An instance can point somebody who has no machine at somewhere to get one.
-  `REEMOAT_CP_MACHINES_OFFER_URL` in the control plane's environment takes an
-  `https://` address, and the three screens that already print the one-line
-  installer draw a second, quieter link beside it. Environment-only on purpose:
-  it names one particular shop, and a runtime setting would draw it on the
-  Server settings screen of every instance. **Empty by default**, and an instance that never sets it
-  looks exactly as it did before. The signed-in person's email address travels in
-  the link as `?email=`, so a checkout on the far side can prefill its own form;
-  it goes only when they tap it, and every response here already carries
-  `referrer-policy: no-referrer`, so nothing else about the instance goes with it.
-  The address is configured rather than compiled in because this is AGPL software
-  and forks run their own control planes.
-  The offer is drawn only where a machine may still be added: at or over the
-  machine limit a bought host would be refused at the dial, so offering one there
-  would sell something this control plane will not connect.
-
 ## [0.7.0] - 2026-09-06
 
 ### Changed

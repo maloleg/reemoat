@@ -24,6 +24,7 @@ import {
 } from "../bits";
 import { toast } from "../Toast";
 import { OneTimeSecret } from "./OneTimeSecret";
+import { FIELD_LABEL } from "./SettingField";
 
 /**
  * Who else may use this control plane.
@@ -176,8 +177,8 @@ export function UsersSection({ me, config }: { me: Me | null; config: InstanceCo
   );
 }
 
-/** A field's visible name. 12px, never `text-2xs`: a label is read, not scanned. */
-const LABEL = "mt-3 block text-xs font-semibold tracking-wider text-muted uppercase";
+/** A field's visible name, at `FIELD_LABEL`'s step: a label is read, not scanned. */
+const LABEL = `mt-3 block ${FIELD_LABEL}`;
 
 function CreateUser({
   onCreated,

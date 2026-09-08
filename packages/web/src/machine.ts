@@ -476,11 +476,22 @@ export class MachineConnection {
     this.lastSeenAt = record.lastSeenAt;
     this.owned = record.owned === true;
     /*
-     * Folded in on every poll rather than read once at construction, which is
-     * what makes the field's own stated remedy work: re-enrolling a machine you
-     * did not enroll sets it back to nothing on the server, and the row stops
-     * saying somebody else brought it online within a poll rather than at the
-     * next reload.
+     * Folded in here rather than read once at construction, so the field's own
+     * stated remedy lands without a reload: re-enrolling a machine you did not
+     * enroll sets this back to nothing on the server, and the row stops naming
+     * somebody else the next time the listing is read.
+     *
+     * ⚠ **"The next time the listing is read" is not "on the poll", and this
+     * said the second.** `update` has exactly two callers — `bootstrap` and
+     * `runResume` in `store.ts` — and the four-second `tick()` deliberately makes
+     * **no** control-plane round trip once any machine is known; it re-lists
+     * sessions on machines that are already reachable and nothing else. So this
+     * value moves on a wake (a tab hidden 20s or more, a bfcache restore,
+     * `online`, the drift watchdog) or on a reload, and *not* while somebody sits
+     * on the machine list watching it — which is the state a substitution would
+     * be noticed in. Making it poll would put a control-plane request on the
+     * four-second timer for a value that changes only when somebody re-enrolls,
+     * which is the wrong trade; saying so here is the right one.
      */
     this.enrolledBy = record.enrolledBy ?? null;
     /*

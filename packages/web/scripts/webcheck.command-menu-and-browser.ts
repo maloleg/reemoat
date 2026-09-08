@@ -9,7 +9,9 @@ import {
   commandsPlan,
   configProse,
   currentView,
+  displayCwd,
   effectiveRank,
+  folderLabel,
   folderNames,
   folderPathOf,
   foldersOf,
@@ -1153,6 +1155,86 @@ process.stdout.write("\nwhat is actually on screen\n");
   check("so one folder holds both", foldersOf(groups, currentView(groups)).map((f) => f.name), ["api"]);
   check("and the row says only what the folder does not", rowSubpath(rows[1] as never, "/home/u/api"), "packages/web");
   check("while the folder's own row says nothing extra", rowSubpath(rows[0] as never, "/home/u/api"), null);
+
+  /*
+   * ⚠ **A row with no folder header above it names the directory *without* the
+   * `~/` that says which root** — `folderLabel`, not `displayCwd`.
+   *
+   * Every session on a machine is under the same root in the ordinary case, so
+   * `~/` is two characters of pure agreement repeated down the rail, and they are
+   * the two nearest the eye. Reported from a phone against the pinned rows.
+   *
+   * ⚠ **Withholding the folder itself was tried first and was wrong**, so the
+   * negative is asserted beside the positive: cutting a pinned row against its own
+   * `folderPathOf` blanks the line for every session launched at its repository
+   * root, which is most of them. The folder has to still be there. Q3.581.
+   */
+  const ROOTS = ["/home/u"];
+  check("a row drops the root marker and keeps the folder", folderLabel("/home/u/api", ROOTS), "api");
+  check("and the marker is what displayCwd still carries", displayCwd("/home/u/api", ROOTS), "~/api");
+  check("a session deeper in keeps every level below the root", folderLabel("/home/u/api/packages/web", ROOTS), "api/packages/web");
+  check("the root itself stays the marker rather than becoming empty", folderLabel("/home/u", ROOTS), "~");
+  check("and a path under no root is untouched", folderLabel("/opt/srv/thing", []), "…/srv/thing");
+  check("withholding the folder is not the fix", rowSubpath(rows[0] as never, folderPathOf(rows[0] as never)), null);
+
+  /*
+   * ⚠ **And the title an unnamed session falls back to is the same string**, which
+   * is a coupling rather than a preference: `SessionLine` suppresses the subline
+   * when it would repeat the title, **by comparing the two strings**. A title
+   * reading `~/thing` beside a subline reading `thing` draws one folder twice —
+   * the exact defect that comparison was added to prevent. Asserted as the
+   * composition the row actually performs, so the two cannot drift apart.
+   */
+  const unnamed = { snapshot: { title: null, workspace: { requestedCwd: "/home/u/api" } } };
+  check("an unnamed session is named after its folder, with no marker", sessionLabel(unnamed as never, ROOTS), "api");
+  check(
+    "and the row's own path is the same string, so the duplicate is suppressed",
+    sessionLabel(unnamed as never, ROOTS) === folderLabel("/home/u/api", ROOTS),
+    true,
+  );
+
+  /*
+   * Read off disk, because the arm above lives in the JSX and a driver with no DOM
+   * cannot reach it. Without this the assertions are true of `paths.ts` and say
+   * nothing about which function the rail actually calls.
+   */
+  {
+    const rail = stripComments(readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8"));
+    check(
+      "the rail draws a folderless row with folderLabel, and no longer with displayCwd",
+      [/folderLabel\(row\.snapshot\.workspace\.requestedCwd, roots\)/.test(rail), /displayCwd\(/.test(rail)],
+      [true, false],
+    );
+    /*
+     * ⚠ **Asserted on the element, not on a window of characters.** This was one
+     * regex expecting `false`, requiring `folderPath={…}` within eighty characters
+     * of `drag={drag.bind(row, PINNED_FOLDER)}` — and the four props already
+     * between them are longer than that, so writing the forbidden prop in the
+     * obvious place would have left the pattern unmatched and the check green over
+     * the defect it names. A negative regex with a distance in it asserts the
+     * distance, not the property.
+     *
+     * Sliced instead: every `<SessionLine … />` in the file, the Pinned one picked
+     * out by the marker it drags against, and the prop looked for inside its own
+     * element. The two floors under it are that the slice found exactly one Pinned
+     * row, and that the sweep does see `folderPath` where it is genuinely passed —
+     * so neither an element that stopped matching nor a prop that was renamed can
+     * make this quiet.
+     */
+    const rows = rail.match(/<SessionLine[\s\S]*?\/>/g) ?? [];
+    const pinnedRow = rows.filter((element) => element.includes("PINNED_FOLDER"));
+    check("the Pinned rail row was found as an element", pinnedRow.length, 1);
+    check(
+      "and Pinned passes no folderPath, so its rows still name a folder",
+      pinnedRow.every((element) => !/folderPath=/.test(element)),
+      true,
+    );
+    check(
+      "while the folder section's row does pass one, so the sweep is not blind",
+      rows.filter((element) => /folderPath=/.test(element)).length,
+      1,
+    );
+  }
 
   /*
    * A basename until it collides, then the shortest suffix that separates them.

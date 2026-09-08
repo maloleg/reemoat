@@ -1363,8 +1363,24 @@ export function Composer({
        * transcript above it and the ask card that floats between them, so all
        * three line up at every width; `px-3` is the inset that used to be written
        * three times, on the chip list, on the form and on the control strip.
+       *
+       * ⚠ **`pb-2` is here and not on the band above, and that is a cascade fact
+       * rather than a layout one.** The box sat 12px off the bottom edge and read
+       * as pressed into it. The obvious fix — another `pb-*` beside `pb-safe` on
+       * the band — is a **silent no-op**: `.pb-safe` is declared unlayered in
+       * `index.css` while Tailwind emits every utility inside `@layer utilities`,
+       * and an unlayered rule beats a layered one regardless of specificity. That
+       * is the same trap the focus ring and `touch-none` docblocks are both about,
+       * and `Toast.tsx`'s `pb-3` and `SHEET`'s `sm:pb-0` are still losing it.
+       *
+       * On this element there is no unlayered competitor, so the 8px lands. It
+       * sits inside the band's `bg-surface`, so what grows is the painted gutter
+       * under the box rather than a transparent strip with the transcript
+       * scrolling through it — which is what `mb-*` or a non-zero `bottom-*` would
+       * have given. Total clearance is `pb-2` + `pb-safe`'s floor: 20px, or the
+       * home indicator where that is larger.
        */}
-      <div className={`${COLUMN} px-3`}>
+      <div className={`${COLUMN} px-3 pb-2`}>
       {/*
        * **The box: one bordered container holding everything the composer owns.**
        *
