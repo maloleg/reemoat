@@ -398,6 +398,101 @@ process.stdout.write("\nwho owns Escape, and what paints above what\n");
   check("and none of them clips text", askCardClasses.filter((cls) => /\btruncate\b/.test(cls)), []);
   check("the collapsed bar wraps instead", askCardSrc.includes('text-xs font-medium wrap-anywhere">{title}'), true);
   /*
+   * ⭐ **Cancelling is a ✕ in the header again, and the 4px is what had to change.**
+   *
+   * It lived there once — two 44px squares at `gap-1`, one of which folds the card
+   * away and one of which ends the agent's request — and was moved to the footer
+   * for exactly that reason. It is back on the owner's word, so what is asserted is
+   * the *mitigation* rather than the position: its own group, behind a hairline,
+   * with padding of its own. A tidy-up that drops the border and merges it into the
+   * `gap-1` beside the chevron is the regression, and it is the one that would look
+   * like simplification.
+   */
+  check(
+    "the header's cancel keeps its own group behind a rule",
+    /border-l border-edge\/60 pl-1/.test(askCardSrc),
+    true,
+  );
+  /*
+   * And it is drawn on the open card only. A one-line bar is where ending a tool
+   * call must not be reachable — the same act Escape gave up, *"a tool call
+   * abandoned with nothing on screen explaining what had happened"*. The collapsed
+   * branch passes `false`, the open one `true`, and both spellings are pinned
+   * because a single `{controls}` reintroduced would put the ✕ on the bar.
+   */
+  check(
+    "and the collapsed bar draws no cancel while the open card does",
+    [askCardSrc.includes("{controls(false)}"), askCardSrc.includes("{controls(true)}")],
+    [true, true],
+  );
+  /*
+   * The footer is answers only now. It was unconditional *because* it held the
+   * cancel; with that gone, a permission drawn as rows would otherwise carry an
+   * empty bordered strip under its answers.
+   */
+  check("the footer no longer draws a cancel of its own", /\{cancel\}/.test(askCardSrc), false);
+  check(
+    "and is drawn only where there is something to put in it",
+    /\{\(layout === "buttons" \|\| \(actions !== undefined && actions !== null\)\) && \(/.test(askCardSrc),
+    true,
+  );
+  /*
+   * ⚠ **The card is out of flow, so the transcript reserves its height.** Without
+   * this the last rows of a conversation sit under the card with no way out, folded
+   * or open — which is the state the fold exists to make readable. Pinned on both
+   * sides, because either half alone is silent: the card reporting a height nobody
+   * reads, or a scroller padded by a number nothing writes.
+   */
+  const sessionViewSrc = readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8");
+  const eventListSrcForFoot = readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8");
+  check("the card measures itself for whoever is drawing behind it", /heightOut\.current\?\.\(panel\.offsetHeight\)/.test(askCardSrc), true);
+  check("and gives the room back as it goes", /heightOut\.current\?\.\(0\)/.test(askCardSrc), true);
+  /*
+   * ⚠ **One number, not two that add up.** The reserve was a second `paddingBottom`
+   * on the scroll box, above a column that already ends in 48px of its own — so a
+   * parked card sat 56px below the last row, reported as a hole. `max` of the two is
+   * what makes the gap a decision rather than a sum, and it is asserted where it is
+   * spent: in the column, and nowhere else.
+   */
+  check(
+    "the transcript's own foot is what the card raises",
+    /paddingBottom: Math\.max\(TRANSCRIPT_FOOT_PX, askHeight \+ ASK_CLEARANCE\)/.test(eventListSrcForFoot),
+    true,
+  );
+  check("and the scroll box outside it pads nothing", /paddingBottom/.test(stripComments(sessionViewSrc)), false);
+  check("and chases the tail when it changes, which no resize reports", /\}, \[askHeight\]\);/.test(sessionViewSrc), true);
+  /*
+   * ⚠ **One gutter for the conversation column, across three files.**
+   *
+   * The transcript's rows, the ask card floating over them and the box you type in
+   * all carry `COLUMN`, and `Composer.tsx`'s own comment said that made the three
+   * line up at every width. It did not: `px-3` there against `px-4` on the
+   * transcript put the message box 8px wider than every row above it and than the
+   * card between them, visible as a step where the card's edge met the box's and
+   * reported as one. Three literals in three files agreeing is exactly the claim a
+   * comment cannot keep, so it is read off disk.
+   *
+   * The floor is the three matches themselves: a regex that finds nothing would
+   * otherwise agree with itself.
+   */
+  const composerSrc = stripComments(readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8"));
+  const gutterOf = (src: string, after: string): string | null => {
+    const at = src.indexOf(after);
+    if (at < 0) return null;
+    return /\bpx-(\d+)\b/.exec(src.slice(at, at + 200))?.[1] ?? null;
+  };
+  const gutters = {
+    transcript: gutterOf(stripComments(eventListSrcForFoot), "${COLUMN} px-"),
+    card: gutterOf(stripComments(askCardSrc), "pointer-events-none absolute inset-0 ${COLUMN}"),
+    composer: gutterOf(composerSrc, "${COLUMN} px-"),
+  };
+  check("the three gutters were all found", Object.values(gutters).every((g) => g !== null), true);
+  check("and the conversation column has one gutter", gutters, {
+    transcript: "4",
+    card: "4",
+    composer: "4",
+  });
+  /*
    * **The transcript's record of a settled question draws the question**, which it
    * did not until 0.3.0 — see `answeredQuestions`. Source text, because the join is
    * a prop and a component that simply stopped reading it would leave every pure

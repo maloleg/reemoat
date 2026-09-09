@@ -1361,8 +1361,17 @@ export function Composer({
        * a centred drop target with dead margins either side would be a lie about
        * where a file may be let go. The box you type in shares `COLUMN` with the
        * transcript above it and the ask card that floats between them, so all
-       * three line up at every width; `px-3` is the inset that used to be written
-       * three times, on the chip list, on the form and on the control strip.
+       * three line up at every width; the inset used to be written three times, on
+       * the chip list, on the form and on the control strip.
+       *
+       * ⚠ **They did not line up, and this comment said they did.** It was `px-3`
+       * here against `px-4` on the transcript's column, so the box you type in was
+       * 8px wider than every row above it and than the ask card floating between —
+       * visible as a step where the card's edge met the box's, and reported that
+       * way. `px-4` is the one gutter for the conversation column now, and
+       * `webcheck` reads the three files off disk and compares them, because
+       * nothing else can: three literals in three files agreeing is exactly the
+       * claim a comment cannot keep.
        *
        * ⚠ **`pb-2` is here and not on the band above, and that is a cascade fact
        * rather than a layout one.** The box sat 12px off the bottom edge and read
@@ -1380,7 +1389,7 @@ export function Composer({
        * have given. Total clearance is `pb-2` + `pb-safe`'s floor: 20px, or the
        * home indicator where that is larger.
        */}
-      <div className={`${COLUMN} px-3 pb-2`}>
+      <div className={`${COLUMN} px-4 pb-2`}>
       {/*
        * **The box: one bordered container holding everything the composer owns.**
        *

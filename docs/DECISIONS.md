@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 130 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 327 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 339 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 133 | `###` |
-| | | **900** | |
+| | | **912** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 900 rather than the 463
+dividers. So the count is over **both** depths, and it says 912 rather than the 463
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -12415,7 +12415,7 @@ differently loses nothing at all.
 is **outside** every existing rule: it is the only `allow_once` in the request,
 i.e. *"yes, but keep asking me about every edit"*, and after this the narrowest
 grant the card offers is `acceptEdits`. That trade was asked for explicitly; the
-reversal is one entry in `PLAN_ORDER`.
+reversal is one entry in that shape's `order`.
 
 **And the primary reverses what the filled button means.** `bg-fg` on this card is
 *the reversible option*, which is why `permissionButtons` gives it to `allow_once`.
@@ -12430,12 +12430,14 @@ of these does, the id is already what identified them, and four of claude's own
 labels wrap into a block on a 390px phone, on the one row whose meaning is carried
 by position. The agent's wording rides `AskOption.hint` as the `title`.
 
-**Status.** Current
+**Status.** Superseded by Q3.585, which keeps every narrowing above and makes the
+single shape a list — `PLAN_SHAPES`, because the one measured here stopped being a
+shape any pinned adapter sends.
 
 #### Q3.454 — ACP cannot attach a sentence to a refusal. Where does "what to change" get written?
 
 **Rule.** In the message box. While a plan is on screen the composer takes over:
-its placeholder reads *"say what to change…"*, the **Stop** control becomes
+its placeholder reads *"Say what to change…"*, the **Stop** control becomes
 **Send**, and a message written there **cancels the turn and then sends** — which
 settles the plan and says why in one gesture. There is no Revise button.
 
@@ -17335,8 +17337,9 @@ longer fits.
 
 #### Q3.562 — What does the empty composer say?
 
-**Decision.** `Type / for commands` — and `message…`, which is what it always
-said, on any session where `/` would open nothing.
+**Decision.** `Type / for commands` — and `Message…`, which is what it always
+said, on any session where `/` would open nothing. (Both sentence-cased since
+Q3.593; the fallback was `message…` here.)
 
 **With no "message" in front of it**, which is the owner's correction to the first
 version of this line. An empty box already reads as somewhere to write; that is
@@ -18627,6 +18630,485 @@ being the same string the header shows. The split that falls out is the honest o
 **a folder named as a name loses the marker; a path drawn as a path keeps it.**
 
 **Status.** Current
+
+#### Q3.582 — After a `/clear` the screen still offered to undo it, and the divider described rows nobody was drawing
+
+**Question.** `buildTail` cuts at the newest `context_cleared` and `loadAll` does
+not fetch below it, so a cleared conversation genuinely starts at the marker. Above
+that marker sat a full-width button — *"Show the conversation from before /clear"* —
+and on the marker itself, the sentence *"context cleared — the agent has forgotten
+everything above"*. What is above it?
+
+**Decision.** Nothing, and both are gone. The reveal control, `revealBeforeClear`
+and the `revealedBeforeClear` flag behind it are deleted; `loadStop` stops at
+`clearedAt` unconditionally and `nextCut` answers one number rather than a pair.
+The marker row now draws the whole of what happened: the `/clear` as a `UserBubble`,
+and under it a hairline rule reading **Context cleared**.
+
+**Why the command is drawn from the marker rather than from the log.**
+`registry.clearContext` appends the `prompt` and *then* the marker, so the message
+somebody sent is by construction one seq below the cut and goes with the
+conversation it ended — deliberate, and Q3.23. Drawing it from the marker is exact
+rather than invented: `server.ts` carries out `/clear` only on the trimmed string
+matching exactly and only with no attachments, and `clearContext` is the one thing
+that appends a `context_cleared`. So the marker *is* that message, and the bubble is
+the row the reader sent.
+
+**What is given up, said plainly.** The conversation above a cut is no longer
+reachable from this client at all. It is still in the daemon's log — the log is the
+daemon's rather than the agent's memory, which is the sentence the old divider was
+reaching for — and `pnpm client` still prints it. That trade was the owner's: what
+the agent has been told to forget is not something the screen offers to re-read.
+
+**And `transcriptNotice` keeps its exemption for a better reason than before.** It
+answers `null` under a cut, which used to be justified by the reveal button being
+the thing to read there. The marker row is that thing now, and it says more: a
+sentence counting the unfetched events above a cut would name a number with no
+control behind it.
+
+**Status.** Current
+
+#### Q3.583 — A parked card sat on the last rows of the conversation, folded or not
+
+**Question.** `AskCard` is `absolute inset-0` over the conversation region and out
+of flow — which is what "it moves nothing behind it" means, and is why
+`SessionView`'s `ResizeObserver` never sees it. The consequence, reported from a
+phone: the end of the transcript is painted over with no way to bring it out.
+Collapsing does not help, the bar being 44px of the same problem on the one control
+whose whole purpose (Q3.39) is reading what is underneath.
+
+**Decision.** The card measures itself and the transcript reserves the room.
+`AskCard` reports `offsetHeight` through `onHeight`, `SessionView` holds it as
+`askHeight`, and the scroller takes it as trailing `paddingBottom` — plus the card
+frame's own 8px, so the last row clears the shadow rather than touching it.
+
+**Why padding rather than putting the card in flow.** Padding grows `scrollHeight`
+and leaves `clientHeight` exactly where it is, so nothing already drawn moves and
+the card still displaces nothing. What changes is only that the bottom of the
+conversation *can* be scrolled clear of it. Moving the card into flow would have
+taken the transcript's height on the agent's schedule, which is the thing that
+observer exists to absorb.
+
+**⚠ The padding went on the wrong box first, and Q3.587 is the correction.** It was
+a `paddingBottom` on the scroll box, over a column that already ends in 48px of its
+own; the two added up to a 56px hole under the last row. It is one number inside
+that column now.
+
+**⚠ The one height change no resize reports.** Because `clientHeight` is untouched,
+the `ResizeObserver` fires for none of this — so there is a second effect keyed on
+`askHeight` that chases the tail, and only when the reader is parked at the bottom.
+Somebody reading history keeps their `scrollTop`, for the reason the observer
+already gives: adjusting by the delta is what would move the ground under them.
+
+**Status.** Current
+
+#### Q3.584 — Cancelling was a labelled button in the footer, and the footer is where a plan needed the room
+
+**Question.** The ✕ that ends a request lived in the card's header once, 4px from
+the control that folds the card away, with its meaning only in `title` and
+`aria-label` — two identical 44px squares, one harmless and one not. It was moved to
+the footer as a button with its words on its face. On a plan card that button is a
+wrap row at 390px, and a plan card is exactly where height is short.
+
+**Decision.** It is a ✕ at the top right again, on the owner's word — and the 4px is
+what changed rather than the idea. It takes its own group behind a hairline
+(`border-l border-edge/60 pl-1 ml-1`), so the header's right edge reads *fold*, then
+across a rule, *leave*. `IconButton size="lg"` keeps 44px of real box; a grown
+target is still refused there, since it would reach onto the neighbour's face.
+
+**What answers the original objection, and what does not.** The words are the
+`title` and the `label`, and a thumb sees neither — that half of the objection
+stands. What buys it back is grouping: the ✕ is now the only control on the card
+that is not an answer, in a group of its own, on a card where everything else is
+one. It is drawn on the **open card only**; the collapsed bar still cannot cancel,
+which is the same act Escape gave up for the same reason.
+
+**And the footer stopped being unconditional with it.** It was unconditional
+*because* it held the cancel — a permission drawn as `rows` has nothing else to put
+there, so without that it is an empty bordered strip. It is now drawn only where
+there are answers to draw, and the obligation the unconditional footer discharged
+has moved rather than evaporated: a request the agent offered no options for is
+answered by the ✕, and `PermissionCard`'s sentence above the answers points there.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.585 — The curated plan card had been dead for a release, and every check was green
+
+**Question.** Q3.453 recognises claude's plan-mode request by `optionId`, against a
+shape measured under claude-agent-acp **0.63.0**. `package.json` pins **0.73.0**.
+What does `planControls` answer?
+
+**Decision.** `null`, on every plan request, since the bump. 0.73.0's
+`buildExitPlanModePermissionOptions` renamed every id and dropped one: it picks one
+elevated mode out of the session's own available modes and builds four options
+around it — `exit-plan-clear-auto`, `exit-plan-auto`, `exit-plan-default`, `reject`,
+or the `bypass`/`accept-edits` spellings of the same four. Exact set equality
+therefore failed, the card fell back to the agent's own 17-to-46-character labels,
+`permissionLayout` saw those and switched to `rows`, and four full-width 44px rows
+plus a footer took the room the plan was supposed to have. The one shape and the one
+order table become **`PLAN_SHAPES`**, a list of measured shapes, each with its own
+order, labels and primary; first exact match wins.
+
+**Every narrowing Q3.453 argued survives.** Structure before ids; exact set equality
+*within* a shape; `null` meaning today's card. What changes is that a second
+measured request is one entry rather than a loosened rule — and a shape borrowing
+ids from two variants matches none of them, which is what keeps the equality from
+quietly becoming a membership test.
+
+**Nothing is dropped from a 0.73.0 request**, which retires half of what Q3.453 had
+to argue: there is no third `allow_always` to leave out, and `exit-plan-default` —
+*"yes, but keep asking me about every edit"* — is on the card. The 0.63.0 entry is
+kept, because a machine can lag the pin, and the two options its order leaves out
+are still the ones Q3.453 argues for dropping.
+
+**The order is the owner's and it is not the agent's.** Refusal first (**Keep
+planning**), then the narrowest grant (**Approve each edit**), then the elevation,
+then the option that clears the context as the filled primary — so the two ends of
+the row are the two things somebody actually chooses between. The labels are ours
+for the reason Q3.453 gives, and here they also buy the layout: four short words fit
+the button footer, so the plan's own box takes everything the header and footer do
+not.
+
+**⚠ Why nothing caught it.** `webcheck`'s fixture *was* the 0.63.0 request, so the
+driver asserted a curation nobody could reach, in detail, and passed. The three
+0.73.0 shapes are asserted beside it now, read off the adapter's own builder — which
+is the only reading of that file this repository can do offline, and the reason the
+adapter version is named in both places.
+
+**Status.** Supersedes Q3.453
+
+#### Q3.586 — A question you could answer three times looked exactly like one the first tap would submit
+
+**Question.** `AskOption.chosen` says which answers have been picked. Nothing said
+how many *may* be — so a multi-select and a select drew identically until a tap had
+already made the difference, which is the wrong order for a control that writes into
+the model's context.
+
+**Decision.** `AskOption.mark` — `"one"` or `"many"` — drawn by `ChoiceMark` as a
+circle or a box on the row's trailing edge, in a reserved slot so becoming the
+answer moves nothing beside it. `ElicitationCard` sets it on the leader's rows and
+on the hand-rolled rows a form with two selects in a row draws, so one form cannot
+draw two idioms.
+
+**Absent draws nothing, which is every permission.** ACP hands back exactly one
+`optionId` and a tap dispatches it, so there is no pending selection an indicator
+could be about; a circle there would promise a choice the tap is not going to leave
+room for.
+
+**Built out of a `ring`, for `CHOSEN`'s own reason.** A ring is a box-shadow, so it
+costs no layout and cannot move the row at any width — the same argument that took
+`font-medium` out of the picked state. And it is a `<button>` rather than a native
+input, which cannot be grown by padding of its own to 44px.
+
+**The role is claimed only where it is kept.** `many` is `role="checkbox"`, which
+promises Space and Enter and nothing else — a button does that by itself. `one`
+takes `aria-pressed`, the idiom `ChoiceRow` already uses, and deliberately **not**
+`role="radio"`, which would promise arrow-key roving this card does not implement.
+That is the defect recorded against the two popups that drew `role="menu"` and
+`role="listbox"` without keeping either.
+
+**Status.** Current
+
+#### Q3.587 — Three things wrong with a card the moment it appeared: a blue ring, an overhang, and a hole under it
+
+**Question.** Reported together off one screenshot, and they share a cause worth
+naming: each is a place where the card's geometry was argued in a comment and never
+compared against the thing it floats over.
+
+**A blue ring around the card.** The panel is a `role="dialog"` with
+`tabIndex={-1}` that takes the caret when a request parks — deliberate, and the
+reason a screen reader lands on the question. It matches nothing in `index.css`'s
+focus rule, so what it drew was the **browser's** default outline, in the browser's
+own colour, on a card whose entire palette is warm grey. Both panels carry
+`outline-none`. `.no-focus-ring` is documented there as the only way to opt out and
+is **not** the instrument here: it opts out of *that* rule, which never fired on
+this element, and a layered utility beats a UA default without help. Nothing is
+lost — the panel is not reachable by Tab, and every control inside it still draws
+the app's own ring.
+
+**The card was wider than the conversation.** `COLUMN` was on the panel with `px-3`
+on the frame outside it; the transcript's rows are that same constant with `px-4`
+*inside* it. So the card overhung the text by 16px on each side at every width past
+the cap — while `EventList`'s own comment said the two "line up by sharing one
+constant". They do now: `COLUMN` and `px-4` move to the frame and the panel is
+`w-full` in it. `mx-auto` under `inset-0` is exactly the case `margin: auto` is
+defined for, and the height still comes from `inset-0`, so `BOX_MAX`'s `100%` is
+untouched.
+
+**And a 56px hole between the last row and the card.** Q3.583 reserved the card's
+height as `paddingBottom` on the scroll box — above a column that already ends in
+48px of its own, so the two added up. The reserve moves *into* that column and the
+two become one number: `max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE)`. With no
+card it is the 48 it always was; with one, the gap the reader sees is
+`ASK_CLEARANCE` less the card frame's own `pb-2` — 12px of air rather than a band,
+which on a plan card is also height the document gets back. **The `max` is the
+point**: a sum is how two paddings that each look right produce a third number
+nobody chose.
+
+**Status.** Current
+
+#### Q3.588 — The checkbox and the radio were the same shape, and Submit sent an empty answer
+
+**Two reports, one card, and each is a control saying something that is not true.**
+
+**`rounded-sm` is not a square.** It is `.375rem` in this theme — 6px of radius on a
+16px box — so beside a circle of the same size the two read as one shape at arm's
+length, and the whole difference Q3.586 exists to draw was lost. The radius is spent
+all the way (`rounded-none`), and the filled states differ by shape as well as by
+outline: a tick in the box, a dot in the circle. Two axes rather than one, because at
+16px a radius alone is not a signal.
+
+**Submit was enabled on a form nobody had filled in.** Measured on
+claude-agent-acp 0.73.0: `askUserQuestionsToCreateRequest` marks **no** field
+`required`, explicitly — *"so the user can also just skip"* — so an untouched draft
+raised no problem, `canSubmit` said `true`, and pressing it sent `{}`. That is Skip
+with a primary-coloured button in front of it: `decline` and an accepted empty form
+both run the tool with no answers, so two controls sat side by side doing the same
+thing and one of them looked like the affirmative one. An empty answer went out by
+accident.
+
+**Decision.** `canSubmit` is *no problems* **and** a non-empty body. Deliberately
+**not** done by inventing `required`: that would be this client overriding a schema
+the agent wrote, and it would refuse a form somebody answered in part. One non-empty
+field is enough — below that there is nothing being said that Skip does not already
+say.
+
+**⚠ The exemption is a form with no fields**, and it is why this is not simply
+"content is non-empty". A confirmation — no properties, message *"Proceed?"* — has
+nothing to fill in, so accepting it *is* the answer; without the clause the one form
+whose only control is Submit would have had Submit disabled for ever. `webcheck`
+asserts the pair, because either half alone is the bug.
+
+**Status.** Current
+
+#### Q3.589 — The message box was 8px wider than everything above it, and a comment said it was not
+
+**Question.** The transcript's rows, the ask card floating over them and the box
+you type in all carry `COLUMN`, and `Composer.tsx` says that makes the three "line
+up at every width". Do they?
+
+**Decision.** No, and now they do: one gutter, `px-4`, for the whole conversation
+column. It was `px-3` on the composer against `px-4` on the transcript's own
+column — so the box you type in overhung every row above it by 8px, and the ask
+card, which shares the transcript's gutter, met it with a visible step. Reported
+off a screenshot of exactly that seam.
+
+**Why `px-4` rather than `px-3`.** Two of the three were already at it, and the one
+that moves is one box rather than every row of every conversation. The alternative
+was widening the transcript, the diffs and the tool cards to settle an 8px
+disagreement at the bottom of the screen.
+
+**⚠ And it is asserted across three files, because nothing else can.** Three
+literals in three components agreeing is precisely the claim a comment cannot keep
+— this one made it and was wrong for as long as it existed. `webcheck` reads the
+inset out of each file and compares; the floor is that all three were found, since
+a regex matching nothing agrees with itself. Proved by drift: putting `px-3` back
+fails the check.
+
+**Status.** Current
+
+#### Q3.590 — Next was live on a question nobody had answered
+
+**Question.** Q3.588 stopped Submit sending an empty body. On a form with several
+questions that is not enough: Next was gated only on *this step's problems*, and
+`askUserQuestionsToCreateRequest` marks nothing `required`, so a blank question
+raises no problem. Four taps walked a three-question form to the end, and Submit
+was then satisfied by one answer given anywhere in it.
+
+**Decision.** `stepAnswered` — pure, in `elicitation.ts`, so `webcheck` can reach
+it. Every step owes an answer before you may leave it; the last one additionally
+owes `canSubmit`, which is the statement about the whole form. The two rules are
+kept apart deliberately: one asks whether *this question* says anything, the other
+whether the *body* does, and collapsing them is how the three-question case came to
+pass on the strength of the third answer.
+
+**It reads the whole step, not its leading field.** A step is a question plus the
+adapter's own optional "Other" box, and typing your own answer instead of picking a
+row is an answer — a rule reading only the leader would have kept Next dead for
+somebody who had just written a sentence into the box the adapter put there for it.
+
+**A step with no fields answers itself**, which is the field-less confirmation
+again — the same exemption `canSubmit` makes one function over, asserted in both
+places because either could be tightened alone.
+
+**Nothing here forces an answer.** Skip is untouched and is still the way to decline
+the whole form; what is forced is that the button *claiming* an answer has one.
+
+**Status.** Current
+
+#### Q3.591 — The box you type your own answer into was not one of the answers
+
+**Question.** `askUserQuestionsToCreateRequest` puts an optional free-text field
+after every `AskUserQuestion` — the CLI's own per-question "Other" — and
+`groupIntoSteps` already keeps it in the same step as the question. It was drawn as
+a labelled input *under* the list of choices: a different kind of object from the
+rows it belongs with, with no indicator, at a different weight. On a multi-select,
+typing your own answer is picking one.
+
+**Decision.** It is a row in the list. Same shell, same 44px, same `ChoiceMark` —
+square where the question is a multi-select, circle where it is a select — filled
+when the box has something in it. The whole row is a `<label>`, so a tap anywhere on
+it lands in the box, which is the affordance the option rows get for free from being
+buttons.
+
+**One treatment, not two that match.** `askRowTone` is exported from `AskCard` and
+both the option rows and this one go through it, so `CHOSEN`'s three signals are
+stated once. A class list here spelling the same thing is exactly the drift this
+repository keeps finding, and it is what the assertion guards.
+
+**It takes no visible heading**, however the caller labelled it. The rows above
+carry their names inside them, so a word over this one makes it a section rather
+than a member — the same argument `groupIntoSteps` already makes when it drops the
+adapter's sentence about this box. The name survives as the `sr-only` copy
+`aria-labelledby` resolves to.
+
+**⚠ Superseded in one paragraph by Q3.592, and the paragraph is kept because the
+reasoning was right and the survey was not.** It read:
+
+> **The mark says "there is an answer in here", and deliberately not "this one
+> wins".** Measured on claude-agent-acp 0.73.0: `applyAskElicitationResponse` takes
+> a non-empty custom answer **instead of** the selection — for a multi-select as
+> well as a single one. So a card showing three ticked boxes and a filled Other is
+> showing four answers where one is sent, and modelling that properly would mean
+> *knowing* this field is a custom-answer box. The only two ways to know are both
+> closed: the key suffix, which Q6.54 forbids by name, and `_meta`, which the daemon
+> drops at ingest.
+
+The first door really is shut and stays shut. The second was not: **both** agents
+declare the relation inside `_meta`, and the daemon dropping the blob is a rule
+about carrying it, not about reading one named key out of it — which
+`acp/subagents.ts` was already doing next door. "Two ways, both closed" was a survey
+of one of them. Q3.592 reads the declaration; no suffix is parsed, and `webcheck`
+still asserts that none is.
+
+**Status.** Superseded in part by Q3.592
+
+#### Q3.592 — Two answers were marked on a question that takes one, and the agent was quietly keeping one of them
+
+**Question.** Q3.591 gave the free-text box under a question the same mark as the
+rows above it. On a single-choice question that made a pre-existing state visible:
+an option filled *and* the typed box filled — two circles on a `oneOf`. Reported as
+*"I picked two options where two cannot be picked"*.
+
+**And it was not only a drawing problem.** Measured 2026-09-09: claude-agent-acp
+0.73.0's `applyAskElicitationResponse` reads the custom answer and **returns** — the
+selection is never looked at — for a multi-select as well as a single one, and
+codex-acp 1.8.0's `convertUserInputResponse` does the same with a `??`. So the card
+was drawing two answers, sending two, and the agent was discarding one without
+saying which.
+
+**Decision, in the reader's own words: *one answer is one answer, several answers
+are several answers, and your own answer is one of the options*.** A **select**
+holds one answer and a **multi-select** holds as many as you give it.
+
+**⚠ And nothing anybody typed is ever erased — the first version of this displaced
+both ways and was wrong.** Picking an option emptied the box, and the report is the
+obvious objection: *"the user may tap by accident and then change their mind; they
+simply chose another option, the field is not zeroed."* A pick is one tap to redo; a
+sentence is not. So `displacedBy` runs in **one** direction — writing your own
+answer clears the *selection*, which is how you switch to it — and what makes the
+card honest the other way is `elicitationAnswer`, which stops *sending* an
+alternative while the question it answers holds a value. The box keeps every
+character, loses its mark, and gets it back the moment the selection goes.
+
+**The mark beside a typed answer is a control, and that was asked for too**: on a
+multi-select you must be able to switch your own answer off from that square having
+already written it. Off is `ask.ts`'s `excluded` — beside the draft, because there
+is no spelling of *present but not an answer* in a `DraftValue` — and never an empty
+box. Turning one back on releases the question it answers, which matters only on a
+select, where the suppression would otherwise undo the tap in the same frame.
+⚠ Making that square a `<button>` is why the row stopped being a `<label>`: a label
+forwards its activation to the field it names, so the square would have focused the
+input instead of toggling. What that costs is the row-wide tap; the input is
+`flex-1` and is most of the row. `ElicitationField.alternativeTo`, projected by
+the daemon out of the agent's own `_meta`, is what makes the pairing exact;
+`questionOf` falls back to the step where a daemon has not sent it, so the rule
+behaves identically on both.
+
+**The multi-select half disagrees with both adapters, deliberately.** They use the
+typed text *instead of* the selection there too. But somebody who ticked two boxes
+and then wrote a third answer meant three, and taking their ticks away to match the
+adapter would be this card editing an answer they gave. What the agent then keeps is
+the agent's — which is Q3.591's position, correct for the case it turns out to
+cover.
+
+**Both agents declare it, under their own names**, which is the third difference
+`toElicitationForm` projects away rather than choosing between: claude sends
+`_askUserQuestionCustomAnswer: {questionId, isCustomAnswer}`, codex sends
+`codex: {questionId, isOtherAnswer, isSecret}`. `customAnswerFor` reads both, strictly
+— the marker exactly `true`, beside a string — and codex's block on the *question*
+carries `isOther` and no `questionId`, so it correctly says nothing.
+
+**⚠ `_meta` is dropped at ingest, and this is the exception**, which is why it is
+one named key projected to one scalar: the same shape `acp/subagents.ts` already
+uses for `_meta.claudeCode`. The alternative was the key's spelling, and Q6.54
+refuses that by name — codex suffixes `__other` where claude suffixes `_custom`, and
+a client keyed on either renders one agent's question and refuses the other's. A
+declaration is the agent saying so; a suffix is us guessing.
+
+**⚠ It is derived from the step as well, and gating on the declaration alone was
+wrong twice over.** This entry originally refused the step, on the grounds that
+`ElicitationForm.steps` accepts its grouping *because* it is presentational —
+*"the worst a wrong grouping does is put two questions on one card together"* — so
+clearing a value on it could destroy an answer. Both halves of that were then
+applied to the **mark**, which destroys nothing: against any daemon not yet sending
+`alternativeTo` the free-text box lost its indicator altogether, which is every
+daemon until its owner restarts one. A layout may not wait on a wire field, and
+that shipped as a regression on the very report it was answering.
+
+So the two are separated. `questionOf` reads the declaration where it is there and
+the step where it is not; `answerMark` uses it unconditionally, which is the
+presentational reading that grouping is licensed for. The displacement uses it too,
+and **that half does carry the cost the refusal named**: an MCP form of `{select,
+notes}`, where `notes` is a second question the heuristic fused, loses one when the
+other is answered. It is narrow — a non-required text field directly after a choice
+— it is the price of the circle being true, and both agents that ask questions
+declare the pairing exactly, so it is not reached on either of them.
+
+**A pointer resolves or it goes.** A `questionId` naming no field on the form, or
+naming its own field, is dropped in `toElicitationForm` after every key is known —
+otherwise it reaches the client as a control that clears nothing, or itself.
+
+**The mark rides the same gate**, and its *shape* comes from the question rather
+than the box: a circle where that question is a select, a box where it is a
+multi-select. A mark is a promise about what picking means, so it is drawn only
+where the card also knows to displace — an agent that declares nothing gets the
+plain field it always had rather than a circle two of which could fill.
+
+**Compatibility.** Optional on the client mirror, and absent means the same thing an
+undeclaring agent means, so an older daemon needs no arm of its own: `?? null` is
+the whole migration. Q3.591 is amended rather than reversed — its closing paragraph
+said this could not be modelled, and named the two doors it thought were shut. One
+of them was open.
+
+**Status.** Current
+
+#### Q3.593 — Five of the six placeholders in the message box were lowercase, on a rule nobody could see
+
+**Question.** `composerPlaceholder` had a register split: a string that *instructs*
+took a capital (`Type / for commands`), a string that *describes the state the box
+is in* stayed a lowercase fragment (`message…`, `agent is working…`, `reconnecting
+the agent…`, `answer the request above first`, `say what to change…`). It was
+argued, written down, and asserted in both directions. Is it visible?
+
+**Decision.** No, and it is withdrawn on the owner's word: all six are
+sentence-cased.
+
+**Why the rule was expensive rather than merely wrong.** The six never appear
+together. They replace each other one at a time, seconds apart, in the same few
+pixels of one box — so a reader meets them as a *sequence*, not as the table the
+split was designed on. In a sequence a register difference is not a distinction, it
+is five strings somebody forgot to capitalise. A rule whose only evidence is a
+listing nobody sees is a rule that costs attention every time it is read and pays it
+back nowhere.
+
+**The assertion moved with it, and got stronger.** It pinned two samples on each
+side of the split; it now enumerates **every** state the function can be in — 32
+combinations, six distinct strings — and asserts the capital on all of them. A
+seventh placeholder has to declare itself there rather than arriving lowercase and
+looking like it belongs.
+
+**Status.** Reversed an earlier decision
 
 ## Deployment, packaging and code layout
 

@@ -864,6 +864,15 @@ export interface ElicitationField {
   max: number | null;
   format: "email" | "uri" | "date" | "date-time" | null;
   default: string | number | boolean | string[] | null;
+  /**
+   * The key of the field this one is an alternative answer to, or `null`.
+   *
+   * Optional on the wire, because a daemon older than it simply does not send it —
+   * and `null` is what an agent that declares nothing already produces, so absent
+   * and "no" are the same state here rather than two. See `src/events.ts` for what
+   * declares it and why no key is ever parsed to find out.
+   */
+  alternativeTo?: string | null;
 }
 
 export interface ElicitationRequestEvent {

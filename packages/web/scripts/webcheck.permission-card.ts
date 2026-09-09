@@ -850,8 +850,17 @@ process.stdout.write("\nthe permission card's context\n");
   /* ---- the plan-mode decision, curated ---- */
 
   /*
-   * The measured option set. Three `allow_always`, which is the whole reason this
-   * has to read ids: ACP's own enum separates none of them.
+   * The option set measured under claude-agent-acp **0.63.0**. Three
+   * `allow_always`, which is the whole reason this has to read ids: ACP's own enum
+   * separates none of them.
+   *
+   * ⚠ **This was the only shape asserted here, and by 0.73.0 it was a shape no
+   * pinned adapter sends.** Every id was renamed and one option dropped, so
+   * `planControls` answered `null` on every real plan request while this block
+   * stayed green — the exact failure `PLAN_SHAPES`' docblock records. The three
+   * 0.73.0 shapes are asserted below, off the adapter's own
+   * `buildExitPlanModePermissionOptions`, and this one is kept because a machine
+   * can lag the pin.
    */
   const PLAN_OPTIONS = [
     { optionId: "bypassPermissions", name: "Yes, and bypass permissions", kind: "allow_always" },
@@ -939,6 +948,108 @@ process.stdout.write("\nthe permission card's context\n");
      * option that did not fit.
      */
     check("and the fallback is still a button row, by one character", permissionLayout(PLAN_OPTIONS as never), "buttons");
+  }
+
+  /*
+   * ⭐ **claude-agent-acp 0.73.0, all three of them.**
+   *
+   * `buildExitPlanModePermissionOptions` picks one elevated mode out of the
+   * session's own `availableModes` — `auto`, else `bypassPermissions`, else
+   * `acceptEdits` — and builds the same four rows around it. The clear-context row
+   * is emitted only when the tool's `plan` argument is a non-empty string, which is
+   * exactly the condition `planControls` gates on, so all three are four options
+   * rather than sometimes three.
+   *
+   * Driven as a table because the three differ in exactly two ids and nothing
+   * else; writing them out separately is how the second one comes to disagree with
+   * the first about the order.
+   */
+  {
+    const variants: [string, string, string, string][] = [
+      // elevated mode, the clear id, the elevate id, what the elevate button says
+      ["auto", "exit-plan-clear-auto", "exit-plan-auto", "Auto mode"],
+      ["bypassPermissions", "exit-plan-clear-bypass", "exit-plan-bypass", "Bypass permissions"],
+      ["acceptEdits", "exit-plan-clear-accept-edits", "exit-plan-accept-edits", "Auto-accept edits"],
+    ];
+    for (const [mode, clearId, elevateId, elevateLabel] of variants) {
+      const options = [
+        { optionId: clearId, name: "Yes, clear context (10% used) and use auto mode", kind: "allow_always" },
+        { optionId: elevateId, name: "Yes, and use auto mode", kind: "allow_always" },
+        { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+        { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+      ];
+      const ctx = permissionContext(planPending({ options }), [planCall("switch_mode")]);
+      const controls = planControls(ctx, options as never);
+      check(`the ${mode} plan request draws all four`, controls?.length, 4);
+      /*
+       * The order is the owner's: the refusal leads, the narrowest grant sits
+       * immediately after it, and the option that clears the context is last and
+       * filled — so the two ends of the row are the two things somebody actually
+       * chooses between.
+       */
+      check(
+        `${mode}: refusal, then the narrowest grant, then the two elevations`,
+        controls?.map((c) => c.option.optionId),
+        ["reject", "exit-plan-default", elevateId, clearId],
+      );
+      check(`${mode}: our own short words`, controls?.map((c) => c.label), [
+        "Keep planning",
+        "Approve each edit",
+        elevateLabel,
+        `Clear + ${clearId === "exit-plan-clear-auto" ? "auto" : clearId === "exit-plan-clear-bypass" ? "bypass" : "accept"}`,
+      ]);
+      check(`${mode}: the refusal alone on the left`, controls?.map((c) => c.leading), [true, false, false, false]);
+      check(
+        `${mode}: clearing the context is the filled one`,
+        controls?.filter((c) => c.primary).map((c) => c.option.optionId),
+        [clearId],
+      );
+      /*
+       * **Nothing is dropped from a 0.73.0 request**, which retires half of what
+       * Q3.453 had to argue for the 0.63.0 shape above: there is no third
+       * `allow_always` to leave out, and `exit-plan-default` — "yes, but keep
+       * asking me about every edit" — is on the card.
+       */
+      check(
+        `${mode}: every option the agent sent is drawn`,
+        controls?.map((c) => c.option.optionId).sort(),
+        options.map((o) => o.optionId).sort(),
+      );
+      /*
+       * And the labels are ours for the reason the card needs them to be: the
+       * agent's own wording is past `BUTTON_LABEL_MAX` and would take this card to
+       * `rows`, which is four full-width 44px rows in the space the plan wants.
+       */
+      check(`${mode}: the agent's own words would not have been buttons`, permissionLayout(options as never), "rows");
+      check(`${mode}: and the agent's wording is kept as the tooltip`, controls?.map((c) => c.option.name).length, 4);
+
+      // One character out of place and it is the agent's card again.
+      const renamed = options.map((o) => (o.optionId === clearId ? { ...o, optionId: `${clearId}x` } : o));
+      check(
+        `${mode}: one renamed id falls back to the agent's own buttons`,
+        planControls(permissionContext(planPending({ options: renamed }), [planCall("switch_mode")]), renamed as never),
+        null,
+      );
+    }
+
+    /*
+     * ⚠ **And a shape that borrows ids from two of them matches none.** The three
+     * are alternatives rather than a menu — `availableModes` picks one — so a
+     * request pairing one variant's clear-context option with another's elevation
+     * is not something the adapter can send, and matching it would mean the set
+     * equality had quietly become a membership test.
+     */
+    const mixed = [
+      { optionId: "exit-plan-clear-auto", name: "Yes, clear context and use auto mode", kind: "allow_always" },
+      { optionId: "exit-plan-bypass", name: "Yes, and bypass permissions", kind: "allow_always" },
+      { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+      { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+    ];
+    check(
+      "a request mixing two variants matches none of them",
+      planControls(permissionContext(planPending({ options: mixed }), [planCall("switch_mode")]), mixed as never),
+      null,
+    );
   }
 
   /* ---- a payload the snapshot was too small to carry ---- */

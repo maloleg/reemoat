@@ -637,28 +637,45 @@ process.stdout.write("\nwho is working, and what the box says\n");
    * box promising a key that does nothing on every restored session.
    */
   check("an idle box teaches the one key nothing else does", say({}), "Type / for commands");
-  check("but only where that key opens something", say({ hasCommands: false }), "message…");
+  check("but only where that key opens something", say({ hasCommands: false }), "Message…");
   /*
-   * **The capital is asserted, and the pair beside it is why it needs asserting.**
-   * The idle line is the one string here that instructs rather than describes, and
-   * it is sentence-cased for that reason while the five state captions are not — a
-   * split a later tidy-up would read as an inconsistency and "fix" in whichever
-   * direction it noticed first. Both halves pinned, so either direction reddens.
+   * ⚠ **Every placeholder this box can draw is sentence-cased, and the split that
+   * used to govern them is gone.**
+   *
+   * It was: an *instruction* took a capital, a *caption about the state* stayed a
+   * lowercase fragment. Argued at length here, and withdrawn on the owner's word —
+   * the six appear one at a time, seconds apart, in the same few pixels, so a
+   * reader meets them as a sequence rather than as a table and a register split
+   * nobody can see reads as five strings somebody forgot to capitalise.
+   *
+   * Asserted over **every** state rather than on two samples, so a seventh
+   * placeholder has to declare itself here rather than arriving lowercase and
+   * looking like the others.
    */
-  check("the instruction is sentence-cased", /^[A-Z]/.test(say({})), true);
-  check("while the state captions are not", [say({ hasCommands: false }), say({ working: true })].every((line) => /^[a-z]/.test(line)), true);
-  check("a working one says so", say({ working: true }), "agent is working…");
+  {
+    const every: string[] = [];
+    for (const blocked of [false, true])
+      for (const reconnecting of [false, true])
+        for (const working of [false, true])
+          for (const revising of [false, true])
+            for (const hasCommands of [false, true])
+              every.push(say({ blocked, reconnecting, working, revising, hasCommands }));
+    const distinct = [...new Set(every)].sort();
+    check("every placeholder this box can draw", distinct.length, 6);
+    check("and each of them starts with a capital", distinct.filter((line) => !/^[A-Z]/.test(line)), []);
+  }
+  check("a working one says so", say({ working: true }), "Agent is working…");
   // Wins over `working`: it is the rarer fact, and the one explaining the spinner.
   check(
     "an in-flight send during a restart explains the wait",
     say({ working: true, reconnecting: true }),
-    "reconnecting the agent…",
+    "Reconnecting the agent…",
   );
   // Wins over both: nothing typed here moves until the card above is answered.
   check(
     "and a blocked one points at the request above",
     say({ working: true, reconnecting: true, blocked: true }),
-    "answer the request above first",
+    "Answer the request above first",
   );
   /*
    * **And a plan outranks even that, because it is the one blocked state where
@@ -670,12 +687,12 @@ process.stdout.write("\nwho is working, and what the box says\n");
   check(
     "a plan on screen asks for the correction instead",
     say({ blocked: true, revising: true }),
-    "say what to change…",
+    "Say what to change…",
   );
   check(
     "and it says so whatever else is true",
     say({ blocked: true, working: true, reconnecting: true, revising: true }),
-    "say what to change…",
+    "Say what to change…",
   );
 
   /* ---- the three places that state has to hold together ---- */

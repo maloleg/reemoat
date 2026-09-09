@@ -19,7 +19,9 @@ import { Icon } from "./bits";
  * by — and none of the three was distinguishable at a glance from the agent's own
  * output, which on a phone is the entire reading problem.
  *
- * One component, three call sites, so they cannot drift again.
+ * One component, four call sites, so they cannot drift again. The fourth is the
+ * `/clear` a `context_cleared` marker stands for — the same bubble, drawn from the
+ * marker because the prompt that caused it is one seq below the cut.
  *
  * **There is no `pending` any more, and its removal is the point rather than a
  * tidy-up.** A message on its way carried a spinner and the word `sending`, drawn

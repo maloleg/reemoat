@@ -59,6 +59,7 @@ export function PermissionCard({
   events,
   agent,
   more,
+  onHeight,
 }: {
   // Deliberately not called `ref`: React reserves that prop name, and a card
   // whose props silently stopped arriving would be a very bad thing for this
@@ -70,6 +71,12 @@ export function PermissionCard({
   agent: string;
   /** Other requests waiting behind this one. Drawn by the card, not counted here. */
   more: number;
+  /**
+   * Passed straight to {@link AskCard.onHeight} — how tall this card is, so the
+   * transcript can reserve the room and be scrolled clear of it. Nothing here
+   * reads it; the card is out of flow and `SessionView` is what draws behind it.
+   */
+  onHeight?: (px: number) => void;
 }): ReactNode {
   const [busy, setBusy] = useState<string | null>(null);
   // Collapsed until asked, and reset per request because the state is about
@@ -244,7 +251,7 @@ export function PermissionCard({
             label: control.label,
             // The agent's own wording, kept where it costs no width. Ours is on
             // the face because claude's labels do not fit a row whose meaning is
-            // carried by position — see `PLAN_ORDER`.
+            // carried by position — see `PLAN_SHAPES`.
             hint: control.option.name,
             leading: control.leading,
             primary: control.primary,
@@ -300,6 +307,7 @@ export function PermissionCard({
 
   return (
     <AskCard
+      onHeight={onHeight}
       /*
        * The question when there is one; otherwise the tool **and what it is acting
        * on**, which `pending.title` alone does not say. `AskUserQuestion` and
@@ -333,7 +341,7 @@ export function PermissionCard({
        * decision whose labels do not fit a button row also takes rows — because the
        * alternative, which shipped for a year, was *deleting the option that did
        * not fit*. `permissionLayout` decides it by length and never by id, and the
-       * plan card is exempt because `PLAN_ORDER` writes our own short labels for
+       * plan card is exempt because `PLAN_SHAPES` writes our own short labels for
        * exactly this reason. The positional rule survives the switch: refusals are
        * still first and one option is still `primary`, which `OptionRow` draws
        * filled.
@@ -405,7 +413,7 @@ export function PermissionCard({
       extra={
         pending.options.length === 0 ? (
           <p className="text-xs text-muted">
-            The agent offered no options, so the only answer is to cancel it.
+            The agent offered no options, so the only answer is the ✕ above.
           </p>
         ) : null
       }
@@ -416,15 +424,15 @@ export function PermissionCard({
        * Submit where an elicitation's Skip is, not in the list of answers where a
        * red row would read as "this one is dangerous". Its label is the agent's
        * own word; only its *position* is ours, and the leading `flex-1` is what
-       * pushes it to the far edge from the cancel `AskCard` draws first.
+       * pushes it to the far edge.
        *
        * ⚠ **The second occupant is gone and nothing was lost with it.** For a
        * request with no options at all this slot used to offer a Cancel, because
        * `cancelPermission` existed on the client and nothing called it — the card
        * described the only way out in words and provided no control for it. That
-       * cancel is now on every card unconditionally, drawn by `AskCard` itself, so
-       * a second one here would be the same act twice in one row. The sentence
-       * above the answers still names it and now points at something permanent.
+       * cancel is the ✕ `AskCard` draws in its header, on every card and in every
+       * layout, so a second one here would be the same act twice. The sentence
+       * above the answers names it and points at something permanent.
        */
       actions={
         skip !== null ? (

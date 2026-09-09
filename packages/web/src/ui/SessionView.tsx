@@ -74,6 +74,26 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
    */
   const [tailRequest, setTailRequest] = useState(0);
 
+  /*
+   * How tall the parked card is, so the transcript can be scrolled clear of it.
+   *
+   * ⚠ **The card is `absolute` and therefore invisible to every mechanism this
+   * screen has for absorbing a height change** — which is why the last rows of a
+   * conversation sat underneath it with no way out, folded or open. `AskCard`
+   * measures itself and reports here; `Transcript` turns the number into trailing
+   * padding inside its own scroller. The card still moves nothing: padding grows
+   * `scrollHeight` and leaves `clientHeight` alone.
+   *
+   * React state rather than a custom property written onto the node — which is the
+   * idiom `AppShell` uses for `--rail-w` — because the two cases are different.
+   * That one is a finger dragging at 60fps; this changes on mount, on a fold, on a
+   * step and when the card's context pages in. Four discrete moments are what
+   * React state is for, and the re-render is one component with one scroll box.
+   *
+   * `0` with no card, which is also what `AskCard` reports as it unmounts.
+   */
+  const [askHeight, setAskHeight] = useState(0);
+
   // Attaching is an effect of *viewing*, so it belongs here rather than in the
   // router. The store's LRU decides what stays live when this unmounts, which is
   // what lets two sessions on different machines keep streaming at once.
@@ -351,7 +371,13 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
         knowledge of how tall the composer currently is.
       */}
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <Transcript sessionRef={sessionRef} state={state} tailRequest={tailRequest} stale={stale} />
+        <Transcript
+          sessionRef={sessionRef}
+          state={state}
+          tailRequest={tailRequest}
+          stale={stale}
+          askHeight={askHeight}
+        />
 
         {/*
           Last, so it paints over everything left in this region — which is the
@@ -405,6 +431,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
               events={transcript?.events ?? []}
               agent={session.agent}
               more={waitingCount(session) - 1}
+              onHeight={setAskHeight}
             />
           ) : (
             <ElicitationCard
@@ -412,6 +439,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
               sessionRef={sessionRef}
               pending={asking.elicitation}
               more={waitingCount(session) - 1}
+              onHeight={setAskHeight}
             />
           ))}
       </div>
@@ -669,6 +697,7 @@ function Transcript({
   state,
   tailRequest,
   stale,
+  askHeight,
 }: {
   sessionRef: SessionRef;
   state: AppState;
@@ -694,6 +723,24 @@ function Transcript({
    * that claims the agent is working right now.
    */
   stale: boolean;
+  /**
+   * The parked card's height, handed to `EventList` as the foot of its column.
+   *
+   * ⚠ **Without it the end of a conversation is unreachable.** `AskCard` is
+   * `absolute inset-0` over this box, so it changes neither `scrollHeight` nor
+   * `clientHeight` and the observer below cannot see it — the last rows are simply
+   * painted over, folded card included, which is the one state the fold exists to
+   * make readable (Q3.39). Padding is the remedy the card cannot apply to itself:
+   * it grows the scrollable extent and moves nothing that is drawn, so "the card
+   * moves nothing behind it" stays true and the rows can still be brought out from
+   * under it.
+   *
+   * ⚠ **It is spent inside the column and not on this scroller**, which is the
+   * correction: that column already ends in 48px of its own, so a second padding
+   * out here left 56px between the last row and the card. `EventList` takes the
+   * `max` of the two, so there is one number rather than two that add up.
+   */
+  askHeight: number;
 }): ReactNode {
   const key = keyOf(sessionRef);
   /*
@@ -945,6 +992,27 @@ function Transcript({
     return () => observer.disconnect();
   }, []);
 
+  /*
+   * The one height change the observer above cannot see.
+   *
+   * ⚠ **`askHeight` becomes padding, and padding is not a resize.** It grows
+   * `scrollHeight` — inside `EventList`'s column — and leaves this box's
+   * `clientHeight` exactly where it was, so the `ResizeObserver` fires for none of
+   * it. That is the whole reason the general form up there is not general enough
+   * here and this is a second effect rather than a widening of that one.
+   *
+   * Only the parked-at-the-bottom case is corrected, for the reason the observer
+   * gives: somebody reading history keeps their `scrollTop`, and moving it by the
+   * delta is what would take the ground out from under them. At the tail it is the
+   * opposite — the reserve exists precisely so the last row can come out from
+   * under the card, and it only does that if something scrolls into it.
+   */
+  useEffect(() => {
+    const box = boxRef.current;
+    if (box === null) return;
+    if (atBottomRef.current) box.scrollTop = box.scrollHeight;
+  }, [askHeight]);
+
   // Reset when the session changes under a mounted pane — the desktop two-pane
   // case, where this component is not remounted. A new conversation starts at
   // its end.
@@ -1031,11 +1099,11 @@ function Transcript({
               files={files}
               echo={echo}
               transcript={transcript}
+              askHeight={askHeight}
               working={working}
               reporting={reporting}
               stale={stale}
               turnElapsedMs={turnElapsedMs}
-              onReveal={() => store.revealBeforeClear(sessionRef)}
               onResized={remeasure}
             />
           </FileAccessContext.Provider>

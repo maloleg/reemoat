@@ -52,9 +52,9 @@ export function composerPlaceholder(state: {
    * is itself the answer, and the placeholder has to say so or the control is
    * invisible.
    */
-  if (state.revising) return "say what to change…";
+  if (state.revising) return "Say what to change…";
   // Blocked first: nothing typed here moves until the request above is answered.
-  if (state.blocked) return "answer the request above first";
+  if (state.blocked) return "Answer the request above first";
   /*
    * Then reconnecting, which is the rarer and the more surprising of the two —
    * and the one that explains why Send has been a spinner for thirty seconds.
@@ -63,8 +63,8 @@ export function composerPlaceholder(state: {
    * for exactly the window in which this is true, because `submit()` clears the
    * draft before the request resolves.
    */
-  if (state.reconnecting) return "reconnecting the agent…";
-  if (state.working) return "agent is working…";
+  if (state.reconnecting) return "Reconnecting the agent…";
+  if (state.working) return "Agent is working…";
   /*
    * **The idle line teaches the one affordance nothing else on screen does.**
    *
@@ -86,20 +86,23 @@ export function composerPlaceholder(state: {
    * The plain line is what that falls back to, which is what it always said.
    */
   /*
-   * ⚠ **Capitalised, alone among the six.** The other five are lowercase
-   * fragments — "message…", "agent is working…", "reconnecting the agent…" — and
-   * this one is now sentence-cased on the owner's instruction. It is defensible
-   * rather than accidental: the five describe a *state the box is in* and read as
-   * captions, while this one is an **instruction to the reader**, the only string
-   * here that asks them to do something. `ElicitationCard`'s "Type your own answer
-   * here" and `AgentBuilder`'s "Or type a model id" are the two other placeholders
-   * that instruct, and both are capitalised already — so the split is by register
-   * and this line has moved to the side it belongs on.
+   * ⚠ **All six are capitalised, and the split that used to govern them is gone.**
    *
-   * The fallback stays lowercase because it is not an instruction: it names what
-   * the box is for and nothing else.
+   * It was one: an *instruction to the reader* took a capital ("Type / for
+   * commands", and `ElicitationCard`'s "Type your own answer here"), a *caption
+   * about the state the box is in* stayed a lowercase fragment ("message…", "agent
+   * is working…"). Defensible, argued at length, and withdrawn on the owner's word
+   * — every string in this box is sentence-cased now.
+   *
+   * What is worth keeping from it is why a rule like that is expensive: it is
+   * invisible in the one place it is read. Six placeholders appear one at a time,
+   * seconds apart, in the same 4px of a phone screen — so a reader meets them as a
+   * *sequence* rather than as a table, and a register split nobody can see reads as
+   * five strings someone forgot to capitalise. `webcheck` asserts the six by value,
+   * which is what makes this a decision rather than a habit; the assertion is where
+   * a seventh has to declare itself.
    */
-  return state.hasCommands ? "Type / for commands" : "message…";
+  return state.hasCommands ? "Type / for commands" : "Message…";
 }
 
 /**

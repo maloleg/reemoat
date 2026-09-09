@@ -91,9 +91,16 @@ stays off, because it is untrusted text quoting an untrusted repository.
   blink the skeleton out and back. `SessionView` draws the same shape before its
   *row* has landed — `missingRowReason` and `AppState.listed` — that session not
   being knowably absent until a list has come back from its machine. Q3.419.
-- **The only cut is the agent's**: `buildTail`'s third argument is `cut`, the
-  newest `context_cleared`. Strictly *below* the marker, so the divider stays as
-  the top row.
+- **The only cut is the agent's, and nothing offers to undo it**: `buildTail`'s
+  third argument is `cut`, the newest `context_cleared`. Strictly *below* the
+  marker, so the `/clear` prompt goes with the conversation it ended and the marker
+  is the top row, drawing **both** facts — the command as a `UserBubble` and a
+  hairline rule reading *Context cleared* — since `clearContext` is the only thing
+  that emits one and `server.ts` reaches it only on that exact string.
+  ⚠ **A reveal control and its `revealedBeforeClear` flag are deleted** (Q3.582):
+  `loadStop` stops at `clearedAt` unconditionally, `nextCut` answers one number, and
+  `transcriptNotice` stays silent under a cut. The events stay on the daemon and
+  nothing here reads them.
 - **The daemon's bookkeeping is not part of the conversation.**
   `showsInTranscript` refuses status lines, workspace rows and
   `turn_end: end_turn`. Every *other* stop reason is kept — `max_tokens`,
@@ -216,110 +223,10 @@ stays off, because it is untrusted text quoting an untrusted repository.
   the next event scrolls the just-opened card out of view. One `remeasure` on the
   next frame, honest in both directions, rather than a "stop following" flag.
 
-**The ask card.** `ui/AskCard.tsx` owns the frame: where it sits, that it moves
-nothing behind it, the collapse, the ✕, the numbered answer rows, the digit
-shortcuts. It is `absolute` in a region ending where the composer begins, so
-`bottom-0` is the top of the composer, and `inset-0` rather than `bottom-0` is
-what *bounds* it — a card anchored to the bottom grows upwards and would paint
-over the session header. The frame is `pointer-events-none` and the card
-`pointer-events-auto`. **Every option is visible at once** — hiding a reject
-behind a disclosure is a safety regression. 44px rows. The spinner is overlaid
-rather than replacing the label. De-emphasis in fill and border, never in text.
-`essentialContext` and `detailContext` are a **partition**, so nothing is drawn
-twice and the disclosure sits *between* them. There is **no scrim** — Q3.39.
-
-**A plan is the one payload on that card that is *rendered*, and the gate above it
-is what makes that safe.** `context.plan` is read from a `plan` field in the tool's
-arguments and drawn through `Markdown` on `bg-raised/50`; everything else keeps the
-verbatim `<pre>`, whose rule — *a text block may be the command, so it is never
-parsed* — is untouched and still governs every other request. A plan survives only
-when the request **authorizes nothing**: no command, no body, no diff, no location,
-which is `askedQuestion`'s own test reused, and half of it falls out of
-`computeInput`'s early returns. ACP's `switch_mode` kind is deliberately *not* part
-of that gate — it rides the `tool_call`, i.e. it is missing exactly when the
-transcript has not paged in — and **is** required one level up, where the
-consequence is larger. The card takes `size="tall"` for a plan, keyed on
-`context.plan` and never on the title. **The plan's own source goes behind
-`details`** — `essentialContext` drops the text blocks, `detailContext` puts the
-source in their place, and `withheldDetail` gains a clause so a plan with no
-`planFilePath` still gets a disclosure. ⚠ The echo test is **trimmed**, because
-`pick` trims and a markdown document ends with a newline: 6818 against 6819 drew
-the document twice, once readable and once not. Q3.452.
-
-**`planControls` recognises claude's plan-mode options by `optionId`, and that is a
-named exception to the rule below rather than a softening of it.** All three
-approvals are `allow_always`, so ACP's enum separates none of them and the id is
-the only thing that does. Three narrowings make being wrong free: structure before
-ids (a plan *and* `switch_mode`), **exact set equality** over five ids and five
-kinds, and `null` meaning today's card. What it gives up is `bypassPermissions` —
-which the fourth narrowing below already licenses — and `default`, the only
-`allow_once`, which it does **not**: after this the narrowest grant on the card is
-`acceptEdits`, and the filled `bg-fg` primary goes to `auto`, reversing "the
-reversible one" on the card that invented that convention. `drawableOptions` is
-untouched. Q3.453.
-
-**"What to change" is written in the message box, and the card has no control for
-it.** ACP has no field for text on a permission response, so a correction cannot
-ride the answer — and every control that tried built a second message box above
-the one this app already has. Instead the **composer takes over** while a plan is
-on screen: `revising` reaches it from `SessionView`, which is the only place the
-pending permission and the transcript are both in scope. The placeholder says *say
-what to change…*, `sendRefused` lifts, `stoppable` yields the Stop slot to Send,
-and `parked` stands down so the blur rule does not take the caret from somebody
-just invited to type. Sending **cancels the turn, then prompts** — measured: a
-refused plan does *not* end the turn, and the operator was pressing Stop by hand
-before typing. All four flags are pinned as source text; a gate left reading
-`blocked || working` refuses the one send this state exists for. ⚠ **`awaitingPlan`
-is computed above `SessionView`'s guard clause and must stay there** — it holds a
-`useMemo`, and below the `if (row === undefined)` return it ran on some renders and
-not others, which is React #310 the moment a cold-opened session's row lands.
-Nothing else in this repository catches that: no eslint, `tsc` does not model hook
-order, `webcheck` has no DOM — so `webcheck` reads the file instead. Q3.454.
-
-**The number beside an answer is a keyboard shortcut, so it is not drawn on a
-touch device.** `pointer-coarse:hidden`, keyed on the **pointer and never on a
-breakpoint** — `sm:` would claim a narrow desktop window has no keyboard. The
-handler is untouched: a tablet with a bluetooth keyboard still answers on `2`.
-
-**A row of buttons carries its meaning by position, so an option that cannot be a
-button gets a different layout — never a deletion.** With the colour removed, what
-says which button is which is *where it is*: the refusal alone on the left, the
-reversible approval filled on the right — and the halves are **nested groups rather
-than one row with a `flex-1` spacer**, because a spacer only spaces the line it is
-on and any wrap at all dissolves the rule silently.
-
-`permissionLayout` is the decision, and it is one rule: *by length, never by id* —
-nothing knows the string `accept_execpolicy_amendment`, because recognising an
-option by its id or its wording is the guessing this codebase refuses everywhere.
-Past `BUTTON_LABEL_MAX` on any **approval's** rendered label the card draws `rows`
-instead, which is the arrangement it already uses for a question. A refusal never
-decides it: alone in its group it has no sibling to line up against, so a long one
-is a wide button and nothing worse. **The positional rule travels with the switch**
-— `permissionButtons` still orders refusals first and still names one `primaryId`,
-and `OptionRow` draws that one filled.
-
-⚠ **This replaced `drawableOptions`, which deleted the option instead, and the
-reversal is Q3.470.** That function was narrowed four separate ways and every
-narrowing was a case where deleting lost something: claude's path-scoped
-`allow_always` was the only one on its card, an over-long `allow_once` handed the
-filled button to the *permanent* grant, and kimi's `AskUserQuestion` arrives down
-this channel — so two of four **model-written answers** went with nothing said.
-Measured over the live log, five of fifteen real option labels exceed the ceiling.
-A layout is this app's problem and an option is the agent's. Q3.92, Q3.470.
-
-**Two options of one `kind` is why the labels there are the agent's own.**
-`optionLabel` substitutes our word only when the kind identifies the option;
-codex's two `allow_always` entries would both read "Always allow", which is the one
-rendering that must never happen — the scope is the whole difference between them.
-`webcheck` pins that it does.
-
 ## Layout
 
 | File | Holds |
 |---|---|
-| `packages/web/src/permission.ts` | What is actually being approved, from the request and from the log — not the diff, which is `diff.ts`'s |
-| `packages/web/src/elicitation.ts` | A question as controls somebody can fill in: the field union, the draft rules, and `elicitationAnswer` — the request body and the `canSubmit` in one pass. Reads no field name, ever |
-| `packages/web/src/ask.ts` | What the ask card holds: a half-filled form, which question is on screen, whether the card is folded — keyed by the *request*, not the session |
 | `packages/web/src/ui/tail.ts` | The transcript's shape as pure functions: coalescing, the five-events merge, which card a step belongs to, what it refuses to draw, where a `/clear` cuts, what a permission was answered with, `sameNode` — and which rows stand together: `foldRuns`, the clause grammar behind `runSummary`, and the one direction in which a duplicated `file_change` is dropped |
 | `packages/web/src/diff.ts` | What a file change was, as lines: the trim, the bounded LCS, hunks with two sets of line numbers, the word-level marks, the `+N −M`, and the refusal to draw a diff over an event the log clipped. The `WeakMap` behind `changeCounts` is why `buildTail` may ask on every token |
 | `packages/web/src/ui/DiffView.tsx` | A file change, drawn — for the transcript **and** the approval card. Its body paints `bg-surface` inside a `raised` frame because that is the ground the two tints were measured against; on `raised` they are 1.03:1, i.e. invisible |
@@ -328,8 +235,6 @@ rendering that must never happen — the scope is the whole difference between t
 | `packages/web/src/ui/mdlist.ts` | Which ordered lists were written with `)`, recovered from the source because mdast throws the character away. Pure, so `webcheck` imports it |
 | `packages/web/src/echo.ts` | The message that has been sent and has not come back: a module `Map` with subscribers, keyed by session, the third of `attach.ts`'s shape. At `src/` because `store.ts` settles it |
 | `packages/web/src/ui/Bubble.tsx` | The user's own messages, right-aligned. One component, three call sites, and **no `pending`** — a sent message looks sent |
-| `packages/web/src/ui/AskCard.tsx` | The one card for "the agent is waiting on you", whichever way it asked. Two bodies go inside it and neither knows what the other is |
-| `packages/web/src/ui/ElicitationCard.tsx` | The question's body. Renders generically, which is what makes it right for an MCP schema as well as `AskUserQuestion` |
 
 ## Bounds
 
@@ -345,10 +250,8 @@ never drawn one.
 
 ## Two rules that were filed under the shell
 
-They arrived in `web-shell.md` because that is where the palette was written down,
-and they are about **the transcript** — `EventList`, a permission's row, a card's
-own headline. Moved rather than copied: this file's globs are what summon them
-where they apply.
+They arrived in `web-shell.md`, where the palette was written down, and are about
+**the transcript**. Moved, not copied; this file's globs summon them.
 
 - **Machinery is `text-fg/85`, one value for every machinery row, failures
   included**; the `X` at full `fg` and `N failed` carry a failure instead of

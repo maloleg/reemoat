@@ -65,6 +65,13 @@ export interface RenderField {
   kind: RenderKind;
   /** The agent's own default, already the right type for the control. */
   fallback: DraftValue | undefined;
+  /**
+   * The key of the field this one is an alternative answer to, or `null`.
+   *
+   * The agent's own declaration, carried through unchanged. See {@link displacedBy}
+   * for what the card does with it and `src/events.ts` for why nothing infers it.
+   */
+  alternativeTo: string | null;
 }
 
 /**
@@ -157,6 +164,9 @@ export interface ElicitationAnswer {
  */
 const MULTILINE_ABOVE = 240;
 
+/** One frozen instance, so a default argument cannot defeat a caller's `useMemo`. */
+const EMPTY_EXCLUSIONS: ReadonlySet<string> = Object.freeze(new Set<string>());
+
 /** Turn the daemon's fields into controls. */
 export function elicitationForm(
   pending: PendingElicitationSnapshot,
@@ -209,6 +219,123 @@ export function askTitle(form: ElicitationForm, index: number): string {
   return leader.label;
 }
 
+/**
+ * The question a field is an answer to, or `null` where it is a control.
+ *
+ * Two sources, in order, and both are needed.
+ *
+ * **The agent's own `alternativeTo` first**, where it is there: claude and codex
+ * each declare which question their free-text box answers, so the pairing is exact
+ * even on a form where a step holds more than one follow-up.
+ *
+ * **Then the step**, which is what a daemon older than that field leaves us — and
+ * is not a fallback so much as the same fact, less precisely: `groupIntoSteps` put
+ * a non-required text field under a choice leader because it *is* that question's
+ * own box. Reading it here is the **presentational** use `ElicitationForm.steps`
+ * is licensed for, and it is what keeps the indicator drawn on every daemon rather
+ * than appearing when one is updated.
+ */
+function questionOf(form: ElicitationForm, key: string): RenderField | null {
+  const field = form.fields.find((entry) => entry.key === key);
+  if (field === undefined) return null;
+  const declared =
+    field.alternativeTo === null
+      ? undefined
+      : form.fields.find((entry) => entry.key === field.alternativeTo);
+  const asks =
+    declared ??
+    form.steps.find((step) => step.fields.some((entry) => entry.key === key) && step.fields[0]?.key !== key)
+      ?.fields[0];
+  if (asks === undefined) return null;
+  return asks.kind.k === "select" || asks.kind.k === "multiselect" ? asks : null;
+}
+
+/**
+ * Whether this field is an *answer* rather than a control, and how many the
+ * question it answers admits.
+ *
+ * `null` for everything on an ordinary form. `"one"` or `"many"` for a field that
+ * answers a question, taking its shape from the **question** — a circle where that
+ * question is a select, a box where it is a multi-select — so the free-text box and
+ * the rows above it wear the same mark.
+ *
+ * ⚠ **It is drawn from `questionOf`, which reads the step when nothing is
+ * declared, and gating it on the declaration alone was a regression.** For one
+ * release it was: the box lost its indicator entirely against any daemon that did
+ * not yet send `alternativeTo`, which is every daemon until its owner restarts one.
+ * A mark is a fact about the *layout* — this box answers the question above it —
+ * and a layout may not wait on a wire field. What waits on the wire is only how
+ * precisely the pairing is known.
+ */
+export function answerMark(form: ElicitationForm, field: RenderField): "one" | "many" | null {
+  const asks = questionOf(form, field.key);
+  if (asks === null) return null;
+  return asks.kind.k === "multiselect" ? "many" : "one";
+}
+
+/**
+ * The other fields a value written here displaces, or `[]`.
+ *
+ * **Nothing you typed is ever erased, and that is the shape of this rule rather
+ * than a caveat on it.** It ran both ways once — picking an option emptied the box
+ * — and that is wrong for the obvious reason: a pick is one tap and costs nothing
+ * to redo, while a sentence somebody wrote is gone. *"The user may tap by accident
+ * and then change their mind; they simply chose another option, the field is not
+ * zeroed."*
+ *
+ * So there is exactly one direction. **Writing your own answer clears the
+ * question's selection**, because that is how you switch to it and a selection is a
+ * tap. **Picking an option clears nothing**: the text stays in its box, and what
+ * makes the card honest instead is {@link elicitationAnswer}, which stops *sending*
+ * an alternative while the question it answers has its own value. The box keeps its
+ * content, loses its mark, and gets it straight back if the selection goes.
+ *
+ * **Only where the question takes one answer.** A multi-select displaces nothing in
+ * either direction — several is what it means, and both the ticks and the typed
+ * answer are sent.
+ *
+ * One hop, never a walk: a field displaced here may answer a question of its own,
+ * and following that would be this function deciding what a second question means.
+ */
+export function displacedBy(form: ElicitationForm, key: string): string[] {
+  const asks = questionOf(form, key);
+  if (asks === null) return [];
+  return asks.kind.k === "select" ? [asks.key] : [];
+}
+
+/**
+ * Whether the question on screen has been answered, out of the body that would be
+ * sent rather than out of the draft.
+ *
+ * ⚠ **This is what stops Next and Submit leaving a question blank**, and it is a
+ * separate rule from `canSubmit` on purpose: that one asks whether the *form* says
+ * anything, this one asks whether *this step* does. Without it a three-question
+ * form could be walked all the way through with Next and submitted on the strength
+ * of one answer given at the end.
+ *
+ * **The whole step, not its leading field.** A step is a question plus the
+ * adapter's own optional "Other" box, and typing your own answer instead of picking
+ * one is an answer — so anything in the step counts.
+ *
+ * **A step with no fields answers itself.** That is the field-less confirmation
+ * (`requestedSchema` with no properties, message *"Proceed?"*), where accepting is
+ * the answer and there is nothing to fill in; the same exemption `canSubmit` makes
+ * one function over, and for the same reason.
+ *
+ * Reads `content` with `hasOwnProperty` because that object has a **null
+ * prototype** — see `elicitationAnswer`, where that is load-bearing for a field
+ * named `__proto__`.
+ */
+export function stepAnswered(
+  form: ElicitationForm,
+  index: number,
+  content: Record<string, ContentValue>,
+): boolean {
+  const step = form.steps[index];
+  if (step === undefined || step.fields.length === 0) return true;
+  return step.fields.some((field) => Object.prototype.hasOwnProperty.call(content, field.key));
+}
+
 /** See {@link ElicitationForm.steps} for why this rule exists and what it risks. */
 function groupIntoSteps(fields: readonly RenderField[]): RenderStep[] {
   const steps: RenderStep[] = [];
@@ -243,6 +370,10 @@ function toRenderField(field: ElicitationField): RenderField {
     label: field.title ?? field.key,
     hint: field.description,
     required: field.required,
+    // `?? null` is the whole migration: a daemon older than the field does not
+    // send it, and an agent that declares nothing produces `null` anyway, so
+    // absent and "no" are one state rather than two.
+    alternativeTo: field.alternativeTo ?? null,
   };
 
   const options = field.options ?? [];
@@ -316,12 +447,45 @@ export function fieldValue(field: RenderField, draft: ElicitationDraft): DraftVa
  * `Number("")` and `Number(" ")` are both `0`, so a parse-first version silently
  * sends a zero nobody typed into a blank optional number field.
  *
+ * ⚠ **A form with nothing in it cannot be submitted, and that is not a rule about
+ * `required`.** Measured on claude-agent-acp 0.73.0: `askUserQuestionsToCreateRequest`
+ * marks **no** field required, on purpose — *"so the user can also just skip"* — so
+ * an empty draft raised no problem and Submit sent `{}`. That is Skip with a
+ * primary-coloured button in front of it: `decline` and an accepted empty form both
+ * run the tool with no answers, and the two controls sat side by side doing the
+ * same thing, one of them looking like the affirmative one. Reported after somebody
+ * sent an empty answer by accident.
+ *
+ * So `canSubmit` is *no problems* **and** something to submit. It is not done by
+ * inventing `required` — that would be this client overriding a schema the agent
+ * wrote, and it would also refuse a form somebody deliberately answered in part.
+ * One non-empty field is enough, which is the honest floor: below it there is
+ * nothing being said that Skip does not already say.
+ *
+ * ⚠ **A form with no fields is exempt, and it is the reason this is not simply
+ * "content is non-empty".** A confirmation — `requestedSchema` with no properties,
+ * message *"Proceed?"* — has nothing to fill in, so accepting it *is* the answer
+ * and an empty body is the right one. Without the exemption the one form whose
+ * only control is Submit would have had Submit disabled for ever.
+ *
  * An untouched optional field is *absent* from `content`, never `""` — the
  * adapter reads a non-empty custom field as overriding that question's selection,
  * so an empty string sent where somebody typed nothing answers a question they
  * skipped.
  */
-export function elicitationAnswer(form: ElicitationForm, draft: ElicitationDraft): ElicitationAnswer {
+export function elicitationAnswer(
+  form: ElicitationForm,
+  draft: ElicitationDraft,
+  /**
+   * Answers switched off without being deleted — `ask.ts`'s `excludedFor`.
+   *
+   * Defaulted, so the dozens of assertions and the one caller that has nothing to
+   * exclude read as they always did. See {@link displacedBy} for why "off" is a
+   * thing a field can be at all: nothing anybody typed is ever erased, so refusing
+   * to *send* it is the only honest way to stop it counting.
+   */
+  excluded: ReadonlySet<string> = EMPTY_EXCLUSIONS,
+): ElicitationAnswer {
   /*
    * **`Object.create(null)`, because the agent chooses these keys.**
    *
@@ -446,5 +610,41 @@ export function elicitationAnswer(form: ElicitationForm, draft: ElicitationDraft
     }
   }
 
-  return { content, problems, canSubmit: problems.length === 0 };
+  // `content` is what would be sent, so "is anything being said" is a question about
+  // it rather than about the draft — an untouched field carrying the agent's own
+  // `default` is in here and is a real answer, and an emptied one is not.
+  /*
+   * What is in the draft and what is *an answer* are two different questions, and
+   * this is where they part.
+   *
+   * **Switched off by hand.** The mark beside a typed answer is a control — tap it
+   * and the text stays in its box and stops counting. There is no spelling of that
+   * in a `DraftValue`, so it lives beside the draft and is applied here.
+   *
+   * **Or displaced by the question it answers.** A question that takes *one* answer
+   * holds one: with the question itself answered, its free-text alternative is not
+   * what is being said, so it is not sent and the row draws unmarked. It is not
+   * emptied — pick the option again to release it, or clear the selection and the
+   * text is the answer once more. A multi-select displaces nothing: several is what
+   * it means.
+   *
+   * Deleting from `content` rather than skipping in the loop above, because the
+   * displacement is a question about *another* field's value and the loop has not
+   * necessarily reached it yet.
+   */
+  for (const field of form.fields) {
+    if (!Object.prototype.hasOwnProperty.call(content, field.key)) continue;
+    const asks = questionOf(form, field.key);
+    const suppressed =
+      asks !== null &&
+      asks.kind.k === "select" &&
+      Object.prototype.hasOwnProperty.call(content, asks.key);
+    if (excluded.has(field.key) || suppressed) delete content[field.key];
+  }
+
+  return {
+    content,
+    problems,
+    canSubmit: problems.length === 0 && (form.fields.length === 0 || Object.keys(content).length > 0),
+  };
 }

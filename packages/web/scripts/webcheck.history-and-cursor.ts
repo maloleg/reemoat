@@ -256,7 +256,6 @@ process.stdout.write("\nwhere a re-opened session's socket is seeded\n");
       loadedFrom: heldSeqs[0] ?? 0,
       daemonFirstSeq: 1,
       clearedAt: null,
-      revealedBeforeClear: false,
       loadingHistory: false,
       stream: null,
     });
@@ -351,7 +350,6 @@ process.stdout.write("\nthe whole conversation arrives without being asked for\n
       loadedFrom: total + 1,
       daemonFirstSeq: 1,
       clearedAt: null,
-      revealedBeforeClear: false,
       loadingHistory: false,
       stream: null,
     });
@@ -436,7 +434,6 @@ process.stdout.write("\nhow many conversations a tab keeps\n");
       loadedFrom: 1,
       daemonFirstSeq: null,
       clearedAt: null,
-      revealedBeforeClear: false,
       loadingHistory: false,
       unfetched: 0,
     });
@@ -737,21 +734,18 @@ process.stdout.write("\nwhen the loader stops paging\n");
     loadedFrom?: number;
     daemonFirstSeq?: number;
     clearedAt?: number | null;
-    revealedBeforeClear?: boolean;
     heldEvents?: number;
     heldBytes?: number;
   }): {
     loadedFrom: number;
     daemonFirstSeq: number;
     clearedAt: number | null;
-    revealedBeforeClear: boolean;
     heldEvents: number;
     heldBytes: number;
   } => ({
     loadedFrom: 500,
     daemonFirstSeq: 0,
     clearedAt: null as number | null,
-    revealedBeforeClear: false,
     heldEvents: 10,
     heldBytes: 1_000,
     ...over,
@@ -760,10 +754,21 @@ process.stdout.write("\nwhen the loader stops paging\n");
   check("an ordinary window carries on", loadStop(st({})), null);
   check("the start of the log ends it", loadStop(st({ loadedFrom: 1 })), "start_of_log");
   check("the agent's own cut ends it", loadStop(st({ clearedAt: 400 })), "cleared");
+  /*
+   * ⭐ **And nothing carries on past it any more.** There was a second field here,
+   * `revealedBeforeClear`, set by a button at the head of the transcript that
+   * offered to fetch the conversation the agent had been told to forget. Both are
+   * deleted on the owner's word, so a cut is unconditional — asserted, because a
+   * flag re-added to `LoadState` would otherwise be the one change to this
+   * function that no assertion here notices.
+   */
   check(
-    "unless somebody asked to see past it",
-    loadStop(st({ clearedAt: 400, revealedBeforeClear: true })),
-    null,
+    "with no way to ask past it, whatever else is true",
+    [
+      loadStop(st({ clearedAt: 400, heldEvents: 500_000 })),
+      loadStop(st({ clearedAt: 1, loadedFrom: 500 })),
+    ],
+    ["cleared", "cleared"],
   );
   /*
    * ⭐ **The daemon's own floor, which is what makes the 4s re-drive affordable.**
@@ -840,7 +845,6 @@ process.stdout.write("\nwhen the loader stops paging\n");
       loadedFrom?: number;
       daemonFirstSeq?: number;
       clearedAt?: number | null;
-      revealedBeforeClear?: boolean;
       loadingHistory?: boolean;
       heldEvents?: number;
       heldBytes?: number;
@@ -849,7 +853,6 @@ process.stdout.write("\nwhen the loader stops paging\n");
       loadedFrom: 1_357,
       daemonFirstSeq: 1,
       clearedAt: null as number | null,
-      revealedBeforeClear: false,
       loadingHistory: false,
       heldEvents: 1_500,
       heldBytes: 200_000,
@@ -915,7 +918,7 @@ process.stdout.write("\nwhen the loader stops paging\n");
       null,
     );
     check(
-      "and a cut says nothing, because the reveal button is the thing to read",
+      "and a cut says nothing, because the marker row is the thing to read",
       transcriptNotice(ns({ clearedAt: 900 })),
       null,
     );
@@ -932,34 +935,31 @@ process.stdout.write("\nwhen the loader stops paging\n");
     for (const loadedFrom of [1, 2, 357, 1_357, 6_145]) {
       for (const daemonFirstSeq of [0, 1, 6_145]) {
         for (const clearedAt of [null, 900]) {
-          for (const revealedBeforeClear of [false, true]) {
-            for (const loadingHistory of [false, true]) {
-              for (const [heldEvents, heldBytes] of [
-                [0, 0],
-                [1_500, 200_000],
-                [120_000, MAX_TRANSCRIPT_BYTES],
-              ] as const) {
-                for (const rows of [0, 9]) {
-                  const state = ns({
-                    loadedFrom,
-                    daemonFirstSeq,
-                    clearedAt,
-                    revealedBeforeClear,
-                    loadingHistory,
-                    heldEvents,
-                    heldBytes,
-                    rows,
-                  });
-                  states += 1;
-                  const answer = transcriptNotice(state);
-                  const cutInForce = clearedAt !== null && !revealedBeforeClear;
-                  const outstanding = loadedFrom > Math.max(1, daemonFirstSeq);
-                  if (answer === null && !cutInForce && outstanding) silent += 1;
-                  // The mirror of it: a `null` must be *justifiable*, never merely
-                  // absent — so the only other way to answer nothing is a whole
-                  // conversation on screen.
-                  if (answer === null && !cutInForce && !outstanding && rows === 0) silent += 1;
-                }
+          for (const loadingHistory of [false, true]) {
+            for (const [heldEvents, heldBytes] of [
+              [0, 0],
+              [1_500, 200_000],
+              [120_000, MAX_TRANSCRIPT_BYTES],
+            ] as const) {
+              for (const rows of [0, 9]) {
+                const state = ns({
+                  loadedFrom,
+                  daemonFirstSeq,
+                  clearedAt,
+                  loadingHistory,
+                  heldEvents,
+                  heldBytes,
+                  rows,
+                });
+                states += 1;
+                const answer = transcriptNotice(state);
+                const cutInForce = clearedAt !== null;
+                const outstanding = loadedFrom > Math.max(1, daemonFirstSeq);
+                if (answer === null && !cutInForce && outstanding) silent += 1;
+                // The mirror of it: a `null` must be *justifiable*, never merely
+                // absent — so the only other way to answer nothing is a whole
+                // conversation on screen.
+                if (answer === null && !cutInForce && !outstanding && rows === 0) silent += 1;
               }
             }
           }
@@ -967,7 +967,7 @@ process.stdout.write("\nwhen the loader stops paging\n");
       }
     }
     // The count rides the assertion so a shrunk grid cannot pass by covering less.
-    check("no state with history outstanding is drawn silently", { states, silent }, { states: 720, silent: 0 });
+    check("no state with history outstanding is drawn silently", { states, silent }, { states: 360, silent: 0 });
 
     /*
      * And the pair with `loadStop`, which is the invariant in one line: a run that
@@ -1137,12 +1137,24 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
   check("nor does the view pass one", /onLoadEarlier/.test(sessionView), false);
 
   /*
-   * The two sentences that must survive the deletion, and they survive for
-   * opposite reasons. One is a loss no amount of fetching undoes; the other is
-   * the agent's own cut, which is a thing the reader chose and can unchoose.
+   * The one sentence that must survive the deletion: a loss no amount of fetching
+   * undoes. The agent's own cut used to have a second one beside it, offering the
+   * conversation back — the assertions below are that both the offer and the state
+   * behind it are **gone**, which is the direction that needs pinning now. A
+   * control re-added here is a client re-reading what the agent was told to forget.
    */
   check("real retention loss still says so", /the start of this conversation is gone/.test(eventList), true);
-  check("and the agent's own cut is still offered back", /from before \/clear/.test(eventList), true);
+  check("nothing offers the conversation from before a /clear", /from before \/clear/.test(eventList), false);
+  check("and no view wires a reveal", [/onReveal/.test(eventList), /revealBeforeClear/.test(sessionView)], [false, false]);
+  check("nor does the store hold a flag for one", /revealedBeforeClear/.test(storeSrc), false);
+  /*
+   * The marker row is what speaks there instead, and both halves of it are
+   * asserted: the command that caused the cut, and the words. Read off disk
+   * because `webcheck` has no DOM and this is a JSX arm.
+   */
+  check("the marker draws the command that caused it", /<UserBubble text="\/clear" \/>/.test(eventList), true);
+  check("and says the context was cleared", /Context cleared/.test(eventList), true);
+  check("and no longer claims anything is above it", /forgotten everything above/.test(eventList), false);
 
   // The skeleton is what replaced the empty screen; without it the reader is back
   // to a lone `working…` over a conversation that has not arrived.
@@ -1213,11 +1225,9 @@ process.stdout.write("\na /clear arriving down the socket\n");
    * which side of the socket it came from is precisely what the reader must not
    * be able to tell. So `onEvents` runs the same rule the loader does.
    *
-   * Newest in the batch wins, and it takes `revealedBeforeClear` with it: having
-   * asked to see what was above the *previous* cut is not a standing request to
-   * see everything above every future one. Clearing again means clearing again —
-   * and the failure of not resetting it is the worst kind, since it silently
-   * shows a conversation somebody has just asked the agent to forget.
+   * Newest in the batch wins. It used to take a `revealedBeforeClear` flag with
+   * it, and that flag is gone with the control that set it — `nextCut` answers one
+   * number now, so the two halves that could disagree are one.
    */
   const ev = (seq: number): StoredEvent => ({
     seq,
@@ -1230,21 +1240,12 @@ process.stdout.write("\na /clear arriving down the socket\n");
     event: { type: "context_cleared", agentSessionId: `a${seq}`, previousAgentSessionId: `a${seq - 1}` },
   });
 
-  check("a batch with no marker changes nothing", nextCut(7, true, [ev(8), ev(9)]), {
-    clearedAt: 7,
-    revealedBeforeClear: true,
-  });
-  check("an empty batch changes nothing either", nextCut(7, true, []), { clearedAt: 7, revealedBeforeClear: true });
-  check("a marker moves the cut and takes the reveal with it", nextCut(7, true, [ev(8), cut(9)]), {
-    clearedAt: 9,
-    revealedBeforeClear: false,
-  });
+  check("a batch with no marker changes nothing", nextCut(7, [ev(8), ev(9)]), 7);
+  check("an empty batch changes nothing either", nextCut(7, []), 7);
+  check("a marker moves the cut", nextCut(7, [ev(8), cut(9)]), 9);
   // Two in one batch is not exotic: a batch is whatever the socket delivered
   // since the last frame, and a wake after two `/clear`s delivers both.
-  check("the newest marker in a batch wins", nextCut(null, false, [cut(3), ev(4), cut(5)]), {
-    clearedAt: 5,
-    revealedBeforeClear: false,
-  });
+  check("the newest marker in a batch wins", nextCut(null, [cut(3), ev(4), cut(5)]), 5);
   /*
    * Last, not highest. A live batch cannot in practice carry a marker below the
    * cut already held — but the rule CLAUDE.md states is "whichever came last
@@ -1252,8 +1253,5 @@ process.stdout.write("\na /clear arriving down the socket\n");
    * case above and disagrees with this one. Written down so the two cannot be
    * confused for each other by somebody tidying.
    */
-  check("what the batch last said decides, rather than the largest seq in it", nextCut(9, false, [cut(5)]), {
-    clearedAt: 5,
-    revealedBeforeClear: false,
-  });
+  check("what the batch last said decides, rather than the largest seq in it", nextCut(9, [cut(5)]), 5);
 }

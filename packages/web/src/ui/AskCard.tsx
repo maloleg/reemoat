@@ -1,7 +1,7 @@
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { optionShortcut } from "../keys";
-import { COLUMN, IconButton, Spinner } from "./bits";
+import { COLUMN, Icon, IconButton, Spinner } from "./bits";
 import { focusWorthKeeping } from "./composing";
 import { currentLayers, decisionShortcutsEnabled, useDismissible } from "./overlay";
 
@@ -27,7 +27,9 @@ import { currentLayers, decisionShortcutsEnabled, useDismissible } from "./overl
  * and is wrong: a parked question makes one *session* unanswerable, not the app,
  * so the session list, the header and every other agent stay live. It is out of
  * flow, so the transcript behind it does not shift by a pixel and
- * `SessionView`'s `ResizeObserver` never sees it mount.
+ * `SessionView`'s `ResizeObserver` never sees it mount — which is also why the
+ * rows it covers were unreachable until this card started reporting its height;
+ * see {@link AskCard.onHeight}.
  *
  * **No scrim and no blur, which is a reversal.** The first version dimmed the
  * conversation behind a `bg-ink/40 backdrop-blur`, on the reasoning that a
@@ -59,6 +61,22 @@ export interface AskOption {
   hint?: string | null;
   /** Drawn as picked. Only a multi-select and a re-tappable choice ever set it. */
   chosen?: boolean;
+  /**
+   * How many of these may be picked, drawn as the shape of the indicator.
+   *
+   * ⚠ **This is about the *question*, not about this option**, and it is the fact
+   * the card had no way to say. {@link chosen} says what has been picked; nothing
+   * said what picking means, so a four-answer question where you may tick three
+   * and one where the first tap submits drew identically until you had tapped —
+   * and by then the difference has already been made for you.
+   *
+   * `"one"` is a circle, `"many"` a box, which is the convention every checkbox in
+   * every form has taught. Absent draws nothing at all, which is every permission:
+   * ACP hands back exactly one `optionId` and a tap dispatches it, so there is no
+   * pending selection for an indicator to be about, and a circle promising one
+   * would be a lie about what the tap is going to do.
+   */
+  mark?: "one" | "many" | null;
   busy?: boolean;
   /** In `buttons` layout: sits left of the gap. A refusal, kept away from the thumb. */
   leading?: boolean;
@@ -231,6 +249,7 @@ export function AskCard({
   extra,
   actions,
   size = "normal",
+  onHeight,
 }: {
   /** One line at the top: the question, or the tool being asked about. */
   title: string;
@@ -290,9 +309,59 @@ export function AskCard({
   actions?: ReactNode;
   /** How much room the card may take. See {@link BOX_MAX}. */
   size?: AskSize;
+  /**
+   * How tall this card is right now, so the transcript can scroll past it.
+   *
+   * ⚠ **This card is out of flow, and that used to mean the conversation could
+   * not be read to its end.** The frame is `absolute inset-0`, so `SessionView`'s
+   * `ResizeObserver` — which exists precisely to absorb everything that changes
+   * the scroll box's height — never sees it, and the last rows of the transcript
+   * sat under the card with no way to bring them out. Folding the card away did
+   * not fix it: the collapsed bar is 44px of the same problem, on the control
+   * whose entire purpose (Q3.39) is reading what is underneath.
+   *
+   * The remedy is the reader's, not the card's: `Transcript` reserves this many
+   * pixels of trailing padding *inside* the scroller, so the bottom of the
+   * conversation can be scrolled clear of the card. Nothing already drawn moves —
+   * padding grows `scrollHeight` and leaves `clientHeight` alone — which is what
+   * keeps "it moves nothing behind it" true while making the rows reachable.
+   *
+   * Reported from a `ResizeObserver` on the panel rather than measured by the
+   * caller, because both branches share `panelRef`: a fold is one measurement of
+   * one element, not two components agreeing. `0` on unmount, so a card that is
+   * answered gives the room straight back.
+   */
+  onHeight?: (px: number) => void;
 }): ReactNode {
   const headingId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
+
+  /*
+   * The panel's height, out to whoever is drawing behind it. See {@link onHeight}.
+   *
+   * `offsetHeight` and not the observer's `contentRect`, which excludes the
+   * border this card has on every side; the reserve has to cover the whole box or
+   * the last row is still clipped by two pixels. Held in a ref so the effect does
+   * not re-subscribe on every render — this component re-renders on every streamed
+   * token behind it.
+   */
+  const heightOut = useRef(onHeight);
+  heightOut.current = onHeight;
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (panel === null || typeof ResizeObserver === "undefined") return;
+    const send = (): void => heightOut.current?.(panel.offsetHeight);
+    send();
+    const observer = new ResizeObserver(send);
+    observer.observe(panel);
+    return () => {
+      observer.disconnect();
+      heightOut.current?.(0);
+    };
+    // `collapsed` is a dependency because the two branches are two elements: React
+    // reconciles them as one `<div>`, but the ref is re-attached and an observer
+    // left on the old node would report the height of something that is gone.
+  }, [collapsed]);
 
   /*
    * The number beside each row, wired.
@@ -540,13 +609,13 @@ export function AskCard({
    * which is precisely what `TAP_GROW_Y`'s note warns about at a wider gap than
    * this one.
    *
-   * **Second correction, and it is the one that actually settles it: they are not
-   * side by side any more.** Two 44px boxes at `gap-1` are still 4px apart, and the
-   * destructive one carried its meaning **only** in `title` and `aria-label` — a
-   * thumb never sees either. So cancelling left this row for the footer, where it
-   * is a button with its words on its face, a whole flex group away from the
-   * approvals; see the footer's own note. `gap-1` survives for the chip beside the
-   * toggle, and the title gets ~44px of a 358px header back.
+   * **Second correction, spacing — and it is what makes the ✕ beside this
+   * survivable.** Two 44px boxes at `gap-1` are 4px apart, and one of them ends the
+   * agent's request. That is why cancelling left the header for the footer for two
+   * releases; it is back on the owner's word, and the 4px is what had to change
+   * rather than the idea. {@link cancel} carries a rule of its own — a hairline and
+   * its own padding, so the pair reads as two groups rather than as two identical
+   * squares — and `gap-1` survives only for the chip beside this toggle.
    *
    * It also retires the fifth hand-rolled copy of the class string `IconButton`
    * exists to eliminate; `label` there is required, so it cannot ship nameless.
@@ -562,58 +631,74 @@ export function AskCard({
     />
   );
 
-  const controls = (
+  /*
+   * The header's right edge: what else is waiting, fold, and leave.
+   *
+   * ⚠ **`cancel` is drawn here only on the open card**, and the collapsed bar
+   * passes `false`. A one-line bar is exactly where ending a tool call must not be
+   * reachable — the same act Escape gave up for the same reason, *"a tool call
+   * abandoned with nothing on screen explaining what had happened"*. Expanding is
+   * one tap and puts the request back in front of whoever is about to end it.
+   */
+  const controls = (withCancel: boolean): ReactNode => (
     <div className="flex shrink-0 items-center gap-1">
       {more > 0 && <MoreWaiting count={more} />}
       {toggle}
+      {withCancel && cancel}
     </div>
   );
 
   /*
-   * **Cancelling, with its meaning on its face.**
+   * **Leaving without answering, as a ✕ at the top right.**
    *
-   * It was a ✕ in the header: 4px from the control that folds the card away, and
-   * with nothing but a `title` and an `aria-label` to say that pressing it ends the
-   * agent's request rather than tidying the screen. That is the card's own
-   * positional rule broken at the one place it matters most — the rule says the
-   * refusal is alone on the left and the reversible approval is filled on the
-   * right, and this was neither, sitting instead against the most harmless control
-   * on the card.
+   * ⚠ **This reverses a decision, and the reason it was made is the reason the
+   * shape here is not the old one.** A ✕ lived in this header once, 4px from the
+   * control that folds the card away, with nothing but a `title` and an
+   * `aria-label` to say that pressing it ends the agent's request rather than
+   * tidying the screen — two identical squares, one harmless and one not. It was
+   * moved to the footer as a labelled button for exactly that reason, and it is
+   * back here on the owner's word: the footer row it occupied is height, and on a
+   * plan card height is what the document being approved does not have.
    *
-   * Here it is first in the footer, so it is separated from every answer by at
-   * least the `flex-1` group that pushes the approvals to the right edge, and its
-   * label is the caller's own sentence — "Cancel this request", "Abandon this tool
-   * call" — drawn rather than hidden in an attribute.
+   * **What answers the original defect is separation and grouping, not the
+   * label.** The ✕ takes a hairline and its own padding — `border-l border-edge/60
+   * pl-1 ml-1` — so the header's right edge reads as *fold* and then, across a
+   * rule, *leave*. That is the same axis this palette spends everywhere it has to
+   * tell two controls apart without colour, and it is a real 12px of gap plus a
+   * line rather than the 4px that failed. `IconButton size="lg"` keeps 44px of
+   * actual box; a grown target is refused here for the reason {@link toggle}
+   * gives, since it would reach onto the neighbour's face.
+   *
+   * **The words are not lost, they are the `title` and the `label`** — the
+   * caller's own sentence, "Cancel this request" or "Abandon this tool call". A
+   * thumb does not see either, which is the half of the old objection that stands:
+   * what buys it back is that the ✕ is now the only control on this card that is
+   * not an answer, in its own group, on a card whose every other control is one.
    *
    * **No colour, and that is a judgement rather than an omission.** This card
    * carries none at all, and red here would say cancelling is the dangerous act —
    * on a card whose other buttons run commands and write files, it is the one
-   * control that authorizes nothing. `DangerButton` is documented as the only door
-   * to that look anyway, and this is not it.
-   *
-   * **`quiet` and not the bordered `plain`, because what this has to say is that
-   * it is not an answer.** Drawn `plain` it is a third outlined button sitting
-   * beside the refusal, on the card whose whole legibility rests on *"the refusal
-   * alone on the left, the reversible approval filled on the right"* — two
-   * identical-looking controls where one denies the call and the other abandons
-   * it. Borderless is a **shape** difference rather than a value one, which is the
-   * axis this palette spends everywhere else it has to separate two things without
-   * colour, and it puts this in the same register as `ElicitationCard`'s Back: a
-   * way out of the card, not one of the things it is asking. It is still a 44px
-   * target with its words on it, and where the agent offered no options at all the
-   * prose directly above names it.
-   *
-   * ⚠ **The collapsed bar therefore no longer cancels, and that is deliberate.**
-   * The bar's own note used to claim it did. Escape gave up cancelling for exactly
-   * this reason — *"the same key abandoned a tool call with nothing on screen
-   * explaining what had happened"* — and a ✕ on a one-line bar was the same act
-   * through a different control. Expanding is one tap and puts the request back in
-   * front of whoever is about to end it.
+   * control that authorizes nothing.
    */
   const cancel = (
-    <AskAction tone="quiet" onClick={onDismiss} disabled={dismissDisabled} busy={dismissBusy}>
-      {dismissLabel}
-    </AskAction>
+    <span className="relative ml-1 flex items-center border-l border-edge/60 pl-1">
+      <IconButton
+        icon={X}
+        size="lg"
+        onClick={onDismiss}
+        disabled={dismissDisabled || dismissBusy}
+        title={dismissLabel}
+        label={dismissLabel}
+      />
+      {/* Overlaid rather than replacing the glyph — this card's own rule, and the
+          reason it has one: swapping the content of a 44px control at the moment
+          of the tap moves the thing under the thumb. */}
+      {dismissBusy && (
+        <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <Spinner />
+        </span>
+      )}
+    </span>
   );
 
   /*
@@ -627,11 +712,23 @@ export function AskCard({
    * bottom grows upwards, and `absolute` is not clipped by an ancestor with no
    * `overflow` — so on a short screen a long form would have painted straight over
    * the session header. As a flex item in a container the height of the region,
-   * `max-h-full` cannot.
+   * `max-h-full` cannot. Narrowing the frame to `COLUMN` does not touch that: the
+   * height still comes from `inset-0`, so `BOX_MAX`'s `100%` still resolves against
+   * the region.
    *
-   * `pointer-events-none` on the frame, `auto` on the card: the frame now covers
-   * the whole conversation, and without it every tap and every wheel event meant
-   * for the transcript would land on an empty box instead.
+   * `pointer-events-none` on the frame, `auto` on the card: the frame lies over the
+   * conversation, and without it every tap and every wheel event meant for the
+   * transcript would land on an empty box instead.
+   *
+   * ⚠ **`COLUMN` is on the frame now, and that is what makes the card the width of
+   * the conversation.** It was on the panel, with `px-3` on the frame outside it —
+   * so the card was `max-w-[45rem]` while the transcript's rows are that same
+   * constant with `px-4` *inside* it, i.e. 32px narrower. The card overhung the text
+   * by 16px on each side, on every screen wide enough to reach the cap, while this
+   * file's own comment claimed the two "line up by sharing one constant". They do
+   * now: same constant, same gutter, and the panel is simply `w-full` in it.
+   * `mx-auto` centres it even though `inset-0` sets both edges — that is exactly
+   * the case `margin: auto` is defined for.
    *
    * **There is no `z-index` here and its absence is deliberate — a bare
    * `absolute` is exactly what a later reader "fixes" by adding one back.** It
@@ -648,6 +745,17 @@ export function AskCard({
    * it, jump-to-latest button included) and before the composer (so its menus
    * open over the card, which is what opening a menu means).
    *
+   * ⚠ **Both panels carry `outline-none`, and it is the *browser's* ring being
+   * suppressed rather than this app's.** The panel is a `role="dialog"` with
+   * `tabIndex={-1}` that takes the caret the moment a request parks — so a blue UA
+   * outline appeared around the card every time the agent asked something. It
+   * matches nothing in `index.css`'s focus rule, so `.no-focus-ring` — documented
+   * there as the only way to opt out of *that* rule — is not the instrument here
+   * and would have done nothing; a layered utility beats a UA default on its own.
+   * Nothing is lost: this element is not reachable by Tab, so the only focus it
+   * ever has is the one this file gives it, and every control inside it still draws
+   * the app's own ring.
+   *
    * **`overlay.ts` now has a `LAYER` table with a `z-50` in it, and that is not
    * available here.** Said explicitly because the arrival of a working overlay
    * layer makes "and give the ask frame a z-index so it matches the rest" look
@@ -659,7 +767,7 @@ export function AskCard({
    * not the app), so it has no such escape and does not want one.
    */
   return (
-    <div className="pointer-events-none absolute inset-0 flex flex-col justify-end px-3 pb-2">
+    <div className={`pointer-events-none absolute inset-0 ${COLUMN} flex flex-col justify-end px-4 pb-2`}>
       {collapsed ? (
         /*
          * One line, and it keeps everything a folded request has to keep.
@@ -682,7 +790,7 @@ export function AskCard({
           role="dialog"
           aria-labelledby={headingId}
           tabIndex={-1}
-          className={`${COLUMN} animate-rise pointer-events-auto flex min-h-11 shrink-0 items-center gap-1 rounded-lg border border-edge-strong bg-surface py-1.5 pr-1 pl-3 shadow-2xl`}
+          className="animate-rise pointer-events-auto flex min-h-11 w-full shrink-0 items-center gap-1 rounded-lg border border-edge-strong bg-surface py-1.5 pr-1 pl-3 shadow-2xl outline-none"
         >
           {/*
            * ⚠ **`wrap-anywhere`, not `truncate`, and this is the one place on this
@@ -710,7 +818,7 @@ export function AskCard({
           {detail !== undefined && detail !== null && (
             <span className="shrink-0 text-2xs text-faint">{detail}</span>
           )}
-          {controls}
+          {controls(false)}
         </div>
       ) : (
         /*
@@ -761,7 +869,7 @@ export function AskCard({
           role="dialog"
           aria-labelledby={headingId}
           tabIndex={-1}
-          className={`${COLUMN} animate-rise pointer-events-auto flex ${BOX_MAX[size]} min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface shadow-2xl`}
+          className={`animate-rise pointer-events-auto flex w-full ${BOX_MAX[size]} min-h-0 flex-col overflow-hidden rounded-lg border border-edge-strong bg-surface shadow-2xl outline-none`}
         >
           <div className="flex shrink-0 items-start gap-1 px-3 pt-2.5 pb-2">
             <div className="mt-1 min-w-0 flex-1">
@@ -770,7 +878,7 @@ export function AskCard({
                 <div className="mt-0.5 text-2xs text-faint">{detail}</div>
               )}
             </div>
-            {controls}
+            {controls(true)}
           </div>
 
           {context !== undefined && context !== null && (
@@ -790,19 +898,24 @@ export function AskCard({
           )}
 
           {/*
-           * **The footer is unconditional now, because cancelling always is.**
+           * **The footer holds answers and nothing else, so it is drawn only when
+           * there are any.**
            *
-           * It used to be drawn only when there was something to put in it — the
-           * decision buttons, or a caller's Skip/Submit — which left a permission
-           * whose options are drawn as *rows* with no footer at all, and therefore
-           * with no way out but the ✕ that has since left the header. A request
-           * with no options at all had the same hole and `PermissionCard` was
-           * patching it by passing its own Cancel into `actions`; that patch is
-           * deleted, and the sentence it drew above the answers ("the only answer
-           * is to cancel it") now points at a control that is always there.
+           * ⚠ **It was unconditional, and the cancel is why.** A permission whose
+           * options are drawn as *rows* has nothing else to put down here, so
+           * without the cancel this row was an empty bordered strip — and the
+           * reason it could not simply be dropped was that the cancel was the only
+           * way out of a request the agent offered no options for. {@link cancel}
+           * is the header's ✕ again, so that obligation has moved rather than
+           * evaporated: the way out is drawn on every card, in the header, and the
+           * sentence `PermissionCard` writes above the answers for an
+           * option-less request points there.
+           *
+           * What it buys is the wrap row a labelled Cancel cost at 390px, which on
+           * a plan card is height the document being approved did not have.
            */}
+          {(layout === "buttons" || (actions !== undefined && actions !== null)) && (
           <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-edge/60 px-3 py-2.5">
-            {cancel}
             {/*
              * Two groups rather than one row with a `flex-1` spacer between the
              * halves, which is what this was.
@@ -856,6 +969,7 @@ export function AskCard({
             )}
             {actions}
           </div>
+          )}
         </div>
       )}
       {/*
@@ -946,6 +1060,15 @@ function OptionRow({
       disabled={disabled}
       title={option.hint !== undefined && option.hint !== null && option.hint !== option.label ? option.hint : undefined}
       /*
+       * The state {@link OptionMark} draws, said once more for a reader who cannot
+       * see it — and the role is claimed only where this button already keeps it.
+       * See that component for why `one` is `aria-pressed` rather than
+       * `role="radio"`.
+       */
+      role={option.mark === "many" ? "checkbox" : undefined}
+      aria-checked={option.mark === "many" ? option.chosen === true : undefined}
+      aria-pressed={option.mark === "one" ? option.chosen === true : undefined}
+      /*
        * ⚠ **`primary` reaches this layout now, and it has to.** A decision whose
        * labels will not fit a button row is drawn here instead of having an option
        * deleted (see `permissionLayout`), and the whole reason a button row is
@@ -959,11 +1082,7 @@ function OptionRow({
        * set no `primary`, because none of their options is the reversible one.
        */
       className={`tap press relative flex min-h-11 w-full items-start gap-2.5 rounded-md border px-3 py-2 text-left disabled:opacity-40 ${
-        option.primary === true
-          ? "border-fg bg-fg text-ink hover:bg-fg/90"
-          : option.chosen === true
-            ? CHOSEN
-            : ROW
+        option.primary === true ? "border-fg bg-fg text-ink hover:bg-fg/90" : askRowTone(option.chosen === true)
       }`}
     >
       {/*
@@ -995,7 +1114,101 @@ function OptionRow({
           {index + 1}
         </span>
       )}
+      <ChoiceMark mark={option.mark} chosen={option.chosen === true} className="mt-0.5" />
     </button>
+  );
+}
+
+/**
+ * How an answer row is painted, picked or not.
+ *
+ * Exported because `ElicitationCard` draws one answer this card cannot: the free
+ * text box the adapter puts under a question, which is an option somebody types
+ * rather than taps. It has to be the **same** treatment rather than one that
+ * resembles it — this file's own rule about sharing a component instead of a class
+ * list — so the two go through one function and `CHOSEN`'s three signals are stated
+ * once.
+ */
+export function askRowTone(chosen: boolean): string {
+  return chosen ? CHOSEN : ROW;
+}
+
+/**
+ * Whether picking this one is a choice or a tick, as a shape on the row's edge.
+ *
+ * **A reserved slot, which is `ChoiceRow`'s idiom one file over**: the box is
+ * drawn whether or not it is filled, so becoming the answer does not move the
+ * label beside it. Nothing is drawn at all where {@link AskOption.mark} is absent,
+ * so every permission card is untouched.
+ *
+ * **Built out of a `ring` rather than a `border`.** `CHOSEN`'s own docblock is the
+ * argument: a ring is a box-shadow, so it costs no layout and cannot move the row
+ * at any width — and a signal that reflows what it is applied to is not a third
+ * signal. The fill is `bg-fg`, which is licensed here for the reason it is
+ * licensed on `primary`: this is the affirmative state inside a decision.
+ *
+ * ⚠ **The box is `rounded-none`, and the first version was not.** It used
+ * `rounded-sm`, which is `.375rem` in this theme — 6px of radius on a 16px box, so
+ * against a circle of the same size the two read as the same shape at arm's length
+ * and the whole point of drawing them differently was lost. Reported that way. A
+ * radius is the only thing separating them, so it is spent all the way: a square
+ * with square corners against a circle.
+ *
+ * **And the filled states differ by shape too, not only by outline.** A tick for
+ * the box and a dot for the circle, which is what the two controls mean everywhere
+ * else — so the pair is distinguishable filled as well as empty, and at 16px that
+ * is the second difference doing the work rather than the radius alone.
+ *
+ * ⚠ **Not a native `<input>`.** `ui/plugins/MachineInstalls.tsx` already records
+ * why — a native checkbox cannot be grown by padding of its own — and the row is
+ * already a 44px `<button>`, so the tick has the target the platform control
+ * would have had to be given back.
+ *
+ * **The role is only claimed where it is kept.** `many` is `role="checkbox"`: a
+ * `<button>` toggles on Space and Enter by itself, which is the whole of what that
+ * role promises. `one` takes `aria-pressed` and **not** `role="radio"`, which
+ * would promise arrow-key roving between the options — `web-shell.md` records both
+ * popups that drew a widget role without keeping it, and this card has digit
+ * shortcuts rather than a caret.
+ *
+ * Exported because `ElicitationCard` draws a second set of these rows by hand — a
+ * form whose *leader* is not the choice field — and one form must not draw two
+ * idioms for one question.
+ */
+export function ChoiceMark({
+  mark,
+  chosen,
+  className = "",
+}: {
+  mark: AskOption["mark"];
+  chosen: boolean;
+  /**
+   * Where it sits in its row, and nothing else.
+   *
+   * A row of choices is `items-start`, because an option can wrap to two lines and
+   * the mark belongs beside the first; the typed answer's row is one line and
+   * `items-center`. That is the row's business rather than this component's, which
+   * is why the nudge is passed in — the same arrangement `IconButton` uses, and
+   * safe for the same reason: it is a margin, so there is nothing here for it to
+   * lose a specificity race against.
+   */
+  className?: string;
+}): ReactNode {
+  if (mark === undefined || mark === null) return null;
+  return (
+    <span
+      aria-hidden={true}
+      className={`flex h-4 w-4 shrink-0 items-center justify-center ${
+        mark === "many" ? "rounded-none" : "rounded-full"
+      } ring-1 ring-inset ${chosen ? "bg-fg ring-fg" : "ring-edge-strong"} ${className}`.trimEnd()}
+    >
+      {chosen &&
+        (mark === "many" ? (
+          <Icon as={Check} size={11} className="text-ink" />
+        ) : (
+          <span className="block h-1.5 w-1.5 rounded-full bg-ink" />
+        ))}
+    </span>
   );
 }
 

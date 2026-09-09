@@ -92,6 +92,33 @@ export interface ElicitationField {
   /** An input hint. Enforced by nobody — see `validateElicitationContent`. */
   format: "email" | "uri" | "date" | "date-time" | null;
   default: string | number | boolean | string[] | null;
+  /**
+   * The key of the field this one is an *alternative* answer to, or `null`.
+   *
+   * **The one thing read out of an elicitation property's `_meta`, and it is
+   * projected to a scalar rather than carried.** `acp/subagents.ts` does the same
+   * with `_meta.claudeCode`, for the same reason: a blob an agent chose is not
+   * something to hand a browser, and a named scalar is something a client can act
+   * on.
+   *
+   * What it answers is a question the client otherwise cannot: claude puts an
+   * optional free-text box after every `AskUserQuestion` — its own "Other" — and
+   * `applyAskElicitationResponse` uses that text **instead of** the selection,
+   * for a multi-select as well as a single one. Without this the card draws two
+   * answers to one question and sends both, and the agent silently keeps one.
+   *
+   * ⚠ **Read from a declaration and never from the key's shape.** claude declares
+   * `_meta._askUserQuestionCustomAnswer` `{questionId, isCustomAnswer}`; codex
+   * declares nothing and spells the same idea by suffixing `__other` to the
+   * question's id. Q6.54 refuses to parse either suffix by name — a client keyed
+   * on one renders that agent's question and refuses the other's — so an agent
+   * that does not declare it gets `null` here and the card behaves exactly as it
+   * did. Absence is the only way to say no, one field over.
+   *
+   * Resolved before it leaves: a key naming no other field on the form, or naming
+   * itself, is dropped. A dangling pointer would be a control clearing nothing.
+   */
+  alternativeTo: string | null;
 }
 
 /** What the agent asked, as a form somebody can be shown. */

@@ -1464,6 +1464,14 @@ ol.md-paren > li::marker {
  * textarea is the one place that holds, because a text caret is a focus indicator
  * in its own right — nothing else here should use it.
  *
+ * **A `tabindex` container is deliberately *not* in this list, and `AskCard`'s
+ * panel is the case.** It is a `role="dialog"` that takes the caret when a request
+ * parks, and what it was drawing was the **browser's** own ring, not this one — so
+ * the instrument there is a plain `outline-none` utility, which beats a UA default
+ * without needing anything from here. `.no-focus-ring` would have been a no-op on
+ * it. The line between the two is worth keeping: this rule owns every control a
+ * keyboard can reach, and a programmatically-focused container is not one.
+ *
  * **`[role="separator"][tabindex]` is in the list rather than styling its own**,
  * which is this rule's whole argument applied the first time something new arrived
  * to test it. The rail's drag handle is not a `button` and matches nothing else

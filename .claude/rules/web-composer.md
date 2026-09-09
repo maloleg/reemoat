@@ -189,13 +189,13 @@ a target, and all stay far under the 20px a symmetric grow would need — which 
 that growth is still vertical-only. Q3.561, Q3.563.
 
 **The empty box teaches `/`, and only where `/` opens something.**
-`composerPlaceholder`'s idle line is `Type / for commands` and nothing else — the
-one affordance in the composer nothing else advertises, the strip below it having
-covered the settings, and no "message" in front of it because an empty box already
-reads as somewhere to write. It falls back to `message…` when `buildCommands` returns
-nothing, which is every session whose agent is away: no published commands, and no
-`agentConfig` for the three synthesized controls to be built from. A hint for a key
-that does nothing is worse than no hint. Q3.562.
+`composerPlaceholder`'s idle line is `Type / for commands` and nothing else — the one
+affordance nothing else advertises, and no "message" in front of it because an empty
+box already reads as somewhere to write. It falls back to `Message…` where
+`buildCommands` returns nothing: an agent that is away publishes no commands and no
+`agentConfig` for the synthesized controls, and a hint for a key that does nothing
+is worse than none. **All six are sentence-cased**, asserted over every
+state; a register split was argued and withdrawn. Q3.562, Q3.593.
 
 **`Composer` outlives a session switch, so every write that follows an `await` is
 split in two.** Neither `SessionView` nor `Composer` carries a `key`, so switching
