@@ -130,10 +130,34 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
    * for as long as the snapshot is, and `null` short-circuits before any walk
    * happens at all.
    */
+  /*
+   * ⚠ **`?? []` here for the same reason the card below has it, and it became
+   * load-bearing when the plan card stopped drawing a refusal.**
+   *
+   * This read `events !== undefined`, i.e. "only once a transcript exists" — and
+   * `openSession` returns without creating one when the machine has no connection,
+   * which is the cold-open the card's own comment describes at length. So on that
+   * path the plan was on screen, `revising` was false, and the composer said
+   * *answer the request above first* about the request it is the answer to.
+   *
+   * ⚠ **It is not a ✕-only dead end, and the first version of this comment said it
+   * was.** `planControls` gates on `context.kind === "switch_mode"`, and the kind
+   * rides the `tool_call` — so with an empty window it answers `null`, the curated
+   * two-button card is never drawn, and the card falls back to `permissionButtons`:
+   * every option the agent sent, refusal included, as rows. Driven, not read.
+   *
+   * Which makes the gate worse than a dead end would have been, in the way that is
+   * easy to miss. On exactly the screen where the card is at its *least* readable —
+   * four full-width rows in the agent's own 46-character wording, the layout this
+   * whole card was curated to avoid — the one control that lets somebody decline
+   * with a reason was switched off, and the placeholder told them to go and answer
+   * something. The plan comes off the *snapshot*, not the window, exactly as the
+   * card's context does; an empty window costs the markdown, never the state.
+   */
   const pendingAsk = asking !== undefined && asking.kind === "permission" ? asking.permission : null;
   const events = transcript?.events;
   const awaitingPlan = useMemo(
-    () => pendingAsk !== null && events !== undefined && permissionContext(pendingAsk, events).plan !== null,
+    () => pendingAsk !== null && permissionContext(pendingAsk, events ?? []).plan !== null,
     [pendingAsk, events],
   );
 

@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 130 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 339 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 81 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 343 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 133 | `###` |
-| | | **912** | |
+| | | **917** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 912 rather than the 463
+dividers. So the count is over **both** depths, and it says 917 rather than the 464
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -6266,6 +6266,58 @@ one-line mutation.
 
 **Status.** Fixed, 2026-09-05.
 
+### Q2.223 — "this machine already has 6 live sessions", on a daemon that may well have had eight
+
+**Question.** The owner hit the live-session cap on a provisioned cloud box and
+asked the fair question: *"почему у нас существует какой то лимит сессий? его не
+должно быть, либо обоснуй понятным языком, зачем он нужен"*. Two things had to be
+answered — where the 6 came from, and whether the bound should exist at all.
+
+**Where 6 came from.** Not from this repository. `MAX_LIVE_SESSIONS` is 64;
+`services/premium/cloud-init/provision.sh` writes `REEMOAT_MAX_LIVE_SESSIONS='6'`
+into `~/.reemoat/daemon.env` once, at provision, with its own arithmetic above it:
+*"The default is 64 and this machine has 8 GiB, so 64 is not a bound — it is a
+promise of an out-of-memory kill. Six is arithmetic… Revise it against a real
+box."* Nothing in `deploy/` ever rewrites that file, so an update never touches it,
+and `maxLiveSessions` is on no route and in no snapshot — **the refusal string is
+the only place in the product this number is visible.** Which is why the number
+could not be found from the phone that hit it.
+
+**Decision on the bound.** It stays, and it is not one bound but two — Q2.100's
+pair. Of the four reasons behind it, exactly one still applies to a single-owner
+machine, and it is the decisive one: **memory**. Agents are spawned `detached`, a
+new process *group* and not a new cgroup, so they live in the daemon's own cgroup
+and no cgroup arrangement protects the daemon from them; the premium box runs
+`earlyoom` with `node` among its preferred victims and the daemon is itself a
+`node` process. Removing the ceiling trades a refusal that names its remedy for an
+OOM kill of an agent mid-turn, on a phone, with nothing on screen explaining why.
+The honest fix is a bigger box or `SessionRuntime`, both of which are somewhere
+else.
+
+The other three are weaker than the docblock reads, and saying so is the point of
+this entry. The prune taking somebody's transcripts is largely defused by Q2.222's
+floor and rules, and was never the live cap's job anyway — the *burst* is that
+half, and it survives independently. The shared-machine case needs a grantee. And
+the multi-tenant container case does not exist in this product any more.
+
+**What changed instead.** The sentence. It interpolated `maxLiveSessions` — the
+*limit* — inside a clause claiming a *count*, and the two coincide only at the
+boundary: **resume is deliberately outside the bound**, so a restart that brings
+eight conversations back leaves a daemon truthfully holding eight while the
+refusal insists on six. It now states the limit as a limit and names
+`REEMOAT_MAX_LIVE_SESSIONS`, because a number visible in exactly one string should
+say what to search for.
+
+**Not done, and each for a reason.** Removing the live cap: it is the last named
+bound on a plugin whose `session.created` handler calls `ctx.sessions.create`, and
+three separate docblocks quote it as the worst case they escaped. Raising the
+default from 64: a no-op for the machine that reported this, which reads the env
+var. Making it settable from the UI: *the daemon's config is env only*, and there
+is no per-machine settings table or route to put it in.
+
+**Status.** Active
+
+
 ## The web client
 
 ### What the client is
@@ -12060,7 +12112,18 @@ one of the branching, and the comment there says so.
 reaching only the newest, an unknown event passing through untouched, and an old
 client asked for nothing at all rather than asked and ignored.
 
-**Status.** Current
+⚠ **Both halves of this were wrong in a way nothing on screen said, and each was
+reported months later from a phone.** The back button was never once asked for past
+the launch screen, because the version it gates on is read out of a fragment
+`navigate` destroys — Q3.596. And the inset was keyed on *being* in Telegram rather
+than on how Telegram is presenting the page, so the measured overlay clearance was
+also spent on a client that draws its header as a bar and reserves its own space —
+Q3.597, which replaces the literal with Telegram's own number and demotes 3.25rem to
+the pre-8.0 fallback. **The floor-not-an-addition rule stated here is untouched** and
+still governs that line; the one addition is between Telegram's two reported insets,
+which are nested rather than describing the same strip.
+
+**Status.** **Current in its rules, superseded in both mechanisms by Q3.596 and Q3.597**
 
 #### Q3.444 — Two screens' text at once, and a sheet that left its contents behind
 
@@ -12456,6 +12519,24 @@ an extra act invented here; it is the one they were already performing, and
 `POST /sessions/:id/cancel` answers only once the turn has settled, which is what
 lets the prompt behind it land. It settles the permission as `cancelled` /
 `by: turn_cancelled` — the same record their own Stop wrote.
+
+⚠ **That measurement was taken on claude-agent-acp 0.63.0 and the pinned 0.73.0
+behaves differently — the *conclusion* survives, the *reason* does not.** 0.73.0's
+`applyExitPlanModeSelection` answers `reject` with `deny(context, "User chose to
+keep planning", true)`, and its own comment says what the third argument is for:
+*"Interrupt stops this ACP turn; the adapter maps Claude's internal diagnostic for
+that intentional stop back to cancellation."* 0.63.0's `deny` took no such argument.
+So a refused plan **does** end the turn on the pinned adapter, and the sentence
+above is history rather than current behaviour.
+
+Nothing about the composer changes, and that is worth being explicit about rather
+than leaving to be re-derived: this path never presses reject. It sends while the
+permission is still parked and the turn is still in flight, so `cancelTurn` is
+required for the reason it always was — a prompt sent inside a turn is
+`409 turn_in_flight`. What expired is the anecdote about the operator pressing Stop,
+not the ordering it justified. Kept rather than deleted because it is the record of
+an adapter bump changing behaviour under a decision, which is the same failure
+Q3.585 records for `PLAN_SHAPES` and is why that one is a list.
 
 **Three flags move together and none has a pure function behind it**, so all three
 are pinned as source text: `sendRefused` lifts rather than gates, `stoppable`
@@ -13342,7 +13423,16 @@ had been, and that `drawableOptions` had therefore been justified partly by a
 fallback nobody built. The correction stays written where it is; the function now
 exists under the name it was promised.
 
-**Status.** Reversed an earlier decision
+⚠ **One card is now an exception, and it is named rather than left to be found.**
+The plan-mode card draws two of the four options claude sends — Q3.594 — on the
+owner's instruction, after four labelled buttons wrapped into the room the plan
+itself needed on a 390px phone. The rule here still governs everything else, and the
+exception is the narrow kind this entry could live with: curation on a **measured
+shape** matched by exact set equality, dropping two ids named in the driver, with
+`null` still meaning the agent's own card — not a length rule reaching for whatever
+does not fit.
+
+**Status.** **Reversed an earlier decision; itself narrowed by Q3.594**
 
 #### Q3.471 — Seven call sites asked for `items-center` and none of them got it
 
@@ -19109,6 +19199,216 @@ seventh placeholder has to declare itself there rather than arriving lowercase a
 looking like it belongs.
 
 **Status.** Reversed an earlier decision
+
+#### Q3.594 — Four buttons on a plan card, in the room the plan was supposed to be read in
+
+**Question.** `PLAN_SHAPES` curates claude's `ExitPlanMode` request into our own
+short labels, and Q3.585 had just made every option the adapter sends reachable:
+**Keep planning**, **Approve each edit**, the elevation, and the elevation with the
+context cleared. Reported from a phone with a screenshot — *"на телефоне кнопки в
+предложении плана выглядят отвратительно"*. Four labelled buttons wrap at 390px, and
+the footer they wrap into is height the `flex-1` markdown box does not get. Is
+drawing everything the agent sent the right rule for *this* card?
+
+**Decision.** No. Every shape's `order` is now **two**: the elevated grant the
+adapter picked, then that same grant with the context cleared, filled. `reject` and
+`exit-plan-default` are dropped, on the owner's instruction and by name.
+
+**This reverses Q3.470 for one card, and the shape of the reversal is what makes it
+survivable.** Q3.470 is flat — *"Nothing is deleted"* — and Q3.92 is kept as the
+evidence for it: deleting options by a length rule made a scoped `allow_always`
+unreachable from a phone and dropped two of four model-written answers silently.
+None of that applies here. This is curation on a **measured shape**, matched by
+exact set equality, with `null` still meaning the agent's own card — so an adapter
+that words plan mode differently loses nothing at all. And `shape` still names the
+whole request: the two that go are removed from `order`, in one place, per shape, so
+the driver can assert *which* two by name rather than merely counting to two.
+
+**Nothing is given up as a capability, which is the argument the reversal rests
+on.** Per-edit approval is a session *mode*, republished by the agent as an
+`agent_config` control, so the composer's own strip walks a broader grant back after
+the fact. And declining has two routes already on screen: the ✕ in the header, and
+the message box, which takes over while a plan is up and sends a correction that
+cancels the turn first — Q3.454, and the owner named it in the same sentence
+(*"ну или ввести внизу правку и отправить"*).
+
+⚠ **The ✕ and the button are not the same message to the model, and this is written
+down rather than glossed.** Read out of the pinned adapter rather than guessed:
+`applyExitPlanModeSelection` answers `reject` with `deny(context, "User chose to
+keep planning", true)`, while `parseClaudePermissionSelection` throws `new
+Error("Tool use aborted")` for any outcome that is not `selected`. So the composer
+is the good decline and the ✕ is the abrupt one.
+
+**And the curated card is not the only card, which is what keeps this honest.**
+`planControls` needs the `tool_call` for its `switch_mode` gate, so before the
+window pages in the request is drawn as the agent sent it — refusal and all. Q3.595
+has the measurement. The two curated buttons are what somebody sees once the
+transcript has landed, which is the common case and not the only one.
+
+**What the left group is now.** Empty. `leading` is still computed as
+`kind.startsWith("reject")` rather than dropped to `false`: no shape carries a
+refusal today, and a measured shape that does one day must not land it on the right,
+beside the filled primary. A rule costing one comparison is cheaper than that.
+
+**The 0.63.0 entry looks inconsistent and is not.** It keeps `acceptEdits` beside
+`auto` where the 0.73.0 shapes keep only the pair — because 0.63.0 emits no
+clear-context row at all, so its two are the two grants it can offer and there is
+nothing to pair them with. It drops three of five now rather than two.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.595 — The plan was on screen and the box under it said to go and answer something
+
+**Question.** `awaitingPlan` in `SessionView` gated on `pendingAsk !== null && events
+!== undefined`. `PermissionCard`, rendered four lines below it, reads
+`transcript?.events ?? []` and carries a long comment about why: `openSession`
+returns *without* creating a transcript when the machine has no connection, so a
+session the rail draws as WAITING ON YOU opens to a card with no context. Two reads
+of the same condition, on the same screen, disagreeing. Which is right?
+
+**Decision.** The ungated one. `awaitingPlan` reads `events ?? []` too.
+
+⚠ **The first version of this entry said the gate left a ✕ as the only way out, and
+that is false — corrected here rather than rewritten away, because the mistake is
+the useful part.** `planControls` demands `kind === "switch_mode"` before it
+consults `PLAN_SHAPES`, and the kind rides the `tool_call`. With an empty window
+there is no call, so the curation answers `null`, the two-button card is **never
+drawn**, and `permissionButtons` puts every option the agent sent on screen —
+refusal included — as rows. Driven in `webcheck` now rather than reasoned about:
+the same request one event later is `["Auto mode", "Clear + auto"]`, and one
+`tool_call` is the whole difference.
+
+**Which makes the gate worse than a dead end, in the way that is easy to miss.** On
+exactly the screen where the card is at its *least* readable — four full-width rows
+in the agent's own 46-character wording, the layout Q3.585 and Q3.594 both exist to
+avoid — the one control that lets somebody decline *with a reason* was switched off,
+and the placeholder told them to go and answer something. That is the argument for
+`?? []`, and it never needed the false one.
+
+**How it got written.** The reasoning ran "the card now draws two grants, therefore
+the only other exit is a ✕", which is true of the card and not of *this* state, and
+nothing checked it: `docscheck` holds sizes, citations and counts, not whether a
+sentence is true. It reached a docblock, a driver comment, a rule file and two
+entries here before an adversarial pass ran the function. CLAUDE.md names this exact
+failure — an invariant stated in prose that the code quietly stopped holding — and
+the remedy it names is the one applied: an assertion, at the claim.
+
+**The plan is not in the window.** It arrives on the pending permission's own
+`rawInput`, which is the snapshot the list poll already delivered; the transcript is
+where `permissionContext` looks for a *clipped* plan to recover. So an empty window
+costs the markdown in the rare clamped case and never the state — the same sentence
+`PermissionCard`'s comment already makes about its own context.
+
+**Status.** Active
+
+
+#### Q3.596 — The mini app drew ✕ Close at every depth, and the back button had never once been asked for
+
+**Question.** Q3.443 built the Telegram back button: `upFrom` answers where up goes,
+`null` at the root, and `setTelegramBack` posts `web_app_setup_back_button` — one
+control, so hiding it is what draws ✕ Close. Reported from a phone months later:
+*"в ТМА при переходе в диалог все еще кнопка закрыть… иначе юзеру каждый раз
+приходится перезаходить в тма"*. `upFrom` returns `"/"` for a conversation, the
+version gate is 6.1 against a client well past 8.0, and the control never appeared.
+Why?
+
+**Decision.** Because the launch fragment does not survive a navigation, and the
+version was read out of it on every call. `router.ts`'s `navigate` calls
+`history.pushState(state, "", path)` with a path-only URL, which replaces the
+**whole** URL — proven against the same WHATWG parser the browser uses:
+`new URL("/m/x/s/y", "https://cp/#tgWebAppVersion=8.0")` is `https://cp/m/x/s/y`.
+So `telegramVersion()` answered `null` from the first tap onward, `versionAtLeast`
+read that as *too old* by its own deliberate fail-closed rule, and `setTelegramBack`
+returned before posting anything.
+
+**The one call that survived was the one that hides the control.** At the root
+`upFrom` is `null`, the hash is still intact, and the app posts
+`is_visible: false` — so the app successfully asked Telegram for ✕ Close, once, and
+then never spoke again.
+
+**The fix is a latch, at the one moment that means launch.** `telegramReady` runs
+from `main.tsx`'s module body, before `createRoot` and therefore before any effect
+can navigate. It is mirrored into `sessionStorage` because a *reload* loses the
+fragment too — this app assigns `window.location.href = "/"` on sign-out and offers
+the same from the error boundary. Telegram's own SDK does exactly this and their
+docs say why: *"If the application uses hash routing, it may lose the initial hash
+after some time."* Only the **version** is kept, never `tgWebAppData` — that is a
+signed credential naming a Telegram account, this app has never read it, and a copy
+in `sessionStorage` would be one this origin stores for no reason.
+
+⚠ **`webcheck` was green over it for the whole time, and the reason generalises.**
+The driver writes `location.hash` immediately before each `setTelegramBack` call, so
+the read always succeeded — the one condition the real app never satisfies. The
+assertion now drives the actual sequence: latch at launch, wipe the fragment the way
+a navigation does, then ask. Reverting the fix fails it twice.
+
+**What was not the cause**, checked before the fix: `upFrom`'s `session` arm
+(returns `"/"`), the 6.1 gate (the client is 8.x), and the transport not being
+injected (`data-telegram` is stamped off the same test, and the header inset it
+controls was visibly applied in the screenshot).
+
+**Status.** Active
+
+#### Q3.597 — 52px of empty screen under a header bar that had already reserved its own space
+
+**Question.** Q3.443 also set a Telegram header inset: `:root[data-telegram]
+.pt-safe { padding-top: max(3.25rem, env(safe-area-inset-top)) }`, a **floor** and
+never an addition, measured against a screenshot where the client's floating pill sat
+on the session title. Reported from a phone with a second screenshot: *"в тма почему
+то страница отрисовывается с огромным отступом сверху"*. Telegram drew its header as
+an opaque bar and then there was a band of nothing before ours. Is the floor wrong?
+
+**Decision.** The floor is not wrong; keying it on `[data-telegram]` is. Being in
+Telegram says nothing about how Telegram is presenting us, and there are **three**
+states: chrome floated over the page (spend the room), chrome drawn as a bar above
+the webview (overlaps nothing, the honest inset is 0), and a client too old to say
+which. So the number is asked for — `web_app_request_safe_area` and
+`web_app_request_content_safe_area`, answered as events, written onto the root as
+`--tg-chrome-top` / `--tg-chrome-bottom`.
+
+⚠ **`env()` reads 0 inside a mini-app webview whatever the device** (Telegram-iOS
+#1377, open), so the `max()` had exactly one live term and it was the literal. That
+is the sentence that stops the next reader deleting `--tg-chrome-top` as redundant,
+and it is why the page cannot see the notch either.
+
+**3.25rem is now the fallback's value rather than a floor under the answer**, which
+is what bounds the change: a client too old to be asked keeps precisely the header
+it had. `0.5rem` leads the `max()` so an answer of `0` falls back to the ordinary
+`.pt-safe` floor rather than to nothing.
+
+**The two numbers are added, and that is the one thing here read from documents
+rather than measured.** `safeAreaInset` is the space to avoid at the top of the
+*screen*; `contentSafeAreaInset` the space to avoid at the top of the *content
+area*, i.e. of what the first leaves. Nested, therefore additive — and Telegram's
+SDK writes four CSS properties per object and combines nothing, so every page doing
+this adds them. **It is the direction to be wrong in**: over-adding costs a band of
+empty space, while taking the larger of the two would put the header back under the
+pill, which is the failure Q3.443 was written to fix. One screenshot in fullscreen
+mode settles it; in the ordinary presentation both are 0, which is the reported case.
+
+**Q3.443's rule survives verbatim at the line it was about.** That line is still a
+`max()` and still never an addition to `env()`. The one addition is between
+Telegram's own two numbers, in `telegramInsets`, where both are in scope and neither
+is a literal.
+
+**The bottom edge had the same defect and nobody reported it**, because nothing under
+the approve buttons *looks* wrong — `.pb-safe` resolved to its own 0.75rem floor
+inside Telegram, i.e. 12px where the home indicator wanted 34, which is exactly what
+`viewport-fit=cover` was supposed to buy. Fixed symmetrically, with a `0px` fallback
+so a client that cannot answer keeps today's screen.
+
+⚠ **Neither may ever be written as a Tailwind `pt-*`/`pb-*` utility beside these
+classes.** `.pt-safe`/`.pb-safe` are unlayered while Tailwind emits utilities inside
+`@layer utilities`, and an unlayered rule beats a layered one regardless of
+specificity — `Composer.tsx` records the same trap and names the casualties.
+
+**And `telegram.ts` got a rule file.** It was globbed by none, so the knowledge above
+arrived in no session that opened it, which is how two of these shipped twice.
+`telegram-mini-app.md` holds it; `web-shell.md`, at 25 characters of headroom, keeps
+one sentence and a pointer.
+
+**Status.** Active
+
 
 ## Deployment, packaging and code layout
 

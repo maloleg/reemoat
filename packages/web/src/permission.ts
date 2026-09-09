@@ -970,11 +970,29 @@ export function permissionButtons(options: readonly PermissionOptionSummary[]): 
  * single shape here went stale silently — see {@link PLAN_SHAPES} for what that
  * cost. Adding a measured request is an entry; nothing about the gate moves.
  *
- * **Saying what to change is not one of these buttons.** It is the message box,
- * which takes over while a plan is on screen: its placeholder says so, Stop
- * becomes Send, and a message written there stops the turn and goes. A fourth
- * button that opened a second text field two inches above the one this app
- * already has was built here and taken back out — see Q3.454.
+ * **Saying what to change is not one of these buttons, and that is now the whole
+ * of how a plan is declined.** It is the message box, which takes over while a
+ * plan is on screen: its placeholder says so, Stop becomes Send, and a message
+ * written there stops the turn and goes. A fourth button that opened a second
+ * text field two inches above the one this app already has was built here and
+ * taken back out — see Q3.454.
+ *
+ * ⚠ **No refusal is drawn, and no `allow_once` either.** Every `order` below is
+ * two buttons: the elevated grant, and the same grant with the context cleared.
+ * Reported from a phone against the four-button footer — the row wrapped, and
+ * four buttons of ours in the place where the plan itself was supposed to be
+ * readable is the same defect `PLAN_SHAPES` was written to fix, arrived at from
+ * the other side. What is *given up* is stated rather than assumed: "keep
+ * planning" as a button, and "yes, but ask me about every edit".
+ *
+ * **Neither is given up as a capability, which is the only reason this is
+ * survivable.** Declining has two routes and both are on screen: the ✕ in the
+ * header settles the request `cancelled`, and the message box refuses it *with a
+ * reason*, which is the one somebody actually wants — a plan is declined because
+ * of something in it. And per-edit approval is a session mode, not a fork in this
+ * card: the agent republishes it as an `agent_config` control, so the composer's
+ * own strip sets it back afterwards. What the card no longer does is ask a
+ * question with four answers where the document being decided on had no room.
  *
  * **The primary is the clear-context grant, and that reverses what the filled
  * button means here** — `permissionButtons` gives `bg-fg` to `allow_once` precisely
@@ -989,6 +1007,16 @@ export interface PlanControl {
   option: PermissionOptionSummary;
   /** Ours — see {@link PLAN_SHAPES}. */
   label: string;
+  /**
+   * The left group, which is `permissionButtons`' refusals-left rule.
+   *
+   * ⚠ **False for every control every shape draws today, and computed anyway.**
+   * No `order` below carries a `reject_once` any more, so this is a rule with
+   * nothing currently under it — kept as `kind.startsWith("reject")` rather than
+   * dropped to `false`, because the alternative is a measured shape that does
+   * carry a refusal one day landing it in the approvals group, on the right, next
+   * to the filled primary. A rule that costs one comparison is cheaper than that.
+   */
   leading: boolean;
   primary: boolean;
 }
@@ -1030,16 +1058,24 @@ interface PlanShape {
  * `plan` argument is a non-empty string, which is exactly when this function runs
  * at all, so all three are four options rather than sometimes three.
  *
- * **Nothing is dropped from a 0.73.0 request**, which retires half of what Q3.453
- * had to argue: there is no third `allow_always` to leave out, and `default` — "yes,
- * but keep asking me about every edit" — is on the card. The 0.63.0 entry below
- * still drops `bypassPermissions` and `default`, and the paragraph justifying that
- * stays with it.
+ * **Every shape draws two, and it is the same two.** The elevated grant the adapter
+ * picked, then that grant with the context cleared as the filled primary — so the
+ * card asks one question with one axis, and the buttons are two words wide on the
+ * screen that reported them. `shape` is still the *whole* request and still matched
+ * exactly; `order` is what is drawn, and the gap between them is where the dropping
+ * happens, in one place, per measured shape.
  *
- * **The order is the owner's and it is not the agent's.** The refusal leads, the
- * narrowest grant sits immediately after it, and the filled primary is the one that
- * clears the context — so the two ends of the row are the two things somebody
- * actually chooses between, with the middle for the case they do not.
+ * ⚠ **This drops a refusal, which the four-button arrangement did not**, and the
+ * paragraph at {@link PlanControl} carries the argument rather than this one: the ✕
+ * and the message box are both on screen, and only one of them can say *why*. It
+ * also drops `exit-plan-default` on the 0.73.0 shapes and keeps `acceptEdits` on the
+ * 0.63.0 one, which looks inconsistent and is not: 0.63.0 has no clear-context row
+ * at all, so its two are the two grants it can offer and there is nothing to pair.
+ *
+ * **The order is the owner's and it is not the agent's.** Narrower first, wider
+ * second, the filled primary on the right where a thumb is — which is the same
+ * left-to-right reading `permissionButtons` gives every other card, with the
+ * refusals group standing empty rather than removed.
  */
 const PLAN_SHAPES: readonly PlanShape[] = [
   {
@@ -1050,8 +1086,6 @@ const PLAN_SHAPES: readonly PlanShape[] = [
       ["reject", "reject_once"],
     ],
     order: [
-      ["reject", "Keep planning"],
-      ["exit-plan-default", "Approve each edit"],
       ["exit-plan-auto", "Auto mode"],
       ["exit-plan-clear-auto", "Clear + auto"],
     ],
@@ -1065,8 +1099,6 @@ const PLAN_SHAPES: readonly PlanShape[] = [
       ["reject", "reject_once"],
     ],
     order: [
-      ["reject", "Keep planning"],
-      ["exit-plan-default", "Approve each edit"],
       ["exit-plan-bypass", "Bypass permissions"],
       ["exit-plan-clear-bypass", "Clear + bypass"],
     ],
@@ -1080,8 +1112,6 @@ const PLAN_SHAPES: readonly PlanShape[] = [
       ["reject", "reject_once"],
     ],
     order: [
-      ["reject", "Keep planning"],
-      ["exit-plan-default", "Approve each edit"],
       ["exit-plan-accept-edits", "Auto-accept edits"],
       ["exit-plan-clear-accept-edits", "Clear + accept"],
     ],
@@ -1090,12 +1120,12 @@ const PLAN_SHAPES: readonly PlanShape[] = [
   /*
    * claude-agent-acp 0.63.0, kept because a machine can lag the pin.
    *
-   * This is the request Q3.453 was written against, and the two options its
-   * `order` leaves out are the ones that entry argues for dropping:
-   * `bypassPermissions`, the broadest grant on the card, and `default`, the only
-   * `allow_once` — after which the narrowest grant offered was `acceptEdits`. That
-   * trade was asked for explicitly and applies to this shape alone; 0.73.0 above
-   * draws every option it is sent.
+   * This is the request Q3.453 was written against, and its `order` now leaves out
+   * three: `bypassPermissions`, the broadest grant on the card, `default`, the only
+   * `allow_once`, and `plan`, the refusal — the first two on that entry's own
+   * argument, the third on the one every shape here now shares. What is left is the
+   * two grants this adapter can offer, narrower first, and no clear-context row to
+   * pair them with because 0.63.0 has none.
    */
   {
     shape: [
@@ -1106,7 +1136,6 @@ const PLAN_SHAPES: readonly PlanShape[] = [
       ["plan", "reject_once"],
     ],
     order: [
-      ["plan", "Reject"],
       ["acceptEdits", "Auto-accept edits"],
       ["auto", "Auto mode"],
     ],

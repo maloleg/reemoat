@@ -645,7 +645,7 @@ body {
 }
 
 /*
- * Telegram draws its own controls **over** the page, and `env()` does not know.
+ * Telegram draws its own controls over the page, and `env()` does not know.
  *
  * ⚠ Reported with a screenshot: inside the Telegram mini app the client's
  * floating pill — ✕ Close top-left, ⌄ ⋯ top-right — sat directly on the session
@@ -654,18 +654,55 @@ body {
  * something Telegram paints inside the same viewport afterwards, so on a phone
  * with no notch the inset is 0 and the header starts underneath the buttons.
  *
- * Which is why this is a floor rather than an addition. Adding to `env()` would
- * double-count on a notched device, where the pill is drawn *below* the notch and
- * the two insets describe the same strip of screen. 3.25rem clears the pill on
- * iOS and Android; the `max()` means whichever is larger wins and neither is
- * assumed to be.
+ * ⚠ **And then the same literal cost a band of empty screen, reported with a
+ * second screenshot — because there are three states here and `[data-telegram]`
+ * distinguishes none of them.**
+ *
+ *   1. Telegram floats its chrome **over** the page. The page must spend the room.
+ *      This is the state the 3.25rem was measured against.
+ *   2. Telegram draws its header as a **bar above** the webview, which is the
+ *      ordinary presentation. It overlaps nothing, the honest inset is 0, and the
+ *      literal is 52px of nothing under a bar that already reserved its own space.
+ *   3. A client too old to say which.
+ *
+ * `env()` cannot separate them and never could: **it reads 0 inside a mini-app
+ * webview whatever the device** (Telegram-iOS #1377, open), so the `max()` had
+ * exactly one live term and it was the constant. That is the sentence that stops
+ * the next reader deleting `--tg-chrome-top` as redundant with `env()`.
+ *
+ * So the number is asked for rather than assumed — `watchTelegramInsets` posts
+ * `web_app_request_safe_area` and `web_app_request_content_safe_area` and writes
+ * the answer here. **The 3.25rem is now the value of the fallback rather than a
+ * floor under the answer**, which bounds this change to clients that actually
+ * reply: state 3 keeps precisely the header it had.
+ *
+ * Still a `max()` and still never an addition **at this line** — Q3.443's rule is
+ * untouched, and the one addition is between Telegram's own two numbers, argued at
+ * `telegramInsets` where both are in scope. `0.5rem` leads it so that an answer of
+ * `0` falls back to the ordinary `.pt-safe` floor rather than to nothing: state 2
+ * still needs a title that is not against the top edge.
  *
  * Scoped to `[data-telegram]`, written by `main.tsx` only when the bridge is
  * actually injected — so an ordinary browser, and a phone home-screen shortcut,
  * keep exactly the header they had.
  */
+:root[data-telegram] {
+  --tg-chrome-top: 3.25rem;
+  /*
+   * Zero, and that is today's behaviour rather than a guess. `.pb-safe` already
+   * resolves to its own 0.75rem floor inside Telegram — `env(safe-area-inset-
+   * bottom)` being 0 there for the reason above — so a fallback of 0 changes
+   * nothing for a client that cannot answer, and a client that can finally puts
+   * the approve buttons above the home indicator, which is the thing
+   * `viewport-fit=cover` was supposed to buy and silently did not.
+   */
+  --tg-chrome-bottom: 0px;
+}
 :root[data-telegram] .pt-safe {
-  padding-top: max(3.25rem, env(safe-area-inset-top));
+  padding-top: max(0.5rem, var(--tg-chrome-top), env(safe-area-inset-top));
+}
+:root[data-telegram] .pb-safe {
+  padding-bottom: max(0.75rem, var(--tg-chrome-bottom), env(safe-area-inset-bottom));
 }
 
 /*

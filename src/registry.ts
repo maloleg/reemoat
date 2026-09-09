@@ -4858,10 +4858,25 @@ export class SessionRegistry {
      * have different remedies: one is "stop something", the other is "wait".
      */
     if (this.liveSessionCount >= this.maxLiveSessions) {
+      /*
+       * ⚠ **It says the *limit*, and it used to say it as if it were the count.**
+       * "this machine already has 6 live sessions" interpolated `maxLiveSessions`,
+       * which is only the number of live sessions at the exact boundary — and
+       * **resume is deliberately outside this bound**, so a restart that brings
+       * eight conversations back leaves a daemon truthfully holding eight while
+       * this sentence insists on six. Reported by the owner, who read it as the
+       * daemon miscounting.
+       *
+       * And it names the setting, because this refusal is the only place in the
+       * whole product the number appears: `maxLiveSessions` is on no route and in
+       * no snapshot, so somebody hitting it had nothing to search for. On a
+       * provisioned machine it was written once into `~/.reemoat/daemon.env` and
+       * never mentioned again.
+       */
       throw new SessionLimitError(
         "too_many_sessions",
         0,
-        `this machine already has ${this.maxLiveSessions} live sessions; stop one before starting another`,
+        `this machine is limited to ${this.maxLiveSessions} live sessions (REEMOAT_MAX_LIVE_SESSIONS); stop one before starting another`,
       );
     }
     const wait = this.takeCreateSlot(Date.now());

@@ -761,6 +761,37 @@ process.stdout.write("\nwho is working, and what the box says\n");
   check("the guard clause is still where this check thinks it is", guard > 0, true);
   const late = [...body.matchAll(/\buse[A-Z]\w*\(/g)].filter((m) => (m.index ?? 0) > guard);
   check("no hook runs after SessionView's guard clause", late.map((m) => m[0]), []);
+
+  /*
+   * ⚠ **`revising` may not wait for a transcript, and this is the one state where
+   * that is a dead end rather than a delay.**
+   *
+   * `openSession` returns *without* creating a transcript when the machine has no
+   * connection, which is why `PermissionCard` beside this reads `transcript?.events
+   * ?? []` and says so at length. `awaitingPlan` was reading `events !== undefined`
+   * instead: same screen, same request, opposite answer — the plan drawn, and the
+   * composer beneath it saying *answer the request above first* about the request
+   * it is the answer to.
+   *
+   * ⚠ **And the state it was switching the composer off in is the *worst* one, not
+   * a dead end** — which is the correction this comment exists to carry. With no
+   * window `planControls` answers `null` (the kind rides the `tool_call`), so the
+   * curated two-button card is not drawn at all and the fallback puts every option
+   * the agent sent on screen as rows, in its own 46-character wording. That is the
+   * layout the curation exists to avoid, and it was the one screen where the box
+   * that says *what to change* had been turned off. The plan comes off the snapshot
+   * either way; an empty window costs the markdown and never the state.
+   */
+  check(
+    "a plan is recognised before its transcript exists",
+    /permissionContext\(pendingAsk, events \?\? \[\]\)\.plan !== null/.test(sessionViewSrc),
+    true,
+  );
+  check(
+    "and the card it is drawn beside makes the same read",
+    /events=\{transcript\?\.events \?\? \[\]\}/.test(sessionViewSrc),
+    true,
+  );
 }
 
 process.stdout.write("\nwho gets the caret on a session switch\n");

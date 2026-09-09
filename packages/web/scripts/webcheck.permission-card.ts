@@ -769,6 +769,43 @@ process.stdout.write("\nthe permission card's context\n");
     check("a plan with no tool call loaded is still a plan", permissionContext(planPending(), []).plan, planned2);
 
     /*
+     * ⭐ **And it is a plan the curation cannot touch, which is a consequence
+     * nothing asserted until a comment claimed the opposite.**
+     *
+     * `planControls` demands `kind === "switch_mode"` before it consults
+     * `PLAN_SHAPES`, and the kind rides the `tool_call`. So on a cold open the
+     * card is not the two curated buttons — it is `permissionButtons` over
+     * everything the agent sent, in the agent's own wording, as **rows**. Every
+     * word of that is drawn below rather than reasoned about, because a docblock
+     * in `SessionView` had just asserted that the same state left a ✕ as the only
+     * way out, and it is the exact opposite: the refusal is on screen there and
+     * nowhere else.
+     *
+     * Which is also the honest reason `awaitingPlan` must not wait for a window.
+     * This is the *least* readable the card ever is — the layout the curation
+     * exists to avoid — and it was the one state with the message box switched
+     * off.
+     */
+    const coldOptions = [
+      { optionId: "exit-plan-clear-auto", name: "Yes, clear context (10% used) and use auto mode", kind: "allow_always" },
+      { optionId: "exit-plan-auto", name: "Yes, and use auto mode", kind: "allow_always" },
+      { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+      { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+    ];
+    const cold = permissionContext(planPending({ options: coldOptions }), []);
+    check("but the kind has not arrived with it", cold.kind, null);
+    check("so the curation declines the request entirely", planControls(cold, coldOptions as never), null);
+    check("and the fallback draws every option, refusal included", permissionButtons(coldOptions as never).order.length, 4);
+    check("as rows, in the agent's own words", permissionLayout(coldOptions as never), "rows");
+    // The same request one `tool_call` later is the curated pair. One event is the
+    // whole difference, and it is what makes the two comments above true.
+    check(
+      "and the same request with its tool call is two of ours",
+      planControls(permissionContext(planPending({ options: coldOptions }), [planCall("switch_mode")]), coldOptions as never)?.map((c) => c.label),
+      ["Auto mode", "Clear + auto"],
+    );
+
+    /*
      * **The gate, and the only reason rendering markdown here is safe.** A
      * request that authorizes a concrete action is not a document — the same test
      * `askedQuestion` makes, and the case that would otherwise hand a shell
@@ -873,13 +910,24 @@ process.stdout.write("\nthe permission card's context\n");
   {
     const context = permissionContext(planPending({ options: PLAN_OPTIONS }), [planCall("switch_mode")]);
     const controls = planControls(context, PLAN_OPTIONS as never);
-    check("a measured plan request draws three controls", controls?.length, 3);
-    check("in this order", controls?.map((c) => c.option.optionId), ["plan", "acceptEdits", "auto"]);
-    check("the refusal alone on the left", controls?.map((c) => c.leading), [true, false, false]);
+    check("a measured plan request draws two controls", controls?.length, 2);
+    check("in this order", controls?.map((c) => c.option.optionId), ["acceptEdits", "auto"]);
+    /*
+     * ⚠ **No refusal is drawn on any shape now, so the left group stands empty.**
+     * `leading` is still computed from the kind rather than hard-coded false — see
+     * `PlanControl` — and this asserts the consequence rather than the mechanism:
+     * nothing this card draws is a refusal, on the shape that used to carry one.
+     */
+    check("and none of them is a refusal", controls?.map((c) => c.leading), [false, false]);
     check(
       "and auto mode is the one filled button",
       controls?.filter((c) => c.primary).map((c) => c.option.optionId),
       ["auto"],
+    );
+    check(
+      "the refusal the agent sent is not among them",
+      controls?.some((c) => c.option.optionId === "plan"),
+      false,
     );
     /*
      * **Every control here is one of the agent's own options**, and nothing
@@ -913,7 +961,7 @@ process.stdout.write("\nthe permission card's context\n");
     /*
      * The structural gates, asked separately. The kind is demanded *here* and not
      * for the rendering because this is where the consequence is: drawing a
-     * document cannot approve anything, removing two of five options can.
+     * document cannot approve anything, removing three of five options can.
      */
     check(
       "an option set this shape on a tool call that is not switch_mode is not curated",
@@ -980,40 +1028,42 @@ process.stdout.write("\nthe permission card's context\n");
       ];
       const ctx = permissionContext(planPending({ options }), [planCall("switch_mode")]);
       const controls = planControls(ctx, options as never);
-      check(`the ${mode} plan request draws all four`, controls?.length, 4);
+      check(`the ${mode} plan request draws two`, controls?.length, 2);
       /*
-       * The order is the owner's: the refusal leads, the narrowest grant sits
-       * immediately after it, and the option that clears the context is last and
-       * filled — so the two ends of the row are the two things somebody actually
-       * chooses between.
+       * The order is the owner's: the elevated grant, then the same grant with the
+       * context cleared, filled. One axis, two buttons — reported from a phone,
+       * where four of them wrapped into the room the plan itself needed.
        */
       check(
-        `${mode}: refusal, then the narrowest grant, then the two elevations`,
+        `${mode}: the elevation, then the same elevation clearing the context`,
         controls?.map((c) => c.option.optionId),
-        ["reject", "exit-plan-default", elevateId, clearId],
+        [elevateId, clearId],
       );
       check(`${mode}: our own short words`, controls?.map((c) => c.label), [
-        "Keep planning",
-        "Approve each edit",
         elevateLabel,
         `Clear + ${clearId === "exit-plan-clear-auto" ? "auto" : clearId === "exit-plan-clear-bypass" ? "bypass" : "accept"}`,
       ]);
-      check(`${mode}: the refusal alone on the left`, controls?.map((c) => c.leading), [true, false, false, false]);
+      check(`${mode}: neither of them is a refusal`, controls?.map((c) => c.leading), [false, false]);
       check(
         `${mode}: clearing the context is the filled one`,
         controls?.filter((c) => c.primary).map((c) => c.option.optionId),
         [clearId],
       );
       /*
-       * **Nothing is dropped from a 0.73.0 request**, which retires half of what
-       * Q3.453 had to argue for the 0.63.0 shape above: there is no third
-       * `allow_always` to leave out, and `exit-plan-default` — "yes, but keep
-       * asking me about every edit" — is on the card.
+       * ⚠ **Two of the four are dropped, and this asserts *which* two.** The
+       * refusal, because the ✕ and the message box both decline and only one of
+       * them can say why; and `exit-plan-default`, because per-edit approval is a
+       * session mode the composer's strip sets back rather than a fork in this
+       * card. Asserted by name so that dropping a *third* — the elevation, say —
+       * cannot pass as "still two buttons".
        */
       check(
-        `${mode}: every option the agent sent is drawn`,
-        controls?.map((c) => c.option.optionId).sort(),
-        options.map((o) => o.optionId).sort(),
+        `${mode}: the refusal and the per-edit grant are the two left out`,
+        options
+          .map((o) => o.optionId)
+          .filter((id) => controls?.every((c) => c.option.optionId !== id) === true)
+          .sort(),
+        ["exit-plan-default", "reject"],
       );
       /*
        * And the labels are ours for the reason the card needs them to be: the
@@ -1021,7 +1071,7 @@ process.stdout.write("\nthe permission card's context\n");
        * `rows`, which is four full-width 44px rows in the space the plan wants.
        */
       check(`${mode}: the agent's own words would not have been buttons`, permissionLayout(options as never), "rows");
-      check(`${mode}: and the agent's wording is kept as the tooltip`, controls?.map((c) => c.option.name).length, 4);
+      check(`${mode}: and the agent's wording is kept as the tooltip`, controls?.map((c) => c.option.name).length, 2);
 
       // One character out of place and it is the agent's card again.
       const renamed = options.map((o) => (o.optionId === clearId ? { ...o, optionId: `${clearId}x` } : o));

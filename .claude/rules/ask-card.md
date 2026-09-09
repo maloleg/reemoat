@@ -121,10 +121,31 @@ untouched. Q3.453.
 under claude-agent-acp 0.63.0, renamed wholesale by 0.73.0, so the curation answered
 `null` on every plan request while `webcheck` stayed green over a fixture no pinned
 adapter sends, and the fallback's long labels took the card to `rows`. Four entries:
-0.73.0's three variants and 0.63.0's five. **Nothing is dropped from a 0.73.0
-request.** The order is the owner's — refusal, narrowest grant, elevation, then
-clearing the context as the filled primary — and our own labels are what keep four
-buttons in the footer. Q3.585.
+0.73.0's three variants and 0.63.0's five. Q3.585.
+
+⚠ **Every shape draws exactly two buttons, and neither is a refusal.** The elevated
+grant the adapter picked, then that grant with the context cleared as the filled
+primary — one question with one axis. Four wrapped on a 390px phone into the room
+the plan itself needed, which is the same defect `PLAN_SHAPES` was written to fix
+arrived at from the other side. **What is dropped is stated rather than implied**:
+`reject` and `exit-plan-default`, asserted by name, so that dropping a *third* one
+day cannot pass as "still two buttons". `shape` is still the whole request and still
+matched exactly; `order` is what is drawn, and the gap between them is the only
+place anything is dropped. **This reverses Q3.470's "nothing is deleted" for this
+one card** — curation on a measured shape rather than a length rule, with `null`
+still meaning the agent's own buttons. Q3.594.
+
+**Neither is given up as a capability, and that is the whole argument.** Declining
+has two routes on screen: the ✕ settles the request `cancelled`, and the message box
+declines *with a reason*, which is the one somebody actually wants — a plan is
+refused because of something in it. ⚠ **They are not the same message to the model**:
+`reject` reaches claude as a deny reading *"User chose to keep planning"*, a
+`cancelled` outcome as an aborted tool call. So the composer is the good decline and
+the ✕ is the abrupt one, and `revising` had better work — see below. Per-edit
+approval is a session mode the agent republishes as an `agent_config` control, so
+the composer's own strip sets it back after a broader grant. `leading` is still
+computed from the kind rather than dropped to `false`: no shape carries a refusal
+today, and a measured one that does must not land on the right beside the primary.
 
 **"What to change" is written in the message box, and the card has no control for
 it.** ACP has no field for text on a permission response, so a correction cannot
@@ -134,15 +155,34 @@ on screen: `revising` reaches it from `SessionView`, which is the only place the
 pending permission and the transcript are both in scope. The placeholder says *say
 what to change…*, `sendRefused` lifts, `stoppable` yields the Stop slot to Send,
 and `parked` stands down so the blur rule does not take the caret from somebody
-just invited to type. Sending **cancels the turn, then prompts** — measured: a
-refused plan does *not* end the turn, and the operator was pressing Stop by hand
-before typing. All four flags are pinned as source text; a gate left reading
+just invited to type. Sending **cancels the turn, then prompts**, because this path
+never presses reject: it sends while the permission is parked and the turn is in
+flight, and a prompt inside a turn is `409 turn_in_flight`. ⚠ The anecdote that used
+to justify it — *a refused plan does not end the turn* — was measured on 0.63.0 and
+is stale: 0.73.0 answers `reject` with `deny(…, interrupt: true)` and its own
+comment says that stops the ACP turn. The ordering survives; the reason for it
+changed under an adapter bump. All four flags are pinned as source text; a gate left reading
 `blocked || working` refuses the one send this state exists for. ⚠ **`awaitingPlan`
 is computed above `SessionView`'s guard clause and must stay there** — it holds a
 `useMemo`, and below the `if (row === undefined)` return it ran on some renders and
 not others, which is React #310 the moment a cold-opened session's row lands.
 Nothing else in this repository catches that: no eslint, `tsc` does not model hook
 order, `webcheck` has no DOM — so `webcheck` reads the file instead. Q3.454.
+
+⚠ **And it reads `transcript?.events ?? []`, exactly as the card beside it does.**
+It gated on `events !== undefined`, and `openSession` returns *without* creating a
+transcript when the machine has no connection — the cold open `PermissionCard`'s own
+comment describes. So on that path the plan was drawn and the composer under it said
+*answer the request above first* about the request it is the answer to.
+
+⚠ **And that state is the *worst* card, not a ✕-only dead end — the first version of
+this paragraph had it backwards.** `planControls` needs `kind === "switch_mode"` and
+the kind rides the `tool_call`, so with no window the curation answers `null`, the
+two curated buttons are never drawn, and the fallback puts every option the agent
+sent on screen — refusal included — as rows in its own 46-character wording. Which
+is the layout the curation exists to avoid, with the box that says *what to change*
+switched off over it. The plan comes off the snapshot; an empty window costs the
+markdown, never the state. Q3.595.
 
 **The number beside an answer is a keyboard shortcut, so it is not drawn on a
 touch device.** `pointer-coarse:hidden`, keyed on the **pointer and never on a

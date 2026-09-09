@@ -178,11 +178,9 @@ have to enter. These are the rules a change here must not break:
 - **Inside Telegram the client's own control follows the screen.** `upFrom`
   answers where up goes, and `null` at the root — which is what draws ✕ Close
   there and ‹ Back elsewhere, Telegram having **one** control. One rule for two
-  affordances, so its arrow cannot disagree with ours. `telegram.ts` is the
-  bridge: the injected transport only, no SDK (`script-src 'self'` refuses it,
-  which is also what makes owning `window.Telegram` safe), **no iframe arm** while
-  `frame-ancestors 'none'` stands, and a header inset that is a `max()` floor
-  rather than an addition to `env()`. Q3.443.
+  affordances, so its arrow cannot disagree with ours. Everything else about that
+  webview — the bridge, the launch fragment a `navigate` destroys, and where the
+  chrome actually is — is `telegram-mini-app.md`. Q3.443.
 - **There is no back button.** Every leading control goes to a fixed destination
   from the URL, never a history — `useUnder` for a ✕, `upFrom` for a ◀ — which is
   why one may be *drawn* as `ChevronLeft` without being one. None may become

@@ -358,6 +358,10 @@ const FOREIGN = new Set([
   "readStart", // Node's own `StreamBase`, in the entry about the stream window it credits
   "readStop", // likewise — the half that is wired to an event, where its pair is not
   "isTaskTool", // the adapter's function, not ours — the entry says so explicitly
+  // Also the adapter's, and cited because a plan-mode entry turned on reading it:
+  // it is what answers `reject` with `deny(…, interrupt: true)`, which is why the
+  // 0.63.0 measurement about a refused plan not ending the turn went stale.
+  "applyExitPlanModeSelection",
   "REEMOAT_AGENTS", // an env var that was proposed and never built; the entry says so
 ]);
 

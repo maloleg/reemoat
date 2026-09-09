@@ -838,6 +838,48 @@ process.stdout.write("\nwhat Telegram's own control does\n");
     setTelegramBack(() => {});
     check("an old client is asked for nothing", sent, []);
 
+    /*
+     * ⭐ **The launch parameters do not survive a navigation, and the back button
+     * has to.**
+     *
+     * `router.ts`'s `navigate` pushes a path with no fragment, which replaces the
+     * whole URL — so by the time anybody opens a conversation there is no
+     * `tgWebAppVersion` left to read. Reading it inside `setTelegramBack` therefore
+     * answered `null` everywhere but the first screen, the version gate called that
+     * "too old", and Telegram was never asked: **✕ Close at every depth**, reported
+     * from a phone. The old assertions could not see it because every one of them
+     * writes the hash immediately before the call.
+     *
+     * So this drives the real sequence — latch at launch, wipe the fragment the way
+     * a navigation does, then ask — and it is the *only* block here that calls
+     * `telegramReady`. That is why it is last: the latch is module state, and a
+     * later check reading the live fragment would be reading this one's leftovers.
+     */
+    const { telegramReady } = await import("../src/telegram.js");
+    sent.length = 0;
+    (w["location"] as Record<string, unknown>)["hash"] = "#tgWebAppVersion=8.0&tgWebAppPlatform=android";
+    telegramReady();
+    check("launch says the page is up", sent, ["web_app_ready {}"]);
+
+    sent.length = 0;
+    (w["location"] as Record<string, unknown>)["hash"] = "";
+    setTelegramBack(() => {});
+    check(
+      "and a conversation opened after the fragment is gone still asks for Back",
+      sent,
+      ['web_app_setup_back_button {"is_visible":true}'],
+    );
+    check("the live fragment now says nothing", telegramVersion(), null);
+
+    /*
+     * And the pairing survives it: hiding is still how ✕ Close comes back, which is
+     * the half a latch could plausibly have broken by making the gate sticky in
+     * only one direction.
+     */
+    sent.length = 0;
+    setTelegramBack(null);
+    check("and the list still asks for Close", sent, ['web_app_setup_back_button {"is_visible":false}']);
+
     delete w["TelegramWebviewProxy"];
     delete w["Telegram"];
     (w["location"] as Record<string, unknown>)["hash"] = "";
@@ -845,17 +887,80 @@ process.stdout.write("\nwhat Telegram's own control does\n");
   }
 
   /*
-   * The two halves that are not pure, read off disk. The inset is a **floor**
-   * rather than an addition — on a notched device `env()` and Telegram's pill
-   * describe the same strip, and adding them double-counts.
+   * ⭐ **How much room Telegram's own chrome needs, which only Telegram knows.**
+   *
+   * `env(safe-area-inset-*)` reads 0 inside a mini-app webview whatever the device
+   * (Telegram-iOS #1377), so the `max()` in `index.css` had one live term and it
+   * was a 3.25rem literal — right for the state it was measured in, where the
+   * client floats its chrome *over* the page, and 52px of empty band in the
+   * ordinary one, where the client draws a header bar above the webview and
+   * overlaps nothing. Both were reported from a phone, five weeks apart.
+   *
+   * The pure half is here; the `null` is the load-bearing part of it.
    */
+  {
+    const { telegramInsets } = await import("../src/telegram.js");
+    check("with neither answer there is no number", telegramInsets(null, null), null);
+    /*
+     * The two are **added**, and it is the one thing in this file measured from
+     * Telegram's documents rather than from a device: `safeAreaInset` is the space
+     * to avoid at the top of the *screen*, `contentSafeAreaInset` the space to
+     * avoid at the top of the *content area* — i.e. of what the first leaves. The
+     * SDK writes four properties per object and combines nothing, so every page
+     * doing this adds them. See `telegramInsets` for why over-adding is the
+     * direction to be wrong in.
+     */
+    check(
+      "the device inset and the chrome inside it are added",
+      telegramInsets({ top: 59, bottom: 34 }, { top: 46, bottom: 0 }),
+      { top: 105, bottom: 34 },
+    );
+    /*
+     * The ordinary presentation, and the case that was reported: Telegram reserves
+     * its own header above the webview, so it overlaps nothing and says so. Zero
+     * has to survive as zero all the way to the stylesheet — a `??` that read it as
+     * "unanswered" would put the 3.25rem back and this whole exercise buys nothing.
+     */
+    check("a client that overlaps nothing says so, and 0 is an answer", telegramInsets({ top: 0, bottom: 0 }, { top: 0, bottom: 0 }), { top: 0, bottom: 0 });
+    check("one answer alone is still an answer", telegramInsets({ top: 12, bottom: 0 }, null), { top: 12, bottom: 0 });
+  }
+
   const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
-  check("the Telegram header inset is a floor, not an addition", /:root\[data-telegram\] \.pt-safe \{\s*padding-top: max\(/.test(css), true);
-  check("and it is scoped to Telegram", /\.pt-safe \{\s*padding-top: max\(0\.5rem/.test(css), true);
+  /*
+   * The 3.25rem is now the **fallback's value** rather than a floor under the
+   * answer, which is what bounds the change to clients that actually reply: a
+   * client too old to be asked keeps exactly the header it had. Asserted as the
+   * custom property rather than inside the `max()`, because that is the difference.
+   */
+  check("the measured overlay clearance is the pre-8.0 fallback", /:root\[data-telegram\] \{[\s\S]{0,600}--tg-chrome-top: 3\.25rem;/.test(css), true);
+  check("and the header spends what Telegram reported", /:root\[data-telegram\] \.pt-safe \{\s*padding-top: max\(0\.5rem, var\(--tg-chrome-top\), env\(safe-area-inset-top\)\);/.test(css), true);
+  /*
+   * ⚠ **The bottom edge had the same defect and nobody reported it**, because
+   * nothing under the approve buttons *looks* wrong — it is simply 12px where the
+   * home indicator wanted 34. Same measurement, same fix, and the fallback is 0 so
+   * a client that cannot answer keeps today's screen exactly.
+   */
+  check("and the approve row spends it too", /:root\[data-telegram\] \.pb-safe \{\s*padding-bottom: max\(0\.75rem, var\(--tg-chrome-bottom\), env\(safe-area-inset-bottom\)\);/.test(css), true);
+  check("with a bottom fallback that changes nothing", /--tg-chrome-bottom: 0px;/.test(css), true);
+  // Still a `max()` at this line and still never an addition — Q3.443's rule is
+  // untouched. The one addition is between Telegram's own two numbers, above.
+  check("the ordinary floors are unscoped and unchanged", /\.pt-safe \{\s*padding-top: max\(0\.5rem, env\(safe-area-inset-top\)\);/.test(css), true);
+
   const entry = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
   // `dataset["telegram"]` is the DOM spelling of the `[data-telegram]` the CSS
   // selects on; asserting the attribute string would pass on the comment.
   check("the marker is only written when the bridge is there", /if \(inTelegram\(\)\) \{[\s\S]{0,200}dataset\["telegram"\]/.test(entry), true);
+  /*
+   * ⚠ **Order, and it is the whole of whether this works.** `watchTelegramInsets`
+   * gates on the launch version, and `telegramReady` is what latches it — asked
+   * first, the gate reads a fragment `router.ts` has not taken away *yet*, which is
+   * true today and is exactly the coincidence the back button used to rest on.
+   */
+  check(
+    "and the insets are asked for after the version is latched",
+    /telegramReady\(\);\s*watchTelegramInsets\(\);/.test(entry),
+    true,
+  );
   const bridge = readFileSync(new URL("../src/telegram.ts", import.meta.url), "utf8");
   /*
    * ⚠ The iframe transport is deliberately absent: the control plane sends
