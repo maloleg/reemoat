@@ -15,7 +15,8 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_EVENTS,
   DEFAULT_MAX_EVENT_BYTES,
-  endedWithDaemon,
+  keepsItsConversation,
+  type MachineSettingKey,
   estimateBytes,
   isExitReason,
   isPersistedGiveUp,
@@ -213,6 +214,7 @@ export interface StoreBundle {
   customAgents: SqliteCustomAgentStore;
   /** Which agents the New session strip offers here, and in what order. */
   agentStrip: SqliteAgentStripStore;
+  machineSettings: SqliteMachineSettingsStore;
   uploads: SqliteUploadStore;
   /** What is installed. See `src/plugins/store.ts` for why these are two subjects. */
   plugins: SqlitePluginRecordStore;
@@ -329,6 +331,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const systemCredentials = new SqliteSystemCredentialStore(db, options.onDegraded);
   const customAgents = new SqliteCustomAgentStore(db, options.onDegraded);
   const agentStrip = new SqliteAgentStripStore(db);
+  const machineSettings = new SqliteMachineSettingsStore(db);
   const uploads = new SqliteUploadStore(db);
   const plugins = new SqlitePluginRecordStore(db, options.onDegraded);
   const pluginData = new SqlitePluginDataStore(db);
@@ -342,6 +345,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     systemCredentials,
     customAgents,
     agentStrip,
+    machineSettings,
     uploads,
     plugins,
     pluginData,
@@ -1238,9 +1242,11 @@ export class SqliteSessionStore implements SessionStore {
    *
    *   1. **Only an inactive session is ever deleted, by either rule.** A row is
    *      *active* — and nothing here touches it, at any age, under any cap —
-   *      when it is live (no `exit_json`), when its exit `endedWithDaemon` (the
-   *      daemon's own promise to bring it back: a machine put down for a week
-   *      must come back holding its conversations), or when its exit cannot be
+   *      when it is live (no `exit_json`), when its exit `keepsItsConversation`
+   *      — the daemon's own promise to bring it back (a machine put down for a
+   *      week must come back holding its conversations), or an agent it released
+   *      for being idle, which is a conversation somebody is expected to return
+   *      to — or when its exit cannot be
    *      read — not JSON, not an object, or a `reason` this build cannot name
    *      (`isExitReason`) — because a deletion may not be decided from a value
    *      it cannot read. **Unless the daemon has given it up**: a row whose
@@ -1869,9 +1875,19 @@ function readExitReason(exitJson: unknown): ExitReason | null {
  * `GET /sessions/:id/events` still serves them, and they go with the row as
  * every inactive row's log does.
  *
- * Otherwise true for one whose exit `endedWithDaemon` — the daemon's own
- * promise to bring it back — and for one whose exit cannot be read
- * (`readExitReason`). The one predicate for both the age sweep and the cap,
+ * Otherwise true for one whose exit `keepsItsConversation` — the daemon's own
+ * promise to bring it back, **or an agent it let go of on purpose** — and for one
+ * whose exit cannot be read (`readExitReason`).
+ *
+ * ⚠ **That predicate is one member wider than `endedWithDaemon`, and reading the
+ * narrow one here would have deleted exactly the sessions somebody is most likely
+ * to return to.** A `parked` row is a live conversation whose agent was released
+ * for being quiet, which is the *strongest* case for keeping it and reads, to a
+ * predicate that only knows the daemon's three exits, as the weakest: no promise
+ * to come back, so inactive, so ranked for the cap. That is the shape of the
+ * incident this whole function was written after — Q2.222, five conversations
+ * deleted at a restart — aimed this time at the quiet ones. `events.ts` owns both
+ * predicates for the reason the paragraph above gives about `isPersistedGiveUp`. The one predicate for both the age sweep and the cap,
  * because when the cap carried its own copy as a SQL `CASE` it ranked a reason
  * this build cannot name as inactive and cut what the sweep kept (Q2.222, the
  * verification round). Rule 1 in `prune()`'s docblock says why each of the
@@ -1882,7 +1898,7 @@ function isActiveRow(row: Record<string, unknown>): boolean {
   if (exitJson === null || exitJson === undefined) return true;
   if (isPersistedGiveUp(row["resume_gave_up"])) return false;
   const reason = readExitReason(exitJson);
-  return reason === null || endedWithDaemon({ reason });
+  return reason === null || keepsItsConversation({ reason });
 }
 
 /** `retainMs` as the prune's one line says it. */
@@ -2266,6 +2282,44 @@ function readCustomAgent(row: Record<string, unknown>): CustomAgent | null {
  * to be signed out today would rearrange somebody's screen the moment they signed
  * out, and put it somewhere else again when they signed back in.
  */
+/**
+ * The settings a person set on this machine from the settings screen.
+ *
+ * **Narrow on purpose, and the narrowness is the design.** The daemon's *config*
+ * is env only and stays so; what lives here is the class of setting whose owner is
+ * the person using the machine rather than the person deploying it. Q2.225 is the
+ * argument, and the only key today is how long a conversation may sit before its
+ * agent is shut down.
+ *
+ * Keys are enumerated in {@link MACHINE_SETTING_KEYS}: a row whose key this build
+ * cannot name is left where it is and never read, so a downgrade cannot act on a
+ * setting it does not understand — `isExitReason`'s rule on a different column.
+ * `read` therefore answers `null` for anything unknown rather than a string
+ * somebody might parse.
+ */
+export class SqliteMachineSettingsStore {
+  private readonly getStmt: StatementSync;
+  private readonly setStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.getStmt = db.prepare("SELECT value FROM machine_settings WHERE key = ?");
+    this.setStmt = db.prepare(
+      "INSERT INTO machine_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    );
+  }
+
+  /** The stored value, or `null` where nobody has set one. */
+  read(key: MachineSettingKey): string | null {
+    const row = this.getStmt.get(key);
+    return row === undefined ? null : String(row["value"]);
+  }
+
+  write(key: MachineSettingKey, value: string): void {
+    this.setStmt.run(key, value);
+  }
+
+}
+
 export class SqliteAgentStripStore {
   private readonly db: DatabaseSync;
   private readonly listStmt: StatementSync;

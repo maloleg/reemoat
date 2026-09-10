@@ -66,7 +66,13 @@ import {
   probeRequestable,
   safeRelPath,
 } from "./changes.js";
-import { estimateBytes, oldestAvailable, type StoredEvent } from "./events.js";
+import {
+  estimateBytes,
+  oldestAvailable,
+  type StoredEvent,
+  type MachineSettingKey,
+  isMachineSettingKey,
+} from "./events.js";
 import { GitError } from "./git.js";
 import {
   bearerToken,
@@ -93,6 +99,8 @@ import {
   type SessionRegistry,
   type SessionSnapshot,
   type WorktreePolicy,
+  MAX_IDLE_RELEASE_MINUTES,
+  type MachineSettingsPort,
 } from "./registry.js";
 
 /**
@@ -203,6 +211,39 @@ const MAX_MODEL_CHARS = 256;
 
 /** Ceiling on what somebody calls an agent they assembled. */
 const MAX_AGENT_NAME_CHARS = 80;
+
+/**
+ * What each machine setting will accept, and the sentence it refuses with.
+ *
+ * ⚠ **A `Record` over the key union rather than one `if` inside the loop, for the
+ * reason `MACHINE_SETTING_MEMBERS` is a `Record` and not an array.** The loop used
+ * to apply *this* setting's semantics — a whole number of minutes, `0` to
+ * {@link MAX_IDLE_RELEASE_MINUTES} — to every `MachineSettingKey` there is, and
+ * interpolate the offending key's name into a sentence about minutes. Today that
+ * is right by coincidence, the union having one member; the day a second key is
+ * added it silently inherits a range it has nothing to do with and a refusal that
+ * describes the wrong thing, and nothing catches it, because the union is closed
+ * and compile-checked while the rule beside it was neither.
+ *
+ * Written this way a key added to the union is a compile error here until its rule
+ * is written — which is the whole discipline `MACHINE_SETTING_MEMBERS` exists for,
+ * applied to the half that actually varies per key.
+ *
+ * `null` means the value is acceptable; anything else is the refusal, already
+ * worded for the caller. Indexed only with a key `isMachineSettingKey` has
+ * narrowed — that guard is an `Object.hasOwn`, so a body carrying `__proto__` or
+ * `constructor` is refused as unknown before it can reach this table and read a
+ * member off `Object.prototype`.
+ */
+const MACHINE_SETTING_RULES: Record<MachineSettingKey, (value: unknown) => string | null> = {
+  idleReleaseMinutes: (value) =>
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_IDLE_RELEASE_MINUTES
+      ? null
+      : `idleReleaseMinutes must be a whole number of minutes between 0 and ${MAX_IDLE_RELEASE_MINUTES}`,
+};
 
 /**
  * Ceiling on how many positions the agent strip may remember.
@@ -369,6 +410,16 @@ export interface ServerOptions {
    */
   systems?: SystemStores;
   /**
+   * Where this machine's own preferences live, or nothing.
+   *
+   * Absent — every offline driver that builds no store — `GET /settings` answers
+   * with what is in force, and `PATCH` refuses `503`. That asymmetry is deliberate: a person on a store-less daemon
+   * can still be *told* how long a quiet conversation keeps its agent, which is a
+   * fact about the machine either way; what they cannot do is change it, and a
+   * refusal says so where an empty form would not.
+   */
+  machineSettings?: MachineSettingsPort;
+  /**
    * Where a sessionless agent question runs, or nothing.
    *
    * Needed by `GET /agents/capabilities`, which spawns an agent to read what it
@@ -423,6 +474,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const { registry, verifier, instanceId, startedAt } = options;
   const credentials = options.credentials;
   const systems = options.systems ?? null;
+  const machineSettings = options.machineSettings ?? null;
   const asks = options.asks ?? null;
   const logins = options.logins ?? null;
   const uploads = options.uploads ?? null;
@@ -1647,6 +1699,95 @@ export function createApp(options: ServerOptions): AppBundle {
    * `shownHere` is a screen.
    * ---------------------------------------------------------------- */
 
+  /**
+   * How long a conversation may sit untouched before its agent is shut down.
+   *
+   * ⚠ **The first daemon setting with a control on a screen, and the rule it does
+   * not break is that the daemon's *config* is env only.** `REEMOAT_*` is read in
+   * `scripts/daemon.ts`, nothing in `src/` touches `process.env`, and an operator
+   * provisioning a fleet still writes an env file. What this is, is the narrower
+   * class whose owner is the person *using* the machine: their own trade between
+   * memory and a 1.3s wait, on their own machine. Q2.225.
+   *
+   * A saved value **overrides** `REEMOAT_IDLE_PARK_MINUTES`, which is therefore the
+   * default for a machine nobody has set rather than a policy the screen has to
+   * explain itself against. The answer carried a `source` for one round saying
+   * which of the two was in force; it is gone with the line it fed — see the
+   * `PATCH` below and `MachineSettingsView`.
+   */
+  app.get("/settings", read, (c) => {
+    return c.json({ settings: registry.machineSettings() });
+  });
+
+  /**
+   * Change one, or give it back.
+   *
+   * `PATCH` rather than `PUT`, and the difference from `/agent-strip` one route
+   * down is the body: that one is a whole list and replacing it wholesale is the
+   * only coherent write, while this is a table of independent settings where a
+   * client sending the ones it happens to know would silently reset the ones it
+   * does not. An older client must be able to write this without erasing a key a
+   * newer daemon has.
+   *
+   * ⚠ **There is no "give it back".** This accepted `null`, which forgot the stored
+   * value so `REEMOAT_IDLE_PARK_MINUTES` applied again — and the only thing that
+   * could express it was a line on the settings screen saying which of the two was
+   * in force, which the owner removed as noise about env files on a screen that
+   * mentions none. With no reader the branch was a capability nothing could reach.
+   * The variable is the default for a machine nobody has set; the way back to it
+   * is typing the number.
+   */
+  app.patch("/settings", write, async (c) => {
+    if (machineSettings === null) {
+      return jsonError(c, 503, "settings_unavailable", "this daemon has no durable store for settings");
+    }
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+
+    /*
+     * ⚠ **The whole body is weighed before any of it is written, and the two
+     * loops are the point rather than a tidier shape.**
+     *
+     * This was one loop that validated and wrote each key as it went, so a body
+     * whose *second* key was bad persisted the first and then answered `400` — and
+     * the early return skipped `applyMachineSettings` on the way out, so the
+     * durable table and the running daemon disagreed until the next restart. The
+     * comment below promises the exact opposite of that, and a refused request
+     * silently changing machine-wide policy at the next boot is the worst version
+     * of it: nothing on any screen would say the number had moved.
+     *
+     * Reachable today, with one key in the union, as `{idleReleaseMinutes: 5,
+     * anythingElse: 1}` — the unknown key is refused *after* the known one is
+     * written. Every refusal the drivers had was a single-key body, which is why
+     * "none of which changed what is stored" passed over it.
+     *
+     * A `PATCH` naming several settings is therefore all-or-nothing **against a
+     * refusal**, which is the only coherent reading of a route whose own docblock
+     * is written for older clients sending subsets.
+     *
+     * ⚠ **Against the store it is not, and the distinction is stated rather than
+     * implied.** `MachineSettingsPort` is two methods with no transaction seam, so
+     * a `write` that threw on the second key would still leave the first — the same
+     * drift by a different door. Unreachable while `MachineSettingKey` has one
+     * member, and the seam to close it if that changes is the port, not this loop.
+     */
+    const wanted: [MachineSettingKey, string][] = [];
+    for (const [key, value] of Object.entries(body)) {
+      if (!isMachineSettingKey(key)) {
+        return jsonError(c, 400, "unknown_setting", `this daemon has no setting called "${key}"`);
+      }
+      const refusal = MACHINE_SETTING_RULES[key](value);
+      if (refusal !== null) return jsonError(c, 400, "invalid_setting", refusal);
+      wanted.push([key, String(value)]);
+    }
+    for (const [key, value] of wanted) machineSettings.write(key, value);
+    // Applied to the running daemon before the answer, so the value the caller
+    // reads back is one that is already in force rather than one that will be at
+    // the next restart.
+    registry.applyMachineSettings();
+    return c.json({ saved: true, settings: registry.machineSettings() });
+  });
+
   app.get("/agent-strip", read, (c) => {
     if (systems === null) {
       return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
@@ -2860,7 +3001,25 @@ export function createApp(options: ServerOptions): AppBundle {
 
     if (
       managed.terminal &&
-      registry.autoResumeEnabled &&
+      /*
+       * ⚠ **`parked` is outside the auto-resume switch, and has to be.**
+       *
+       * `REEMOAT_AUTO_RESUME=0` says "do not put agents back on your own" — it is
+       * about the boot pass deciding for somebody. Parking is not a spawn the
+       * operator declined; it is one *this daemon performed*, on by default, and
+       * a message is the only documented way back. Gated together, a machine with
+       * auto-resume off parked every conversation after half an hour and then
+       * answered `409 session_terminal` to the message that was supposed to wake
+       * it — with `SessionMenu` deliberately drawing no Resume for a parked
+       * session, `sessionNotice` deliberately saying nothing, and
+       * `autoResumeEnabled` on no wire the client could read. The conversation
+       * was reachable only through `pnpm client resume`, and nothing on the phone
+       * said so.
+       *
+       * So the switch keeps its meaning for every other reason and stops
+       * deciding for the one the daemon caused itself.
+       */
+      (registry.autoResumeEnabled || managed.exit?.reason === "parked") &&
       // The same gate the boot pass uses: an agent that has told us it no longer
       // holds this conversation will say it again, and spawning one per typed
       // message to hear it is worse than answering from what we already know.

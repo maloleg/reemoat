@@ -468,6 +468,30 @@ CREATE TABLE IF NOT EXISTS custom_agents (
   model         TEXT    NOT NULL,
   created_at    INTEGER NOT NULL
 );
+-- Machine-wide preferences a person set from the settings screen.
+--
+-- A new *table*, so `schema.sql` alone is enough and `SCHEMA_VERSION` stays 6 —
+-- the reason `uploads` and `plugins` already give: a bump turns every rollback
+-- into a daemon that will not start, to buy nothing.
+--
+-- ⚠ **This is deliberately not "the daemon's config".** That is env only and
+-- stays so: `REEMOAT_*` is read in `scripts/daemon.ts`, nothing in `src/` touches
+-- `process.env`, and an operator provisioning a fleet writes an env file. What
+-- this table holds is the narrow class of settings whose *owner is the person
+-- using the machine* rather than the person deploying it — the ones with a
+-- control on a screen. `agent_strip` above is the same class and predates the
+-- table only because one preference did not need a general home.
+--
+-- Key/value rather than a column each, and the keys are enumerated in
+-- `MACHINE_SETTING_KEYS` rather than here: a row whose key this build cannot name
+-- is ignored on read and never written, which is `compatibility.md`'s rule for
+-- which way an unknown value must fail applied to a downgrade. A column per
+-- setting would make that a migration instead.
+CREATE TABLE IF NOT EXISTS machine_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 
 -- Which agents the New session strip offers on this machine, and in what order.
 --

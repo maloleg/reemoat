@@ -14,6 +14,7 @@ import { listNavKey, nextOptionIndex } from "../keys";
 import { folderLabel, shortPath } from "../paths";
 import type { OfflineReason, Reach } from "../machine";
 import {
+  isParked,
   isTerminal,
   resumeStalled,
   waitingForDaemon,
@@ -121,9 +122,9 @@ export const TAP_GROW_Y =
  *
  * It is a shared constant rather than a copy per surface because they all have to
  * be the *same* width or the card and the composer stop lining up with the text
- * they belong to — which is visible immediately and was the complaint. Seven call
- * sites: the transcript, the composer, both ask cards, and in `SessionView` a
- * load skeleton and two banners.
+ * they belong to — which is visible immediately and was the complaint. Six call
+ * sites: the transcript, the composer, the shared ask-card frame, and in
+ * `SessionView` a load skeleton and two banners.
  *
  * ⚠ **There is no breakpoint here, and this sentence used to say there was.** It
  * is a `max-w`, so it simply stops binding once the pane is narrower than the
@@ -378,6 +379,25 @@ export function statusTone(
         return "idle";
     }
   }
+  /*
+   * ⚠ **A released agent reads as `idle`, deliberately — and this line is what
+   * makes that true rather than the accident it looks like.**
+   *
+   * Without it a parked session takes the `ended` arm below, which is the one
+   * word it may not carry: nobody ended it. Nothing in the type system says so —
+   * both the `default:` above and the ternary below are total over
+   * `SessionStatus`, so a new member lands silently in whichever it reaches
+   * first, and here that is the wrong one.
+   *
+   * `idle` rather than a tone of its own, which is what this had for a draft.
+   * From the reader's side the two states are the same fact — *nothing is
+   * happening and you can type into it* — and whether a process happens to be
+   * resident is not something they can act on or should have to think about. A
+   * mark of its own turned an implementation detail into a state somebody has to
+   * interpret, and the only thing it could have explained is a 1.3s wait that the
+   * composer's own spinner already covers.
+   */
+  if (isParked(session as SessionSnapshot)) return "idle";
   if (resumeStalled(session as SessionSnapshot)) return "stalled";
   if (waitingForDaemon(session as SessionSnapshot)) return "waiting";
   return session.status === "failed" ? "failed" : "ended";
@@ -819,6 +839,14 @@ const EXIT_TEXT: Partial<Record<ExitReason, string>> = {
   start_failed: "the agent could not be started",
   start_timeout: "the agent did not start in time",
   agent_kill_failed: "the agent could not be stopped",
+  /*
+   * Unreachable from `sessionNotice`, which returns `null` for a parked session
+   * before it gets here — and kept anyway, because this map is `Partial`, so a
+   * missing entry is not a compile error but the string `ended: parked` appearing
+   * the day somebody adds a second caller. "ended" is the one word this state may
+   * not carry.
+   */
+  parked: "the agent was released after a quiet spell",
 };
 
 export function exitText(reason: ExitReason): string {
@@ -831,6 +859,23 @@ export function sessionNotice(
   machineName: string,
 ): SessionNotice | null {
   if (session.exit === null) return null;
+  /*
+   * ⚠ **A released agent says nothing at all, and the `return null` is load-bearing
+   * rather than a missing case.**
+   *
+   * Deleting this arm does not remove the notice — it moves it. Every path below
+   * falls through to the catch-all at the foot of this function, which draws
+   * `exitText(reason)`, so a parked session would announce itself in the same
+   * shape and tone as a conversation that ended. That is precisely backwards.
+   *
+   * Nothing is wrong, nothing is pending, and there is nothing to act on: the
+   * agent was released because the session was quiet, and the message box below
+   * — which is never taken away — is the whole of the remedy. This had a
+   * sentence for a draft ("the agent was released after a quiet spell…") and the
+   * sentence was the defect: it made a person read about, and decide something
+   * about, a piece of housekeeping they cannot influence and are not paying for.
+   */
+  if (isParked(session)) return null;
   if (resumeStalled(session)) {
     const error = session.resume?.error;
     const code = error?.code ?? "no_agent_session_id";

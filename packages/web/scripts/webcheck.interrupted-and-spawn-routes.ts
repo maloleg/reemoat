@@ -28,6 +28,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
     TERMINAL_STATUSES,
     countsAsLive,
     endedWithDaemon,
+    isParked,
     resumeStalled,
     showsAsEnded,
     waitingForDaemon,
@@ -46,6 +47,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
     "daemon_restarted",
     "config_changed",
     "agent_signed_out",
+    "parked",
   ] as const;
 
   /*
@@ -55,7 +57,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
    * `gapPlan` takes a `LaggedFrame["reason"]`) while the checks tie the same
    * list to the daemon's source. Neither half is worth anything alone.
    */
-  const STATUSES = ["starting", "idle", "running", "blocked", "stopping", "exited", "failed", "interrupted"] as const;
+  const STATUSES = ["starting", "idle", "running", "blocked", "stopping", "exited", "failed", "interrupted", "parked"] as const;
   const LAG_REASONS = ["evicted", "slow_consumer", "backlog"] as const;
 
   /*
@@ -108,10 +110,35 @@ process.stdout.write("\nsessions the daemon interrupted\n");
      * silently treated as ended. So the partition is asserted rather than assumed,
      * in both directions.
      */
+    /*
+     * ⚠ **Three parts now, not two, and `parked` is deliberately in neither
+     * list.**
+     *
+     * It is not a `DAEMON_EXIT_REASON` — that list drives the daemon's own boot
+     * pass, and un-parking everything at a restart would put back exactly the
+     * memory parking released. It is not `FINAL` either — it is the one reason
+     * that *is* coming back. So it is its own part, and the partition is asserted
+     * over all three rather than relaxed into "these two plus whatever".
+     *
+     * The consequence is worth stating because it is not obvious and it is load
+     * bearing: `endedWithDaemon` is `!FINAL.includes(...)`, so it answers **true**
+     * for `parked`. That is the fail-safe direction for an *unknown* reason and
+     * the wrong answer for this known one, which is why `wire.ts` tests
+     * `isParked` first in every function that would otherwise ask. Both halves are
+     * pinned below.
+     */
     check(
-      "the two exit-reason lists partition the daemon's union",
-      [...DAEMON_EXIT_REASONS, ...FINAL_EXIT_REASONS].sort(),
+      "the exit-reason lists partition the daemon's union, with parked its own part",
+      [...DAEMON_EXIT_REASONS, ...FINAL_EXIT_REASONS, "parked"].sort(),
       [...members].sort(),
+    );
+    check(
+      "parked is in neither list: not resumed at boot, and not final",
+      [
+        DAEMON_EXIT_REASONS.includes("parked" as ExitReason),
+        FINAL_EXIT_REASONS.includes("parked" as ExitReason),
+      ],
+      [false, false],
     );
     check(
       "and nothing is in both",
@@ -226,13 +253,35 @@ process.stdout.write("\nsessions the daemon interrupted\n");
    * added to the union would otherwise be classified `false` in silence. This
    * fails the driver instead.
    */
+  const sessionOf = (over: Record<string, unknown>) => ({ ...snapshot, ...over }) as never;
+
   check(
     "every reason in the union is accounted for",
     REASONS.filter((reason) => endedWithDaemon({ reason })).sort(),
-    [...DAEMON_EXIT_REASONS].sort(),
+    [...DAEMON_EXIT_REASONS, "parked"].sort(),
+  );
+  /*
+   * ⚠ **And the one that says the line above is not a mistake.**
+   *
+   * `endedWithDaemon` answers `true` for `parked` because it asks "not final",
+   * and that is the *wrong* answer read literally — the daemon does not bring a
+   * parked session back on its own. The predicate is left alone anyway, because
+   * making it exact would mean naming known reasons and would cost the fail-safe
+   * that keeps an unknown one from taking the composer away. What makes it
+   * harmless is ordering: `isParked` is tested first everywhere the answer would
+   * matter. So both facts are pinned, together, or the next person deletes the
+   * ordering to "simplify" and gets "reconnecting after a restart" on a machine
+   * that is doing nothing.
+   */
+  check(
+    "endedWithDaemon is not exact about parked, and isParked is what runs first",
+    [
+      endedWithDaemon({ reason: "parked" as ExitReason }),
+      waitingForDaemon(sessionOf({ status: "parked", exit: { reason: "parked" }, agentSessionId: "a_1" })),
+    ],
+    [true, false],
   );
 
-  const sessionOf = (over: Record<string, unknown>) => ({ ...snapshot, ...over }) as never;
 
   /*
    * The partition. Three predicates decide what a terminal row looks like, and
@@ -243,7 +292,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
    * and in Ended, which no individual case would catch.
    */
   const matrix: Record<string, unknown>[] = [];
-  for (const status of ["running", "idle", "exited", "failed", "interrupted"]) {
+  for (const status of ["running", "idle", "exited", "failed", "interrupted", "parked"]) {
     for (const reason of REASONS) {
       for (const agentSessionId of ["a_1", null]) {
         for (const state of [undefined, "waiting", "running", "failed"]) {
@@ -259,7 +308,12 @@ process.stdout.write("\nsessions the daemon interrupted\n");
   }
   const broken = matrix.filter((over) => {
     const session = sessionOf(over);
-    const hits = [waitingForDaemon(session), resumeStalled(session), showsAsEnded(session)].filter(Boolean).length;
+    const hits = [
+      isParked(session),
+      waitingForDaemon(session),
+      resumeStalled(session),
+      showsAsEnded(session),
+    ].filter(Boolean).length;
     return (over["status"] === "running" || over["status"] === "idle") ? hits !== 0 : hits !== 1;
   });
   check("exactly one presentation holds for every terminal session", broken.length, 0);
@@ -338,7 +392,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
 process.stdout.write("\nwhat an interrupted session says\n");
 {
   const { resumeFailureText, resumeRetryable, sessionNotice, statusTone } = await import("../src/ui/bits.js");
-  const { resumeStalled, waitingForDaemon } = await import("../src/wire.js");
+  const { countsAsLive, resumeStalled, showsAsEnded, waitingForDaemon } = await import("../src/wire.js");
   const sessionOf = (over: Record<string, unknown>) => ({ ...snapshot, ...over }) as never;
 
   const stopped = sessionOf({
@@ -528,6 +582,83 @@ process.stdout.write("\nwhat an interrupted session says\n");
     statusTone(sessionOf({ status: "blocked", exit: null })),
   ], ["running", "blocked"]);
   check("and a starting one has its own, which is neither", statusTone(sessionOf({ status: "starting", exit: null })), "starting");
+
+  /*
+   * A released agent is drawn as an ordinary quiet session, and the three
+   * assertions below are one decision read from three sides.
+   *
+   * ⚠ **`idle` is the *chosen* answer, not the leftover one**, and the pins are
+   * written so that both ways of getting it wrong are red. Fall through to the
+   * terminal arm and it reads `ended` — the one word it may not carry, since
+   * nobody ended it. Give it a mark of its own — which it had for a draft — and an
+   * implementation detail becomes a state somebody has to interpret, explaining
+   * only a 1.3s wait the composer's spinner already covers. So: equal to what an
+   * ordinary idle session draws, and not equal to `ended` or `waiting`.
+   */
+  const parked = sessionOf({ status: "parked", exit: { reason: "parked" }, agentSessionId: "a_1" });
+  const plainIdle = sessionOf({ status: "idle", exit: null });
+  check("a released agent is drawn exactly as a quiet one", statusTone(parked), statusTone(plainIdle));
+  check(
+    "and never as ended, which is what somebody deciding looks like",
+    [statusTone(parked) === "ended", statusTone(parked) === "waiting"],
+    [false, false],
+  );
+  /*
+   * ⚠ **And it says nothing.** Removing the notice does not remove it — every
+   * path in `sessionNotice` falls through to a catch-all that draws
+   * `exitText(reason)`, so without an explicit `return null` a parked session
+   * announces itself in the shape of a conversation that ended. Asserted as an
+   * absence beside a live session's, which is the only comparison that says
+   * "the same amount of nothing".
+   */
+  check(
+    "and says nothing at all, exactly as a live session does",
+    [sessionNotice(parked, "claude", "box"), sessionNotice(plainIdle, "claude", "box")],
+    [null, null],
+  );
+  /*
+   * What is *not* the same as idle, and must not be: nothing is running on this
+   * machine, so it may not inflate a count drawn beside a green dot — and nobody
+   * ended it, so it is not filed under Ended either. The dot answers "what is this
+   * conversation doing"; the count answers "what is this machine doing". Two
+   * questions, and parking is the case that separates them.
+   */
+  check(
+    "it is not live, and not ended",
+    [countsAsLive(parked), showsAsEnded(parked)],
+    [false, false],
+  );
+  /*
+   * ⚠ **A released conversation and one somebody stopped are never the same thing
+   * to a reader, and this is the pin that says so.**
+   *
+   * The requirement is the brief's first: nobody stopped a parked session, so it
+   * may not read as stopped. What carries it is not the mark — `idle` and `ended`
+   * share a dot, and always did — but `showsAsEnded`, which decides the bucket in
+   * `sessionLists` *and* the Active/Ended filter in the browser, whose default is
+   * `active`. So in the ordinary view a released session is present and a stopped
+   * one is not, and the two never appear on one screen unless somebody asks for
+   * `all`.
+   *
+   * Asserted as a difference rather than as two separate facts: either value alone
+   * would stay green if both moved together, which is exactly how a bucket rule
+   * collapses.
+   */
+  const stoppedByHand = sessionOf({
+    status: "exited",
+    exit: { reason: "stopped", detail: null, agentConfirmedDead: true },
+    agentSessionId: "a_1",
+  });
+  check(
+    "a released session and a stopped one are filed apart",
+    showsAsEnded(parked) === showsAsEnded(stoppedByHand),
+    false,
+  );
+  check(
+    "and only one of them says somebody ended it",
+    [sessionNotice(parked, "claude", "box"), sessionNotice(stoppedByHand, "claude", "box")?.text],
+    [null, "you stopped this conversation"],
+  );
 
   /*
    * The loud blink is spent exactly once, on work actually happening.

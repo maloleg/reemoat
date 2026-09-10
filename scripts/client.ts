@@ -787,10 +787,34 @@ async function attach(sessionId: string, options: AttachOptions): Promise<void> 
    * before we attached is only ever visible in the hello frame.
    */
   const reportIfEnded = (session: SessionSnapshot): boolean => {
-    if (session.status !== "exited" && session.status !== "failed" && session.status !== "interrupted") {
+    if (
+      session.status !== "exited" &&
+      session.status !== "failed" &&
+      session.status !== "interrupted" &&
+      session.status !== "parked"
+    ) {
       return false;
     }
     if (stop) return false;
+
+    /*
+     * A parked session is one the daemon let go of for being quiet, and this
+     * client is the reason it happened: an attach that sits watching sends
+     * nothing, so `lastActivityAt` stops moving and the sweep takes it.
+     *
+     * ⚠ **Stays attached, and it is the one case where staying is not enough on
+     * its own.** Nothing is coming to reconnect this — `autoResumable` answers
+     * `parked` only on a prompt, by design — so a client that merely waited, the
+     * way it waits for a restart above, would wait for ever with a hopeful
+     * sentence on screen. So it says what actually brings it back, and keeps the
+     * socket, because the next `pnpm client prompt` on this session resumes it and
+     * the transcript then carries on here without a re-attach.
+     */
+    if (session.exit?.reason === "parked") {
+      warn("\n── the agent was released after a quiet spell; the conversation is intact");
+      warn(`   send a message and it comes back:  pnpm client prompt ${session.id} "…"   (^C to stop waiting)`);
+      return false;
+    }
 
     /*
      * A session the daemon ended is one it is bringing back, so **stay

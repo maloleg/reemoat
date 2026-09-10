@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 917 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 919 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -74,7 +74,10 @@ pnpm authcheck                       # token verification and enrollment
 pnpm daemoncheck                     # the daemon's HTTP surface and durable state: routes,
                                      #   the v6 migration, the login pty, the WS, subagent lineage,
                                      #   permissions, stopping a turn, the SQLite log, changes/diff,
-                                     #   uploads — and the bounds an agent can push against,
+                                     #   uploads, and letting an idle agent go — the refusals one
+                                     #   at a time, that a released session reads as neither
+                                     #   stopped nor interrupted, and the sweep on a fake clock —
+                                     #   and the bounds an agent can push against,
                                      #   all of them refusals now: a permission's title and
                                      #   options weighed as one 8 KiB thing rather than clipped,
                                      #   a form's prose carried whole against one 32 KiB

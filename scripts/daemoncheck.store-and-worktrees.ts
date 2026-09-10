@@ -608,6 +608,22 @@ process.stdout.write("\nthe database, across a restart\n");
       daemon_shutdown: "kept",
       daemon_restarted: "kept",
       config_changed: "kept",
+      /*
+       * ⚠ **Kept, and it is the reason this table is a `Record` rather than a
+       * list.** `parked` is the daemon letting an idle agent go while keeping the
+       * conversation, so the row is one somebody is expected to come back to —
+       * the strongest case there is for keeping it. But it is deliberately *not*
+       * in `DAEMON_EXIT_REASONS` (the boot pass must not un-park), and
+       * `isActiveRow` read that narrow predicate: so on the day the reason was
+       * added, every parked session became inactive, swept by age and ranked
+       * under the cap. Q2.222's incident, re-aimed at the quiet sessions.
+       *
+       * Nothing else would have caught it. `isActiveRow` has no `switch` to go
+       * non-exhaustive and the prune has no other assertion about a reason it has
+       * never seen; this line is the whole net, and it was red before
+       * `keepsItsConversation` existed.
+       */
+      parked: "kept",
     };
     const reasons = Object.keys(byReason) as ExitReason[];
     for (const reason of reasons) seed(row(`s_b_${reason}`, reason), stale);

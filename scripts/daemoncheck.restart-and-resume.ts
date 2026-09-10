@@ -9,7 +9,8 @@ import {
   type SessionExit,
   type SessionStore,
 } from "../src/events.js";
-import { SessionRegistry, autoResumable, resumeBackoffMs, SessionLimitError } from "../src/registry.js";
+import { SessionRegistry, autoResumable, resumeBackoffMs, MAX_IDLE_RELEASE_MINUTES, SessionLimitError } from "../src/registry.js";
+import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
@@ -93,6 +94,20 @@ process.stdout.write("\nwhich sessions the daemon brings back\n");
    */
   check("a signed-out conversation waits to be asked too", [boot("agent_signed_out"), typed("agent_signed_out")], [false, true]);
   // No conversation to return to means nothing to return to it with, whatever
+  /*
+   * ⚠ **Parked splits the other way from everything above it: `false` at boot is
+   * the load-bearing half.**
+   *
+   * Every other reversal in this table is about a prompt being allowed to revive
+   * something. Here the prompt half is obvious — it is the *only* way back, since
+   * no client draws a Resume control for a parked session — and the boot half is
+   * the one that matters: a boot pass that un-parked everything would hand back
+   * all the memory parking released, at the worst possible moment, all at once.
+   * Both are pinned so neither can be "simplified" into the `daemon_shutdown` row.
+   */
+  check("a released agent is not brought back by a boot pass", boot("parked"), false);
+  check("and comes back when somebody types", typed("parked"), true);
+
   // the reason says.
   check(
     "and nothing resumes without an agent session id",
@@ -125,6 +140,22 @@ process.stdout.write("\nwhich sessions the daemon brings back\n");
   check("a stop reads as exited", statusOf("stopped"), "exited");
   check("an agent quitting reads as exited", statusOf("agent_exited"), "exited");
   check("a failed start reads as failed", [statusOf("start_failed"), statusOf("start_timeout")], ["failed", "failed"]);
+  /*
+   * ⚠ **The pin this whole feature turns on, and the only thing standing between
+   * a parked session and the word "exited".**
+   *
+   * `ManagedSession.status` reads `endedWithDaemon` first and then falls through
+   * a `switch` whose `default:` answers `exited`. `parked` is deliberately not a
+   * daemon exit reason — the boot pass must not un-park anything — so without its
+   * own arm it lands in that `default` and every quiet conversation on the machine
+   * reports the same value as one somebody pressed Stop on. It compiles clean:
+   * unlike `autoResumable` one section up, this switch has a default, so the
+   * compiler has nothing to say. Asserted against `exited` explicitly as well as
+   * for `parked`, because the failure is a *collapse* of two states into one and
+   * an equality alone would still pass if `exited` were what both returned.
+   */
+  check("a released agent reads as parked", statusOf("parked"), "parked");
+  check("and not as exited, which is what nobody deciding looks like", statusOf("parked") === statusOf("stopped"), false);
 
   // Full jitter — drawn from `[0, capped)` — and not the ±20% band the relay
   // uses. A boot pass retries N sessions whose attempts began together, so a
@@ -168,6 +199,8 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * has.
      */
     disposed: () => number;
+    /** What `session/set_config_option` was actually asked for, in order. */
+    configSets: () => { id: string; value: unknown }[];
   }
 
   /**
@@ -189,6 +222,26 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      */
     hatesFileIo?: boolean;
     stallMs?: number;
+    /**
+     * Take a prompt and never answer it, so the turn stays open.
+     *
+     * The one state the parking rules exist to protect: an agent working is an
+     * agent that must not notice the client left. Nothing else in this file needs
+     * a turn that outlives the call that started it, which is why the option is
+     * here rather than in the shared fixtures.
+     */
+    stallPrompt?: boolean;
+    /**
+     * Publish one `select` option from `session/new` and `session/resume`, and
+     * accept `session/set_config_option` on it.
+     *
+     * The only rig here that answers *anything* about configuration, because it is
+     * the only section that needs to: parking keeps a session's controls live and
+     * defers the tap, so both halves — what a released session still offers, and
+     * what a returning agent is sent — are unobservable without an agent that has
+     * an option to offer in the first place.
+     */
+    config?: boolean;
   }): Rig => {
     let launched = 0;
     let opened = 0;
@@ -198,6 +251,28 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     let declaredFileIo = false;
     const fileIoAtResume: boolean[] = [];
     const resumes: { sessionId: string; cwd: string; mcpServers: unknown }[] = [];
+    const configSets: { id: string; value: unknown }[] = [];
+    /*
+     * ACP's wire shape — `type`/`currentValue`/`options` — and **not** this
+     * daemon's own `kind`/`value`/`choices`. Written the internal way first, which
+     * is why this comment exists: `toConfigOptions` reads `option.type`, so the
+     * parsed option had `kind: undefined` and no choices, both validation guards
+     * were skipped, and a model no agent offers was accepted and then sent. The
+     * driver caught it; nothing else would have.
+     */
+    const modelOption = {
+      id: "model",
+      name: "Model",
+      description: null,
+      category: "model",
+      type: "select",
+      currentValue: "opus",
+      options: [
+        { value: "opus", name: "Opus" },
+        { value: "sonnet", name: "Sonnet" },
+      ],
+    };
+    const withValue = (value: unknown) => ({ ...modelOption, currentValue: value });
 
     class ResumeRig extends LocalRuntime {
       override describe(agent: AgentId): AgentLaunchConfig {
@@ -242,8 +317,28 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
               // through `session/new` rather than `session/resume`.
               case acp.methods.agent.session.new:
                 opened += 1;
-                send({ jsonrpc: "2.0", id, result: { sessionId: `conv_${opened}` } });
+                send({
+                  jsonrpc: "2.0",
+                  id,
+                  result: {
+                    sessionId: `conv_${opened}`,
+                    ...(options.config === true ? { configOptions: [modelOption] } : {}),
+                  },
+                });
                 break;
+              case acp.methods.agent.session.setConfigOption: {
+                const params = message["params"] as Record<string, any>;
+                configSets.push({ id: String(params["configId"]), value: params["value"] });
+                // Answered with the whole list, the way both adapters do, so the
+                // daemon's own listener folds the new value in rather than the
+                // driver asserting against a state nothing published.
+                send({
+                  jsonrpc: "2.0",
+                  id,
+                  result: { configOptions: [withValue(params["value"])] },
+                });
+                break;
+              }
               case acp.methods.agent.session.resume: {
                 const params = message["params"] as Record<string, any>;
                 fileIoAtResume.push(declaredFileIo);
@@ -271,12 +366,17 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                   } else if (options.failResume === true) {
                     send({ jsonrpc: "2.0", id, error: { code: -32000, message: "no such conversation" } });
                   } else {
-                    send({ jsonrpc: "2.0", id, result: {} });
+                    send({
+                      jsonrpc: "2.0",
+                      id,
+                      result: options.config === true ? { configOptions: [modelOption] } : {},
+                    });
                   }
                 }, options.stallMs ?? 15);
                 break;
               }
               case acp.methods.agent.session.prompt:
+                if (options.stallPrompt === true) break;
                 send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
                 break;
               default:
@@ -309,6 +409,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       fileIoAtResume: () => fileIoAtResume,
       peak: () => peak,
       disposed: () => ended,
+      configSets: () => configSets,
     };
   };
 
@@ -529,7 +630,48 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      */
     const gone = join(users, "u_alice", "no_such_dir_at_all");
     own.setSessionLimits({ live: 1 });
-    check("a daemon at its live ceiling refuses before it touches the path", await refusal(gone), "too_many_sessions");
+
+    /*
+     * ⚠ **At the ceiling with something idle, the slot is *taken* rather than the
+     * request refused — and the old assertion here read `too_many_sessions`.**
+     *
+     * `s_live` is idle, so `create` releases its agent and proceeds; the request
+     * then dies on the path, which is what says it got past the ceiling. That is
+     * the whole change: the ceiling used to refuse on sight and tell a person to
+     * *stop* a conversation — destructive, and their job — while the daemon was
+     * holding an agent doing nothing that it could release losslessly. The
+     * conversation is untouched, and the `parked` reason below is what says the
+     * slot came from a release rather than from something ending.
+     */
+    check("at the ceiling, a create takes a quiet session's slot", await refusal(gone), "PathError");
+    check("and takes it losslessly, without ending anything", [own.get("s_live")?.status, own.get("s_live")?.exit?.reason], ["parked", "parked"]);
+    check("so the machine is still inside its ceiling", own.liveSessionCount, 0);
+
+    /*
+     * And the half that keeps the ceiling a ceiling: with nothing releasable it
+     * still refuses, before it touches the filesystem.
+     *
+     * `s_busy` is resumed and then given a prompt this rig never answers, so its
+     * status is `running` and `parkCandidates` cannot take it. **The ordering is
+     * the assertion**: the cwd does not exist, so `resolveCwd` would throw
+     * `PathError` and must never get the chance — a refusal that reaches the
+     * filesystem first spends a bounded probe and a libuv threadpool slot per
+     * request, on the one path a caller can aim at a stalled network mount.
+     */
+    const busyStore = storeOf([interruptedRow("s_busy_cap", "daemon_restarted", "a_busy_cap")]);
+    const busyRig = rigWith({ resume: true, stallPrompt: true });
+    const busy = new SessionRegistry(new MemoryEventStore(), busyStore, undefined, busyRig.runtime);
+    busy.restore({ reapOrphans: false });
+    await busy.autoResume({ ...options, concurrency: 1 });
+    busy.get("s_busy_cap")?.prompt("keep working");
+    busy.setSessionLimits({ live: 1 });
+    check("the one live session is working", busy.get("s_busy_cap")?.status, "running");
+    const refusedBusy = await busy
+      .create({ agent: "kimi", cwd: gone })
+      .then(() => "created", (error: unknown) => (error instanceof SessionLimitError ? error.reason : (error as Error).name));
+    check("with nothing to take, the ceiling still refuses before it touches the path", refusedBusy, "too_many_sessions");
+    check("and the working session was not touched", busy.get("s_busy_cap")?.status, "running");
+    await busy.shutdown();
 
     /*
      * Raising it lets the same request through to the ordinary failure, which is
@@ -538,6 +680,33 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      */
     own.setSessionLimits({ live: 8 });
     check("and with room it reaches the path check as before", await refusal(gone), "PathError");
+
+    /*
+     * ⚠ **Releasing switched off must not become "cannot start anything".**
+     *
+     * `releaseOneSlot` weighed `effectiveIdleParkMs` *before* it asked whether
+     * there was any room, so a machine with `REEMOAT_IDLE_PARK_MINUTES=0` — or
+     * `idleReleaseMinutes: 0` saved from the settings screen — refused every
+     * create at zero live sessions out of eight, under a sentence claiming every
+     * one of them was busy. No case combined the off switch with a create, which
+     * is the only reason it was not caught; both halves are pinned here now.
+     */
+    own.setSessionLimits({ live: 8, idleParkMs: 0 });
+    check("a machine that never releases still starts sessions", await refusal(gone), "PathError");
+    check("and says so about itself", own.idleParkEnabled, false);
+    check("and its sweep really does release nothing", await own.parkIdleSessions(now + 365 * 24 * 60 * 60_000), []);
+
+    /*
+     * And the refusal the off switch *is* for: at the ceiling, with an idle agent
+     * that could be taken, on a machine whose owner said never take one. That is
+     * the eviction being declined rather than the room check being skipped.
+     */
+    await own.get("s_live")?.resume();
+    check("with a quiet agent back in front of that conversation", own.get("s_live")?.status, "idle");
+    own.setSessionLimits({ live: 1, idleParkMs: 0 });
+    check("but at the ceiling it declines to take one anyway", await refusal(gone), "too_many_sessions");
+    check("and the quiet session it would have taken is untouched", own.get("s_live")?.status, "idle");
+    own.setSessionLimits({ live: 8, idleParkMs: 45 * 60_000 });
 
     /*
      * The other half, and it is needed: stopping a session makes it non-live, so
@@ -566,6 +735,705 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     await new Promise((resolve) => setTimeout(resolve, 5));
     check("a slot comes back on its own", await refusal(gone), "PathError");
 
+    await own.shutdown();
+  }
+
+  /*
+   * ⚠ **A boot pass may not evict, and it was doing exactly that.**
+   *
+   * `doResume` makes room before it starts, and the whole licence for that is
+   * written about somebody typing: being told your own conversation is
+   * unavailable is worse than briefly holding one agent over a soft ceiling. A
+   * boot pass is this codebase's canonical case of *nobody* asking — the split
+   * `autoResumable` already makes between `boot` and `prompt` — and it reached
+   * the same call.
+   *
+   * The two orders are opposed, which is what turned it from waste into loss:
+   * `autoResumePass` queues most-recently-active first, `parkCandidates` takes
+   * least-recently-active. So each wake past the ceiling parked the session
+   * before it, and the pass ended holding fewer conversations than it had
+   * started — having spent a spawn, a `session/close` and a confirmed SIGKILL on
+   * each one it threw away. `.env.example` promises the opposite in as many
+   * words: a daemon coming back from a deploy restores the work it was holding.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([
+      interruptedRow("s_boot_a", "daemon_restarted", "a_boot_a"),
+      interruptedRow("s_boot_b", "daemon_restarted", "a_boot_b"),
+      interruptedRow("s_boot_c", "daemon_restarted", "a_boot_c"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    // Below the three that are coming back, so every wake after the second is
+    // one the old code would have made room for by parking an earlier one.
+    own.setSessionLimits({ live: 2, idleParkMs: 45 * 60_000 });
+    await own.autoResume({ ...options, concurrency: 1 });
+
+    const reasons = ["s_boot_a", "s_boot_b", "s_boot_c"].map((id) => own.get(id)?.exit?.reason ?? "live");
+    check("a restart parks nothing it just brought back", reasons, ["live", "live", "live"]);
+    check("and holds every conversation, over the ceiling rather than under it", own.liveSessionCount, 3);
+
+    /*
+     * And the ceiling still means something for the act it is for: a *person*
+     * asking for capacity. The same registry, one line later, takes a quiet
+     * agent — which is what says the assertion above is about the trigger rather
+     * than about eviction being broken.
+     */
+    const gone = join(users, "u_alice", "no_such_dir_at_all");
+    const outcome = await own.create({ agent: "kimi", cwd: gone }).then(
+      () => "created",
+      (error: unknown) => (error instanceof SessionLimitError ? error.reason : (error as Error).name),
+    );
+    check("but somebody asking for a new one still frees a slot", outcome, "PathError");
+    check("by taking the least recently used, which is the first one back", own.get("s_boot_a")?.exit?.reason, "parked");
+
+    await own.shutdown();
+  }
+
+  /*
+   * Letting go of an agent nobody is using, and every reason not to.
+   *
+   * **The measurements this exists for are in `IDLE_PARK_MS` and Q2.224** — a
+   * resident agent is ~397 MB and comes back in ~1.3s — and none of that is
+   * assertable here. What is assertable is the part that goes wrong silently: a
+   * session released while somebody was mid-turn, a released session that reads
+   * as stopped, and a released session the prune then deletes.
+   *
+   * Driven through the real registry rather than by calling `parkable` on a
+   * hand-built object, because the whole precondition is `status === "idle"` and
+   * `status` is *derived* — a fixture that sets it directly would be asserting
+   * against the very thing under test.
+   */
+  {
+    const rig = rigWith({ resume: true, stallPrompt: true });
+    const store = storeOf([
+      interruptedRow("s_quiet", "daemon_restarted", "a_quiet"),
+      interruptedRow("s_busy", "daemon_restarted", "a_busy"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+
+    const quiet = own.get("s_quiet");
+    const busy = own.get("s_busy");
+    check("two conversations, two agents", [own.liveSessionCount, quiet?.status, busy?.status], [2, "idle", "idle"]);
+
+    /*
+     * Nothing is parked before the threshold, and this is asserted *first*
+     * because it is what makes every "was parked" below mean something. A sweep
+     * that took everything regardless of age would satisfy all of them.
+     */
+    check("a session that has just spoken is left alone", await own.parkIdleSessions(now), []);
+    check("and it still has its agent", own.liveSessionCount, 2);
+
+    /*
+     * ⚠ **The one the whole feature is judged on: an agent mid-turn is not
+     * touched.** `s_busy` has a prompt in flight that this rig never answers, so
+     * `turn !== null`, so `status` is `running`, so `parkable` refuses — and the
+     * agent never learns that anybody stopped watching. Written against a real
+     * open turn rather than a mocked status, because a mock of `status` is a mock
+     * of the predicate.
+     */
+    const sent = busy?.prompt("keep working");
+    check("the busy one is working", [sent?.kind, busy?.status], ["accepted", "running"]);
+
+    const later = now + 31 * 60_000;
+    const parked = await own.parkIdleSessions(later);
+    check("the quiet one is released", parked, ["s_quiet"]);
+    check("and the working one is not, however long the turn runs", busy?.status, "running");
+    check("so the machine holds one agent for two conversations", own.liveSessionCount, 1);
+
+    /*
+     * What "released" means, stated as the four facts a person would check. The
+     * third is the one with a defect behind it: `exited` is what the derivation's
+     * `default:` arm answers, and it is the word for a conversation somebody
+     * ended.
+     */
+    check("the conversation is still there", own.get("s_quiet") !== undefined, true);
+    check("with the agent's own id kept, which is what it comes back on", quiet?.agentSessionId, "a_quiet");
+    check("and it does not read as stopped", quiet?.status, "parked");
+    check("nor as something the daemon is coming back for by itself", quiet?.exit?.reason, "parked");
+
+    /*
+     * The refusals, each on its own row, because a single collapsed condition
+     * would satisfy a test that asserted them together. Every one of these is a
+     * session the sweep can see and must not take.
+     */
+    check("a session already released is not released again", await own.parkIdleSessions(later), []);
+
+    /*
+     * ⚠ **A person may end a released conversation, and this was broken the day
+     * parking landed.**
+     *
+     * `stop()` memoises: a parked session's `stopping` promise has already
+     * resolved, so `DELETE /sessions/:id` handed it straight back, `doStop` never
+     * ran, and the route answered `200` with a snapshot still reading `parked`.
+     * Pressing Stop did nothing, twice, forever — and the only way to end such a
+     * conversation was to send a message, wait for the agent to come back, and
+     * stop *that*. Before parking, a quiet session was live and Stop simply
+     * worked, which is what makes this a regression rather than a gap.
+     *
+     * Both halves are pinned: that the reason is now the person's, and that the
+     * status follows it. Asserting only the status would stay green if `parked`
+     * were left on the row and something downstream started mapping it to
+     * `exited`.
+     */
+    await quiet?.stop("stopped");
+    check("a person can end a released conversation", quiet?.exit?.reason, "stopped");
+    check("and it reads as ended, because this time somebody decided", quiet?.status, "exited");
+    check("and it is not brought back at the next boot", autoResumable(quiet?.exit ?? null, quiet?.agentSessionId ?? null, "boot"), false);
+    // The other trigger disagrees on purpose: `stopped` answers `true` on a
+    // prompt, so a message *does* revive a conversation somebody ended. Pinned
+    // here because the label above used to claim the opposite.
+    check("but a message does bring it back, which is the other half of that arm", autoResumable(quiet?.exit ?? null, quiet?.agentSessionId ?? null, "prompt"), true);
+
+    await own.shutdown();
+  }
+
+  /*
+   * A released session survives a restart still released, and a message is what
+   * brings it back — through the real route, because the route is where the
+   * decision is made.
+   *
+   * The restart half matters more than it looks. `markInterrupted` is what a boot
+   * pass runs over the rows it finds, and it is written `if (this.exitRecord)
+   * return;` — so a parked row keeps its own exit rather than being relabelled
+   * `daemon_restarted`, which would put it straight back into the boot pass and
+   * undo the whole feature at the next deploy. Nothing else asserts that the
+   * guard covers this new reason.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const rows = [interruptedRow("s_wake", "daemon_restarted", "a_wake")];
+    // A store that keeps what is written to it, so the second registry below sees
+    // the row the first one left rather than the fixture.
+    const saved = new Map<string, PersistedSession>(rows.map((row) => [row.id, row]));
+    const store: SessionStore = {
+      put: (row) => void saved.set(row.id, row),
+      list: () => [...saved.values()],
+      remove: (id) => void saved.delete(id),
+    };
+    const first = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    first.restore({ reapOrphans: false });
+    await first.autoResume({ ...options, concurrency: 1 });
+    check("released after a quiet spell", await first.parkIdleSessions(now + 31 * 60_000), ["s_wake"]);
+    check("and written down that way", saved.get("s_wake")?.exit?.reason, "parked");
+    await first.shutdown();
+
+    const second = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    second.restore({ reapOrphans: false });
+    check("a restart finds it still released, not interrupted", second.get("s_wake")?.status, "parked");
+    const boot = await second.autoResume({ ...options, concurrency: 1 });
+    check("and the boot pass leaves it alone", [boot.resumed, second.get("s_wake")?.status], [0, "parked"]);
+    check("so the machine comes up holding no agent for it", second.liveSessionCount, 0);
+
+    const routed = createApp({
+      registry: second,
+      verifier,
+      instanceId: "i_park",
+      startedAt: now,
+      credentials,
+      roots: [users],
+      logins: new AgentLoginRuns({ runtime: second.sessionRuntime, onWarning: () => {} }),
+    }).app;
+    const woke = await routed.fetch(
+      new Request("http://d/sessions/s_wake/prompt", {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+        body: JSON.stringify({ text: "carry on" }),
+      }),
+    );
+    check("a message wakes it", woke.status, 202);
+    check("on the same conversation the agent already had", rig.resumes().at(-1)?.sessionId, "a_wake");
+    check("and it is live again", [second.get("s_wake")?.status, second.liveSessionCount], ["idle", 1]);
+
+    await second.shutdown();
+  }
+
+  /*
+   * At the ceiling, a wake takes a slot rather than being refused.
+   *
+   * **This is what turns `MAX_LIVE_SESSIONS` into a memory budget.** The cap is
+   * checked in exactly one place — `create()` — and resume has always been
+   * outside it, deliberately, because refusing to restore work after a deploy is
+   * worse than being briefly over. That was safe while nothing ever parked; once
+   * parking is ordinary, a fleet of released sessions waking one by one would
+   * walk straight past the ceiling and the feature would buy nothing.
+   *
+   * So the wake evicts instead: least recently active first, one slot, never a
+   * refusal. Both halves are pinned, and the second is the one with a person on
+   * the other end of it.
+   */
+  {
+    const rig = rigWith({ resume: true, stallPrompt: true });
+    const store = storeOf([
+      interruptedRow("s_old", "daemon_restarted", "a_old"),
+      interruptedRow("s_new", "daemon_restarted", "a_new"),
+      interruptedRow("s_want", "daemon_restarted", "a_want"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    // Park all three, then wake two in a known order so that "least recently
+    // active" has something to be wrong about: `s_new` spoke after `s_old`.
+    await own.parkIdleSessions(now + 31 * 60_000);
+    await own.get("s_old")?.resume();
+    await own.get("s_new")?.resume();
+    check("two agents resident, one conversation still released", [own.liveSessionCount, own.get("s_want")?.status], [2, "parked"]);
+
+    /*
+     * ⚠ **The threshold is lowered to 1ms, and that is the fixture rather than a
+     * shortcut.** `makeRoomForWake` reads the *real* clock — it runs on the wake
+     * path, where there is no test-supplied instant to thread through — while
+     * `parkIdleSessions` takes one. So at the default half hour these sessions,
+     * resumed moments ago, are correctly not candidates, and the first draft of
+     * this block asserted an eviction that must not have happened: the machine
+     * went one over instead, which is this section's *second* property arriving
+     * early. Lowering the threshold is what makes the first one reachable.
+     */
+    own.setSessionLimits({ live: 2, idleParkMs: 1 });
+    await own.get("s_want")?.resume();
+    check("the machine stays at its ceiling", own.liveSessionCount, 2);
+    check("the wake was not refused", own.get("s_want")?.status, "idle");
+    check("and the slot came from the least recently used", own.get("s_old")?.status, "parked");
+    check("while the one used more recently kept its agent", own.get("s_new")?.status, "idle");
+
+    /*
+     * And the refusal that is deliberately absent. Every remaining session is
+     * mid-turn, so there is nothing idle to take — a machine genuinely doing that
+     * much work. Going one over the soft ceiling is the right answer, because the
+     * alternative is telling somebody who just typed that their own conversation
+     * is unavailable.
+     */
+    own.get("s_new")?.prompt("keep working");
+    own.get("s_want")?.prompt("keep working");
+    check("nothing left to take", [own.get("s_new")?.status, own.get("s_want")?.status], ["running", "running"]);
+    await own.get("s_old")?.resume();
+    check("the wake still happens", own.get("s_old")?.status, "idle");
+    check("and the machine is knowingly one over rather than refusing somebody", own.liveSessionCount, 3);
+
+    await own.shutdown();
+  }
+
+  /*
+   * The schedule itself, driven by hand.
+   *
+   * **A scheduler nothing drives is a scheduler nobody knows is broken** — the
+   * sentence `daemoncheck.agent-login-and-launch.ts` puts on `AgentUpdates`, and
+   * it applies harder here: every branch below is unreachable from a machine that
+   * is merely left running, and each of them fails *quietly*. A sweep that stopped
+   * re-arming would look exactly like a fleet with nothing idle on it.
+   *
+   * The timer and the sweep are both injected, so this runs at no wall-clock cost
+   * and asserts the wiring rather than the timing.
+   */
+  {
+    const armed: { delay: number; fire: () => void }[] = [];
+    const reported: string[][] = [];
+    let sweeps = 0;
+    let allowed = true;
+    let parked: string[] = [];
+    const parking = IdleParking.start({
+      park: async () => {
+        sweeps += 1;
+        return parked;
+      },
+      enabled: () => allowed,
+      schedule: (fire, delay) => {
+        const entry = { delay, fire };
+        armed.push(entry);
+        return {
+          cancel: () => {
+            const at = armed.indexOf(entry);
+            if (at >= 0) armed.splice(at, 1);
+          },
+        };
+      },
+      onParked: (ids) => void reported.push([...ids]),
+    });
+
+    check("a sweep is armed at start", [armed.length, armed[0]?.delay], [1, 60_000]);
+    check("and nothing has run yet", sweeps, 0);
+
+    // One tick, and the next is armed only after it settles — a self-rescheduling
+    // timeout rather than an interval, so a slow sweep can never overlap itself.
+    const first = armed.shift();
+    first?.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check("a tick sweeps once and arms the next", [sweeps, armed.length], [1, 1]);
+    check("and says nothing when nothing was released", reported, []);
+
+    parked = ["s_a", "s_b"];
+    armed.shift()?.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check("what it released is reported, so a vanished agent is never silent", reported, [["s_a", "s_b"]]);
+
+    /*
+     * Switched off at the source rather than by not arming: the thunk is read at
+     * every tick because `daemon.ts` finishes reading its environment after the
+     * registry exists, so a value captured at construction would be stale for the
+     * whole life of the process.
+     */
+    allowed = false;
+    parked = ["s_c"];
+    armed.shift()?.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check("a disabled sweep does not sweep", sweeps, 2);
+    check("but keeps its timer, so switching it back on needs no restart", armed.length, 1);
+
+    allowed = true;
+    armed.shift()?.fire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    check("and picks up again when it is allowed", sweeps, 3);
+
+    await parking.shutdown();
+    check("shutdown disarms it", armed.length, 0);
+    await parking.shutdown();
+    check("and is idempotent, like every other shutdown here", armed.length, 0);
+  }
+
+  /*
+   * Choosing a model on a session whose agent has been released.
+   *
+   * **The rule, and it is the owner's: a tap does not wake anything, and the
+   * setting is really in force from the next message.** Both halves are here
+   * because either alone is a different feature. Recording without applying is a
+   * control that lies; applying by waking is a second way back for a design whose
+   * whole answer to "where did my agent go" is *send a message*, and it would
+   * spend ~400 MB on a glance at a settings row.
+   *
+   * What makes the strip live enough to tap at all is that parking keeps the
+   * published options where every other stop clears them — so the first assertion
+   * here is that they survived, and the rest is meaningless without it.
+   */
+  {
+    const rig = rigWith({ resume: true, config: true });
+    const store = storeOf([interruptedRow("s_cfg", "daemon_restarted", "a_cfg")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const cfg = own.get("s_cfg");
+    check("the agent offers a model", cfg?.snapshot().agentConfig?.options.map((o) => o.id), ["model"]);
+
+    await own.parkIdleSessions(now + 31 * 60_000);
+    check("released", cfg?.status, "parked");
+    /*
+     * ⚠ The controls are still published. Cleared — which is what every other
+     * stop does — the client falls to its own memory, draws the row faint and
+     * refuses the tap, so a session you could re-model at 29 minutes you could not
+     * at 31, with nothing on screen saying why.
+     */
+    check("and its controls are still offered", cfg?.snapshot().agentConfig?.options.map((o) => o.id), ["model"]);
+
+    const before = rig.launches();
+    const set = await cfg?.setConfigOption("model", "sonnet");
+    check("choosing a model is accepted rather than refused", set?.kind, "ok");
+    check("the choice is on the session at once", cfg?.snapshot().agentConfig?.options[0]?.value, "sonnet");
+    /*
+     * The two halves of "does not wake", asserted separately: no process was
+     * started, and the session did not quietly stop being released. A tap that
+     * woke the agent would satisfy the value assertion above and fail both of
+     * these.
+     */
+    check("no agent was started for it", rig.launches(), before);
+    check("and it is still released", cfg?.status, "parked");
+    check("nothing has been sent to any agent", rig.configSets(), []);
+
+    /*
+     * Validation is the live path's, run against the remembered options — so a
+     * value the agent does not offer is refused without one, rather than recorded
+     * and then silently dropped at the wake by `restoreConfig`'s own guard.
+     */
+    const bad = await cfg?.setConfigOption("model", "no-such-model");
+    check("a value the agent does not offer is still refused", bad?.kind, "invalid_value");
+    const missing = await cfg?.setConfigOption("nonsense", "x");
+    check("and so is an option it never had", missing?.kind, "unknown_option");
+
+    // And now the half that makes the recording mean anything.
+    await cfg?.resume();
+    check("the wake sends the choice to the fresh agent", rig.configSets(), [{ id: "model", value: "sonnet" }]);
+    check("which is live again on the chosen model", [cfg?.status, cfg?.snapshot().agentConfig?.options[0]?.value], ["idle", "sonnet"]);
+
+    await own.shutdown();
+  }
+
+  /*
+   * And the negative that keeps the arm narrow: a session somebody *stopped* is
+   * not a session whose settings are pending. Its controls went with its agent —
+   * `doStop` clears them for every reason but `parked` — so there is nothing to
+   * tap and the refusal is the ordinary one.
+   */
+  {
+    const rig = rigWith({ resume: true, config: true });
+    const store = storeOf([interruptedRow("s_off", "daemon_restarted", "a_off")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const off = own.get("s_off");
+    await off?.stop("stopped");
+    check("a stopped session keeps no controls", off?.snapshot().agentConfig?.options ?? [], []);
+    const set = await off?.setConfigOption("model", "sonnet");
+    check("and a choice on one is refused, not deferred", set?.kind, "terminal");
+
+    await own.shutdown();
+  }
+
+  /*
+   * The one setting on this a person can change, and the precedence that makes it
+   * worth having.
+   *
+   * ⚠ **The daemon's config is env only, and this does not relax that.** What is
+   * stored here is the narrow class whose owner is the person *using* the machine:
+   * their own trade between memory and a ~1.3s wait.
+   *
+   * What is worth asserting is therefore the precedence itself — a stored value
+   * beats the env file, so `REEMOAT_IDLE_PARK_MINUTES` is the default for a
+   * machine nobody has set rather than a policy anything has to explain itself
+   * against. ⚠ **This paragraph used to argue that the wire needed a `source` to
+   * say which of the two was winning; it does not, and the assertions below would
+   * fail if it did** — they deep-equal the whole payload as `{ idleReleaseMinutes:
+   * … }`. The field existed for one round, the owner removed the line on the screen
+   * that was its only reader, and it went with it. Left as written it read as a
+   * requirement rather than as history. See `MachineSettingsView`.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const kept = new Map<string, string>();
+    const settings = {
+      read: (key: string) => kept.get(key) ?? null,
+      write: (key: string, value: string) => void kept.set(key, value),
+    };
+    const own = new SessionRegistry(new MemoryEventStore(), storeOf([]), undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    // What an env file asked for, exactly as `daemon.ts` injects it.
+    own.setSessionLimits({ idleParkMs: 45 * 60_000 });
+    own.setMachineSettingsStore(settings);
+
+    const routed = createApp({
+      registry: own,
+      verifier,
+      instanceId: "i_settings",
+      startedAt: now,
+      credentials,
+      roots: [users],
+      machineSettings: settings,
+      logins: new AgentLoginRuns({ runtime: own.sessionRuntime, onWarning: () => {} }),
+    }).app;
+    const call = async (method: string, body?: unknown): Promise<[number, any]> => {
+      const response = await routed.fetch(
+        new Request("http://d/settings", {
+          method,
+          headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+      );
+      return [response.status, await response.json()];
+    };
+
+    const [readStatus, read] = await call("GET");
+    check("with nothing stored, the configuration is what is in force", [readStatus, read.settings], [200, { idleReleaseMinutes: 45 }]);
+
+    const [saveStatus, saved] = await call("PATCH", { idleReleaseMinutes: 5 });
+    check("saving answers with what is now in force", [saveStatus, saved.settings], [200, { idleReleaseMinutes: 5 }]);
+    /*
+     * ⚠ **Applied to the *running* daemon, not at the next restart.** The route
+     * calls `applyMachineSettings` before it answers, so this is the observable
+     * that says the number reached the sweep rather than only the table — and it
+     * is the half a caller cannot check for itself.
+     */
+    check("and the running daemon is already using it", own.idleParkEnabled, true);
+    const store2 = storeOf([interruptedRow("s_five", "daemon_restarted", "a_five")]);
+    const live = new SessionRegistry(new MemoryEventStore(), store2, undefined, rig.runtime);
+    live.restore({ reapOrphans: false });
+    live.setSessionLimits({ idleParkMs: 45 * 60_000 });
+    live.setMachineSettingsStore(settings);
+    await live.autoResume({ ...options, concurrency: 1 });
+    check("a session quiet past the saved five minutes is released", await live.parkIdleSessions(now + 6 * 60_000), ["s_five"]);
+    check("which the configured forty-five would not have taken", live.machineSettings(), { idleReleaseMinutes: 5 });
+    await live.shutdown();
+
+    // `0` is a real answer rather than "unset", and has to survive the round trip
+    // as one — a falsy value read as absent is how a switch turns itself back on.
+    /*
+     * ⚠ `0` is a real answer and has to survive the round trip as one — a falsy
+     * value read as absent is how a switch turns itself back on. It is also now the
+     * *only* way to say "never": the `null` that forgot the stored value went with
+     * the line on the screen that was the only thing able to express the difference.
+     */
+    const [, off] = await call("PATCH", { idleReleaseMinutes: 0 });
+    check("zero is stored as a choice, not read as unset", off.settings, { idleReleaseMinutes: 0 });
+    check("and nothing is released while it says so", own.idleParkEnabled, false);
+    const [nullStatus] = await call("PATCH", { idleReleaseMinutes: null });
+    check("and null is no longer a way to ask for the configuration back", nullStatus, 400);
+
+    const [unknownStatus, unknown] = await call("PATCH", { somethingElse: 5 });
+    check("a setting this daemon does not have is refused", [unknownStatus, unknown.error.code], [400, "unknown_setting"]);
+    const [badStatus, bad] = await call("PATCH", { idleReleaseMinutes: -1 });
+    check("and so is a value outside the bound", [badStatus, bad.error.code], [400, "invalid_setting"]);
+    const [fracStatus, frac] = await call("PATCH", { idleReleaseMinutes: 1.5 });
+    check("and half a minute", [fracStatus, frac.error.code], [400, "invalid_setting"]);
+    const [hugeStatus] = await call("PATCH", { idleReleaseMinutes: MAX_IDLE_RELEASE_MINUTES + 1 });
+    check("and more than the ceiling", hugeStatus, 400);
+    // The refusals left the stored `0` exactly as it was — one row, unchanged.
+    check("none of which changed what is stored", [...kept.entries()], [["idleReleaseMinutes", "0"]]);
+
+    /*
+     * ⚠ **And the shape every refusal above misses: a body with more than one key
+     * in it.**
+     *
+     * All five are one key — `null`, an unknown name, `-1`, `1.5`, and one over the
+     * ceiling — so each is refused before anything is written, and the assertion
+     * above passes over the defect it looks like it covers. The route validated and
+     * wrote in the same pass, so a *valid* key ahead of a bad one was persisted and
+     * then the request answered `400` — and the early return skipped
+     * `applyMachineSettings`, leaving the table saying one thing and the running
+     * daemon another until the next restart. A refused request silently moved
+     * machine-wide policy, at the next boot, with nothing on any screen saying so.
+     *
+     * Reachable with today's one-member union because the second key does not have
+     * to be *valid* to be second: `anythingElse` is refused as unknown, and by then
+     * `idleReleaseMinutes` had already been written.
+     *
+     * ⚠ **The three rows below do not each catch it, and which one does is worth
+     * writing down** — measured by reverting the fix in a scratch copy and running
+     * this file. The table row fails. The drift row fails. The `idleParkEnabled`
+     * row **passes**, and can never do otherwise: under the bug the *registry* is
+     * the half that stayed right — `applyMachineSettings` was skipped, so it went
+     * on holding the old number — and it is the table underneath that moved. It is
+     * here to pin the value a caller would actually observe, not as a second
+     * detector.
+     */
+    const [mixedStatus, mixed] = await call("PATCH", { idleReleaseMinutes: 5, anythingElse: 1 });
+    check("a body with one bad key is refused", [mixedStatus, mixed.error.code], [400, "unknown_setting"]);
+    check("and the good key beside it was not written", [...kept.entries()], [["idleReleaseMinutes", "0"]]);
+    check("so the running daemon still holds what it held", own.idleParkEnabled, false);
+    /*
+     * ⚠ **And the second half of the same defect, which the row above cannot
+     * see.** The early return also skipped `applyMachineSettings`, so the bug did
+     * not merely write too much — it wrote the table and left the running daemon
+     * on the old number, and the two then disagreed until the next restart.
+     *
+     * Read as one comparison because the *route* half of it is blind on its own:
+     * `GET /settings` answers from the registry, so it reports the old number
+     * quite happily while the table underneath it says something else. Asserting
+     * what `GET` returns would therefore have been green over the drift. What the
+     * pairing adds is the table beside it, and it is their agreement — not either
+     * value — that is the property.
+     */
+    check(
+      "and the table and the running daemon did not drift apart",
+      [kept.get("idleReleaseMinutes") ?? null, String((await call("GET"))[1].settings.idleReleaseMinutes)],
+      ["0", "0"],
+    );
+
+    /*
+     * The other order, which is the one a `PATCH` is most likely to arrive in: the
+     * bad key first. Already correct before the fix — nothing had been written yet
+     * — and pinned so the two orders can never diverge, since "all-or-nothing" is
+     * not a property one of them may have.
+     */
+    const [firstBadStatus, firstBad] = await call("PATCH", { anythingElse: 1, idleReleaseMinutes: 5 });
+    // The code as well as the status: "the two orders never diverge" is a claim
+    // about the refusal, and a status alone would let them answer 400 for two
+    // different reasons and still pass.
+    check("and the same body the other way round is refused too", [firstBadStatus, firstBad.error.code], [400, "unknown_setting"]);
+    check("with the table still untouched", [...kept.entries()], [["idleReleaseMinutes", "0"]]);
+
+    await own.shutdown();
+  }
+
+  /*
+   * A daemon with no durable store can still say what is in force and must refuse
+   * to change it — the asymmetry `ServerOptions.machineSettings` argues for: the
+   * number is a fact about the machine either way, and a refusal says why a form
+   * would not save where an empty one would say nothing.
+   */
+  {
+    const own = new SessionRegistry(new MemoryEventStore(), storeOf([]));
+    own.restore({ reapOrphans: false });
+    const routed = createApp({
+      registry: own,
+      verifier,
+      instanceId: "i_nostore",
+      startedAt: now,
+      credentials,
+      roots: [users],
+      logins: new AgentLoginRuns({ runtime: own.sessionRuntime, onWarning: () => {} }),
+    }).app;
+    const get = await routed.fetch(
+      new Request("http://d/settings", { headers: { authorization: `Bearer ${tokenFor("u_alice")}` } }),
+    );
+    const got = (await get.json()) as any;
+    check("a store-less daemon still says what is in force", [get.status, got.settings.idleReleaseMinutes], [200, 30]);
+    const patch = await routed.fetch(
+      new Request("http://d/settings", {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+        body: JSON.stringify({ idleReleaseMinutes: 5 }),
+      }),
+    );
+    const refused = (await patch.json()) as any;
+    check("and refuses to change it rather than pretending", [patch.status, refused.error.code], [503, "settings_unavailable"]);
+    await own.shutdown();
+  }
+
+  /*
+   * A conversation the agent no longer holds is never released — and the
+   * interesting half is *why* the check inside `parkable` cannot fire.
+   *
+   * ⚠ **This section had a fixture that was wrong in an instructive way.** It
+   * resumed a `resume_gave_up` session by hand so that every other precondition
+   * was met and the give-up was the only thing left to refuse on — and the row
+   * was parked anyway. The fixture was not the bug: `onResumed` **clears**
+   * `resumeGivenUp` on the resume that succeeded, so a session that is live at
+   * all has, by construction, just proved it can be brought back. The state the
+   * guard describes — live, idle, and given up on — does not exist.
+   *
+   * So the guard stays as a statement of intent at the site where somebody would
+   * otherwise add "…and also park the settled ones", and what is asserted here is
+   * the reachable shape and the reason the other one is not: a session the daemon
+   * has given up on is terminal, it has no agent to release, and a successful
+   * resume is what takes the verdict off it.
+   */
+  {
+    const rig = rigWith({ resume: true, forgotten: true });
+    const store = storeOf([
+      interruptedRow("s_ok", "daemon_restarted", "a_ok"),
+      interruptedRow("s_lost", "daemon_restarted", "a_lost"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    // The rig answers every resume with `resourceNotFound`, so both sessions are
+    // told the agent no longer holds them; `s_ok` is then brought back by hand
+    // against a rig that does hold it, which is the only way to have one of each.
+    await own.autoResume({ ...options, concurrency: 1 });
+    check("the agent says it has forgotten them", own.get("s_lost")?.resumeAbandoned, "forgotten");
+
+    const later = now + 31 * 60_000;
+    check("a session with no agent to release is not released", await own.parkIdleSessions(later), []);
+    check("and it keeps the verdict rather than gaining an exit nobody wrote", own.get("s_lost")?.status, "interrupted");
+
+    await own.shutdown();
+  }
+
+  /*
+   * And the guard's own premise, asserted rather than assumed: a resume that
+   * works takes the give-up off. This is what makes "live and given up on"
+   * unreachable, and it is a fact about `onResumed` that nothing else in this
+   * file pins.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([
+      { ...interruptedRow("s_cleared", "daemon_restarted", "a_cleared"), resumeGaveUp: "forgotten" },
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    check("restored still carrying the verdict", own.get("s_cleared")?.resumeAbandoned, "forgotten");
+    await own.get("s_cleared")?.resume();
+    check("and a resume that works clears it", own.get("s_cleared")?.resumeAbandoned, null);
+    check("which is why a live session cannot be one the daemon gave up on", own.get("s_cleared")?.status, "idle");
     await own.shutdown();
   }
 

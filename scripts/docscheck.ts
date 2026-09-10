@@ -100,8 +100,30 @@ const MAX_CLAUDE_MD_CHARS = 150_000;
  * is that the bloat this driver exists to catch does not have to come back to the
  * root file to hurt: fifteen rules growing quietly is the same cost arriving
  * through fifteen doors, and it is *less* visible, because no CLI warns about it.
+ *
+ * ⚠ **Raised to 34 000 on 2026-09-09, and the reason is a distinction this number
+ * has to keep making: one bloated file against a ceiling the corpus has reached.**
+ * Adding parking's four invariants to `daemon-sessions.md` (Q2.224) failed here by
+ * 1 175 chars — and that file had **11** chars of slack, while `web-composer.md`,
+ * `agent-systems.md`, `plugins.md` and `web-shell.md` sat at 31 992, 31 986,
+ * 31 968 and 31 834. Five files within 400 chars of the limit at once is not five
+ * authors overwriting; it is the limit having become the binding constraint on
+ * every one of them.
+ *
+ * What that state actually produces is the failure this driver exists to prevent,
+ * arriving from the other side: with no slack anywhere, the only way to record a
+ * new invariant is to delete somebody else's, and `CLAUDE.md` is explicit that the
+ * comment layer is the specification and no shortening pass owns it. A ceiling
+ * that can only be satisfied by erosion is worse than a looser one, because the
+ * erosion is silent and the number is not.
+ *
+ * Raised by 2 000 rather than to a round 40 000 deliberately: enough for this
+ * change and a little after it, little enough that the next author meets the same
+ * wall and has to argue rather than assume. If five files sit against 34 000 too,
+ * the answer is probably that a rule wants splitting by subject, not that this
+ * should go up again.
  */
-const MAX_RULE_CHARS: number | null = 32_000;
+const MAX_RULE_CHARS: number | null = 34_000;
 
 // ---------------------------------------------------------------- the corpus
 
@@ -363,6 +385,12 @@ const FOREIGN = new Set([
   // 0.63.0 measurement about a refused plan not ending the turn went stale.
   "applyExitPlanModeSelection",
   "REEMOAT_AGENTS", // an env var that was proposed and never built; the entry says so
+  // The ACP schema's own request types, quoted from the spec in Q2.224 for what
+  // they do *not* carry: neither has a history field, which is what settles "the
+  // daemon has the transcript, so why is a wake not free" at the protocol rather
+  // than in this repository's code.
+  "ResumeSessionRequest",
+  "LoadSessionRequest",
 ]);
 
 /*

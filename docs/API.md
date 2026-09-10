@@ -45,7 +45,7 @@ auth gate.
 
 ---
 
-## The daemon — 55 routes
+## The daemon — 57 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -83,6 +83,7 @@ plugin *manifest* does name all three, disclosed in `consent.adds` on
 | `PUT /systems/:system` · `DELETE /systems/:system` | Set or clear that system's key |
 | `GET /agents/capabilities` | What each harness offers and what it can be pointed at. **Starts an agent per harness**, cached ten minutes. Each row carries `cli` — which build of the harness's own CLI published `models` (`version` may be `null`; `source` is `override` or `path`) — `null` where nothing was spawned, absent from daemons older than this field, and never the path it was resolved from |
 | `GET /custom-agents` · `POST /custom-agents` · `PATCH /custom-agents/:id` · `DELETE /custom-agents/:id` | The harness+system+model presets on this machine. A `PATCH` carries all four fields — an edit is a replace, so the pairing is never weighed against a merge |
+| `GET /settings` · `PATCH /settings` | This machine's own preferences — today one: how many minutes a conversation may sit untouched before its agent is shut down, `0` never. **Not the daemon's configuration**, which is env only; this is the narrow class whose owner is the person using the machine. A stored value **overrides** `REEMOAT_IDLE_PARK_MINUTES`, which is the default for a machine nobody has set. `PATCH` rather than `PUT` because the body names only what is changing, so an older client cannot erase a key it has never heard of. Applied to the running daemon before the route answers. Without a durable store the `GET` still answers and the `PATCH` is `503` |
 | `GET /agent-strip` · `PUT /agent-strip` | Which agents this machine's New session strip offers, and in what order. A **partial** record — a position and a hidden flag for what somebody moved or hid — merged by the client against the two listings above, so a `ref` naming something that is gone keeps its place and is simply not drawn. The `PUT` carries the whole list and replaces it; no `ref` is validated against anything |
 
 ### The filesystem the picker sees

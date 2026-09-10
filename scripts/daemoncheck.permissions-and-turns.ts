@@ -1743,6 +1743,25 @@ process.stdout.write("\nwhat else may talk to the agent during a clear\n");
   check("with a status that still says idle, because a clear is not a turn", refused.body?.error?.detail?.status, "idle");
 
   /*
+   * ⚠ **And the sixth caller of that marker, which is the idle sweep.**
+   *
+   * The line above is the whole reason this assertion has to exist: `status`
+   * reads `idle` through a clear, and `parkable` is written to trust `status`
+   * alone. So a mid-clear session was parkable — and `releaseOneSlot` asks with
+   * an `idleMs` of `0`, which makes the age clause vacuously true, so a create or
+   * a wake landing at the ceiling could stop the agent between `session/new` and
+   * the assignment of the id it just handed back. The daemon would keep the
+   * parent conversation while the agent had already forked, which is Q2.7's
+   * codeword-comes-back failure reached from the one direction `clearContext`
+   * does not guard.
+   *
+   * Both arguments, because `0` is the one a ceiling actually uses and a
+   * threshold would hide the hole.
+   */
+  check("a session mid-clear is not one the sweep may take", managed.parkable(Date.now(), 30 * 60_000), false);
+  check("nor one a ceiling may take, which asks with no threshold at all", managed.parkable(Date.now(), 0), false);
+
+  /*
    * **And the other two ways to talk to the agent, which the marker's own
    * docblock claimed and the code did not do.**
    *

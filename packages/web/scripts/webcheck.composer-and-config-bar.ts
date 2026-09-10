@@ -332,6 +332,20 @@ process.stdout.write("\nthe session lists\n");
       resume: { state: "failed", attempts: 3, error: { code: "agent_auth_required", message: "no" }, at: 0 },
       lastEventAt: 5,
     }),
+    /*
+     * The daemon let this one's agent go for being quiet. Beside `b` and `f` for
+     * the same reason they are beside each other: it is a third answer to the
+     * same question, and the two mistakes available are both silent. Filed as
+     * ended it would disappear into a tab nobody opens, taking a conversation
+     * somebody is mid-way through with it; counted as live it would put a number
+     * beside a green dot for a machine running nothing at all.
+     */
+    row("h", {
+      status: "parked",
+      exit: { reason: "parked" },
+      agentSessionId: "a_h",
+      lastEventAt: 15,
+    }),
   ];
   const state = { sessions, machines: [] } as never;
   const lists = sessionLists(state);
@@ -352,12 +366,15 @@ process.stdout.write("\nthe session lists\n");
    * equality, and asserting a sequence again would be pinning arithmetic nothing
    * reads.
    */
-  check("the live buckets are memberships rather than orders", lists.active.map((r) => r.snapshot.id).sort(), ["a", "e", "f", "g"]);
+  check("the live buckets are memberships rather than orders", lists.active.map((r) => r.snapshot.id).sort(), ["a", "e", "f", "g", "h"]);
   // `b` alone. `f` ended in exactly the same *status* and is not here, which is
   // the whole point: nobody ended it, so calling it ended would be answering a
   // question the reader did not ask.
   check("only a session somebody ended is filed as ended", lists.ended.map((r) => r.snapshot.id), ["b"]);
-  check("and a blocked session is never also counted active", lists.active.length + lists.blocked.length, 6);
+  // The third row that shares `b`'s "no agent on the other end" and none of its
+  // meaning: nobody ended `h` either, so it stays where the reader left it.
+  check("a released agent leaves its conversation in Active", lists.active.some((r) => r.snapshot.id === "h"), true);
+  check("and a blocked session is never also counted active", lists.active.length + lists.blocked.length, 7);
   /*
    * Five: the four that were live plus `f`, which is a live conversation a few
    * seconds from having an agent again. Not `b` (somebody ended it) and not `g`
@@ -365,6 +382,10 @@ process.stdout.write("\nthe session lists\n");
    * `countsAsLive` is a separate question from which list a row lands in.
    */
   check("the machine count is live sessions, not every session", lists.countByMachine.get("m" as never), 5);
+  // Still five with `h` added, which is the assertion: a parked conversation is
+  // in the list and not in the count, the same split `g` demonstrates from the
+  // other side.
+  check("and a released agent is in the list without being counted", lists.active.length, 5);
   check("and ended rows are still in the list, just not counted", lists.ended.length, 1);
 
   // Memoised on the array's identity, which is what makes a streamed event free.

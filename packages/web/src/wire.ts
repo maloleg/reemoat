@@ -607,9 +607,28 @@ export type SessionStatus =
   | "stopping"
   | "exited"
   | "failed"
-  | "interrupted";
+  | "interrupted"
+  /**
+   * The daemon let go of this session's agent because nobody was using it.
+   *
+   * Terminal in the same sense `interrupted` is — no process on the other end —
+   * and it must not be drawn like it. `interrupted` means something happened to
+   * the daemon and it is coming back on its own; this means nothing happened at
+   * all, the conversation is whole, and it comes back when you type into it. The
+   * one thing it may never read as is *ended*: nobody ended it.
+   */
+  | "parked";
 
-export const TERMINAL_STATUSES: readonly SessionStatus[] = ["exited", "failed", "interrupted"];
+export const TERMINAL_STATUSES: readonly SessionStatus[] = [
+  "exited",
+  "failed",
+  "interrupted",
+  // Terminal because there is no agent to ask anything of — which is all
+  // `isTerminal` has ever meant here. What it does *not* decide is how the
+  // session is drawn: that is the four-way partition below, where `parked` is
+  // its own arm precisely so it lands in neither "coming back" nor "ended".
+  "parked",
+];
 
 export function isTerminal(status: SessionStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
@@ -636,6 +655,18 @@ export function hasLiveAgent(status: SessionStatus): boolean {
   return AGENT_LIVE_STATUSES.includes(status);
 }
 
+/**
+ * A machine's own preferences. Hand-mirrored from `src/registry.ts`.
+ *
+ * The number and nothing else: this carried a `source` saying whether the value
+ * was stored here or came from the machine's env file, and the line it fed was
+ * removed as noise — see `MachineSettingsView`, which holds the argument.
+ */
+export interface MachineSettings {
+  /** Minutes a conversation may sit untouched before its agent is shut down. `0` never does. */
+  idleReleaseMinutes: number;
+}
+
 export type ExitReason =
   | "stopped"
   | "agent_exited"
@@ -659,7 +690,12 @@ export type ExitReason =
    * daemon exit: nothing brings these back on its own. Signing in again does,
    * because that is the same person reversing it.
    */
-  | "agent_signed_out";
+  | "agent_signed_out"
+  /**
+   * The daemon released an idle agent and kept the conversation. Typing brings it
+   * back; nothing else does, and nothing else needs to.
+   */
+  | "parked";
 
 /**
  * The exits that mean the daemon went away rather than that anybody decided.
@@ -1027,13 +1063,22 @@ export function isResumable(session: SessionSnapshot): boolean {
 }
 
 /*
- * How a terminal session is presented, in four pure functions.
+ * How a terminal session is presented, in five pure functions.
  *
  * The property that makes them assertable, and that `webcheck` states directly:
- * **for any terminal session exactly one of `waitingForDaemon`, `resumeStalled`
- * and `showsAsEnded` is true, and for a live session none of them is.** They are
- * a partition, not three independent tests, which is why they are written here
- * together rather than inlined at the three call sites that need them.
+ * **for any terminal session exactly one of `isParked`, `waitingForDaemon`,
+ * `resumeStalled` and `showsAsEnded` is true, and for a live session none of them
+ * is.** They are a partition, not four independent tests, which is why they are
+ * written here together rather than inlined at the call sites that need them.
+ *
+ * ⚠ **`isParked` is the newest arm and it had to go *first*, ahead of
+ * `endedWithDaemon`.** That predicate is written as "not one of the final
+ * reasons", so a reason it has never been told about answers `true` — the
+ * fail-safe that keeps an old tab from taking the composer away from a live
+ * conversation, and exactly the wrong answer for this one. Left to it, a parked
+ * session would have drawn "reconnecting after a restart" under a daemon that was
+ * doing nothing of the kind and would never have started. The order of the tests
+ * below is the fix, and it is the whole of it.
  *
  * Every one of them keys on `exit.reason` and never on `status` alone. That is
  * the whole correction: `daemon_shutdown` — the ordinary deploy — used to derive
@@ -1043,8 +1088,28 @@ export function isResumable(session: SessionSnapshot): boolean {
  * agree, but agreeing by construction is better than agreeing by coincidence.
  */
 
+/**
+ * The daemon let its agent go for being idle. Nothing is wrong and nothing is
+ * happening; sending a message starts it again.
+ *
+ * Keyed on `exit.reason` like its siblings rather than on `status === "parked"`,
+ * and for their reason: the reason is what the daemon *decided*, while the status
+ * is derived from it, so a client that asks the derived question is one
+ * derivation away from being wrong. Here the two happen to be one-to-one, which
+ * makes asking the reason free rather than unnecessary.
+ *
+ * `agentSessionId === null` is deliberately not a case: parking requires one, so
+ * a parked session without it did not come from this daemon and is better drawn
+ * as stalled — which is where the ordering below leaves it.
+ */
+export function isParked(session: SessionSnapshot): boolean {
+  if (!isTerminal(session.status) || session.exit?.reason !== "parked") return false;
+  return session.agentSessionId !== null;
+}
+
 /** The daemon ended it and is bringing it back. Draw it as ordinary. */
 export function waitingForDaemon(session: SessionSnapshot): boolean {
+  if (isParked(session)) return false;
   if (!isTerminal(session.status) || !endedWithDaemon(session.exit)) return false;
   return session.agentSessionId !== null && session.resume?.state !== "failed";
 }
@@ -1058,13 +1123,19 @@ export function waitingForDaemon(session: SessionSnapshot): boolean {
  * reattach to, which is what the copy says.
  */
 export function resumeStalled(session: SessionSnapshot): boolean {
+  if (isParked(session)) return false;
   if (!isTerminal(session.status) || !endedWithDaemon(session.exit)) return false;
   return session.resume?.state === "failed" || session.agentSessionId === null;
 }
 
 /** It is over, and somebody meant it. The only case that loses its composer. */
 export function showsAsEnded(session: SessionSnapshot): boolean {
-  return isTerminal(session.status) && !waitingForDaemon(session) && !resumeStalled(session);
+  return (
+    isTerminal(session.status) &&
+    !isParked(session) &&
+    !waitingForDaemon(session) &&
+    !resumeStalled(session)
+  );
 }
 
 /**

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
-import { isResumable, isTerminal } from "../wire";
+import { isParked, isResumable, isTerminal } from "../wire";
 import { Icon, IconButton, MENU_PANEL } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
@@ -79,7 +79,32 @@ export function SessionMenu({
   const boxRef = useRef<HTMLDivElement | null>(null);
   const row = state.rowsByKey.get(keyOf(sessionRef));
   const session = row?.snapshot;
-  const canResume = session !== undefined && isTerminal(session.status) && isResumable(session);
+  /*
+   * ⚠ **`!isParked` is doing real work here, and without it this control appears
+   * on its own.**
+   *
+   * A parked session is terminal and has an `agentSessionId`, so it satisfies
+   * both of the other two clauses — the daemon would resume it, the route works,
+   * and a Resume item would have shown up for every quiet conversation on the
+   * machine with nobody having decided that.
+   *
+   * The decision is that **a message is the only way back**. That is not a
+   * shortage of buttons: parking is the daemon doing housekeeping, and a control
+   * offering to undo housekeeping invites somebody to sit on a session list waking
+   * agents one at a time, which is the memory this feature exists to release. The
+   * composer is on screen unconditionally for a session that is coming back —
+   * `Composer.tsx` has no early return, Q7.103 — so the affordance already exists
+   * and needs no companion; `sessionNotice` says so in words.
+   *
+   * `interrupted` keeps its Resume item. There the daemon is trying and may have
+   * given up, so a person pressing it is retrying something that failed, which is
+   * a different act from starting something that was never attempted.
+   */
+  const canResume =
+    session !== undefined &&
+    isTerminal(session.status) &&
+    isResumable(session) &&
+    !isParked(session);
   const pinned = session?.pinned === true;
 
   // Same dismissal as every other popover here: pointerdown rather than blur,
@@ -263,7 +288,18 @@ export function SessionMenu({
           {/* Last, separated, and the only red thing in the menu. Stopping an
               agent mid-turn is the one action here with no way back — and it is
               last whatever is installed, which is what the band above buys. */}
-          {!isTerminal(session.status) && (
+          {/*
+            ⚠ `|| isParked` is not symmetry with the row above — it repairs a
+            regression. A parked session is terminal, so this guard alone took Stop
+            away from every conversation the daemon had quietly released: the one
+            way to end it became "send a message, wait for the agent to come back,
+            then stop it". Before parking existed, a quiet session was live and Stop
+            was simply there. It is drawn exactly as it is for an idle session,
+            which is what the reader sees anyway — see `statusTone`.
+            `ManagedSession.stop` is what makes the press land; without that half
+            this button answers 200 and changes nothing.
+          */}
+          {(!isTerminal(session.status) || isParked(session)) && (
             <MenuItem
               icon={Square}
               label="Stop"

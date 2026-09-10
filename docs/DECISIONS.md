@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 130 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 81 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 83 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 343 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 133 | `###` |
-| | | **917** | |
+| | | **919** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 917 rather than the 464
+dividers. So the count is over **both** depths, and it says 919 rather than the 466
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -5142,9 +5142,25 @@ table rather than in either reader.
 
 **Rule.** Two bounds, kept apart: **64 live**, and **16 creations then one per two
 minutes**. Both answer `429`, and the refusal is made *before* the cwd is resolved,
-so it costs no filesystem probe. **Resume is deliberately outside both** — putting
-an agent back in front of an existing conversation is not manufacturing a session.
-They are in memory; `REEMOAT_MAX_LIVE_SESSIONS` and its siblings move them.
+so it costs no filesystem probe. **A resume is never refused by either** — putting
+an agent back in front of an existing conversation is not manufacturing a session,
+and telling somebody who has just typed that their own conversation is unavailable
+is worse than being briefly over a soft ceiling. They are in memory;
+`REEMOAT_MAX_LIVE_SESSIONS` and its siblings move them.
+
+⚠ **What the live ceiling *means* changed with parking (Q2.224), and the number did
+not.** It counts sessions holding an agent, which used only to be bounded from one
+end — `create()` refused past it and nothing ever released anything — so it read as
+"how many conversations you may have open" and was never a memory bound at all: at
+the ~397 MB a live session was measured to cost, 64 of them is ~25 GB. Since the
+daemon lets an idle agent go, the population it counts is bounded from both ends,
+and what it caps is **agents resident at once** rather than conversations somebody
+may have. The enforcement moved with the meaning: crossing the
+ceiling — by waking a conversation or by creating one — releases the least recently
+used *idle* session first, so the bound is kept by eviction rather than by refusal.
+The two ends differ only in the last resort: a wake proceeds anyway, a `create`
+answers `429`, and it does so only when every live session is mid-turn or waiting
+on a person.
 
 **Why.** `create()` had no bound of any kind, and the only thing counting sessions
 anywhere was the startup prune — which counts in order to **delete**, keeping the
@@ -6316,6 +6332,339 @@ var. Making it settable from the UI: *the daemon's config is env only*, and ther
 is no per-machine settings table or route to put it in.
 
 **Status.** Active
+
+### Q2.224 — A session nobody had touched in two days was still holding 476 MB
+
+**Question.** What bounds the memory a machine spends on agents, and how long may
+a conversation nobody is using keep one?
+
+**Measured, 2026-09-09, the development machine (darwin 24.6.0, Apple silicon),
+against the live daemon `i_b71a1ed2` and its own event log.** Nothing here had ever
+been measured; there is no memory harness in this repository and never has been.
+
+macOS `phys_footprint` — the honest figure, excluding shared framework pages and
+including compressed memory. Five live sessions:
+
+| Session | Idle for | Processes | footprint | peak |
+|---|---:|---|---:|---:|
+| `s_e3cc64` claude | 1.5 h | acp bridge 80 MB + `claude` 261 MB | 341 MB | 396 MB |
+| `s_5d26f9` claude | 6.4 h | acp bridge 82 MB + `claude` 177 MB | 259 MB | 403 MB |
+| `s_a55fb1` opencode | 48.7 h | one process | 476 MB | 760 MB |
+| `s_1bf6a1` opencode | 48.7 h | one process | 447 MB | 674 MB |
+| `s_1fa7f6` opencode | 48.7 h | one process | 461 MB | 736 MB |
+
+**1 984 MB for five conversations, of which 1 384 MB — 70% — belonged to three
+nobody had touched in 48.7 hours.** All three were `idle`: no turn, no unanswered
+permission, no question. Sampled again twelve minutes later they had moved by under
+2%, so an idle agent does not give the memory back on its own. The daemon itself was
+105 MB and its plugin child 31 MB.
+
+The other half, from the same log: `status:interrupted` → the next `agent_config` on
+that session is exactly a spawn, an ACP `initialize`, a `session/resume` and the
+config arriving. 120 real reattaches:
+
+| Agent | n | p50 | p90 | min | max |
+|---|---:|---:|---:|---:|---:|
+| claude, resuming alone | 28 | **1 292 ms** | 2 376 ms | 487 ms | 5 619 ms |
+| kimi, resuming alone | 21 | 2 806 ms | 2 861 ms | 713 ms | 12 945 ms |
+| opencode (only ever in 3-way boot storms) | 44 | 3 298 ms | 26 929 ms | 1 442 ms | 52 843 ms |
+| claude, in a 3-way boot storm | 27 | — | — | 541 ms | 90 182 ms |
+
+A cold `session/new` is 695 ms mean for claude and 1 065 ms for opencode, so a
+resume is about twice a fresh start and most of both is process startup. **The trade
+is therefore ~397 MB against ~1.3 s.** The boot-storm rows are the second finding:
+resumes contend badly, and three at once turned a 1.3 s reattach into 90 s.
+
+**Root.** `MAX_LIVE_SESSIONS` was checked in exactly one place, `create()`. Nothing
+ever released an agent, so the ceiling bounded how many conversations somebody could
+*open* and never how many agents a machine ends up holding. Its own docblock had
+conceded the point for a year — *"a machine running 64 agents at once has run out of
+memory long before it runs out of slots"* — and then done nothing about it.
+
+**Decision. Release the agent, keep the conversation.** A session idle for
+`REEMOAT_IDLE_PARK_MINUTES` (30, `0` off, **on by default**) is stopped with a new
+`ExitReason`, `parked`. The process goes; the transcript, the `agent_session_id`,
+the worktree, the branch and the title do not. The next message starts an agent and
+carries on over the same `session/resume` the daemon already performs after each of
+its own restarts.
+
+Almost none of this is new machinery, which is the argument for doing it this way.
+`terminal` is `exitRecord !== null`, so a stopped session already holds no process,
+is already skipped by `liveSessionCount`, already keeps its conversation and already
+comes back through `resume()`. Parking is `stop("parked")` plus a rule about when it
+returns.
+
+1. **The preconditions are one comparison: `status === "idle"`.** The three states
+   parking must never interrupt — a turn in flight, an unanswered permission, an
+   unanswered question — are exactly the ones the derivation reports as something
+   else, along with the two where there is nothing to release yet or already. A
+   hand-written list would fall out of step with `status` the day a fourth waiting
+   state is added; this cannot. Plus `agentSessionId !== null`, or parking is a
+   one-way door.
+2. **`parked` is deliberately not in `DAEMON_EXIT_REASONS`.** That list means "the
+   daemon owes this back **by itself**", and it drives the boot pass. Un-parking
+   everything at the next restart would hand back all the memory at once, in the
+   contention the measurement above found. So `autoResumable` answers `true` on a
+   prompt and `false` at boot, and `markInterrupted`'s existing `if (this.exitRecord)
+   return;` leaves a parked row parked across a restart with no new code.
+3. **It derives its own `SessionStatus`, and the reason is a defect avoided rather
+   than a preference.** `ManagedSession.status` reads `endedWithDaemon` and then
+   falls through a `switch` whose `default:` answers `exited` — the word for a
+   conversation somebody ended. A reason outside that list lands there silently and
+   compiles clean, because unlike `autoResumable` this switch has a default. The
+   client had the identical hazard one layer up: `statusTone`'s own `default:`
+   answers `idle`, which would have drawn a live dot over a machine running nothing.
+4. **The ceiling releases a slot rather than refusing**, which is what turns it
+   into a memory budget — see Q2.100. Least recently active first, one slot, on
+   **both** ends: a wake that would cross it, and a `create`. They differ only in
+   the last resort: a wake goes one over on purpose, because somebody typing into a
+   conversation they already have must never be told it is unavailable; a `create`
+   refuses, because new load is exactly what a ceiling has to be able to say no to.
+
+   ⚠ **The threshold does not apply at the ceiling, and that is a correction.**
+   Both paths first measured candidates against the full 30 minutes, so six
+   sessions that had finished five minutes ago blocked a seventh for the rest of
+   the half-hour — and the refusal told the person to *stop* one, which ends the
+   conversation and files it under Ended. The daemon was asking somebody to do
+   destructively, by hand, what it could do losslessly one line earlier. **The
+   sweep releases by age, because nobody asked; a ceiling releases by need, because
+   somebody is asking for capacity now.** What stays untouchable is what must be —
+   `parkCandidates` takes only sessions whose derived status is exactly `idle`, so
+   a turn, an unanswered permission and an unanswered question are safe at any
+   ceiling — and a machine whose owner set `REEMOAT_IDLE_PARK_MINUTES=0` is refused
+   rather than having an agent taken anyway.
+5. **A message is the only way back, and nothing on screen says so.** No Resume
+   control is drawn — an active exclusion, since `canResume` is `isTerminal &&
+   isResumable` and a parked session satisfies both. The composer is unconditional
+   (Q7.103), so the affordance already exists; a button offering to undo
+   housekeeping invites somebody to sit on a session list waking agents one at a
+   time.
+6. **It is drawn as an ordinary quiet session — same dot, no notice.** `statusTone`
+   answers `idle` for it, explicitly rather than by fallthrough (the fallthrough
+   answers `ended`), and `sessionNotice` returns `null` before the catch-all that
+   would otherwise draw `exitText` in the shape of a conversation that ended.
+   Whether a process is resident is not a fact about the conversation, and not
+   something a reader can act on. What it is *not* drawn as is equally deliberate:
+   not `ended`, because nobody ended it, and not counted in the machine's live
+   count, because nothing is running. The dot answers what the *conversation* is
+   doing; the count answers what the *machine* is doing, and parking is the case
+   that separates them.
+
+7. **Its controls stay live, and a tap is a choice rather than a wake.** Every
+   other stop clears `agentConfigState`, which is right — the options describe a
+   process that is gone. Parking keeps them, because the process is coming back to
+   the same conversation, and clearing them made the strip fall to the client's own
+   memory, where it is drawn faint and refuses a tap: a session you could re-model
+   at 29 minutes and not at 31, with nothing on screen saying why, since parking
+   deliberately shows nothing. So the options stay, `setConfigOption` and `setMode`
+   **record** against them instead of sending, and `doResume` puts the choice to
+   the fresh agent through `restoreConfig` — which sends only what differs and only
+   what the returning agent still offers. The owner's rule, and both halves are
+   load-bearing: recording without applying is a control that lies, and applying by
+   waking would spend ~400 MB on a glance at a settings row and give the feature a
+   second way back when its whole answer is *send a message*. In memory, so a
+   daemon restart drops a pending choice and the strip reads faint again — the
+   honest state for a daemon that no longer knows what that agent offered.
+   Validation is the live path's, run against the remembered options, so a value no
+   agent offers is refused without one rather than recorded and silently dropped at
+   the wake.
+
+**The trap, and it is the one worth remembering.** `isActiveRow` — the prune's
+predicate — ended `reason === null || endedWithDaemon({ reason })`. Since `parked` is
+deliberately outside that list, adding the reason made **every parked session
+inactive**: swept by age, ranked under the cap. That is Q2.222's incident exactly,
+re-aimed at the quietest and most-likely-to-be-returned-to conversations on the
+machine. `events.ts` now exports `keepsItsConversation`, one member wider, and the
+store reads that; `endedWithDaemon` is untouched, because the boot pass and the
+client's warn tone still want the narrow question. Nothing in the type system would
+have caught this — the function has no `switch` — and what did catch it is the
+`Record<ExitReason, "swept" | "kept">` Q2.222 left behind in `daemoncheck`, which
+refused to compile until the new reason was placed.
+
+**What the wake actually costs, measured 2026-09-09, and why none of it is
+recoverable.** Spawning the ACP bridge and completing `initialize` is **197 ms**,
+timed directly against `claude-agent-acp` with no session opened. `session/new` on
+top of that is ~500 ms — the `claude` CLI's own start — and `session/resume` ~1 100
+ms, so re-reading the conversation is the remaining ~600 ms. Two thirds of the wake
+is inside the agent's own binary.
+
+⚠ **The transcript this daemon holds cannot shorten any of it, and the protocol is
+where that is settled rather than the implementation.** `ResumeSessionRequest` is
+`{sessionId, cwd, …}` and `LoadSessionRequest` is `{mcpServers, cwd, …}` — neither
+carries history, so there is no verb for handing an agent a conversation. What
+`sessions.events` holds is what the *browser* draws; the agent's context has to come
+from the agent's own file, which for claude is `~/.claude/projects/<cwd>/<uuid>.jsonl`
+(Q2.1). The daemon's resume *is* the CLI's own: the live fleet shows
+`claude … --resume=<uuid>` on the command line.
+
+**And that is also the answer to "what do claude and codex do about this".** They
+have no resident process at all — a CLI session lives exactly as long as its
+terminal, and coming back is `--resume=<uuid>` re-reading the transcript, at the
+same ~1.3 s. **The daemon was the deviation**, holding processes indefinitely
+because it had no notion of the person having closed the terminal. Parking is what
+makes it behave like the tools it wraps.
+
+**Alternatives taken out.**
+
+- *A warm spare process.* It cannot help with the expensive part: the CLI is bound
+  to a conversation at spawn (`--resume=<uuid>` is a launch argument), so a spare
+  cannot be pre-pointed at one. Only the *bridge* could be kept warm, saving the
+  197 ms — about 15% of the wake — for a resident process per spare. Paying memory
+  to buy back latency is the trade this whole entry exists to make in the other
+  direction.
+- *A mark and a sentence of its own.* Built first: a dashed dot, a screen-reader
+  label, and a quiet notice saying the agent had been released and a message would
+  bring it back. All of it removed. The person cannot act on any of it, the wait it
+  would have explained is already covered by the composer's spinner, and a state
+  with a name is a state somebody has to interpret. See point 6.
+- *Adding `parked` to `DAEMON_EXIT_REASONS`.* It fixes the prune in one word, and
+  then the boot pass un-parks everything and clients draw the warn tone
+  `interrupted` carries. Two wrong answers to buy one right one.
+- *Refusing a wake at the ceiling, the way `create` used to.* It is the same 429
+  and a completely different sentence: one says "you have too many sessions open",
+  the other says "the conversation you are typing into is unavailable". Releasing a
+  slot is refusing something nobody is watching instead.
+- *Keeping the full idle threshold at the ceiling.* Argued for a round, on the
+  ground that a machine with nothing idle for half an hour is genuinely that busy.
+  It was wrong about who is asking: at a ceiling somebody is asking for capacity
+  now, and what would be taken is an agent doing nothing. Q2.223's complaint
+  survived the whole of Q2.224 because of it.
+- *Waking on opening a session.* Asked for, and declined by the owner: it hides the
+  1.3 s behind reading the transcript, and it means tapping through five rows spawns
+  five agents. Typing is the signal that somebody actually wants the agent.
+- *Scaling the sweep interval to the threshold.* Somebody who sets five minutes
+  would silently get a coarser sweep than somebody who sets an hour. A minute of
+  slack on any threshold is noise; the interval is a constant.
+- *A `resume_gave_up` precondition as a live gate.* It is written, and it cannot
+  fire: `onResumed` clears the verdict on the resume that succeeded, so a session
+  live enough to be idle has just proved it can be brought back. Established by a
+  driver fixture built to exercise it, which parked anyway. Kept as a statement of
+  intent, with the reason recorded at the site and both halves pinned.
+
+**Driven.** `daemoncheck.restart-and-resume.ts`: the `autoResumable` row on both
+triggers; `statusOf("parked")` against `"parked"` *and* against `"exited"`, since
+the failure is two states collapsing into one; a real open turn the sweep must not
+take, against a rig that never answers the prompt; the four facts "released" means;
+a restart that finds it still parked and a boot pass that leaves it alone; a wake
+through the real HTTP route, on the same `agentSessionId`; eviction at the ceiling,
+least-recently-used first, from both ends: a wake taking a slot and proceeding
+anyway when there is none, and a `create` taking one — losslessly, the session
+ending up `parked` rather than ended — and still refusing before it touches the
+filesystem when every live session is mid-turn; and the schedule itself through an
+injected clock, including that it re-arms.
+`daemoncheck.store-and-worktrees.ts`: `parked` placed as `"kept"`, driven under both
+sweeps. And the deferred controls, against a rig that publishes an option and
+accepts `session/set_config_option`: that a released session still offers it, that
+choosing is accepted, that the choice is on the session at once and **no process
+was started for it**, that a value the agent does not offer is still refused, that
+the wake sends exactly what was chosen — and the negative that keeps the arm
+narrow, a session somebody *stopped* keeping no controls and answering `terminal`.
+⚠ The rig was written in this daemon's own `kind`/`value`/`choices` shape rather
+than ACP's `type`/`currentValue`/`options`, so `toConfigOptions` produced an option
+with no kind and no choices, both validation guards were skipped, and a model no
+agent offers was accepted and then sent. The driver caught it; nothing else would
+have. `webcheck`: the three-way exit-reason partition with `parked` its own part;
+that `endedWithDaemon` is *not* exact about it and `isParked` is what runs first;
+the four-way presentation partition over the whole matrix; its own tone, asserted as
+distinct from `ended`, `idle` and `waiting`; its dot read off disk and asserted
+different from the ended one, because a `Record` cannot catch a copied string; that
+it lands in Active and not in the machine's live count; and the absence of the
+Resume control. Every one was proven red under a one-line mutation.
+
+**Status.** Fixed, 2026-09-09.
+
+### Q2.225 — The first daemon setting with a control on a screen
+
+**Question.** How long a conversation keeps its agent (Q2.224) is one person's
+trade between memory on their own machine and a ~1.3 s wait. It shipped as
+`REEMOAT_IDLE_PARK_MINUTES` — an env var, edited over SSH. Should it be on the
+settings screen, and if so what happens to *"the daemon's config is env only"*?
+
+**Decision.** It gets a control, and the rule does not move. `REEMOAT_*` is still
+read only in `scripts/daemon.ts`, nothing in `src/` touches `process.env`, and an
+operator provisioning a fleet still writes an env file. What is new is a **narrower
+class** with a different owner: settings whose subject is the person *using* the
+machine rather than the one who deployed it. `agent_strip` — which agents the New
+session row offers, and in what order — has been in that class since it was built
+and only escaped the question because one preference needed no general home.
+
+- **`machine_settings`, a key/value table**, and a new *table* so `SCHEMA_VERSION`
+  stays 6 for the reason `uploads` and `plugins` already give. Keys are enumerated
+  in `MACHINE_SETTING_KEYS`, a `Record<…, true>` exhaustive in both directions, so
+  a row this build cannot name is left alone rather than half-understood — the
+  stance `isExitReason` takes on a different column. A column per setting would
+  have made that a migration.
+- **`GET /settings` and `PATCH /settings`.** `PATCH` and not `PUT`, which is the
+  opposite call from `/agent-strip` one route above: that body is a whole list and
+  replacing it wholesale is the only coherent write, while this is a table of
+  independent settings where a client sending the keys it happens to know would
+  silently reset the ones it does not. An older client must be able to write this.
+- **A stored value overrides the env var**, which is therefore the default for a
+  machine nobody has set rather than a policy anything has to explain itself
+  against. `0` is a stored answer of "never".
+- **Applied to the running daemon before the route answers**, not at the next
+  restart, so the value a caller reads back is one already in force.
+- **A store-less daemon still answers `GET` and refuses `PATCH`.** The number is a
+  fact about the machine either way; what a person cannot do is change it, and a
+  `503` says so where an empty form would say nothing.
+
+⚠ **The provenance line was built, shipped into review and cut, and the reasoning
+that put it there is worth keeping because it looked correct.** The screen first
+drew a line under the field saying whether the number was set here or came from
+this machine's configuration, with a link back to the latter — on this
+repository's own rule that a control must not show a value a configuration has
+silently answered, which is why the agent settings screen reads
+`~/.claude/settings.json` and says so. The owner cut it on sight, and the rule was
+being misapplied: it is about an operator and a user disagreeing, and here there is
+no operator. This is one person's machine and one person's preference, so the line
+was a sentence about env files on a screen that mentions none. What went with it is
+the whole apparatus it justified — `source` on the wire, `null` on the route,
+`clear` on the store — because the only thing any of them could express was "go back
+to the configuration", and with no line there was no reader. An unread field is the
+state this repository deletes rather than keeps. The way back to the default is
+typing the number.
+
+**The copy, and it is a decision rather than a detail.** One sentence — *"A
+conversation left untouched this long has its agent shut down to free memory, and
+your next message starts it again exactly where you left off"* — and the word
+**park** appears nowhere a reader can see it. That is the owner's call and it is
+right: the daemon calls this state `parked`, every docblock does, and that is
+exactly how the word leaks onto a screen — it is the name everybody working on it
+uses. On a settings row it would name a mechanism the reader cannot see and cannot
+act on, turning housekeeping into a term to learn. `webcheck` asserts the
+prohibition over the whole comment-stripped screen rather than over the sentence,
+because read off the sentence it passes vacuously the moment somebody rewords it —
+which is precisely when they are most likely to reach for the word. The other half
+is asserted too: the sentence must still say that the agent is shut down and that
+nothing is lost, or "no jargon" is satisfied by saying nothing.
+
+**Alternatives taken out.**
+
+- *Leaving it env-only, per Q2.223.* That entry refused a UI for
+  `REEMOAT_MAX_LIVE_SESSIONS` on this exact rule, and the refusal stands **for that
+  setting**: a ceiling on concurrent agents is a machine's operator's business.
+  This one is not — it is a latency preference, and the person meeting the latency
+  is the person holding the phone.
+- *A column on the singleton `daemon` table.* That table is the running instance —
+  `instance_id`, `pid`, `started_at` — and is rewritten at every boot. A persisted
+  preference in it would be a preference that looks like state.
+- *A general settings framework.* One key today, and the table is the general part;
+  what is deliberately absent is a schema, a types-per-key registry and a
+  migration story for a surface with one member.
+
+**Driven.** `daemoncheck.restart-and-resume.ts`: the configuration in force with
+nothing stored; a save that answers with what is now in force **and is already
+being used by the running daemon**, which is the half a caller cannot check for
+itself; a session released on the saved five minutes that the configured
+forty-five would have kept; `0` surviving the round trip as a choice rather than
+being read as unset, and `null` no longer being a way to ask for the configuration
+back; an unknown key, a negative, a fraction and a value past the ceiling all
+refused without changing what is stored;
+and a store-less daemon answering `GET` and refusing `PATCH`. `webcheck`: the
+sentence, the prohibition over the whole screen, and that no heading on it names
+the mechanism either.
+
+**Status.** Current
 
 
 ## The web client

@@ -6,6 +6,7 @@ paths:
   - src/store/*
   - scripts/daemon.ts
   - src/agentupdate.ts
+  - src/idlepark.ts
   - scripts/daemoncheck.ts
   - scripts/daemoncheck.*.ts
   - scripts/harness.ts
@@ -37,14 +38,32 @@ replaying anything, and which all four agents advertise. Q2.1, Q2.106. opencode'
 is read off `initialize` (Q6.105) rather than driven with a real login, which is
 the same standing this claim had for codex before it was exercised.
 
+**A restart is no longer the only way an agent goes with nobody deciding.** A session
+quiet for `REEMOAT_IDLE_PARK_MINUTES` is stopped `parked`, its process released and
+all else kept; the next **message** brings one back. Four invariants, no compiler
+behind any: the precondition is `status === "idle"` **and nothing else**; `parked` is
+**not** a `DAEMON_EXIT_REASON`, so the boot pass leaves it — and it therefore needs
+its own `SessionStatus`, or `status`'s `default:` answers `exited`; the prune reads
+the wider `keepsItsConversation`, since the narrow one made every parked row
+deletable; and **a message is the only way back**, an exclusion rather than an
+omission, `canResume` being satisfied by both its clauses. It draws as an ordinary `idle`
+session and says nothing — explicitly, since the fallthrough says `ended` — but
+**Stop stays offered**: `stop()` memoises, so without an override a person
+pressing it got `200` and no change. Its **controls stay live too** — parking is
+the one stop that keeps `agentConfigState`, so a tap is *recorded* and applied by
+`doResume`, never a wake. Q2.224.
+
 **The rule is `autoResumable`, a `switch` over `ExitReason` with no `default`
 arm**, so adding a reason is a compile error rather than a silent `false`:
 
 | reason | at boot | on a prompt |
 |---|---|---|
 | `daemon_shutdown`, `daemon_restarted`, `config_changed` | yes | yes |
-| `agent_exited`, **`stopped`**, **`agent_signed_out`** | no | **yes** |
+| `agent_exited`, **`stopped`**, **`agent_signed_out`**, **`parked`** | no | **yes** |
 | `start_failed`, `start_timeout`, `agent_kill_failed` | no | no |
+
+⚠ `parked` is in that row for the opposite reason to the other three: theirs is that a
+prompt may overrule a decision; its `no` at boot is the load-bearing half.
 
 **Everything splits on the same rule: a prompt is a person asking for this
 conversation *now*, and a boot pass is nobody asking.** The boot pass has no
@@ -102,12 +121,11 @@ is written at the constant — `claude-agent-acp` maps *two* SDK failures onto t
 code and one is a transport hiccup, so a recoverable session can be stranded and the
 way back is one manual `resume`, until the startup prune takes the row (Q2.222). Q2.6.
 
-**`/clear` breaks resume for that session, and it is not fixed.** Our ACP session id
-does not change and claude forks *underneath* the protocol, so the stored id keeps
-naming the conversation the fork left behind — a codeword somebody asked the agent
-to forget comes back word for word. `session/list` is the untried lead; if the fork
-cannot be identified, the honest answer is to stop auto-resuming a cleared session
-rather than resume the wrong conversation. Q2.7.
+⚠ **Q2.7 says `/clear` breaks resume and reads as current; it describes the daemon
+*forwarding* the command, which `clearContext` no longer does.** It performs the
+clear itself and stores the id `session/new` handed back, so the stored id names the
+live conversation rather than a fork's parent. Rows written before that still carry
+a forked id and are what `resume_gave_up` is for. Q2.7 is stale, not re-measured.
 
 **A clear is exclusive, and `clearing` is the marker that says so.** A `/clear` is a
 `session/new` followed by a `session/close` — ~600ms to 15s in which the session
@@ -264,10 +282,12 @@ against the tab's 16 MiB ceiling and bury a reattaching phone behind
 `ATTACH_REPLAY_MAX`. Neither is drawn anywhere, and the last 20 stderr lines are
 already on `Session.recentLogs()`. Q2.44.
 
-**What is deliberately not done.** `status` is untouched and no new `SessionStatus`
-member exists: a clock in `status` would break *"Status is derived, never stored"*,
-and a new member falls silently through `statusTone`'s `default` with no mirror
-assertion anywhere. The turn is **not** held open — that would make `canCancelTurn`
+**What is deliberately not done.** `status` is untouched and this adds no
+`SessionStatus` member: a clock in `status` would break *"Status is derived, never
+stored"*. ⚠ Its second argument — *"a new member falls silently through
+`statusTone`'s `default`"* — is **spent**: `parked` was added anyway (Q2.224) and
+forced the mirror, partition and tone assertions that make it false. The reason not
+to add one here is that there is no state to name. The turn is **not** held open — that would make `canCancelTurn`
 true for a turn that has ended and answer `409 busy` for ever. And `showsWorking` is
 **not** widened, because it is what refuses Send: widening it would take the control
 away in exactly the state whose only exit is using it.
@@ -412,6 +432,7 @@ non-goal, with the numbers, at Q7.113.
 | `src/registry.ts` | Session lifecycle, derived status, the permission state machine, the turn pump and how a turn is stopped |
 | `scripts/daemon.ts` | Entry point: env, signals, logging |
 | `src/agentupdate.ts` | Runs `deploy/agents.sh` five minutes after start, then daily; drops the cached CLI choice after; nudged when a resume finds no CLI. `REEMOAT_AGENT_UPDATES=off` arms nothing |
+| `src/idlepark.ts` | The idle sweep: a clock and nothing else. Which sessions may be released is `ManagedSession.parkable`, in what order is `parkIdleSessions`. `REEMOAT_IDLE_PARK_MINUTES=0` arms nothing |
 | `scripts/harness.ts` | Pre-daemon CLI that drives `Session` directly. Keep it working: the regression test for the untouched default paths |
 | `scripts/daemoncheck.ts` | Offline driver for the daemon's HTTP surface and durable state. The runner only — the assertions are in the nineteen `daemoncheck.<subject>.ts` beside it, and what they share is in `daemoncheck.env`/`.fixtures`/`.bodies` |
 
@@ -421,7 +442,8 @@ non-goal, with the numbers, at Q7.113.
 |---|---|
 | Event log | **Unbounded per session.** 128 KiB per event (truncated visibly at the store boundary). What bounds the database is whole sessions, `prune()` at startup — the next row, every id reported. Q2.222. That bounds **rows**; bytes, by `reclaim()`, which `VACUUM`s once a quarter of the file is free |
 | Sessions on disk | Inactive — ended by a person or the agent, never started, or given up on; never a live or daemon-ended row otherwise — idle 7 days / 200 of them; never under 50. `GET /sessions` unbounded by default, takes `?limit=`, reorders blocked-first so a cut drops only rows nobody waits on |
-| Sessions running | **64 live, and 16 creations then one per 2 min.** Both are needed: the ceiling bounds what is running, the burst bounds create-and-stop, which walks past a ceiling while still writing the rows the prune deletes. `429` before the cwd is resolved, so a refusal costs no filesystem probe. **Resume is deliberately outside it** — putting an agent back in front of an existing conversation is not manufacturing a session. In memory; `REEMOAT_MAX_LIVE_SESSIONS` and friends move them. Q2.100 |
+| Sessions running | **64 live, and 16 creations then one per 2 min.** Both are needed: the ceiling bounds what is running, the burst bounds create-and-stop, which walks past a ceiling while still writing the rows the prune deletes. **It releases rather than refuses** — a wake *or* a create takes the least recently used **idle** slot, by need rather than by the sweep's age; with none to take a wake goes one over, a create answers `429` before the cwd is resolved. So it counts **agents resident**. In memory; `REEMOAT_MAX_LIVE_SESSIONS` moves it. Q2.100, Q2.224 |
+| Idle agents | **Released after 30 min of quiet**, on by default. `REEMOAT_IDLE_PARK_MINUTES` moves it, `0` switches off the sweep *and* the eviction. Swept once a minute. Q2.224. A value saved on the machine's settings screen (`PATCH /settings`) **overrides** the variable, without a restart: config is still env only, this is the narrower class the *user* owns. Q2.225 |
 | WS outbound queue | 8000 events / 16 MiB, with **`ATTACH_REPLAY_MAX` 2000** under the *event* half only — at 128 KiB an event a full replay is 250 MiB, so the byte ceiling still collapses an attach and reports the same `lagged{backlog}` rather than `slow_consumer`. The socket is bounded, the transcript is not |
 | `Session.EventQueue` | 2000, evicting only `agent_log`/`other`. Never drop-oldest: dropping `text` or `file_change` yields a contiguous log missing content. **What it bounds is narrow**: a `ManagedSession` attaches a reader between turns, so the unread window is the gap between `adopt` and `onStarted`, plus any bare `Session` (`harness`, the Session-level drivers) where nothing drains between turns at all. Q2.104 |
 | Timeouts | start 45s, shutdown budget 20s, cancel-send 1s, session/close 2s, cancel grace 5s **on a dispose** and 1.5s on a turn somebody stopped (what follows the first is SIGKILL, and what follows the second is nothing), exit grace 3s, WS ping 20s, enrollment 15s |
@@ -437,8 +459,7 @@ non-goal, with the numbers, at Q7.113.
 - **`pkill -f "tsx scripts/daemon.ts"` matches nothing.** The real command line is
   `…/tsx/dist/cli.mjs scripts/daemon.ts`, so that pattern kills no daemon and the next
   one refuses to start on the database lock. Kill by pid.
-- **Port 7777 is taken** by a Plane container stack with `restart=always`. Both
-  `DEFAULT_PORT` and the client's `REEMOAT_URL` fallback are 7887 for that reason.
+- **`DEFAULT_PORT` and the client's `REEMOAT_URL` fallback are both 7887**, not 7777.
 - **The slow-consumer collapse path is untested on the daemon side** — producing it
   needs real TCP backpressure. The eviction path is verified, and `webcheck` covers the
   client's half: a 4003 close backs off and does **not** mark the machine unreachable.
