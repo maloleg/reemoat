@@ -25,6 +25,8 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-11
+
 ### Added
 
 - **Terms of Use, an Acceptable Use Policy and a Privacy Policy, at `/terms`,
@@ -65,38 +67,6 @@ it — so a citation here would be the one kind nothing checks.
   reads the session as live, which is the safe direction, but it will label the exit
   `ended: parked`. Deploy the control plane, which carries the web client, before the
   daemons.
-
-### Changed
-
-- **A machine at its session ceiling now releases an idle agent instead of refusing.**
-  `POST /sessions` and any wake take the least recently used **idle** slot rather than
-  answering `429`, and a turn in flight, an unanswered permission and an unanswered
-  question are never taken at any ceiling. A create is still refused when every live
-  session is genuinely busy, and the sentence says so. The ceiling therefore counts
-  agents resident rather than conversations held.
-
-### Removed
-
-- **`PUT` and `DELETE /v1/admin/grants`, and with them `cpctl admin grant` and
-  `cpctl admin ungrant`.** A grant is full access to a machine that runs coding
-  agents as its owner, with no sandbox — and these wrote one for *any* machine on
-  an admin credential alone, with no consent from the person whose machine it was
-  and nothing on any screen afterwards. Sharing is the owner's verb now (below).
-  The two `cpctl` verbs answer with the replacement rather than "unknown command",
-  because the old spellings are in scripts and in shell history. `GET
-  /v1/admin/grants` is kept: seeing who holds what is not the power that was
-  removed, and an operator who cannot read that table cannot answer "why can this
-  person reach that machine".
-
-- The context-window ring is gone from the web client. It reported how full an
-  agent's window was and reported nothing at all on kimi, which never sends the
-  notification it was built on, and nothing on any session waiting for its agent —
-  a control that was blank for most agents most of the time, in a row where
-  everything else changes what the next turn does. Nothing changed on the daemon:
-  the reading is still measured, still on every session snapshot, and still
-  printed by `pnpm client`.
-
-### Added
 
 - **Give up a share somebody made to you** — `DELETE /v1/machines/:id/grants/me`,
   driven by `cpctl leave <machineId>`. Sharing writes a permanent row for any user
@@ -169,6 +139,13 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Changed
 
+- **A machine at its session ceiling now releases an idle agent instead of refusing.**
+  `POST /sessions` and any wake take the least recently used **idle** slot rather than
+  answering `429`, and a turn in flight, an unanswered permission and an unanswered
+  question are never taken at any ceiling. A create is still refused when every live
+  session is genuinely busy, and the sentence says so. The ceiling therefore counts
+  agents resident rather than conversations held.
+
 - **An admin may no longer mint an enrollment code over a live one somebody else
   made.** `POST /v1/admin/machines/:id/enrollments` answers `409 code_outstanding`.
   Minting supersedes the machine's current code, so on a machine that is owned but
@@ -226,6 +203,27 @@ it — so a citation here would be the one kind nothing checks.
   except on pinned rows, which drew it always — so two rows a few pixels apart,
   alike in every other way, had a different number of controls. A row's only menu
   should not be hidden until you are already pointing at the row.
+
+### Removed
+
+- **`PUT` and `DELETE /v1/admin/grants`, and with them `cpctl admin grant` and
+  `cpctl admin ungrant`.** A grant is full access to a machine that runs coding
+  agents as its owner, with no sandbox — and these wrote one for *any* machine on
+  an admin credential alone, with no consent from the person whose machine it was
+  and nothing on any screen afterwards. Sharing is the owner's verb now (below).
+  The two `cpctl` verbs answer with the replacement rather than "unknown command",
+  because the old spellings are in scripts and in shell history. `GET
+  /v1/admin/grants` is kept: seeing who holds what is not the power that was
+  removed, and an operator who cannot read that table cannot answer "why can this
+  person reach that machine".
+
+- The context-window ring is gone from the web client. It reported how full an
+  agent's window was and reported nothing at all on kimi, which never sends the
+  notification it was built on, and nothing on any session waiting for its agent —
+  a control that was blank for most agents most of the time, in a row where
+  everything else changes what the next turn does. Nothing changed on the daemon:
+  the reading is still measured, still on every session snapshot, and still
+  printed by `pnpm client`.
 
 ### Fixed
 
@@ -368,6 +366,7 @@ it — so a citation here would be the one kind nothing checks.
   changed — and why three chips sat side by side mostly empty. That trade is
   reversed: they hug their content, and a value that grows moves its neighbours
   again.
+
 ## [0.7.0] - 2026-09-06
 
 ### Changed
@@ -1334,6 +1333,7 @@ holds them in full, with what would settle each.
 - Three agent-login questions on macOS are written but unmeasured, all settled by
   one real device-code login.
 
-[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/rends-east/reemoat/releases/tag/v0.8.0
 [0.2.0]: https://github.com/rends-east/reemoat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rends-east/reemoat/releases/tag/v0.1.0
