@@ -943,83 +943,204 @@ export function permissionButtons(options: readonly PermissionOptionSummary[]): 
  * claude's plan-mode decision, curated — and **`null` for anything else at all.**
  *
  * ⚠ **This recognises options by `optionId`, which is a documented reversal**, so
- * the reason it is unavoidable comes first. Measured, the request offers three
- * approvals and all three are `kind: "allow_always"` — "Yes, and bypass
- * permissions", "Yes, and use \"auto\" mode", "Yes, and auto-accept edits". ACP's
+ * the reason it is unavoidable comes first. Measured, every approval on the request
+ * is `kind: "allow_always"` bar one — under 0.63.0 "Yes, and bypass permissions",
+ * "Yes, and use \"auto\" mode" and "Yes, and auto-accept edits"; under 0.73.0 "Yes,
+ * clear context (N% used) and use auto mode" beside "Yes, and use auto mode". ACP's
  * enum is therefore carrying nothing that separates them, and the id is the only
  * thing that does. `permissionLayout`'s rule ("by length, never by id") is untouched
- * and still governs every other card; this is a named exception on one measured
- * shape, not a softening of the rule.
+ * and still governs every other card; this is a named exception on measured shapes,
+ * not a softening of the rule.
  *
  * Everything about it is arranged so that being wrong costs nothing:
  *
  *   - **Structure before ids.** A `plan` in the arguments and ACP's own
- *     `switch_mode` kind are both required before the table below is consulted.
- *     The kind is demanded here and *not* for the markdown rendering, because
- *     that is where the consequence is: drawing a document cannot approve
- *     anything, removing two of five options can.
- *   - **Exact set equality.** Five options, these five ids, these five kinds, and
- *     nothing else. One extra option, one renamed id, one changed kind → `null`.
+ *     `switch_mode` kind are both required before {@link PLAN_SHAPES} is
+ *     consulted. The kind is demanded here and *not* for the markdown rendering,
+ *     because that is where the consequence is: drawing a document cannot approve
+ *     anything, reordering the buttons somebody decides with can.
+ *   - **Exact set equality, within one shape.** The same count, these ids, these
+ *     kinds, and nothing else. One extra option, one renamed id, one changed kind
+ *     → that shape does not match, and if none does the answer is `null`.
  *   - **`null` is today's card.** The caller falls back to `permissionButtons`,
  *     so an agent that words plan mode differently, or a claude release that adds
- *     a sixth option, loses nothing whatever.
+ *     an option, loses nothing whatever.
  *
- * **Saying what to change is not one of these buttons.** It is the message box,
- * which takes over while a plan is on screen: its placeholder says so, Stop
- * becomes Send, and a message written there stops the turn and goes. A fourth
- * button that opened a second text field two inches above the one this app
- * already has was built here and taken back out — see Q3.454.
+ * **The list is what makes an adapter bump cheap**, and it exists because the
+ * single shape here went stale silently — see {@link PLAN_SHAPES} for what that
+ * cost. Adding a measured request is an entry; nothing about the gate moves.
  *
- * **What is given up when it fires, said plainly.** `bypassPermissions` — the
- * broadest grant on the card, and the one this table drops on purpose rather than
- * for want of room; nothing else in this file removes an option any more. And
- * `default`, "Yes, and manually approve edits" — the only `allow_once` in
- * the request, i.e. *"yes, but keep asking me about every edit"*. That one is
- * outside every existing rule: after this the narrowest grant the card offers is
- * `acceptEdits`, and the reversal is one entry in {@link PLAN_ORDER}.
+ * **Saying what to change is not one of these buttons, and that is now the whole
+ * of how a plan is declined.** It is the message box, which takes over while a
+ * plan is on screen: its placeholder says so, Stop becomes Send, and a message
+ * written there stops the turn and goes. A fourth button that opened a second
+ * text field two inches above the one this app already has was built here and
+ * taken back out — see Q3.454.
  *
- * The primary is `auto` and **that reverses what the filled button means here** —
- * `permissionButtons` gives `bg-fg` to `allow_once` precisely because it is the
- * reversible one. What makes it survivable rather than merely asked for is that
- * `auto` sets a session *mode*, which the agent republishes as an `agent_config`
- * control the composer's strip can set back; it is not a policy rule written to
- * the agent's disk.
+ * ⚠ **No refusal is drawn, and no `allow_once` either.** Every `order` below is
+ * two buttons: the elevated grant, and the same grant with the context cleared.
+ * Reported from a phone against the four-button footer — the row wrapped, and
+ * four buttons of ours in the place where the plan itself was supposed to be
+ * readable is the same defect `PLAN_SHAPES` was written to fix, arrived at from
+ * the other side. What is *given up* is stated rather than assumed: "keep
+ * planning" as a button, and "yes, but ask me about every edit".
+ *
+ * **Neither is given up as a capability, which is the only reason this is
+ * survivable.** Declining has two routes and both are on screen: the ✕ in the
+ * header settles the request `cancelled`, and the message box refuses it *with a
+ * reason*, which is the one somebody actually wants — a plan is declined because
+ * of something in it. And per-edit approval is a session mode, not a fork in this
+ * card: the agent republishes it as an `agent_config` control, so the composer's
+ * own strip sets it back afterwards. What the card no longer does is ask a
+ * question with four answers where the document being decided on had no room.
+ *
+ * **The primary is the clear-context grant, and that reverses what the filled
+ * button means here** — `permissionButtons` gives `bg-fg` to `allow_once` precisely
+ * because it is the reversible one. What makes it survivable rather than merely
+ * asked for is that it sets a session *mode*, which the agent republishes as an
+ * `agent_config` control the composer's strip can set back; it is not a policy rule
+ * written to the agent's disk. What it also does is clear the context, which is the
+ * one irreversible half — and it is the option somebody reaching this card has
+ * already decided on, the whole card being the question "shall I start".
  */
 export interface PlanControl {
   option: PermissionOptionSummary;
-  /** Ours — see {@link PLAN_ORDER}. */
+  /** Ours — see {@link PLAN_SHAPES}. */
   label: string;
+  /**
+   * The left group, which is `permissionButtons`' refusals-left rule.
+   *
+   * ⚠ **False for every control every shape draws today, and computed anyway.**
+   * No `order` below carries a `reject_once` any more, so this is a rule with
+   * nothing currently under it — kept as `kind.startsWith("reject")` rather than
+   * dropped to `false`, because the alternative is a measured shape that does
+   * carry a refusal one day landing it in the approvals group, on the right, next
+   * to the filled primary. A rule that costs one comparison is cheaper than that.
+   */
   leading: boolean;
   primary: boolean;
 }
 
-/**
- * The shape, exactly as measured — `~/.reemoat/reemoat.db`, seq 48,
- * claude-agent-acp on a `switch_mode` tool call titled "Ready to code?".
- */
-const PLAN_SHAPE: readonly (readonly [string, PermissionOptionSummary["kind"]])[] = [
-  ["bypassPermissions", "allow_always"],
-  ["auto", "allow_always"],
-  ["acceptEdits", "allow_always"],
-  ["default", "allow_once"],
-  ["plan", "reject_once"],
-];
+/** One measured plan-mode request, and what this card makes of it. */
+interface PlanShape {
+  /** Every option the request must carry, and nothing else. */
+  shape: readonly (readonly [string, PermissionOptionSummary["kind"]])[];
+  /** What is drawn, left to right, and what each is called. */
+  order: readonly (readonly [string, string])[];
+  /** The filled one. */
+  primary: string;
+}
 
 /**
- * What is drawn, left to right, and what each is called.
+ * The plan-mode requests this card knows, newest adapter first.
  *
- * **The words are ours here and nowhere else on this card.** `optionLabel`'s rule
- * is that the agent's own wording survives wherever it carries something the kind
- * does not — a *scope*. None of these carries one, the id is already what
- * identified them, and claude's own labels are 17–26 characters each: four of
- * them wrap into an unreadable block on a 390px phone, on the card whose button
- * row carries its meaning by position. The agent's wording is not lost — it rides
- * `AskOption.hint` as the `title`, which is exactly what that field is for.
+ * ⚠ **There was one shape here and it had been dead for a release.** It was
+ * measured under `claude-agent-acp` 0.63.0 — `~/.reemoat/reemoat.db`, seq 48, five
+ * options — and 0.73.0, which is what `package.json` pins, renamed every id and
+ * dropped one. Exact set equality then failed on every plan request, `planControls`
+ * answered `null`, and the card fell back to the agent's own 17-to-46-character
+ * labels; `permissionLayout` saw those and switched to `rows`, so four full-width
+ * rows and a footer took the room the plan was supposed to have. Nothing caught it:
+ * `webcheck`'s fixture was the shape the pinned adapter no longer sends, so the
+ * driver was green over a card nobody could reach.
+ *
+ * **So this is a list, and being wrong is still free.** Every narrowing Q3.453
+ * argued survives — structure before ids, *exact* set equality within a shape, and
+ * `null` meaning today's card — and what changes is that a second measured request
+ * is one entry rather than a loosened rule. First match wins; a shape that matches
+ * none is drawn exactly as it was.
+ *
+ * **0.73.0 sends three of these and the difference is which grant it can offer.**
+ * `buildExitPlanModePermissionOptions` picks one elevated mode out of the session's
+ * own `availableModes` — `auto`, else `bypassPermissions`, else `acceptEdits` — and
+ * builds the same four rows around it: clear-context-and-elevate, elevate,
+ * `exit-plan-default`, `reject`. The clear-context row exists only when the tool's
+ * `plan` argument is a non-empty string, which is exactly when this function runs
+ * at all, so all three are four options rather than sometimes three.
+ *
+ * **Every shape draws two, and it is the same two.** The elevated grant the adapter
+ * picked, then that grant with the context cleared as the filled primary — so the
+ * card asks one question with one axis, and the buttons are two words wide on the
+ * screen that reported them. `shape` is still the *whole* request and still matched
+ * exactly; `order` is what is drawn, and the gap between them is where the dropping
+ * happens, in one place, per measured shape.
+ *
+ * ⚠ **This drops a refusal, which the four-button arrangement did not**, and the
+ * paragraph at {@link PlanControl} carries the argument rather than this one: the ✕
+ * and the message box are both on screen, and only one of them can say *why*. It
+ * also drops `exit-plan-default` on the 0.73.0 shapes and keeps `acceptEdits` on the
+ * 0.63.0 one, which looks inconsistent and is not: 0.63.0 has no clear-context row
+ * at all, so its two are the two grants it can offer and there is nothing to pair.
+ *
+ * **The order is the owner's and it is not the agent's.** Narrower first, wider
+ * second, the filled primary on the right where a thumb is — which is the same
+ * left-to-right reading `permissionButtons` gives every other card, with the
+ * refusals group standing empty rather than removed.
  */
-const PLAN_ORDER: readonly (readonly [string, string])[] = [
-  ["plan", "Reject"],
-  ["acceptEdits", "Auto-accept edits"],
-  ["auto", "Auto mode"],
+const PLAN_SHAPES: readonly PlanShape[] = [
+  {
+    shape: [
+      ["exit-plan-clear-auto", "allow_always"],
+      ["exit-plan-auto", "allow_always"],
+      ["exit-plan-default", "allow_once"],
+      ["reject", "reject_once"],
+    ],
+    order: [
+      ["exit-plan-auto", "Auto mode"],
+      ["exit-plan-clear-auto", "Clear + auto"],
+    ],
+    primary: "exit-plan-clear-auto",
+  },
+  {
+    shape: [
+      ["exit-plan-clear-bypass", "allow_always"],
+      ["exit-plan-bypass", "allow_always"],
+      ["exit-plan-default", "allow_once"],
+      ["reject", "reject_once"],
+    ],
+    order: [
+      ["exit-plan-bypass", "Bypass permissions"],
+      ["exit-plan-clear-bypass", "Clear + bypass"],
+    ],
+    primary: "exit-plan-clear-bypass",
+  },
+  {
+    shape: [
+      ["exit-plan-clear-accept-edits", "allow_always"],
+      ["exit-plan-accept-edits", "allow_always"],
+      ["exit-plan-default", "allow_once"],
+      ["reject", "reject_once"],
+    ],
+    order: [
+      ["exit-plan-accept-edits", "Auto-accept edits"],
+      ["exit-plan-clear-accept-edits", "Clear + accept"],
+    ],
+    primary: "exit-plan-clear-accept-edits",
+  },
+  /*
+   * claude-agent-acp 0.63.0, kept because a machine can lag the pin.
+   *
+   * This is the request Q3.453 was written against, and its `order` now leaves out
+   * three: `bypassPermissions`, the broadest grant on the card, `default`, the only
+   * `allow_once`, and `plan`, the refusal — the first two on that entry's own
+   * argument, the third on the one every shape here now shares. What is left is the
+   * two grants this adapter can offer, narrower first, and no clear-context row to
+   * pair them with because 0.63.0 has none.
+   */
+  {
+    shape: [
+      ["bypassPermissions", "allow_always"],
+      ["auto", "allow_always"],
+      ["acceptEdits", "allow_always"],
+      ["default", "allow_once"],
+      ["plan", "reject_once"],
+    ],
+    order: [
+      ["acceptEdits", "Auto-accept edits"],
+      ["auto", "Auto mode"],
+    ],
+    primary: "auto",
+  },
 ];
 
 export function planControls(
@@ -1027,14 +1148,16 @@ export function planControls(
   options: readonly PermissionOptionSummary[],
 ): PlanControl[] | null {
   if (context.plan === null || context.kind !== "switch_mode") return null;
-  if (options.length !== PLAN_SHAPE.length) return null;
-  for (const [id, kind] of PLAN_SHAPE) {
-    if (!options.some((option) => option.optionId === id && option.kind === kind)) return null;
-  }
-
   const byId = new Map(options.map((option) => [option.optionId, option]));
+  const matched = PLAN_SHAPES.find(
+    (candidate) =>
+      candidate.shape.length === options.length &&
+      candidate.shape.every(([id, kind]) => byId.get(id)?.kind === kind),
+  );
+  if (matched === undefined) return null;
+
   const controls: PlanControl[] = [];
-  for (const [id, label] of PLAN_ORDER) {
+  for (const [id, label] of matched.order) {
     const option = byId.get(id);
     // Unreachable — the sweep above proved every id is there — and spelled so
     // that it stays unreachable rather than acting if it ever became reachable.
@@ -1044,7 +1167,7 @@ export function planControls(
       label,
       // Refusals left, approvals right — `permissionButtons`' rule, kept.
       leading: option.kind.startsWith("reject"),
-      primary: id === "auto",
+      primary: id === matched.primary,
     });
   }
   return controls;
@@ -1272,26 +1395,65 @@ export function askedQuestion(
   const questions = readQuestions(pending.rawInput ?? inputFor(pending.toolCallId, events));
   if (questions === null) return null;
 
-  for (const question of questions) {
-    const byLabel = new Map(question.options.map((option) => [option.label, option]));
-    const answers: AskedQuestion["answers"] = [];
-    for (const option of offered) {
-      const match = byLabel.get(option.name);
-      // By identity, and one miss abandons the whole question rather than
-      // drawing a partial one: an answer we could not match is an answer whose
-      // description would go on the wrong row.
-      if (match === undefined) break;
-      answers.push({ optionId: option.optionId, label: match.label, description: match.description });
+  /*
+   * ⚠ **The index is built over *every* question before anything is matched, and
+   * a label seen twice is refused rather than resolved.**
+   *
+   * This walked the questions in order and took the first one whose labels
+   * covered the offered options. Two ways that draws one question's wording over
+   * another question's answers, and both were measured against this function:
+   *
+   * - One `AskUserQuestion` carrying several questions that share answer labels —
+   *   `Yes` and `No`, `Approve` and `Reject`. Offered options belonging to question 1 were
+   *   answered with question 0's `question` string and question 0's per-answer
+   *   descriptions. The measured option-id shape is `q0_opt_0` / `q0_skip`, and
+   *   the index in it exists precisely because a label does not identify a
+   *   question.
+   * - Two options carrying the **same label inside one question**, which needs no
+   *   multi-question shape at all: `new Map` kept the last, so two distinct
+   *   `optionId`s drew as identical rows with the same description.
+   *
+   * `answeredQuestions` in `tail.ts` — the sibling join over the same events, for
+   * the settled case — already refuses exactly this with its `AMBIGUOUS` symbol,
+   * on the stated ground that attributing an answer to the wrong question is
+   * worse than attributing none. `web-transcript.md` states it as a rule. This is
+   * the live half of that pair: the person reads the wording and taps an answer
+   * that is recorded against something else, on the surface that approves what an
+   * agent is about to do on a machine with no sandbox. Falling back to plain
+   * buttons is the whole cost of refusing.
+   */
+  type Asked = (typeof questions)[number];
+  const AMBIGUOUS = Symbol("ambiguous");
+  const byLabel = new Map<string, { asked: Asked; option: Asked["options"][number] } | typeof AMBIGUOUS>();
+  for (const asked of questions) {
+    for (const option of asked.options) {
+      byLabel.set(option.label, byLabel.has(option.label) ? AMBIGUOUS : { asked, option });
     }
-    if (answers.length !== offered.length) continue;
-    const skip = rest[0];
-    return {
-      question: question.question,
-      answers,
-      skip: skip === undefined ? null : { optionId: skip.optionId, name: skip.name },
-    };
   }
-  return null;
+
+  let asked: Asked | null = null;
+  const answers: AskedQuestion["answers"] = [];
+  for (const option of offered) {
+    const hit = byLabel.get(option.name);
+    // By identity, and one miss abandons the whole question rather than
+    // drawing a partial one: an answer we could not match is an answer whose
+    // description would go on the wrong row.
+    if (hit === undefined || hit === AMBIGUOUS) return null;
+    // Every offered option must come from *one* question. Two questions covered
+    // by one permission's options is the shape the old first-match loop resolved
+    // silently, and there is no wording that would be true of both.
+    if (asked === null) asked = hit.asked;
+    else if (asked !== hit.asked) return null;
+    answers.push({ optionId: option.optionId, label: hit.option.label, description: hit.option.description });
+  }
+  if (asked === null || answers.length !== offered.length) return null;
+
+  const skip = rest[0];
+  return {
+    question: asked.question,
+    answers,
+    skip: skip === undefined ? null : { optionId: skip.optionId, name: skip.name },
+  };
 }
 
 /**

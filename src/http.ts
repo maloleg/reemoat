@@ -155,16 +155,19 @@ export function gzipResponses(): MiddlewareHandler {
 /**
  * Every non-2xx body in this system, in one shape.
  *
- * Typed rather than spelled out per call site because it is also hand-built in
- * raw `node:http` handlers in the relay, where there is no `c.json` to go
- * through — four places that previously agreed by copy.
+ * ⚠ **Not exported, and the paragraph that said why it was is gone with the
+ * export.** It read "also hand-built in raw `node:http` handlers in the relay,
+ * where there is no `c.json` to go through — four places that previously agreed
+ * by copy", and nothing outside this file ever imported it: the relay's handlers
+ * build the shape by hand and always did. `errorEnvelope` below is the shared
+ * thing, and it is what the relay should reach for if it ever stops copying.
  *
  * The matching rule on the client is that **not every non-2xx is one of these**:
  * a repeated permission answer is a 409 carrying a *success*-shaped body. See
  * the invariant of that name; a reader here must not assume the presence of an
  * `error` key from the status alone.
  */
-export interface ErrorEnvelope {
+interface ErrorEnvelope {
   error: { code: string; message: string; detail: unknown };
 }
 

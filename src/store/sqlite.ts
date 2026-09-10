@@ -15,7 +15,8 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_EVENTS,
   DEFAULT_MAX_EVENT_BYTES,
-  endedWithDaemon,
+  keepsItsConversation,
+  type MachineSettingKey,
   estimateBytes,
   isExitReason,
   isPersistedGiveUp,
@@ -213,6 +214,7 @@ export interface StoreBundle {
   customAgents: SqliteCustomAgentStore;
   /** Which agents the New session strip offers here, and in what order. */
   agentStrip: SqliteAgentStripStore;
+  machineSettings: SqliteMachineSettingsStore;
   uploads: SqliteUploadStore;
   /** What is installed. See `src/plugins/store.ts` for why these are two subjects. */
   plugins: SqlitePluginRecordStore;
@@ -329,6 +331,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   const systemCredentials = new SqliteSystemCredentialStore(db, options.onDegraded);
   const customAgents = new SqliteCustomAgentStore(db, options.onDegraded);
   const agentStrip = new SqliteAgentStripStore(db);
+  const machineSettings = new SqliteMachineSettingsStore(db);
   const uploads = new SqliteUploadStore(db);
   const plugins = new SqlitePluginRecordStore(db, options.onDegraded);
   const pluginData = new SqlitePluginDataStore(db);
@@ -342,6 +345,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     systemCredentials,
     customAgents,
     agentStrip,
+    machineSettings,
     uploads,
     plugins,
     pluginData,
@@ -486,6 +490,14 @@ function migrate(db: DatabaseSync): void {
   // `SCHEMA_VERSION` does not move, for `resume_gave_up`'s reason above — a
   // nullable column an older daemon never selects is invisible to it.
   if (!hasSession("ultracode")) db.exec("ALTER TABLE sessions ADD COLUMN ultracode INTEGER");
+
+  // Where a session sits in the list somebody reads. Nullable on `ultracode`'s
+  // grounds rather than `pinned`'s: 0 is not "no position", it is the oldest
+  // position there is, so a default would sort every row that predates this
+  // column to the bottom of its folder on the day it shipped. NULL means
+  // "wherever its age puts it", which is what every one of them was.
+  // `SCHEMA_VERSION` does not move, for `resume_gave_up`'s reason above.
+  if (!hasSession("rank")) db.exec("ALTER TABLE sessions ADD COLUMN rank REAL");
 
   // Which assembled agent this session was started as, or NULL for one started
   // on a bare harness — which is every session written before this column.
@@ -1099,8 +1111,10 @@ export class SqliteSessionStore implements SessionStore {
     // `last_seq`/`dropped` use scalar MAX so a stale writer can never walk a
     // cursor backwards.
     //
-    // `title` and `pinned` *are* in the clause, and are the only columns here that
-    // are meant to change after creation.
+    // `title`, `pinned`, `ultracode` and `rank` *are* in the clause: they are the
+    // record's mutable preferences, the things a later touch is *supposed* to
+    // rewrite. What may never be here is identity — `agent`, `created_at` and
+    // `custom_agent` — which is the property this paragraph is actually about.
     //
     // `owner_subject` is no longer written at all. The column is still in the
     // table — see the note on SCHEMA_VERSION for why it is not worth rewriting
@@ -1109,13 +1123,13 @@ export class SqliteSessionStore implements SessionStore {
       `INSERT INTO sessions (
          id, agent, created_at, updated_at, agent_session_id, agent_pid, status, exit_json,
          container_id, agent_pgid, container_started_at,
-         turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, pinned,
+         turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, pinned, rank,
          ultracode, custom_agent,
          workspace_json, workspace_mode, workspace_root, workspace_branch, workspace_base
        ) VALUES (
          :id, :agent, :created_at, :updated_at, :agent_session_id, :agent_pid, :status, :exit_json,
          :container_id, :agent_pgid, :container_started_at,
-         :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :pinned,
+         :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :pinned, :rank,
          :ultracode, :custom_agent,
          :workspace_json, :workspace_mode, :workspace_root, :workspace_branch, :workspace_base
        )
@@ -1123,6 +1137,7 @@ export class SqliteSessionStore implements SessionStore {
          updated_at       = excluded.updated_at,
          title            = excluded.title,
          pinned           = excluded.pinned,
+         rank             = excluded.rank,
          ultracode        = excluded.ultracode,
          agent_session_id = excluded.agent_session_id,
          agent_pid        = excluded.agent_pid,
@@ -1227,9 +1242,22 @@ export class SqliteSessionStore implements SessionStore {
    *
    *   1. **Only an inactive session is ever deleted, by either rule.** A row is
    *      *active* — and nothing here touches it, at any age, under any cap —
-   *      when it is live (no `exit_json`), when its exit `endedWithDaemon` (the
-   *      daemon's own promise to bring it back: a machine put down for a week
-   *      must come back holding its conversations), or when its exit cannot be
+   *      when it is live (no `exit_json`), when its exit `keepsItsConversation`
+   *      — the daemon's own promise to bring it back (a machine put down for a
+   *      week must come back holding its conversations), or an agent it released
+   *      for being idle, which is a conversation somebody is expected to return
+   *      to — ⚠ **and a `parked` row is therefore active for ever, which is a
+   *      class nothing bounds.** It never becomes inactive on its own: no boot
+   *      pass reaches it (`autoResumable` answers `parked` on a prompt alone),
+   *      `markInterrupted` returns early on an existing exit record, and only a
+   *      person stopping it or a sign-out relabels it. Before parking, an
+   *      abandoned conversation held ~400 MB and a `MAX_LIVE_SESSIONS` slot, so
+   *      the class was self-limiting by memory; a parked one costs neither. The
+   *      floor feels it first: `active` counts these, so a machine holding
+   *      `minSessions` parked rows has spent the whole floor on rows that were
+   *      never at risk. Left unbounded on purpose — see D27's correction in
+   *      `docs/DECISIONS.md` — because an age bound here deletes exactly the
+   *      conversation this rule exists to keep — or when its exit cannot be
    *      read — not JSON, not an object, or a `reason` this build cannot name
    *      (`isExitReason`) — because a deletion may not be decided from a value
    *      it cannot read. **Unless the daemon has given it up**: a row whose
@@ -1728,6 +1756,9 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     // that only flipped a pin would compare `true` against `1` and look dirty for
     // ever after.
     pinned: row.pinned ? 1 : 0,
+    // A number or NULL, with no conversion: it is already what SQLite stores, and
+    // NULL is the state ("follows its age") rather than a missing value.
+    rank: row.rank,
     // Three-valued, so the same 1/0 conversion with NULL kept as NULL — that is
     // the state, not a missing value: nobody has chosen. See the column.
     ultracode: row.ultracode === null ? null : row.ultracode ? 1 : 0,
@@ -1855,9 +1886,21 @@ function readExitReason(exitJson: unknown): ExitReason | null {
  * `GET /sessions/:id/events` still serves them, and they go with the row as
  * every inactive row's log does.
  *
- * Otherwise true for one whose exit `endedWithDaemon` — the daemon's own
- * promise to bring it back — and for one whose exit cannot be read
- * (`readExitReason`). The one predicate for both the age sweep and the cap,
+ * Otherwise true for one whose exit `keepsItsConversation` — the daemon's own
+ * promise to bring it back, **or an agent it let go of on purpose** — and for one
+ * whose exit cannot be read (`readExitReason`).
+ *
+ * ⚠ **That predicate is one member wider than `endedWithDaemon`, and reading the
+ * narrow one here would have deleted exactly the sessions somebody is most likely
+ * to return to.** A `parked` row is a live conversation whose agent was released
+ * for being quiet, which is the *strongest* case for keeping it and reads, to a
+ * predicate that only knows the daemon's three exits, as the weakest: no promise
+ * to come back, so inactive, so ranked for the cap. That is the shape of the
+ * incident this whole function was written after — Q2.222, five conversations
+ * deleted at a restart — aimed this time at the quiet ones. `events.ts` owns both
+ * predicates for the reason the paragraph above gives about `isPersistedGiveUp`.
+ *
+ * One predicate serves both the age sweep and the cap,
  * because when the cap carried its own copy as a SQL `CASE` it ranked a reason
  * this build cannot name as inactive and cut what the sweep kept (Q2.222, the
  * verification round). Rule 1 in `prune()`'s docblock says why each of the
@@ -1868,7 +1911,7 @@ function isActiveRow(row: Record<string, unknown>): boolean {
   if (exitJson === null || exitJson === undefined) return true;
   if (isPersistedGiveUp(row["resume_gave_up"])) return false;
   const reason = readExitReason(exitJson);
-  return reason === null || endedWithDaemon({ reason });
+  return reason === null || keepsItsConversation({ reason });
 }
 
 /** `retainMs` as the prune's one line says it. */
@@ -1961,6 +2004,10 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       // session named "null" and render it as the row's label.
       title: row["title"] == null ? null : String(row["title"]),
       pinned: Number(row["pinned"] ?? 0) !== 0,
+      // Read by shape rather than coerced: `Number(null)` is 0, which is a real
+      // position and the oldest one, so a coercion here would silently move every
+      // row that has none to the bottom of its folder.
+      rank: typeof row["rank"] === "number" && Number.isFinite(row["rank"]) ? row["rank"] : null,
       // `== null` covers both NULL on disk and a column an older database does
       // not have at all, and both mean the same thing here: nobody chose, so
       // this session follows the machine's setting.
@@ -2338,6 +2385,43 @@ export class SqliteAgentStripStore {
 }
 
 
+/**
+ * The settings a person set on this machine from the settings screen.
+ *
+ * **Narrow on purpose, and the narrowness is the design.** The daemon's *config*
+ * is env only and stays so; what lives here is the class of setting whose owner is
+ * the person using the machine rather than the person deploying it. Q2.225 is the
+ * argument, and the only key today is how long a conversation may sit before its
+ * agent is shut down.
+ *
+ * Keys are enumerated in {@link MACHINE_SETTING_KEYS}: a row whose key this build
+ * cannot name is left where it is and never read, so a downgrade cannot act on a
+ * setting it does not understand — `isExitReason`'s rule on a different column.
+ * `read` therefore answers `null` for anything unknown rather than a string
+ * somebody might parse.
+ */
+export class SqliteMachineSettingsStore {
+  private readonly getStmt: StatementSync;
+  private readonly setStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.getStmt = db.prepare("SELECT value FROM machine_settings WHERE key = ?");
+    this.setStmt = db.prepare(
+      "INSERT INTO machine_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    );
+  }
+
+  /** The stored value, or `null` where nobody has set one. */
+  read(key: MachineSettingKey): string | null {
+    const row = this.getStmt.get(key);
+    return row === undefined ? null : String(row["value"]);
+  }
+
+  write(key: MachineSettingKey, value: string): void {
+    this.setStmt.run(key, value);
+  }
+}
+
 export interface StoredIdentity {
   machineId: string;
   issuer: string;
@@ -2553,7 +2637,17 @@ export class SqlitePluginRecordStore implements PluginRecordStore {
 
   private toRecord(row: Record<string, unknown>): InstalledPlugin | null {
     const id = String(row["id"] ?? "");
-    const parsed = parseManifest(String(row["manifest_json"] ?? ""));
+    /*
+     * ⚠ **`presenting: false`, because this runs on every read of a row that is
+     * already installed.** A refusal added to `manifest.ts` is otherwise applied
+     * retroactively here: `list` omits the row and `get` answers `null`, so a
+     * plugin whose manifest was legal the day it was installed silently vanishes
+     * on the next daemon start, with its contributed agents and providers. The
+     * flag drops the refusals that exist to protect the install-approval card —
+     * no card is being drawn here — and keeps every one that bounds what the
+     * plugin may do. See `parseManifest`'s own note for the split.
+     */
+    const parsed = parseManifest(String(row["manifest_json"] ?? ""), { presenting: false });
     if (!parsed.ok) {
       this.onDegraded?.(`plugin ${id} is on disk with a manifest this build cannot read: ${parsed.message}`);
       return null;

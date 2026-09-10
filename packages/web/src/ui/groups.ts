@@ -2,6 +2,7 @@ import type { MachineId } from "../ids";
 import { relativeTo } from "../paths";
 import type { MachineGroup, SessionGroups, SessionRow } from "../store";
 import { needsHuman, showsAsEnded } from "../wire";
+import { orderSessions } from "../sessionOrder";
 import { sessionLabel, shortPath } from "./bits";
 
 /**
@@ -555,13 +556,14 @@ export function allRows(groups: SessionGroups, view: ListView): SessionRow[] {
       rows.push(row);
     }
   }
-  return rows.sort((a, b) => lastActivity(b) - lastActivity(a));
-}
-
-/** The same instant `SessionLine` draws its age from, so the two agree. */
-function lastActivity(row: SessionRow): number {
-  const snapshot = row.snapshot;
-  return snapshot.turnStartedAt ?? snapshot.lastEventAt ?? snapshot.createdAt;
+  /*
+   * ⚠ **`lastActivity` desc until this list got a reader.** Leaving it would make
+   * the order of a conversation depend on which tab it is being read from — manual
+   * under a machine, recency under All — which is worse than either rule on its
+   * own. Cross-machine it compares two daemons' wall clocks, exactly as the
+   * recency sort it replaces did.
+   */
+  return orderSessions(rows);
 }
 
 /**
@@ -613,15 +615,41 @@ export function waitingFloor(groups: SessionGroups, view: ListView): SessionRow[
     for (const row of matching(rowsOf(group, view.filter), view.query)) reachable.add(row.key);
   }
 
+  /*
+   * ⚠ **Every row in the fleet, and `groups.groups` alone is not that.**
+   *
+   * `place` in `sessionGroups` *moves* a pinned row into `groups.pinned` and a
+   * row whose machine is no longer granted into `groups.orphans`, returning
+   * `null` — so neither is ever in a `MachineGroup`'s `active`/`ended`, and
+   * neither incremented the `blockedCount` this subtraction is drawn against.
+   * Sourced from the machines alone, the floor was subtracting a set from a
+   * *subset* of itself, and a blocked row in either list could never be lifted.
+   *
+   * It needed no fleet to reach: one machine, one pinned session blocked on a
+   * permission, and a search needle that matches nothing — `visibleRows` empty,
+   * the floor empty, every count zero, and only the header dot left. That is
+   * exactly the "typing four letters into the search box hid an approval"
+   * failure the comment above records as fixed for the other groups, and the
+   * "a blocked session appears in the floor even under the Ended filter" claim
+   * ten lines up. `pinnedFor`'s docblock, `web-shell.md` and Q3.11 all assert
+   * the property this loop did not have.
+   *
+   * `reachable` and `seen` are untouched: a pin the view *does* draw is already
+   * in `reachable` via `pinnedFor`, so nothing is lifted twice.
+   */
+  const fleet: SessionRow[] = [
+    ...groups.groups.flatMap((group) => [...group.active, ...group.ended]),
+    ...groups.pinned,
+    ...groups.orphans,
+  ];
+
   const seen = new Set<string>();
   const out: SessionRow[] = [];
-  for (const group of groups.groups) {
-    for (const row of [...group.active, ...group.ended]) {
-      if (!needsHuman(row.snapshot)) continue;
-      if (reachable.has(row.key) || seen.has(row.key)) continue;
-      seen.add(row.key);
-      out.push(row);
-    }
+  for (const row of fleet) {
+    if (!needsHuman(row.snapshot)) continue;
+    if (reachable.has(row.key) || seen.has(row.key)) continue;
+    seen.add(row.key);
+    out.push(row);
   }
   return out;
 }
@@ -690,8 +718,19 @@ export function visibleRows(groups: SessionGroups, view: ListView): SessionRow[]
  * which is the truthful answer once it is not on screen.
  */
 export function pinnedFor(groups: SessionGroups, view: ListView): SessionRow[] {
-  const rows = underFilter(groups.pinned, view.filter);
-  if (view.all || view.machine === null) return rows;
+  return pinnedHere(underFilter(groups.pinned, view.filter), groups, view);
+}
+
+/**
+ * The machine cut, on its own, because two callers have to make it identically.
+ *
+ * Its own function rather than a line inside `pinnedFor` for the reason that
+ * function's own docblock gives about `visibleRows`: a rule stated twice is two
+ * places to disagree. `siblingsOf` is the second caller, and it disagreed —
+ * see the note there.
+ */
+function pinnedHere(rows: readonly SessionRow[], groups: SessionGroups, view: ListView): SessionRow[] {
+  if (view.all || view.machine === null) return [...rows];
   const known = new Set(groups.groups.map((group) => group.id));
   return rows.filter((row) => row.ref.machineId === view.machine || !known.has(row.ref.machineId));
 }
@@ -717,15 +756,51 @@ export function orphansFor(groups: SessionGroups, filter: Filter): SessionRow[] 
   return underFilter(groups.orphans, filter);
 }
 
+/**
+ * The rows this one shares a group with, in the order they are drawn in.
+ *
+ * A row's group is where it *lives* — Pinned, its own folder, or "No longer
+ * granted" — and this deliberately ignores the filter and the search box, which
+ * the drag cannot ignore because a finger can only land on what is on screen. For
+ * a keyboard move that is the right difference: `Move down` past a row the Ended
+ * filter is hiding still puts the two in the order the reader asked for, whereas
+ * skipping it would make one press mean different distances depending on a
+ * control somewhere else on the screen.
+ *
+ * A machine with no tab answers `orphans`, matching where `sessionGroups` filed
+ * it, so the menu on an orphan acts on the list the orphan is actually in.
+ *
+ * ⚠ **Pinned is cut to the selected machine here, and the filter still is not,
+ * and the two are not the same kind of hiding.** A row the filter is withholding
+ * is one the reader chose to hide, and stepping past it keeps one press meaning
+ * one place however that control is set. A pin on *another machine* is on a list
+ * this tab cannot draw at all: `pinnedFor` cuts it, so `Alt`+`↓` on the last pin
+ * drawn under this tab used to compute a position between two pins nobody can
+ * see, write it, and look like it had done nothing. Worse on the re-spacing path,
+ * which then wrote fresh positions to another machine's rows — a write with no
+ * visible cause anywhere on screen. The cut comes from `pinnedHere`, the same
+ * function the drawn list goes through, so the two cannot drift apart again.
+ */
+export function siblingsOf(row: SessionRow, groups: SessionGroups): SessionRow[] {
+  if (row.snapshot.pinned === true) return orderSessions(pinnedHere(groups.pinned, groups, currentView(groups)));
+  const group = groups.groups.find((candidate) => candidate.id === row.ref.machineId);
+  if (group === undefined) return orderSessions(groups.orphans);
+  const path = folderPathOf(row);
+  return orderSessions([...group.active, ...group.ended].filter((other) => folderPathOf(other) === path));
+}
+
 /** One list sliced by the filter. The single rule, so no two call sites can disagree. */
 function underFilter(rows: readonly SessionRow[], filter: Filter): SessionRow[] {
-  if (filter === "all") return rows as SessionRow[];
+  // The reader's order, for the two groups that come through here — `pinnedFor`
+  // and `orphansFor`. `rowsOf` is the third site; between them every list the rail
+  // draws is ordered once, at the point it is produced.
+  if (filter === "all") return orderSessions(rows);
   // `showsAsEnded`, the same rule `sessionLists` buckets by — a session the
   // daemon interrupted is not one anybody ended, so the Ended filter must not
   // collect it. This also feeds `visibleRows`, so `j`/`k` cannot walk a row the
   // filter says is not there.
   const ended = (row: SessionRow): boolean => showsAsEnded(row.snapshot);
-  return rows.filter((row) => (filter === "ended" ? ended(row) : !ended(row)));
+  return orderSessions(rows.filter((row) => (filter === "ended" ? ended(row) : !ended(row))));
 }
 
 /**
@@ -785,7 +860,19 @@ export function sublineWarns(subline: MachineSubline): boolean {
 }
 
 export function rowsOf(group: MachineGroup, filter: Filter): SessionRow[] {
-  if (filter === "ended") return group.ended;
-  // `active` is already blocked-first — see `sessionGroups`.
-  return filter === "all" ? [...group.active, ...group.ended] : group.active;
+  /*
+   * **One of the three places the reader's order is applied**, the others being
+   * `underFilter` and `allRows`. It is applied where the rows are *produced*
+   * rather than where they are drawn, so `visibleRows` — which calls all three —
+   * needs no edit and cannot disagree with `keyboard.ts` about what `j` steps onto.
+   *
+   * ⚠ **Under `all` the two buckets are concatenated, so sorting the union is
+   * required rather than tidy**: two sorted lists laid end to end are not one
+   * sorted list, and an ended row would otherwise sit below a live one it was
+   * dragged above. That terminal rows now interleave with live ones under this
+   * filter is the honest consequence of the position being the reader's — a second
+   * rule pushing them down would silently undo a drop onto one.
+   */
+  if (filter === "ended") return orderSessions(group.ended);
+  return orderSessions(filter === "all" ? [...group.active, ...group.ended] : group.active);
 }

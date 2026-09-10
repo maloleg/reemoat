@@ -11,9 +11,10 @@ import {
 import { AlertTriangle, Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import { errorText } from "../http";
 import { listNavKey, nextOptionIndex } from "../keys";
-import { displayCwd, shortPath } from "../paths";
+import { folderLabel, shortPath } from "../paths";
 import type { OfflineReason, Reach } from "../machine";
 import {
+  isParked,
   isTerminal,
   resumeStalled,
   waitingForDaemon,
@@ -60,13 +61,21 @@ import { toast } from "./Toast";
  * rather than per component, because per-component focus styling is how the fifth
  * copy of a control ends up with none.
  *
- * **One radius, and the circles are not an exception to it.** Everything that can
- * be pressed is `rounded-md`, which is what the textarea, the send button and
- * every attachment chip already were — the pills in the composer's own control
- * strip were the only round things in the composer, so the row that is *part* of
- * it did not look like it. What stays circular is `StatusDot`, `Dot`, `Spinner`
- * and `Skeleton`'s placeholders: those are marks rather than controls, and a
- * two-pixel radius on an eight-pixel dot is a smudge.
+ * **One radius, and a circle is a mark rather than a control.** Everything that
+ * can be pressed is `rounded-md`, which is what the textarea and every attachment
+ * chip already were — the pills in the composer's own control row were the only
+ * round things in the composer, so the row that is *part* of it did not look like
+ * it. What stays circular is `StatusDot`, `Dot`, `Spinner` and `Skeleton`'s
+ * placeholders: those are marks rather than controls, and a two-pixel radius on an
+ * eight-pixel dot is a smudge.
+ *
+ * **Two controls are exceptions and both are named here rather than discovered.**
+ * `tabPill`, and the composer's send slot — Send, Stop and the two spinner boxes,
+ * through `IconButton`'s `shape` prop. A filled square holding an arrow is the
+ * shape a *stop* control has, in the one slot where Stop genuinely appears a
+ * second later; the circle is what every phone chat client draws there and what
+ * keeps the two readings apart. The exception is bounded by being a prop with one
+ * call site rather than a class anybody can pass.
  *
  * **Two ways to reach 44px, and which is right is a question about neighbours.**
  * A control that owns its row — {@link Dropdown}'s full-width trigger, a form
@@ -82,16 +91,18 @@ import { toast } from "./Toast";
 /**
  * 32px of ink reaching a 44px target, **vertically only**.
  *
- * Exported because the composer's control strip is built from two different
+ * Exported because the composer's control row is built from two different
  * primitives — `ICON_BUTTON_SIZE.chip` here for the paperclip, `CHIP` in
- * `AgentConfigBar` for the pills and the two square buttons — and they sit in
- * one row. Written out twice they were byte-identical and had to stay that way
- * by hand, which is two different tap targets in one strip the first time
- * somebody tunes one of them.
+ * `AgentConfigBar` for the pills and the one square button — and they sit in one
+ * row. Written out twice they were byte-identical and had to stay that way by
+ * hand, which is two different tap targets in one row the first time somebody
+ * tunes one of them.
  *
  * Both halves of the asymmetry are measured rather than tidy. Up is 4px because
- * the textarea's own bottom edge is 6px above; down is 8px into the composer's
- * bottom padding, which holds a line of text and nothing you can press.
+ * the textarea's own bottom edge is 6px above — the row's `mt-1.5`, which is why
+ * that gap may not be tightened without re-reading this. Down is 8px, which lands
+ * in the composer box's `pb-1.5` and 2px past its border into the bar's own
+ * padding: nothing there is pressable, which is the whole of the licence.
  *
  * Vertical only, and that is the whole reason it is not `-inset-2.5`: these sit
  * `gap-1.5` apart, so a symmetric inset would put one control's target over its
@@ -109,17 +120,58 @@ export const TAP_GROW_Y =
  * style preference; it is the thing every reading surface bounds and this one did
  * not.
  *
- * It is a shared constant rather than three copies of `max-w-3xl` because the
- * three have to be the *same* width or the card and the composer stop lining up
- * with the text they belong to — which is visible immediately and was the
- * complaint. Below the breakpoint it resolves to full width with the padding the
- * caller already had, so the phone is unchanged.
+ * It is a shared constant rather than a copy per surface because they all have to
+ * be the *same* width or the card and the composer stop lining up with the text
+ * they belong to — which is visible immediately and was the complaint. Seven call
+ * sites: the transcript, the composer, the shared ask-card frame, a legal
+ * document, and in `SessionView` a load skeleton and two banners.
+ *
+ * ⚠ **There is no breakpoint here, and this sentence used to say there was.** It
+ * is a `max-w`, so it simply stops binding once the pane is narrower than the
+ * number — and that width moves every time the number is tuned. Below it the
+ * column is full width with the padding the caller already had, so a phone is
+ * untouched by any change to it. `Bubble`'s docblock carries the same correction
+ * from the other side, where the moving edge actually shows.
+ *
+ * ⚠ **`45rem` — 720px — fitted to a reference by *proportion*, not by pixels.**
+ * The stock `3xl` step (48rem) read too wide, `× 0.85` took it to 40.8, `+7%`
+ * brought it back to 43.66, and then the shape wanted was named by pointing at a
+ * screenshot of another product's conversation. In that screenshot the text
+ * column fills **56.9% of the pane beside the rail**; 45rem puts this one at
+ * 57.0% of the same pane.
+ *
+ * ⚠ **The pass before this one matched the screenshot's *pixels* and was wrong,
+ * which is the whole reason the sentence above says proportion.** It read the
+ * reference's measure as 927px, inferred a 1:1 capture from its line spacing, and
+ * set 60rem — landing within a pixel of that number and looking nothing like the
+ * reference, because the two captures were at different zoom. Measured on the
+ * result, the column filled **76%** of its pane against the reference's 56.9%. A
+ * pixel count off a screenshot carries the capture's scale with it; the fraction
+ * of the pane and the ratios inside it do not. **Fit those.**
+ *
+ * ⚠ **`Bubble`'s cap is not a fraction of this, and the decoupling is the thing
+ * to know before touching either number.** For one pass both moved by a single
+ * factor and the cap held at exactly three quarters of the column, and two
+ * docblocks leaned on that ratio as though it were a rule. It was arithmetic. The
+ * cap is 26rem now, fitted to the same screenshot's message-to-measure ratio
+ * rather than to this number, and **nothing in the build or the drivers relates
+ * the two**. `Bubble`'s docblock carries the current pair and is the only place
+ * the pixel arithmetic lives.
+ *
+ * ⚠ **Both step names above are written without their utility prefix on
+ * purpose.** Tailwind's scanner reads this file as text, not as code, and it does
+ * not know a comment from a class attribute — spelling the old utility out here
+ * put a dead rule for the retired step straight back into the built stylesheet,
+ * for a width nothing renders. Measured twice: once when this docblock first
+ * named it, and again when the sentence *explaining* that named it a second time.
+ * `webcheck`'s own sweeps strip comments before matching, for the same reason
+ * from the other side.
  *
  * Deliberately not applied to the scroll box itself: the scrollbar belongs at the
  * edge of the window, not at the edge of the text, and `scroll-stable` is
  * measuring that box.
  */
-export const COLUMN = "mx-auto w-full max-w-3xl";
+export const COLUMN = "mx-auto w-full max-w-[45rem]";
 
 /**
  * A text field's chrome, once.
@@ -270,12 +322,21 @@ export function sessionLabel(
    * with no roots to hand — an older daemon, a machine that has not answered
    * `/fs/roots`, a driver — gets exactly the label this drew before roots
    * existed. See `displayCwd`.
+   *
+   * ⚠ **`folderLabel`, not `displayCwd`: no `~/` on a name.** An unnamed session
+   * *is* called after its directory, and a name is a name — the marker saying
+   * which root it hangs off is path grammar, and this is the string that goes in
+   * a rail row and a header where a person is scanning for a word. It also has to
+   * match: `SessionLine` suppresses the subline when it would repeat the title,
+   * by comparing the two strings, and a title reading `~/thing` beside a subline
+   * reading `thing` draws one folder twice — which is the exact defect that
+   * comparison was added to prevent.
    */
   roots: readonly string[] = [],
 ): string {
   const title = row.snapshot.title?.trim();
   if (title !== undefined && title.length > 0) return title;
-  return displayCwd(row.snapshot.workspace.requestedCwd, roots);
+  return folderLabel(row.snapshot.workspace.requestedCwd, roots);
 }
 
 /**
@@ -318,6 +379,25 @@ export function statusTone(
         return "idle";
     }
   }
+  /*
+   * ⚠ **A released agent reads as `idle`, deliberately — and this line is what
+   * makes that true rather than the accident it looks like.**
+   *
+   * Without it a parked session takes the `ended` arm below, which is the one
+   * word it may not carry: nobody ended it. Nothing in the type system says so —
+   * both the `default:` above and the ternary below are total over
+   * `SessionStatus`, so a new member lands silently in whichever it reaches
+   * first, and here that is the wrong one.
+   *
+   * `idle` rather than a tone of its own, which is what this had for a draft.
+   * From the reader's side the two states are the same fact — *nothing is
+   * happening and you can type into it* — and whether a process happens to be
+   * resident is not something they can act on or should have to think about. A
+   * mark of its own turned an implementation detail into a state somebody has to
+   * interpret, and the only thing it could have explained is a 1.3s wait that the
+   * composer's own spinner already covers.
+   */
+  if (isParked(session as SessionSnapshot)) return "idle";
   if (resumeStalled(session as SessionSnapshot)) return "stalled";
   if (waitingForDaemon(session as SessionSnapshot)) return "waiting";
   return session.status === "failed" ? "failed" : "ended";
@@ -759,6 +839,14 @@ const EXIT_TEXT: Partial<Record<ExitReason, string>> = {
   start_failed: "the agent could not be started",
   start_timeout: "the agent did not start in time",
   agent_kill_failed: "the agent could not be stopped",
+  /*
+   * Unreachable from `sessionNotice`, which returns `null` for a parked session
+   * before it gets here — and kept anyway, because this map is `Partial`, so a
+   * missing entry is not a compile error but the string `ended: parked` appearing
+   * the day somebody adds a second caller. "ended" is the one word this state may
+   * not carry.
+   */
+  parked: "the agent was released after a quiet spell",
 };
 
 export function exitText(reason: ExitReason): string {
@@ -771,6 +859,23 @@ export function sessionNotice(
   machineName: string,
 ): SessionNotice | null {
   if (session.exit === null) return null;
+  /*
+   * ⚠ **A released agent says nothing at all, and the `return null` is load-bearing
+   * rather than a missing case.**
+   *
+   * Deleting this arm does not remove the notice — it moves it. Every path below
+   * falls through to the catch-all at the foot of this function, which draws
+   * `exitText(reason)`, so a parked session would announce itself in the same
+   * shape and tone as a conversation that ended. That is precisely backwards.
+   *
+   * Nothing is wrong, nothing is pending, and there is nothing to act on: the
+   * agent was released because the session was quiet, and the message box below
+   * — which is never taken away — is the whole of the remedy. This had a
+   * sentence for a draft ("the agent was released after a quiet spell…") and the
+   * sentence was the defect: it made a person read about, and decide something
+   * about, a piece of housekeeping they cannot influence and are not paying for.
+   */
+  if (isParked(session)) return null;
   if (resumeStalled(session)) {
     const error = session.resume?.error;
     const code = error?.code ?? "no_agent_session_id";
@@ -1747,23 +1852,83 @@ const ICON_BUTTON_SIZE = {
    */
   sm: "relative h-6 w-6 after:absolute after:-inset-2.5 after:content-['']",
   /**
-   * 32px of ink, 44px of target — the height of the composer's control strip.
+   * 32px of ink, 44px of target — the whole of the composer's control row.
    *
    * It exists because the paperclip was the deleted `md`, 36px, which made it the
    * one control in that row that was not the height of the pills beside it — the
-   * measurement that survives its entry. Grown the same way `sm` is, and
+   * measurement that survives its entry. Send and Stop take it too now, so the
+   * row is one height from end to end and the filled circle is the same box as
+   * the chips rather than a third larger than them. Grown the same way `sm` is, and
    * **vertically only**, which is the difference between the two: these sit
    * `gap-1.5` apart, so a symmetric `-inset-2.5` would put this button's target
    * over the mode chip's *face*, and the chip beside it changes the model.
    *
-   * Both halves of the asymmetry are measured rather than tidy. Up is 4px because
-   * the textarea's own bottom edge is 6px above; down is 8px into the composer's
-   * bottom padding, which holds a line of text and nothing you can press.
+   * Both halves of the asymmetry are measured rather than tidy, and
+   * {@link TAP_GROW_Y} carries them: 4px up into the row's own `mt-1.5`, 8px down
+   * into the composer box's bottom padding and past its border, where nothing is
+   * pressable.
    */
   chip: `relative h-8 w-8 ${TAP_GROW_Y}`,
-  /** 44px — the platform tap minimum. The composer's send button, and nothing smaller. */
+  /**
+   * 32px of ink, 44px of target, grown **symmetrically** — a head row's own
+   * leading or trailing control.
+   *
+   * The ◀ and the ✕ in a pop-up's head were `sm`, so a 12px glyph in 24px of ink
+   * was the way out of every settings screen, every plugin screen and the agent
+   * builder. Reported as hard to see rather than hard to hit, which is exactly
+   * what it was: the target had been 44px all along.
+   *
+   * **32px rather than `lg`'s 44px**, and the reason is weight rather than height:
+   * `SHEET_HEAD` is `min-h-14` with no vertical padding, so a 44px box does not
+   * reach that row's floor, let alone raise it — the docblock on `Sheet`'s chevron
+   * said it would and was wrong for four releases. What 44px of ink *would* do is
+   * put the largest object in the head beside a 28px title line, on a control
+   * nobody is looking for until they want it. 32px is also `WaitingHere`'s own
+   * height in that same row, so the head is one size from end to end.
+   *
+   * **Symmetric, unlike `chip`, and that is a fact about neighbours rather than a
+   * preference.** These sit alone at the end of a `gap-2` row, so 6px a side lands
+   * in the gap with 2px to spare; `chip` may not do that because the mode chip is
+   * 6px away and changes the model. And `sm`'s 10px cannot serve here for the same
+   * reason in reverse — it is 2px onto whatever shares the row.
+   *
+   * ⚠ **One per row edge.** Two of these adjacent at zero gap overlap by 12px of
+   * invisible target, which is a mis-tap with nothing on screen explaining it.
+   */
+  nav: "relative h-8 w-8 after:absolute after:-inset-1.5 after:content-['']",
+  /**
+   * 44px of box — the platform tap minimum reached the plain way.
+   *
+   * ⚠ This used to read "the composer's send button, and nothing smaller", and
+   * the composer's send button is `chip` now: 44px of *filled black* was the
+   * loudest object in the box and was asked to come down. What the sentence was
+   * protecting is unharmed — `chip` reaches the same 44px of target through
+   * `TAP_GROW_Y` — and what it was really warning against was the deleted `md`,
+   * which reached 36px and stopped. Every entry in this table clears the floor;
+   * which of them a slot wants is a question about weight.
+   */
   lg: "h-11 w-11",
 } as const;
+
+/**
+ * The glyph each box holds, as a table rather than as a ternary.
+ *
+ * ⚠ **It was `size === "sm" ? 12 : size === "chip" ? 14 : 16`, and the fourth
+ * entry would have taken its 16 by falling off the end of that chain rather than
+ * by anybody choosing it.** Here 16 happened to be right; the next size added is
+ * the one where a silent default is a 16px glyph in a 24px box. Keyed on the size
+ * table itself, so an entry with no glyph is a compile error — the same move
+ * {@link ICON_BUTTON_TONE} makes one line down.
+ *
+ * At least 4px of ink margin a side in every row, which is what keeps a glyph
+ * from touching the hover ground it sits on; `webcheck` holds the arithmetic.
+ */
+const ICON_BUTTON_GLYPH: Record<keyof typeof ICON_BUTTON_SIZE, number> = {
+  sm: 12,
+  chip: 14,
+  nav: 16,
+  lg: 16,
+};
 
 const ICON_BUTTON_TONE: Record<ButtonTone, string> = {
   // A *background* on hover, not just a colour. That is the whole point of this
@@ -1802,6 +1967,7 @@ export function IconButton({
   onClick,
   tone = "ghost",
   size,
+  shape = "square",
   disabled = false,
   active,
   expanded,
@@ -1816,6 +1982,23 @@ export function IconButton({
   tone?: ButtonTone;
   /** Required, and not defaulted. See the ⚠ on this component. */
   size: keyof typeof ICON_BUTTON_SIZE;
+  /**
+   * `round` swaps this button's radius for a circle, and it is a **prop rather
+   * than a `className`** for a mechanical reason: Tailwind emits every utility at
+   * the same specificity inside one layer, so a `rounded-full` passed in would
+   * beat or lose to the `rounded-md` below by emission order rather than by
+   * intent. The same trap {@link ICON_BUTTON_SIZE} carries a ⚠ about.
+   *
+   * ⚠ **It is also an exception to this file's radius rule**, which reserves a
+   * circle for a *mark* — `StatusDot`, `Dot`, `Spinner` — and gives everything
+   * pressable `rounded-md`, with `tabPill` the one documented exception. There is
+   * a second now: the composer's send control, where a filled circle holding an
+   * arrow is the shape every phone chat client draws and a filled square reads as
+   * a stop button. It is deliberately narrow — one call site, one slot, and the
+   * three other things that occupy that slot (Stop and the two spinners) take it
+   * too, so the slot does not change shape under a thumb.
+   */
+  shape?: "square" | "round";
   disabled?: boolean;
   /** Renders as `aria-pressed`. Omit for buttons that are not a toggle. */
   active?: boolean;
@@ -1859,12 +2042,14 @@ export function IconButton({
       aria-expanded={expanded}
       aria-haspopup={haspopup}
       title={title ?? label}
-      className={`tap press inline-flex shrink-0 items-center justify-center rounded-md disabled:pointer-events-none disabled:opacity-40 ${ICON_BUTTON_SIZE[size]} ${ICON_BUTTON_TONE[tone]} ${className}`}
+      className={`tap press inline-flex shrink-0 items-center justify-center ${
+        shape === "round" ? "rounded-full" : "rounded-md"
+      } disabled:pointer-events-none disabled:opacity-40 ${ICON_BUTTON_SIZE[size]} ${ICON_BUTTON_TONE[tone]} ${className}`}
     >
       {/* The glyph comes down with the box: a 16px paperclip in a 32px square
           reads as a bigger control than the 11–13px glyphs on the chips beside
           it, which is the mismatch `chip` exists to remove. */}
-      <Icon as={icon} size={size === "sm" ? 12 : size === "chip" ? 14 : 16} />
+      <Icon as={icon} size={ICON_BUTTON_GLYPH[size]} />
     </button>
   );
 }
@@ -2046,11 +2231,31 @@ export function menuRow(align: "start" | "center"): string {
   const cross = align === "center" ? "items-center" : "items-start";
   return `tap flex min-h-11 w-full ${cross} gap-2 rounded-md px-2.5 py-3 text-left text-xs`;
 }
+/**
+ * The caps heading *inside a popover*, and the only one of the three that carries
+ * its own padding.
+ *
+ * The same type as {@link SETTINGS_HEADING} at one tone quieter — `text-faint`
+ * rather than `text-muted` — because a menu's heading sits on `MENU_PANEL` above
+ * rows that are themselves the content; on a settings screen the heading is the
+ * loudest thing in its band. The padding is here rather than at the caller for the
+ * opposite reason to {@link SETTINGS_HEADING}'s: every popover heading in the app
+ * wants the same `px-2.5` as the rows under it, and a heading that did not share
+ * that left edge is the one arrangement worth preventing.
+ *
+ * ⚠ It had no docblock at all for four releases and was documented only *by
+ * reference*, from {@link SETTINGS_HEADING} and from three call sites — which is
+ * how the caps idiom came to be written out by hand instead. Measured for Q5.115
+ * on 2026-09-08: the trio `uppercase` + `tracking-wider` + `font-semibold` appears
+ * **fifteen times across thirteen files**, and **nine** of those sites used none
+ * of the three constants that already owned it. The count is Q5.115's rather than
+ * restated here, for the reason the rule gives one file over.
+ */
 export const MENU_HEADING =
   "px-2.5 py-1.5 text-2xs font-semibold tracking-wider text-faint uppercase";
 
 /**
- * The settings screen's one heading, and the one section it heads.
+ * The app's section heading — a named band of anything, not only of settings.
  *
  * Written out **fourteen times** across five files before this, and the string
  * itself had not yet drifted — what had drifted is everything around it.
@@ -2072,6 +2277,14 @@ export const MENU_HEADING =
  * `text-faint` with popover padding, and not the nav's heading either, which
  * composes this with `px-4 pt-4 pb-1` so it shares a left edge with its rows.
  * Layout stays with the caller, for the reason {@link FIELD} gives.
+ *
+ * **The name is narrower than the reach and stays that way.** It also heads a
+ * field on the gate and the sign-in screen, a column on a plugin's view and a
+ * table in the key list — seven call sites that had written the string out by
+ * hand. Renaming it to match would break the citation `docs/DECISIONS.md` makes
+ * of this symbol, which `docscheck` asserts; the sentence is cheaper than the
+ * churn. `.claude/rules/web-typography.md` is where the three of these are
+ * distinguished, and the distinction is a *colour*, never a size.
  */
 export const SETTINGS_HEADING = "text-2xs font-semibold tracking-wider text-muted uppercase";
 /** A settings section below the first: the gap, the rule, and the gap under it. */

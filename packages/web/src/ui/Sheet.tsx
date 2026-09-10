@@ -35,6 +35,7 @@ export function Sheet({
   labelledBy,
   up,
   upLabel,
+  onClose,
 }: {
   /**
    * The head's one line — a `string` rather than a `ReactNode`, because the live
@@ -102,12 +103,30 @@ export function Sheet({
    * chevron already meant.
    */
   upLabel?: string;
+  /**
+   * What the ✕, Escape and the scrim mean, for the one pop-up that is not a route.
+   *
+   * ⚠ **Absent is the rule and present is the exception, and every route-backed
+   * pop-up must keep the default.** A sheet the URL names is closed by leaving the
+   * URL, which is what `useUnder` answers; overriding that would leave the address
+   * bar naming a screen nobody is on.
+   *
+   * The exception is `ImportCode`, which is drawn *over* the New session sheet
+   * without a route of its own — so `under` is not its own "under", it is New
+   * session's. All three dismissals therefore reached past the layer they were
+   * dismissing and tore down the whole flow, discarding the machine, the agent and
+   * the folder somebody had walked to. `overlay.ts` was routing Escape correctly
+   * the whole time; the top layer was doing the wrong thing with it. The docblock
+   * in `ImportCode` claiming otherwise stood for four releases with nothing
+   * asserting it.
+   */
+  onClose?: () => void;
 }): ReactNode {
   const under = useUnder();
   const headingId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
 
-  const close = (): void => navigate(under, true);
+  const close = onClose ?? ((): void => navigate(under, true));
 
   useDismissible("sheet", close, true);
 
@@ -217,26 +236,32 @@ export function Sheet({
               label={`Back to ${upLabel ?? "the previous screen"}`}
               onClick={up}
               /*
-               * `sm`: 24px of ink reaching 44 through `after:-inset-2.5`, which is
-               * also the size the settings pane draws its own chevron at, so the
-               * two controls are the same object in two places rather than two
-               * objects.
+               * `nav`: 32px of ink reaching 44 through a symmetric `after:-inset-1.5`,
+               * which is also the size the settings pane and the plugins pane draw
+               * their own chevrons at, so the three are one object in three places
+               * rather than three objects.
                *
-               * ⚠ **This used to read "`sm`, never the `md` default", and all
-               * three of its claims have expired.** `md` was `h-9 w-9` with no
-               * growth mechanism, it was what `size` fell back to, and `webcheck`
-               * ratcheted a list of the call sites that had taken it. It is
-               * deleted, `size` is required, and the list is gone because it
-               * emptied — so there is no default here to be "never", and a size
-               * that misses 44px is no longer expressible. What survives is the
-               * *choice*, and that is what `webcheck` pins now: `sm` keeps this
-               * chevron flush in a head row that a 44px box would have made taller
-               * than the title beside it. The ✕ at the end of this same row is
-               * `sm` for this same reason and says so; `Header`'s pair went the
-               * other way, to `lg`, and its docblock argues why. The two rows may
-               * not be quietly converged.
+               * ⚠ **This used to read "`sm`, never the `md` default", then "`sm`,
+               * because a 44px box would have made this row taller than the title
+               * beside it". The first expired and the second was never true.** `md`
+               * was `h-9 w-9` with no growth mechanism and is deleted; `size` is
+               * required, so a size that misses 44px is not expressible. And the
+               * height claim was measurable and wrong the whole time: `SHEET_HEAD`
+               * is `min-h-14` — 56px, with no vertical padding — so 44px of ink
+               * does not reach this row's floor, never mind raise it.
+               *
+               * What was really wrong with `lg` here is **weight**, not height: the
+               * way out of a screen should not be the largest object in its head,
+               * beside a 28px title line. And what was wrong with `sm` is that a
+               * 12px glyph in 24px of ink was reported as hard to *see* — which it
+               * was, the target having been 44px all along. 32px is the size
+               * `WaitingHere` already is in this same row.
+               *
+               * The ✕ at the end of this row is `nav` for the same reason and says
+               * so; `Header`'s pair went the other way, to `lg`, and its docblock
+               * argues why. The two rows may still not be quietly converged.
                */
-              size="sm"
+              size="nav"
               className="-ml-1"
             />
           )}
@@ -309,19 +334,22 @@ export function Sheet({
            * the same kind of work and sat at two different sizes — a 12px glyph in
            * a 24px box on the left and a 16px glyph in a 36px box on the right —
            * because one of them named a size and the other took whatever the
-           * primitive handed out. `sm` is 24px of ink reaching 44px through
-           * `after:-inset-2.5`, so this ✕, which this file's own docblock calls
-           * "the accessible way out", clears the tap minimum for the first time.
+           * primitive handed out. `nav` is 32px of ink reaching 44px through a
+           * symmetric `after:-inset-1.5`, so this ✕, which this file's own docblock
+           * calls "the accessible way out", clears the tap minimum *and* is visible
+           * at arm's length.
            *
-           * `ml-1` is what keeps that growth off its neighbour. `SHEET_HEAD` is
-           * `gap-2` — 8px — and the pseudo-element reaches 10px, so with the badge
-           * beside it the ✕'s target would land 2px on the badge's *face*, which
-           * is the failure `ICON_BUTTON_SIZE.chip` was invented to describe. 4px
-           * more gap puts 12px between the boxes and 2px of clear space between
-           * the targets. Unconditional, so the row's geometry does not depend on
-           * whether anything is waiting; the `<h1>` is `flex-1` and absorbs it.
+           * `ml-1` is what keeps that growth off its neighbour, and the numbers
+           * moved with the size rather than the rule. `SHEET_HEAD` is `gap-2` — 8px
+           * — and the pseudo-element now reaches 6px, so this already clears the
+           * badge; with `ml-1` the boxes sit 12px apart and the targets have 6px of
+           * clear space rather than 2px. **The clearance is the property, not the
+           * number**: it was kept when the reach shrank because the next size
+           * change is the one that would take it back to nothing. Unconditional, so
+           * the row's geometry does not depend on whether anything is waiting; the
+           * `<h1>` is `flex-1` and absorbs it.
            */}
-          <IconButton icon={X} label="Close" onClick={close} size="sm" className="-mr-1 ml-1" />
+          <IconButton icon={X} label="Close" onClick={close} size="nav" className="-mr-1 ml-1" />
         </div>
 
         {/* Named for the section slide: what changes when you tap a section is

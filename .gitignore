@@ -39,9 +39,19 @@ id_ed25519*
 *.sqlite3
 
 # Local agent tooling, not part of this project.
+#
+# `.claude/rules/` is tracked on purpose — it is this repository's own
+# documentation, loaded by path. Everything else under `.claude/` is one
+# person's harness configuration, and `settings.json` in particular registers
+# hooks that *execute* on somebody else's machine the moment they open a
+# checkout. This repository publishes an install script and a SECURITY.md; it
+# does not also run code on a contributor before they have read the diff.
 .gstack/
+.claude/settings.json
 .claude/settings.local.json
 .claude/*.local.json
+.claude/hooks/
+.claude/agents/
 
 # Build output. The control plane serves packages/web/dist when it is there and
 # says how to build it when it is not, so there is nothing to check in.

@@ -200,10 +200,14 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               }`}
             >
               {/*
-               * `size="sm"` is 24px of ink reaching 44px through `after:-inset-2.5`,
-               * a positioned pseudo-element that costs no layout — so this row is
-               * about the height the heading already was and the move buys no
-               * vertical chrome. The label names the destination rather than saying
+               * `size="nav"` is 32px of ink reaching 44px through a symmetric
+               * `after:-inset-1.5`, a positioned pseudo-element that costs no
+               * layout. ⚠ **It was `sm`, and the sentence here said the move bought
+               * "no vertical chrome" — true then and not now**: this row is sized by
+               * its tallest child, and 32px against a 24px `text-base` heading makes
+               * it 8px taller than the heading alone. That is the price of a way out
+               * somebody can see, paid once at the top of a pane rather than on
+               * every row. The label names the destination rather than saying
                * "Back", which is `Header`'s rule and the whole difference between
                * this control and the history button it must never become.
                *
@@ -215,7 +219,7 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
               <IconButton
                 icon={ChevronLeft}
                 label={`Back to ${upLabel ?? "Settings"}`}
-                size="sm"
+                size="nav"
                 className="-ml-1"
                 onClick={() => navigate(up.path, true)}
               />

@@ -19,7 +19,24 @@ import { navigate } from "../../router";
  * `deploy/ci-release.sh` derives the image's `org.opencontainers.image.source`
  * label from it. What changed is that nothing draws it.
  *
- * See `docs/DECISIONS.md` for where the offer is made now.
+ * See `docs/DECISIONS.md` Q3.440 for where the offer is made now.
+ *
+ * ⚠ **The consent box under `/register` is not that notice coming back.** One
+ * sentence above is narrower than it reads: *"nothing draws it"* is true of the
+ * §13 offer and was never a rule about legal text in general. §13 is an
+ * obligation the **licence** places on whoever runs this, toward anybody who
+ * interacts with it over a network, and Q3.440 decided it is discharged in
+ * `LICENSE`, in `README.md` and in the image's OCI label rather than on a screen
+ * — all of which is unchanged: no screen draws the source URL, the version or
+ * the licence name, and `source` on the wire still has no reader.
+ *
+ * Consent runs the other way. It is a term of an act somebody is about to
+ * perform, at the moment they perform it, and **nothing in a tarball can carry
+ * it**. So it sits inside `Register`'s own `<form>`, before the button that
+ * performs the act — and deliberately **not** in this card's `footer`, which is
+ * the one place each screen keeps for the way back, under a rule, and is
+ * therefore chrome about the page rather than a term of the thing being done.
+ * The documents are `packages/web/src/legal/`. Q3.598, Q3.599.
  */
 
 /**

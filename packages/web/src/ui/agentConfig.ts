@@ -3,7 +3,6 @@ import type {
   AgentConfig,
   AgentConfigChoice,
   AgentConfigOption,
-  AgentId,
   SessionSnapshot,
   StoredEvent,
 } from "../wire";
@@ -82,8 +81,21 @@ const CATEGORY_SLOT: Record<string, Slot> = {
   collaboration_mode: "nested",
 };
 
+/**
+ * Which slot a control sits in, or `overflow` for a category nobody has named.
+ *
+ * ⚠ **`Object.hasOwn`, because `category` is a string the *agent* chose and this
+ * is a plain object.** A bare index inherits: `category: "toString"` answers
+ * `Object.prototype.toString`, a function, so `?? "overflow"` never fires and
+ * `splitOptions`' `out[slotFor(option)].push(…)` reads `undefined` and throws
+ * mid-render — which unmounts the app to `RootErrorBoundary` and blanks the
+ * origin holding `reemoat.credential`. `PluginConsent`'s `said` is the same guard
+ * for the same reason; the three tables in this file are the other place a
+ * value from the wire indexes a literal.
+ */
 export function slotFor(option: Pick<AgentConfigOption, "category">): Slot {
-  return CATEGORY_SLOT[option.category ?? ""] ?? "overflow";
+  const category = option.category ?? "";
+  return Object.hasOwn(CATEGORY_SLOT, category) ? (CATEGORY_SLOT[category] ?? "overflow") : "overflow";
 }
 
 /**
@@ -108,7 +120,7 @@ export function slotFor(option: Pick<AgentConfigOption, "category">): Slot {
  * this table is that counting agents is not how a name is chosen. The argument is
  * that a session is the only thing a mode could belong to here, so the extra word
  * distinguishes this control from nothing, on the narrowest strip in the app,
- * where `showsCaption` makes it the one category that spends width on its name
+ * where the chip used to spend width on its name
  * *and* its value at once.
  *
  * `model` is `Model` on all four, and an unknown category has no second opinion to
@@ -123,7 +135,10 @@ const CATEGORY_LABEL: Record<string, string> = {
 };
 
 export function labelFor(option: Pick<AgentConfigOption, "category" | "name">): string {
-  return CATEGORY_LABEL[option.category ?? ""] ?? option.name;
+  // `Object.hasOwn` for {@link slotFor}'s reason: an inherited member here is a
+  // function, and drawing one as a label is the same throw one function up.
+  const category = option.category ?? "";
+  return (Object.hasOwn(CATEGORY_LABEL, category) ? CATEGORY_LABEL[category] : undefined) ?? option.name;
 }
 
 /**
@@ -299,8 +314,8 @@ function withUnusable(
  * Why a control is on the strip with nothing to choose.
  *
  * Keyed on `category` like everything else here, never on an agent id — but the
- * effort case earns a sentence of its own for `contextHint`'s reason: "why is
- * this empty" has a specific answer there and a vague one everywhere else. The
+ * effort case earns a sentence of its own, because "why is this empty" has a
+ * specific answer there and a vague one everywhere else. The
  * specific answer is measured rather than guessed: **all four agents build this
  * list from the currently selected model's own levels.** claude, kimi and codex
  * express that by publishing the control and dropping it when there are none;
@@ -318,10 +333,13 @@ export function unavailableHint(option: Pick<AgentConfigOption, "category">): st
  * The daemon's own value for the row it appends to claude's effort control, and
  * the capability it requires before appending it.
  *
- * ⚠ **Hand-mirrored literals**, for the reason `CATEGORY_RESERVE` gives about the
- * *name* one screen down: `packages/web` cannot import from `src/`. `webcheck`
- * now reads `src/registry.ts` as text and pins both these and that name, which is
- * the guard that note said was missing.
+ * ⚠ **Hand-mirrored literals**: `packages/web` cannot import from `src/`, so
+ * these are the daemon's own strings typed a second time. `webcheck` reads
+ * `src/registry.ts` as text and pins them there, which is what stops the two
+ * copies drifting. (The width table that used to share this note, and pinned the
+ * daemon's `Ultracode` *name* for the same reason, is gone — Q3.564 — so the
+ * name's pin is now about the row the daemon appends rather than about a column
+ * this client sizes.)
  */
 const ULTRACODE_VALUE = "ultracode";
 const XHIGH_VALUE = "xhigh";
@@ -385,30 +403,35 @@ export const UNAVAILABLE_VALUE = "—";
  * Everything a chip contains, from one place, so its two renderings cannot drift.
  *
  * There are two of them — the live control and the slot of one the agent has
- * stopped offering — and they must be **the same width**, because the right-hand
- * cluster is right-aligned and any difference drags every button beside it. They
- * were not: the unavailable one drew the control's name where the live one
- * deliberately does not, so choosing a model with no effort levels widened that
- * chip by a word and a gap and shoved the rest of the strip sideways.
+ * stopped offering — and they must draw the **same shape**, because they are the
+ * same control in two states. They did not: the unavailable one drew the control's
+ * name where the live one deliberately does not, so choosing a model with no
+ * effort levels widened that chip by a word and a gap and shoved the rest of the
+ * strip sideways.
  *
  * The property that fixes it is structural rather than remembered: **`caption`
- * and `reserve` do not depend on `available`**, so the only thing that changes
- * when a control becomes unavailable is the string inside a box whose width was
- * already reserved. `webcheck` asserts exactly that, over every category.
+ * does not depend on `available`**, so the only thing that changes when a control
+ * becomes unavailable is the string inside it. `webcheck` asserts that over every
+ * category.
+ *
+ * ⚠ **There was a third field, `reserve`, and with it that sentence said "the same
+ * *width*".** It held a fixed list of strings per category, rendered invisibly, so
+ * every chip was as wide as the longest ordinary value its category could ever
+ * show and nothing moved when a value changed. It is gone on the owner's word —
+ * the chips hug their content now, bounded by `CHIP_MAX` — and Q3.564 carries what
+ * that costs, which is real: a value change moves its neighbours again, and an
+ * unavailable slot is narrower than the control it stands for.
  */
 export interface ChipParts {
   /** The control's own name, or `null` where the value names it. */
   caption: string | null;
   value: string;
-  /** Every value this chip could show, for the width it reserves. */
-  reserve: string[] | null;
 }
 
 export function chipParts(option: AgentConfigOption, available: boolean, prose?: ConfigProse): ChipParts {
   return {
     caption: showsCaption(option) ? labelFor(option) : null,
     value: available ? chipValue(option, prose) : UNAVAILABLE_VALUE,
-    reserve: chipReserve(option),
   };
 }
 
@@ -448,89 +471,49 @@ export function withChoice(option: AgentConfigOption, pending: PendingChoices | 
 /**
  * The categories whose chip says nothing but its value.
  *
- * Two of them, and the rule behind the pair is that a caption is dropped only
- * where the chip is identified *twice over* without it: the category draws an
- * icon (`CATEGORY_ICON`), and its value is a proper noun that answers "what is
- * this" by itself — "Opus 5", "Adaptive". Spending a word on "Model" beside
- * "Opus 5" is a word that says nothing and a width that changes for nothing.
+ * **The rule is now the icon and only the icon: a chip says its own name exactly
+ * where nothing else identifies it.** `CATEGORY_ICON` is keyed by the categories
+ * this client knows, so a chip with an entry there is identified by its glyph, its
+ * position and its `aria-label`, and a word repeating that is a word saying
+ * nothing. A category nobody here has heard of has no glyph, so its chip without a
+ * caption is a bare value in the overflow popover with nothing at all saying what
+ * it sets — that is the one case left, and it is what keeps this a function rather
+ * than a constant.
  *
- * Everything else keeps its caption, and the exclusions matter more than the
- * inclusions:
+ * ⚠ **`mode` used to be the exception and is not any more, on the owner's word.**
+ * The argument for keeping it was that "Manual" alone leaves nothing on screen
+ * saying what is on manual. What that missed is that the same chip already draws
+ * `SlidersHorizontal` and answers "Mode" to a screen reader, so the word was the
+ * third copy rather than the only one — and it was the third copy on the narrowest
+ * strip in the app, next to a value it was pushing into a truncation. Two things
+ * fall out and both are simplifications: the composer's row is one word shorter on
+ * every agent, and the caption's own `hidden sm:inline` is gone, because a caption
+ * now only ever belongs to a chip that has no icon to hide behind at any width.
+ * Q3.401 and Q3.417 are the entries this reverses; Q3.559 is the reversal.
  *
- *   - `mode`'s value is not self-describing. "Manual" alone leaves nothing on
- *     screen saying what is on manual, which is a complaint this file has
- *     already answered once.
- *   - an unknown category has **no icon** — `CATEGORY_ICON` is keyed by the
- *     categories we know — so its chip without a caption is a bare value with
- *     nothing at all identifying it, in the overflow popover where there is no
- *     position to read it by either.
+ * ⚠ **This set is the key list of `CATEGORY_ICON`, written out a second time**,
+ * and that is deliberate rather than an oversight: the icon table holds React
+ * components, so it lives in the `.tsx` and cannot be imported here without
+ * dragging `ComponentType` and lucide into the one module `webcheck` can evaluate
+ * with no DOM. Two lists that must agree is a defect unless something checks them,
+ * so `webcheck` reads the icon table off disk and asserts nothing in it draws a
+ * caption. `model_config` is in here for that reason alone — it has a glyph and is
+ * never drawn, being in the `hidden` slot — because a set that is *almost* the
+ * icon table is the version that rots.
  */
-const CAPTION_SILENT = new Set(["model", "thought_level"]);
+const CAPTION_SILENT = new Set(["mode", "model", "thought_level", "model_config"]);
 
 export function showsCaption(option: Pick<AgentConfigOption, "category">): boolean {
   return !CAPTION_SILENT.has(option.category ?? "");
 }
 
-/**
- * The width each chip holds open, as the strings that size it.
- *
- * **One list per category and never per agent**, which is the whole change from
- * the first version of this: reserving the widest of *the agent's own* labels
- * made claude's effort chip wider than kimi's, so the same strip was a different
- * shape depending on which session you were looking at — and switching between
- * two sessions moved every button. A width that depends only on the category is
- * the same on all three agents, before any of them has said anything.
- *
- * Sized by *rendering the strings* rather than by counting characters: `length`
- * is a proxy that is wrong the first time a narrow-lettered word is longer than a
- * wide-lettered one.
- *
- * The strings are measured values rather than invented ones, and each is the
- * longest ordinary one for its category — the rare longer ones truncate, with the
- * full text one tap away in the menu and in the chip's own `title`:
- *
- *   - **mode** — claude's `Accept Edits`. `Bypass Permissions` is longer and is
- *     the one claude drops unless it is running as root, so sizing to it would
- *     spend a third of a phone's strip on a value almost nobody sees.
- *   - **model** — codex's `GPT-5.6-Luna`, the longest head {@link chipValue} mines
- *     across the three (claude's are `Opus 5`, `Sonnet 5`, `Haiku`). It was
- *     `GPT-5.6-Sol` for one revision, which is a *shorter* name from the same
- *     family — proof that this list is a measurement and has to be taken from the
- *     longest one actually seen rather than the first one looked at.
- *   - **thought_level** — two, and neither belongs to an agent. `Adaptive` is
- *     ours, what {@link choiceOverride} renames the default to; `Ultracode` is the
- *     daemon's, appended to claude's effort control by `withUltracode` and drawn
- *     verbatim, since it is a choice no agent publishes and `chipValue` has nothing
- *     to mine it down to. It is the longer of the two, so with only `Adaptive` here
- *     the one row this client invents a width for was the one row that ellipsised —
- *     `Ultrac…`, on the control somebody had just used.
- *     ⚠ **A hand-mirrored literal.** `packages/web` cannot import from `src/`, so
- *     this is a second copy of `name: "Ultracode"` in `src/registry.ts`. It used to
- *     be unchecked — `daemoncheck` pins `ULTRACODE_CHOICE`, which is the *value*,
- *     not the name — so renaming the choice there truncated this chip again with
- *     every driver green. `webcheck` now reads `src/registry.ts` as text and pins
- *     the name against this table and the two values against `ULTRACODE_VALUE` /
- *     `XHIGH_VALUE` above, which closes it.
- *
- * `UNAVAILABLE_VALUE` is in every one of them, so a control the agent stops
- * offering keeps exactly the width it had.
- *
- * `null` — no reservation — for everything else, and that is not an omission: an
- * unknown category is drawn in the overflow popover, a column where every chip is
- * on its own row and nothing is beside it to be moved.
- */
-const CATEGORY_RESERVE: Record<string, string[]> = {
-  mode: ["Accept Edits", UNAVAILABLE_VALUE],
-  model: ["GPT-5.6-Luna", UNAVAILABLE_VALUE],
-  thought_level: ["Adaptive", "Ultracode", UNAVAILABLE_VALUE],
-};
-
-export function chipReserve(option: Pick<AgentConfigOption, "category">): string[] | null {
-  return CATEGORY_RESERVE[option.category ?? ""] ?? null;
-}
-
 /** Right-hand controls in a fixed reading order; the rest alphabetical. */
 const RIGHT_ORDER: Record<string, number> = { model: 0, thought_level: 1 };
+
+const rightOrder = (category: string | null): number => {
+  const key = category ?? "";
+  return (Object.hasOwn(RIGHT_ORDER, key) ? RIGHT_ORDER[key] : undefined) ?? 9;
+};
 
 /**
  * The options split into the three slots.
@@ -580,111 +563,14 @@ export function splitOptions(options: readonly AgentConfigOption[]): Record<Slot
   }
   out.right.sort(
     (a, b) =>
-      (RIGHT_ORDER[a.category ?? ""] ?? 9) - (RIGHT_ORDER[b.category ?? ""] ?? 9) ||
+      // `Object.hasOwn` for {@link slotFor}'s reason. Milder here — an inherited
+      // member makes the subtraction `NaN`, so the comparator silently stops being
+      // one rather than throwing — and wrong in a way nobody would trace back.
+      rightOrder(a.category) - rightOrder(b.category) ||
       a.name.localeCompare(b.name),
   );
   out.overflow.sort((a, b) => a.name.localeCompare(b.name));
   return out;
-}
-
-/**
- * How full the context window is, as a whole percent, or `null` for "cannot tell".
- *
- * Three answers and not two. `null`/`undefined` is an agent that never said (kimi
- * may never say) or a session with no live agent; `size <= 0` is an agent that
- * reported occupancy without a window. Neither may render as a *hole*: this used
- * to unmount the readout entirely, on the grounds that a grey ring reads as "0%
- * used" and an empty one as "plenty left". That was right about the ring and
- * wrong about the remedy — unmounting slid the model and effort chips sideways
- * every time an agent started or stopped reporting. `pieTone` answers `"unknown"`
- * here, which is what keeps the slot quiet without keeping it empty.
- *
- * Clamped rather than trusted: `used > size` is possible across a model switch
- * that shrinks the window, and an arc drawn past its own circumference is worse
- * than one that reads full.
- */
-export function contextPercent(
-  usage: SessionSnapshot["contextUsage"] | undefined,
-): number | null {
-  if (usage === null || usage === undefined) return null;
-  const { used, size } = usage;
-  if (!Number.isFinite(used) || !Number.isFinite(size) || size <= 0) return null;
-  return Math.max(0, Math.min(100, Math.round((used / size) * 100)));
-}
-
-/**
- * What the context readout says, where it says it in words.
- *
- * Not in the control strip: the number used to sit beside the ring there and was
- * the widest thing in that cluster, for a reading nobody needs continuously. It
- * is in the popover the ring opens — and in the trigger's `aria-label`, so this
- * still runs on every render, which is the part worth being accurate about. What
- * changed is not how often it is *called* but that its result is no longer a
- * laid-out element whose width can move a neighbour, which is why there is no
- * longer a widest-label constant to size a slot with. A ring is one width at
- * every percentage.
- *
- * `null` reads `0%` by decision rather than by accident: it is not a measurement
- * and the tone says so — {@link pieTone} answers `"unknown"`, which the caller
- * draws in the quietest colour it has, and the popover says the agent has not
- * reported rather than quoting the zero back as though it had.
- */
-export function pieLabel(percent: number | null): string {
-  return `${percent ?? 0}%`;
-}
-
-/**
- * Why the context readout is empty, in words, when it is.
- *
- * There is an agent-specific answer and no generic one, which is the whole reason
- * this exists and the reason `AgentConfigBar` is allowed to know one agent's name
- * here and nowhere else. Measured: `usage_update` appears in kimi 0.29.2's bundle
- * exactly once, inside the vendored zod schema for the protocol — it is a shape
- * kimi can parse and never one it sends. claude's adapter constructs it in three
- * places and emits it on essentially every output token.
- *
- * So on kimi the readout is empty for the life of every session, and "the agent
- * has not said" reads as *yet* — as though the number were coming. It is not, and
- * somebody watching a long conversation stay at zero reasonably concludes the
- * client is broken. This says so, and points at the one thing that does work:
- * kimi publishes `usage` as a builtin command, so a person can ask it themselves.
- *
- * **Codex takes the neutral arm because it reports, not because it is not kimi.**
- * Worth stating, since every agent but one falls into the `else` and the shape
- * cannot tell a measured silence from an unconsidered one. Measured 2026-08-07
- * against codex-acp 1.1.9: one prompt produced two `usage_update` notifications
- * carrying `{used, size}`, so on codex the readout fills in and "the agent has not
- * reported this" means *yet* — which is what it says.
- *
- * **We deliberately do not send that command for them.** ACP has no request for
- * usage — twenty methods and not one of them asks — so "asking" means sending a
- * prompt, and a prompt takes the session's one turn. A background poll would hold
- * that turn and answer somebody's real message with `409 turn_in_flight`, and its
- * reply would land in the transcript as an agent message nobody asked for. Free
- * in tokens is not free.
- */
-export function contextHint(agent: AgentId): string {
-  return agent === "kimi"
-    ? "kimi does not report this — send /usage to ask it"
-    : "the agent has not reported this";
-}
-
-/** How alarmed the context readout is. A level, so the thresholds are assertable. */
-export type PieLevel = "unknown" | "ok" | "warn" | "critical";
-
-/**
- * The thresholds, as a level rather than a colour.
- *
- * They were a ternary in a JSX prop, which `webcheck` cannot reach. The class
- * strings stay beside every other `Record<…, string>` in the `.tsx`: a colour is
- * not a rule, and a pure module full of Tailwind is a pure module with nothing
- * worth asserting in it.
- */
-export function pieTone(percent: number | null): PieLevel {
-  if (percent === null) return "unknown";
-  if (percent >= 90) return "critical";
-  if (percent >= 75) return "warn";
-  return "ok";
 }
 
 /**
@@ -1053,27 +939,6 @@ function providerSplit(name: string): { head: string; tail: string } | null {
   return head.length === 0 || tail.length === 0 ? null : { head, tail };
 }
 
-/**
- * `124k`, `1.2M` — a token count at the width a chip has for one.
- *
- * **The unit is chosen from the rounded number, not the raw one**, which is the
- * only interesting line here. Deciding on the raw value and rounding afterwards
- * lets the rounding carry the number *out* of the unit that was just picked:
- * 999,999 is under a million, so it took the `k` arm, and `Math.round(999999/100)
- * / 10` is 1000 — printing `1000k`, which is four characters wider than the `1M`
- * this exists to produce and reads as a different order of magnitude.
- *
- * Only the `k`/`M` boundary is guarded. Above `M` there is no larger unit to be
- * carried into, so a number big enough to round to `1000M` is honestly `1000M`.
- */
-export function shortCount(value: number): string {
-  if (!Number.isFinite(value) || value < 0) return "?";
-  if (value < 1000) return String(Math.round(value));
-  const thousands = Math.round(value / 100) / 10;
-  if (thousands < 1000) return `${thousands}k`;
-  return `${Math.round(value / 100_000) / 10}M`;
-}
-
 /** Descriptions for one option and its choices, recovered from the transcript. */
 export interface ConfigProse {
   description: string | null;
@@ -1152,33 +1017,6 @@ function scanConfigProse(events: readonly StoredEvent[]): Map<string, ConfigPros
     break;
   }
   return out;
-}
-
-/**
- * Whether the composer's control strip has anything to draw at all.
- *
- * Extracted from an inline condition because the third clause is the half that
- * would fail silently on exactly one agent, and a rule that is only *described*
- * is the thing this repository is against.
- *
- * An older daemon sends no `agentConfig`, and an agent may genuinely offer no
- * controls — but either way there may still be a context readout, so the test
- * cannot be options alone. **And the paperclip lives in this row**, which is the
- * clause with a history: without it a kimi session that reports no context
- * usage, or *any* session waiting on a daemon restart — which has no live agent
- * to publish controls — would render no bar and therefore no way to attach a
- * file, while claude was fine. Correct on the agent you tested, wrong on the
- * other, invisible from either one alone.
- *
- * That case stopped being rare when the composer began surviving a restart, so
- * it is asserted now rather than reasoned about.
- */
-export function configBarShows(
-  optionCount: number,
-  contextPercent: number | null,
-  hasLeading: boolean,
-): boolean {
-  return optionCount > 0 || contextPercent !== null || hasLeading;
 }
 
 /**

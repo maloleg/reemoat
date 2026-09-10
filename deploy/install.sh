@@ -116,7 +116,6 @@ resolve_bin git "deploy/deploy.sh" >/dev/null
 
 ENV_FILE=$(env_file "$SERVICE")
 ENV_EXAMPLE=$(env_example "$SERVICE")
-ENV_IS_NEW=0
 
 if [ -f "$ENV_FILE" ]; then
   echo "  environment:  $ENV_FILE (existing, left alone)"
@@ -149,7 +148,6 @@ else
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "  environment:  $ENV_FILE (created from $(basename -- "$ENV_EXAMPLE"))"
-  ENV_IS_NEW=1
 fi
 
 
@@ -592,12 +590,16 @@ ask_daemon() {
       # A machine has an owner now, and one registered without one is the failure
       # this whole change removes: it enrolls, dials the relay, holds a tunnel, and
       # appears in nobody's list, because nothing granted it to anybody. The old
-      # wizard printed `cpctl admin grant …` as a closing hint and ran it never.
+      # wizard printed a grant command as a closing hint and ran it never.
       #
       # Asked *before* `addmachine`, keeping the ordering the block above fought
       # for: everything read and validated first, the single-use code minted last.
-      # An admin registering a machine for somebody grants nothing new — an admin
-      # can already mint an API key for any user and act as them.
+      # ⚠ This used to say "an admin registering a machine for somebody grants
+      # nothing new — an admin can already mint an API key for any user and act as
+      # them". That is false: Q1.631 and Q7.74 deleted every route that issues a
+      # credential for somebody else's account. Registering a machine for another
+      # person is its own power now, and what bounds it is that their own list
+      # names whoever enrolled it (`enrolledBy` on `GET /v1/machines`).
       _owner=""
       _users=$(cpctl admin users --ids 2>/dev/null) || _users=""
       if [ -z "$_users" ]; then
@@ -676,8 +678,9 @@ ask_daemon() {
 }
 
 # **"Still the example" rather than "created by this run", and the answers land
-# atomically.** `ENV_IS_NEW` was set at copy time, so a Ctrl-C at any `ask` left the
-# raw example in place and the *next* run took the "existing, left alone" branch,
+# atomically.** A flag set at copy time — `ENV_IS_NEW`, removed with the last of
+# its readers — meant a Ctrl-C at any `ask` left the raw example in place, so the
+# *next* run took the "existing, left alone" branch,
 # skipping the interview and with it the do-not-start guard below.
 #
 # `cmp` alone was not enough, and saying it was is what the first version of this
@@ -1301,9 +1304,21 @@ if [ "$SERVICE" = daemon ] && [ -n "${MACHINE_ID:-}" ]; then
   echo "this machine is $MACHINE_ID, and it already belongs to the person you picked."
   echo "they will see it in the web UI as soon as this daemon dials the relay."
   echo
-  echo "share it with somebody else:"
-  echo "  pnpm cpctl admin adduser <name>   # prints a user id and a password"
-  echo "  pnpm cpctl admin grant <userId> $MACHINE_ID"
+  # ⚠ **This shell holds the *admin's* `REEMOAT_CP_KEY`** — it just ran `cpctl
+  # admin adduser` and `cpctl admin addmachine` with it — and `cpctl share`
+  # resolves through `ownedMachine`, so pasting it here answers `404
+  # machine_not_found` on a machine created thirty seconds earlier. Printing an
+  # owner verb next to an admin one read as one continuous recipe and was not.
+  #
+  # The owner also has no credential yet: `admin adduser` stopped minting API
+  # keys, so they hold a password and nothing else. Both steps are theirs to run,
+  # and saying so is the difference between a hint and a wrong command.
+  echo "share it with somebody else — run these as the machine's OWNER, not here:"
+  echo "  pnpm cpctl admin adduser <name>   # here, as admin: prints a user id and a password"
+  echo
+  echo "  # then on the owner's machine, with the owner's own credential:"
+  echo "  pnpm cpctl login <name>           # prints a REEMOAT_CP_KEY to export"
+  echo "  pnpm cpctl share $MACHINE_ID <userId>   # <userId> is what they read off 'cpctl me'"
 fi
 
 # **Both of these are about a *user* unit, so neither applies to a container.**

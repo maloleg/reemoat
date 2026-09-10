@@ -370,6 +370,21 @@ export interface MachineState {
    * could not tell them apart would name the wrong one.
    */
   ownerDisabled: boolean;
+  /**
+   * Whose enrollment code brought this machine online, where that was not you.
+   * See `MachineRecord.enrolledBy`, which is where the argument for it lives.
+   *
+   * **`undefined` is folded into `null` here, unlike `lastSeenAt` above**, and
+   * the asymmetry is the point rather than an inconsistency. There the two
+   * silences differ and a screen says different things about them — a control
+   * plane that predates the table may not claim "never seen" about a fleet that
+   * is working. Here they are one silence by construction: the field's own
+   * `null` already means *unknown* rather than "you", so a control plane that
+   * has never heard of the question is already inside the meaning of the value
+   * it does not send. `?? null` is the whole migration, the same shape
+   * `cancelRequestedAt` takes on the daemon's side of the wire.
+   */
+  enrolledBy: string | null;
   scopes: Scope[];
   route: Route | null;
   reach: Reach;
@@ -414,6 +429,7 @@ export class MachineConnection {
   private owned: boolean;
   private overLimit: boolean;
   private ownerDisabled: boolean;
+  private enrolledBy: string | null;
   private scopes: Scope[];
 
   private token: { value: string; expiresAt: number } | null = null;
@@ -443,6 +459,10 @@ export class MachineConnection {
     // suspended", which is true of a control plane that has no such concept.
     this.overLimit = record.overLimit === true;
     this.ownerDisabled = record.ownerDisabled === true;
+    // Absent and `null` are one silence here rather than two — see
+    // `MachineState.enrolledBy` for why this one may collapse and `lastSeenAt`
+    // above may not.
+    this.enrolledBy = record.enrolledBy ?? null;
     this.scopes = record.scopes;
     this.onChange = onChange;
   }
@@ -455,6 +475,25 @@ export class MachineConnection {
     this.enrolled = record.enrolled;
     this.lastSeenAt = record.lastSeenAt;
     this.owned = record.owned === true;
+    /*
+     * Folded in here rather than read once at construction, so the field's own
+     * stated remedy lands without a reload: re-enrolling a machine you did not
+     * enroll sets this back to nothing on the server, and the row stops naming
+     * somebody else the next time the listing is read.
+     *
+     * ⚠ **"The next time the listing is read" is not "on the poll", and this
+     * said the second.** `update` has exactly two callers — `bootstrap` and
+     * `runResume` in `store.ts` — and the four-second `tick()` deliberately makes
+     * **no** control-plane round trip once any machine is known; it re-lists
+     * sessions on machines that are already reachable and nothing else. So this
+     * value moves on a wake (a tab hidden 20s or more, a bfcache restore,
+     * `online`, the drift watchdog) or on a reload, and *not* while somebody sits
+     * on the machine list watching it — which is the state a substitution would
+     * be noticed in. Making it poll would put a control-plane request on the
+     * four-second timer for a value that changes only when somebody re-enrolls,
+     * which is the wrong trade; saying so here is the right one.
+     */
+    this.enrolledBy = record.enrolledBy ?? null;
     /*
      * **The transition, which is the part that is easy to miss.**
      *
@@ -496,6 +535,7 @@ export class MachineConnection {
       owned: this.owned,
       overLimit: this.overLimit,
       ownerDisabled: this.ownerDisabled,
+      enrolledBy: this.enrolledBy,
       scopes: this.scopes,
       route: this.chosen,
       reach: this.reach,

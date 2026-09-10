@@ -451,6 +451,19 @@ export class PluginApi {
          * loop, and a plugin that stopped hearing them would lose the only
          * confirmation it has that its act landed.
          */
+        /*
+         * ⚠ **Wake a released agent first, exactly as `POST /sessions/:id/prompt`
+         * does.** `ManagedSession.prompt` refuses a terminal session, and a parked
+         * one is terminal — so without this a plugin could not talk to any
+         * conversation the daemon had let go for being idle, got
+         * `session_terminal` for it, and had no way back: there is no
+         * `sessions.resume` in the method table. Parking reached the hook fan
+         * (`host.ts` teaches `session.ended` about it) and stopped at this door.
+         *
+         * Before the turn is claimed, because a wake is not a turn and a failed
+         * one must not leave a claim behind.
+         */
+        await registry.wakeForPrompt(managed);
         const undo = this.options.origins?.claimTurn(managed.id, manifest.id);
         const result = managed.prompt(prompt);
         if (result.kind !== "accepted") {

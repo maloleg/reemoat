@@ -1,34 +1,31 @@
 import { Bot, Check, ChevronDown, Gauge, MoreHorizontal, SlidersHorizontal, Sparkles } from "lucide-react";
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   useSyncExternalStore,
   type ComponentType,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { errorText, meansRestartRefused } from "../http";
 import { beginChoice, choicesFor, choicesVersion, endChoice, subscribeChoices } from "../choices";
 import { LAYER, useDismissible } from "./overlay";
 import { keyOf, type SessionRef } from "../ids";
 import { store } from "../store";
-import type { AgentConfigChoice, AgentConfigOption, AgentId, SessionSnapshot, StoredEvent } from "../wire";
+import type { AgentConfigChoice, AgentConfigOption, StoredEvent } from "../wire";
 import {
   chipParts,
   choiceLabel,
   choiceOverride,
   drawnChoices,
   choiceRefusal,
-  configBarShows,
   configProse,
-  contextHint,
-  contextPercent,
   labelFor,
   NESTED_HOST,
-  pieLabel,
-  pieTone,
-  shortCount,
   slotFor,
   splitOptions,
   unavailableHint,
@@ -36,7 +33,6 @@ import {
   type ChipParts,
   type ConfigProse,
   type DrawnControls,
-  type PieLevel,
   effortFollowUp,
 } from "./agentConfig";
 import { Icon, MENU_HEADING, MENU_PANEL, menuRow, TAP_GROW_Y } from "./bits";
@@ -170,19 +166,47 @@ const CATEGORY_ICON: Record<string, ComponentType<{ size?: number | string; clas
  * utilities ever land on one element.
  */
 /*
- * **Every chip is the colour of the bar it sits in, and `edge-strong` is what
- * says it is a control.**
+ * **A chip inside a bounded box carries no boundary of its own, and its chevron
+ * is what says it is a control.**
  *
- * They were `border-edge bg-raised` — a grey pill on a `bg-surface/95` bar — so
- * the strip under the composer read as a row of filled tags rather than as part
- * of the composer. The rule they follow now is the app-wide one: a control takes
- * its ground's colour and is bounded rather than filled, which is why the border
- * has to be `edge-strong` (≥3:1) and not `edge` (1.31:1 here) — with no fill of
- * its own, the border is the whole of the control's identification.
+ * ⚠ **This reverses the paragraph that stood here**, which read: *"a control
+ * takes its ground's colour and is bounded rather than filled, which is why the
+ * border has to be `edge-strong` (≥3:1) and not `edge` (1.31:1 here) — with no
+ * fill of its own, the border is the whole of the control's identification."*
+ * That is still the app-wide rule and it is still right — for a control standing
+ * on a plane of its own. Its premise was that this row is such a plane, and that
+ * premise is withdrawn: the strip is now inside the composer's own box, which is
+ * itself bounded at `edge-strong`, so seven separately-outlined pills inside one
+ * outlined container is the visual noise the box was drawn to remove.
  *
- * The fill is freed up by that, and it is spent on **state**: `bg-raised` now
- * means a toggle that is *on* and a menu row that is *chosen*, where before it
- * meant nothing at all because everything had it.
+ * What each chip then owes 3:1 is its own **action glyph**, not its text and not
+ * a fill. That is the `ChevronDown` at `text-faint` — 6.23:1 on `surface`, and a
+ * stronger claim than the 4.40:1 border it replaces, which said only "a control"
+ * where this says "a list opens here". **So the chevron is drawn at every width**
+ * and may never take a breakpoint; without it a borderless chip is a caption with
+ * a decorative glyph. A fill could not do this job in this palette at all —
+ * `raised` on `surface` is 1.22:1.
+ *
+ * The precedent is `menuRow` inside `MENU_PANEL`, whose note in `bits.tsx` makes
+ * this exact argument one container down: what identifies a row there is the
+ * panel's box and the hover fill, and adding a border to the live rows "would be
+ * a new decoration rather than an identification". `ICON_BUTTON_TONE.ghost` is
+ * the same shape as a primitive.
+ *
+ * **`active:bg-raised` is not decoration**, and it is the half `ContextPie` got
+ * wrong before it was deleted: it reversed *from* borderless *to* bordered on the
+ * grounds that "hover is not a state a phone has at all", which is true and is
+ * answered by pressing rather than by a border. `.tap` transitions
+ * `background-color`, and `.press`'s `scale(0.97)` is nearly invisible on a
+ * control with no edge to scale.
+ *
+ * `border` stays in this string and only the *colour* moves to the call sites.
+ * Two `border-color` utilities on one element is the equal-specificity race
+ * `FIELD` documents; and keeping the width shared means a chip that takes a real
+ * border for a state — `Toggle` when it is on — does not grow by 2px to do it.
+ *
+ * The fill is still spent on **state**: `bg-raised` means a toggle that is on and
+ * a menu row that is chosen.
  */
 /*
  * The size is on `CHIP` and never on either span inside `chipInner`, which is what
@@ -197,33 +221,141 @@ const CATEGORY_ICON: Record<string, ComponentType<{ size?: number | string; clas
  * goes 20px → 18px, still far under `min-h-8`, so no box gets shorter.
  *
  * ⚠ **Height is deliberately not reduced.** `min-h-8` plus `TAP_GROW_Y` is the
- * 44px target above, and both square buttons are `${CHIP} w-8` — they stop being
- * square the moment height moves without width, and the paperclip is a fixed
- * `h-8 w-8` chosen to match these. The chips get smaller horizontally and in type
+ * 44px target above, and the one square button left here is `${CHIP} w-8` — it
+ * stops being square the moment height moves without width, and the paperclip,
+ * now the composer's rather than this row's, is an `IconButton size="chip"` at a
+ * fixed 32px chosen to match it. The chips get smaller horizontally and in type
  * only.
+ */
+/**
+ * How wide a chip's value may get before it truncates.
+ *
+ * The one bound left after the fixed reserve was withdrawn (Q3.564). 128px is
+ * about eighteen characters at `text-2xs`, which clears every ordinary value the
+ * four agents publish — `Accept Edits`, `GPT-5.6-Luna`, `Ultracode` — and clips
+ * the rare long one rather than letting it take the row. The full text is in the
+ * menu and in the chip's `title` either way.
+ */
+const CHIP_MAX = "max-w-32";
+
+/**
+ * How long the config picker's sheet takes to leave, in milliseconds.
+ *
+ * It stays mounted for exactly this long after it is dismissed so its exit
+ * animation can run — a sheet that simply stops being drawn is a panel vanishing
+ * between two frames, which is the complaint `sheet-close` answers for the
+ * *routed* pop-ups and cannot answer here, there being no navigation to hang a
+ * view transition off.
+ *
+ * ⚠ **The same number is `--animate-sheet-out` in `index.css`** and `webcheck`
+ * asserts they agree: shorter, and the slide is cut off mid-travel; longer, and a
+ * finished panel sits on the screen waiting to be unmounted.
+ */
+const SHEET_EXIT_MS = 260;
+
+/**
+ * The config sheet's full detent, as the length `.config-sheet` is written in.
+ *
+ * The **resting** detent is not here: it is `.config-sheet`'s own `--sheet-max`
+ * default, because at rest nothing writes anything and a picker whose rows already
+ * fit is laid out by its content. This one is written because the gesture has to
+ * set it, both as a bound while a finger is down and as the height it settles on.
+ *
+ * `dvh` and not `vh`, for the reason every other full-height length in this app is
+ * `dvh`: on a phone `vh` is the viewport with the browser chrome *retracted*, so a
+ * sheet sized in it is taller than the screen for as long as the address bar is
+ * showing — the bottom rows sit under it, and on this panel the bottom rows are
+ * the ones somebody scrolled to reach.
+ *
+ * 92 matches `SHEET_PANEL` in `bits.tsx` — the routed sheets' phone height — so
+ * the two kinds of sheet in this app agree about what *full* means. And resting at
+ * 60 rather than at the 80 this sheet opened at first: 80 is tall enough to look
+ * like the whole screen and short enough to still clip a model list, which is the
+ * shape that reads as broken.
+ *
+ * ⚠ **Opening also writes `--sheet-min`, and that is a correction.** It was a
+ * `max-height` alone, which clamps a tall list and does nothing whatever to a
+ * short one — so the effort picker, four rows and never near 60dvh, could not be
+ * expanded at all while the model picker could. Two controls on one row behaving
+ * differently under one gesture is the defect; the space below four rows in a
+ * sheet somebody deliberately pulled open is not.
+ */
+const SHEET_FULL = "92dvh";
+
+/**
+ * The full detent again, as a fraction, for the one place that needs a number.
+ *
+ * ⚠ **Written twice — here and as `SHEET_FULL` — because a drag has to compare a
+ * pixel height against it and CSS will not hand one over.** The alternative is
+ * measuring the panel after forcing it full, which is a layout pass per frame.
+ * `webcheck` reads both and asserts they agree, which is the same treatment
+ * `SHEET_EXIT_MS` gets against `index.css`.
+ *
+ * `window.innerHeight` is the multiplicand: it is the *dynamic* viewport on every
+ * mobile browser, which is what `dvh` resolves against, so the two spellings mean
+ * the same height rather than nearly the same one.
+ */
+const SHEET_FULL_SHARE = 0.92;
+
+/**
+ * How far a finger travels on the sheet before the drag takes over, in pixels.
+ *
+ * The same 24 the platform uses to tell a scroll from a tap, and it is doing that
+ * job here: under it the gesture is still a tap on whatever row it landed on, over
+ * it the sheet follows the finger and {@link Select}'s capture handler eats the
+ * click. Too small and choosing a model becomes a lottery; too large and the drag
+ * reads as dead before it fires.
+ */
+const SHEET_DRAG_STEP = 24;
+
+/**
+ * How far below its resting height the sheet has to be pulled to close, in pixels.
+ *
+ * Only ever measured *below* rest, where the panel has stopped shortening and is
+ * sliding instead — so this is the same gesture and the same distance a phone's
+ * own sheets close on, rather than a second rule about heights. Three fingers'
+ * width, which is far enough that letting go of a sheet you were only nudging puts
+ * it back.
+ */
+const SHEET_DISMISS_PX = 72;
+
+/**
+ * How long the sheet takes to settle onto a detent once a finger lets go.
+ *
+ * ⚠ **The same number is the literal in `.config-sheet`'s `transition` in
+ * `index.css`** — not a custom property, and naming one here would point a reader
+ * at re-adding the mechanism that file's own note records taking out: a `var()`
+ * inside a shorthand makes every longhand a pending-substitution value. `webcheck`
+ * reads the literal out of the stylesheet and asserts they agree, for the reason
+ * it does for the exit: this timer is
+ * what hands the panel's height back to `.config-sheet`'s own defaults, so a
+ * shorter one cuts the settle off mid-travel and a longer one leaves a pixel height
+ * pinning a sheet that has stopped moving — which the next open would inherit.
+ */
+const SHEET_SETTLE_MS = 300;
+
+/*
+ * Six pixels between the glyph, the value and the chevron.
+ *
+ * ⚠ **This was `gap-1` and the argument for it has been withdrawn on the owner's
+ * word.** Four pixels was chosen so a chip read as one word rather than three
+ * things, and it was also 8px a chip against a 352px row that had just taken Send.
+ * Measured on a phone it is the other failure: the glyph and the value *touch*, and
+ * a control whose whole identification is its glyph cannot afford to have it read
+ * as part of the word beside it. The width it costs is affordable now for the
+ * reason the row's own gap is — the model chip folds away below `sm`, so this pays
+ * two chips 4px each rather than three.
  */
 const CHIP = `tap press relative inline-flex min-h-8 items-center gap-1.5 rounded-md border text-2xs ${TAP_GROW_Y}`;
 
 export function AgentConfigBar({
   sessionRef,
-  agent,
   controls,
-  usage,
   events,
   disabled,
   turnRunning,
-  leading,
 }: {
   sessionRef: SessionRef;
-  /**
-   * Which agent this is, for the context readout alone.
-   *
-   * The one place in this file that is allowed to know an agent's *name*:
-   * everything else is keyed on ACP's `category` precisely so it is not. It is
-   * here because "why is this empty" has an agent-specific answer and no generic
-   * one — see `contextHint`.
-   */
-  agent: AgentId;
   /**
    * What to draw, and whether there is an agent behind it — see `drawnControls`.
    *
@@ -233,7 +365,6 @@ export function AgentConfigBar({
    * the gap lives in the store, and `stale` is what stops it being tapped.
    */
   controls: DrawnControls;
-  usage: SessionSnapshot["contextUsage"];
   /** The loaded transcript, for the prose the snapshot strips. See `configProse`. */
   events: readonly StoredEvent[];
   /** This tab is busy elsewhere — a prompt in flight. Terminal sessions arrive as `stale`. */
@@ -248,16 +379,10 @@ export function AgentConfigBar({
    * blind to the turn by construction, `running` being a live status.
    */
   turnRunning: boolean;
-  /**
-   * Rendered first in the left cluster — today, the paperclip.
-   *
-   * A node rather than attachment props, so this component stays about the
-   * agent's own controls and `slotFor`/`splitOptions` keep their vocabulary.
-   */
-  leading?: ReactNode;
 }): ReactNode {
   const [busy, setBusy] = useState<string | null>(null);
   const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowRef = useRef<HTMLDivElement | null>(null);
   // Read from module state rather than held here, because the other door into
   // `applyConfigChange` is a sibling component — see `choices.ts`.
   useSyncExternalStore(subscribeChoices, choicesVersion);
@@ -330,7 +455,6 @@ export function AgentConfigBar({
           }),
     [polledOptions, fullOptions],
   );
-  const percent = contextPercent(usage);
   // Above the early return because the registration below reads it, and a hook
   // cannot sit under one. Pure, and the same call it was two lines lower.
   const slots = splitOptions(options);
@@ -357,12 +481,36 @@ export function AgentConfigBar({
    */
   useDismissible("menu", () => setOverflowOpen(false), overflowOpen && slots.overflow.length > 0);
 
+  /*
+   * ⚠ **And a press outside closes it, because Escape is a desktop answer to a
+   * phone-first control.**
+   *
+   * `useDismissible` registers a layer and nothing else — `overlay.ts` listens
+   * for `keydown` alone — so on a phone the only exit was a second tap on the
+   * trigger, which is `disabled` while a config change is in flight. That is
+   * exactly the window the docblock above says was the defect, left open by the
+   * repair for it. `Select` and `Absent` in this file each carry this effect
+   * already; this popover was the one that did not.
+   */
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const close = (event: Event): void => {
+      if (overflowRef.current?.contains(event.target as Node) !== true) setOverflowOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [overflowOpen]);
+
   // Memoised on the events array identity, which the store replaces only when the
   // transcript actually changes — this walks the whole window backwards, and the
   // composer re-renders on every keystroke.
   const prose = useMemo(() => configProse(events), [events]);
 
-  if (!configBarShows(options.length, percent, leading !== undefined)) return null;
+  // Nothing to draw. The row that holds this cluster is the composer's, and it
+  // carries the paperclip and Send whatever an agent has published — so this is
+  // an ordinary empty render rather than the predicate it used to be, whose
+  // third clause existed only to keep the paperclip alive. See `web-composer.md`.
+  if (options.length === 0) return null;
 
   const apply = (option: AgentConfigOption, value: string | boolean): void => {
     setBusy(option.id);
@@ -372,17 +520,50 @@ export function AgentConfigBar({
     void applyConfigChange(sessionRef, option.id, value).finally(() => setBusy(null));
   };
 
+  /*
+   * **What the mode picker also holds on a phone.**
+   *
+   * The model chip leaves the row below `sm` — it is `hidden sm:contents` down in
+   * the render — and its choices go here instead, into the one control every agent
+   * has. That is one control *drawn* in two places and it is still in exactly one
+   * **slot**: `splitOptions` puts it in `right` at every width and the partition
+   * is untouched. What differs is which of two renderings the browser draws.
+   *
+   * Keyed on the category rather than on the id, like everything else in this
+   * file, and read off `slots.right` so a session that publishes no model control
+   * folds nothing.
+   *
+   * ⚠ **It folds only where there is somewhere to fold *into*, which is
+   * `splitOptions`' own rule for `nested` applied to the same host.** The mode
+   * control is not guaranteed: an agent can publish none, and one this client is
+   * drawing from memory arrives in `unavailable`, where `Absent` draws a chip with
+   * one row and **no nested sections at all**. Either way the model chip would be
+   * `hidden` below `sm` with its choices nowhere — a control unreachable on a
+   * phone, silently, which is the failure the "a control never leaves the strip"
+   * rule exists against. So the fold is conditional and the chip's own class is
+   * conditional on the same answer; that is a question about what the agent
+   * published rather than about a width, so it is JavaScript's to ask.
+   */
+  const foldHost = slots.left.find(
+    (one) => one.category === NESTED_HOST && one.kind !== "boolean" && !unavailable.has(one.id),
+  );
+  const foldedBelowSm =
+    foldHost === undefined ? [] : slots.right.filter((one) => one.category === "model");
+
   const control = (option: AgentConfigOption): ReactNode => {
     const nested = option.category === NESTED_HOST ? slots.nested : [];
+    const narrow = option.category === NESTED_HOST ? foldedBelowSm : [];
     /*
      * Two flags, and the split is what stops the row flickering.
      *
      * `disabled` is semantic — there is no agent to ask, or this tab is mid-prompt
-     * — and it is drawn, at `opacity-40`. `locked` is the transient exclusion
-     * while another control in this row is in flight, and it is **not** drawn:
-     * one tap used to dim every chip beside it, and since `opacity` is
-     * deliberately absent from `.tap`'s transition list, the whole strip snapped
-     * to 40% and snapped back around a round trip that is often under a second.
+     * — and it is drawn, by dropping the chip's ink to `text-faint`; see the
+     * paragraph on `Select`'s own class string for why that is a token and not an
+     * `opacity`. `locked` is the transient exclusion while another control in this
+     * row is in flight, and it is **not** drawn: one tap used to dim every chip
+     * beside it, and since `opacity` was deliberately absent from `.tap`'s
+     * transition list, the whole strip snapped and snapped back around a round
+     * trip that is often under a second.
      * The lock itself is kept — setting a model rebuilds the mode list, so two
      * changes at once really do race — it just stopped announcing itself as
      * damage.
@@ -416,6 +597,7 @@ export function AgentConfigBar({
         key={option.id}
         option={withChoice(option, pending)}
         nested={nested.map((sub) => withChoice(sub, pending))}
+        narrow={narrow.map((sub) => withChoice(sub, pending))}
         proseOf={(sub) => prose.get(sub.id)}
         disabled={disabled || stale}
         locked={busy !== null}
@@ -428,25 +610,50 @@ export function AgentConfigBar({
   };
 
   return (
-    <div className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5">
+    /*
+     * A cluster inside somebody else's row, not a row of its own.
+     *
+     * `Composer` owns the strip now — it lays out the paperclip, this, and the
+     * send slot in one flex line inside the composer's box — so the padding and
+     * the outer `flex` that used to be here belong to it. What is left is the two
+     * clusters and the rule that separates them, which is the only part that is
+     * about the agent's own controls.
+     *
+     * `min-w-0` is what lets `truncate` fire on a chip inside `flex-1`.
+     */
+    <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
       {/* Mode on the left, where a permission decision belongs — it is the control
-          you reach for when the agent is asking, not one you browse. The attach
-          slot before it was reserved and empty for as long as no layer of this
-          system accepted an attachment; every layer does now, so it holds the
-          paperclip. It is ungated on purpose: ACP requires every agent to support
-          `resource_link`, so there is no agent for which attaching does nothing.
-          Only whether the *bytes* of an image go inline depends on a capability,
-          and that is the daemon's decision, recorded on the event afterwards. */}
-      <div className="flex min-w-0 items-center gap-1.5">
-        {leading}
-        {slots.left.map(control)}
-      </div>
+          you reach for when the agent is asking, not one you browse. */}
+      <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">{slots.left.map(control)}</div>
 
-      <div className="ml-auto flex min-w-0 items-center gap-1.5">
-        {slots.right.map(control)}
+      <div className="ml-auto flex min-w-0 items-center gap-1.5 sm:gap-2">
+        {slots.right.map((option) =>
+          option.category === "model" ? (
+            /*
+             * **The model chip is drawn above `sm` and folded into the mode
+             * picker below it** — see `foldedBelowSm`. `hidden sm:contents` and
+             * not `hidden sm:flex`: at `sm` and up this wrapper has to leave the
+             * layout entirely or the chip becomes a flex item inside a flex item
+             * and stops taking the row's own `gap`.
+             *
+             * A class and never a measurement in JavaScript, which is
+             * `AppShell`'s rule for this app: a window dragged across the
+             * breakpoint cannot render a row that is not there, because both are
+             * rendered and `display` chooses.
+             */
+            <div
+              key={option.id}
+              className={foldedBelowSm.length > 0 ? "hidden sm:contents" : "contents"}
+            >
+              {control(option)}
+            </div>
+          ) : (
+            control(option)
+          ),
+        )}
 
         {slots.overflow.length > 0 && (
-          <div className="relative">
+          <div ref={overflowRef} className="relative">
             <button
               type="button"
               onClick={() => setOverflowOpen(!overflowOpen)}
@@ -456,11 +663,20 @@ export function AgentConfigBar({
               aria-label="More controls"
               aria-expanded={overflowOpen}
               // A 32px square, the twin of the paperclip at the other end of the
-              // strip. Kept hand-rolled rather than swapped for `IconButton`
-              // because `aria-expanded` is load-bearing on a disclosure and that
-              // primitive exposes `active` → `aria-pressed`, a different promise.
-              className={`${CHIP} w-8 justify-center border-edge-strong bg-surface text-muted hover:bg-raised hover:text-fg ${
-                disabled || stale ? "opacity-40" : ""
+              // row — and the twin in *tone* as well now that both are ghost, which
+              // is the first time that comment has been true. Kept hand-rolled
+              // rather than swapped for `IconButton` because `aria-expanded` is
+              // load-bearing on a disclosure and that primitive exposes `active` →
+              // `aria-pressed`, a different promise.
+              //
+              // `${CHIP}` stays interpolated rather than inlined: `webcheck` sweeps
+              // hand-rolled `h-N w-N` buttons for a 44px signal in the same class
+              // attribute, and this one is exempt only because the string is not
+              // written out here.
+              className={`${CHIP} w-8 justify-center border-transparent ${
+                disabled || stale
+                  ? "text-faint"
+                  : "text-muted hover:bg-raised active:bg-raised hover:text-fg"
               }`}
             >
               <Icon as={MoreHorizontal} size={13} />
@@ -474,240 +690,7 @@ export function AgentConfigBar({
             )}
           </div>
         )}
-
-        {/*
-         * **Off the strip below `sm`, and this is the one control that loses
-         * nothing by going.**
-         *
-         * Every other thing in this row *sets* something. This one reports: it is a
-         * readout of how full the context window is, and its popover explains the
-         * number and names `/usage` for the agent that cannot report one at all. On
-         * a 390px strip it is competing for width against controls that change what
-         * the next turn does — and the reader who wants this number is at a desk
-         * looking at a long conversation, not answering a question one-handed.
-         *
-         * Hidden rather than moved into `…`: the overflow popover is built from
-         * `slots`, which is a partition over the agent's *own* controls with an
-         * assertion counting every member, and the context ring is not one of them.
-         * Putting it there would mean either lying to that partition or teaching it
-         * about a control no agent publishes.
-         */}
-        <div className="hidden shrink-0 items-center sm:flex">
-          <ContextPie percent={percent} usage={usage} agent={agent} />
-        </div>
       </div>
-    </div>
-  );
-}
-
-/** The bar's fill, which cannot use `currentColor` — the row around it is toned. */
-const PIE_BAR: Record<PieLevel, string> = {
-  unknown: "bg-faint",
-  ok: "bg-fg",
-  warn: "bg-fg",
-  critical: "bg-danger",
-};
-
-const PIE_TONE: Record<PieLevel, string> = {
-  // Not beside `text-faint` by accident: "cannot tell" has to be quieter than a
-  // healthy reading, or an unmeasured window looks like a comfortable one.
-  unknown: "text-faint",
-  ok: "text-fg",
-  warn: "text-fg",
-  // Weight, not hue: the figure inside the popover is what says how close it is.
-  critical: "text-fg font-semibold",
-};
-
-/**
- * How full the context window is, as a ring you can press.
- *
- * Hand-written SVG rather than a chart library: this package has four runtime
- * dependencies and a donut is `stroke-dasharray` on one circle.
- *
- * **The number is in the popover, not in the strip.** It used to sit beside the
- * ring, and it was the widest thing in the right-hand cluster for a reading
- * nobody needs continuously — "roughly how full" is what the ring already says at
- * a glance, and the exact figure is a thing you go and look at. Removing it also
- * removes the last moving part in this row: a ring is one width at every
- * percentage, where `9% → 10%` and `99% → 100%` each pushed the chips beside it,
- * because `tabular-nums` fixes the width of a digit and not how many there are.
- *
- * **`null` keeps its slot.** This used to render nothing at all, on the grounds
- * that an empty ring reads as "0% used". That was right about the ring and wrong
- * about the remedy: unmounting moved the model and effort chips sideways every
- * time an agent started or stopped reporting. What defuses the misreading is the
- * tone and the popover rather than the absence — an unmeasured window is drawn in
- * the quietest colour there is and says so in words when opened. "Cannot tell" is
- * common: kimi may never report, and a restored session has no agent to ask.
- *
- * **What the popover cannot show, and Claude Code's can:** plan usage limits —
- * the five-hour and weekly bars. That is not a layout decision. The agent sends
- * it as `usage_update._meta._claude/rateLimit`, and the daemon drops `_meta`
- * entirely rather than putting an unbounded agent-shaped blob on a snapshot that
- * `GET /sessions` returns sixty at a time. Carrying it is a daemon change — see
- * the note in CLAUDE.md. So this shows the context window and nothing else: the
- * cost `contextUsage` also carries is deliberately left out, because this answers
- * "how much room is left" and a currency figure answers a different question.
- */
-function ContextPie({
-  percent,
-  usage,
-  agent,
-}: {
-  percent: number | null;
-  usage: SessionSnapshot["contextUsage"];
-  agent: AgentId;
-}): ReactNode {
-  const [open, setOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-
-  /*
-   * Escape belongs to `overlay.ts`, which is the only thing that knows what has
-   * opened over this popover since — the same registration `SessionMenu` makes.
-   *
-   * It was resolved on the element below instead, on the argument that
-   * `keyboard.ts`'s `window` listener would otherwise blur the trigger. The
-   * arbiter answers that properly: its listener is in the **capture** phase and
-   * stops propagation once it has decided to act, so `keyboard.ts` never sees the
-   * key, and the caret is put back here rather than left on `document.body`.
-   * What the element handler could not do is push a layer — so while this was
-   * open over a parked question, the card's digit shortcuts stayed live and a
-   * keystroke aimed at this panel approved the command underneath it.
-   */
-  useDismissible(
-    "menu",
-    () => {
-      setOpen(false);
-      triggerRef.current?.focus();
-    },
-    open,
-  );
-
-  // Outside-press, and only that.
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: Event): void => {
-      if (boxRef.current?.contains(event.target as Node) !== true) setOpen(false);
-    };
-    window.addEventListener("pointerdown", close);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-    };
-  }, [open]);
-
-  const level = pieTone(percent);
-  // r=5 → circumference 2πr ≈ 31.42. The arc is drawn from 12 o'clock by rotating
-  // the whole circle, which is cheaper than computing an arc path.
-  const circumference = 31.42;
-  const filled = percent === null ? 0 : (percent / 100) * circumference;
-  const known = percent !== null && usage !== null && usage !== undefined;
-  const label = known
-    ? `Context window — ${shortCount(usage.used)} / ${shortCount(usage.size)} tokens, ${pieLabel(percent)}`
-    : `Context window — ${contextHint(agent)}`;
-
-  return (
-    <div ref={boxRef} className="relative">
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        aria-label={label}
-        title={label}
-        /*
-         * A control, drawn like every other control in this strip — the same
-         * box, not merely the same 32px of space.
-         *
-         * It was `border-transparent` with no background until hovered, on the
-         * argument that it is "a readout first". That argument does not survive
-         * contact with the strip: it is the one thing here that opens something
-         * when pressed while looking like it does not, and hover is not a state a
-         * phone has at all. The `…` button beside it is the same size, the same
-         * radius and the same job — one tap, a panel — so it is the same string.
-         *
-         * It matters most in the state where the ring says least. `unknown` is
-         * every kimi session for its whole life (kimi never sends `usage_update`),
-         * and a dashed 14px arc floating in nothing does not read as pressable.
-         * `PIE_TONE` still carries the tone; the box carries the affordance.
-         */
-        className={`${CHIP} w-8 justify-center border-edge-strong bg-surface hover:bg-raised ${PIE_TONE[level]}`}
-      >
-        <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden={true} className="shrink-0">
-          {/*
-           * The track is `--color-edge-strong` at full opacity, not `currentColor`
-           * at 0.22. Measured: faint at 22% over the composer's surface is about
-           * 1.3:1, far under the 3:1 floor for a non-text control.
-           */}
-          <circle cx="7" cy="7" r="5" fill="none" stroke="var(--color-edge-strong)" strokeWidth="2" />
-          {percent === null ? (
-            /*
-             * A dash in an empty track, not a dashed ring.
-             *
-             * It used to draw the ring itself dashed, so that "no measurement" was
-             * a positive mark rather than an absence and could not be misread as a
-             * measured zero. The reasoning was sound and the result was not: kimi
-             * never sends `usage_update`, so that is a circle of loose dots sitting
-             * in the composer for the whole life of every kimi session, reading as
-             * damage rather than as a statement.
-             *
-             * The dash keeps what the dashes were for and drops what they looked
-             * like: it is still a positive mark, so an empty track is not left to be
-             * read as nought percent, and it is the ordinary glyph for "no reading".
-             * Deliberately not an icon from the set — `Gauge` is already the effort
-             * chip two controls to the left in this same strip.
-             */
-            <line x1="4.5" y1="7" x2="9.5" y2="7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-          ) : (
-            <circle
-              cx="7"
-              cy="7"
-              r="5"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeDasharray={`${filled} ${circumference - filled}`}
-              transform="rotate(-90 7 7)"
-            />
-          )}
-        </svg>
-      </button>
-
-      {open && (
-        <div className={`absolute right-0 bottom-full mb-1 w-64 max-w-[calc(100vw-1.5rem)] ${MENU_PANEL}`}>
-          <div className="px-2 py-1.5">
-            <div className="flex items-baseline justify-between gap-2 text-xs">
-              <span className="text-fg">Context window</span>
-              <span className="shrink-0 tabular-nums text-muted">
-                {known ? `${shortCount(usage.used)} / ${shortCount(usage.size)}` : "not reported"}
-              </span>
-            </div>
-            {/* A bar as well as the ring, because the ring is 14px and this is the
-                screen somebody opened to actually read the number. Drawn only when
-                there is something to draw: an empty track under "not reported"
-                reads as a measured zero, which is the exact misreading the whole
-                `unknown` tone exists against. `aria-hidden`: the button's own
-                label already says all of it in words. */}
-            {known && (
-              <div aria-hidden={true} className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-edge">
-                <div
-                  className={`h-full rounded-full ${PIE_BAR[level]}`}
-                  style={{ width: `${percent ?? 0}%` }}
-                />
-              </div>
-            )}
-            {/* The occupancy in words, and nothing else on this line. `contextUsage`
-                also carries a `cost`, and it is deliberately not drawn: this
-                readout answers "how much room is left", which is a question about
-                the *window*, and a currency figure beside it answers a different
-                one nobody asked here. It also could not be trusted to be
-                comparable — kimi's own usage report has no cost field at all. */}
-            <p className="mt-1 text-2xs text-faint">
-              {known ? `${pieLabel(percent)} used` : contextHint(agent)}
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -736,79 +719,50 @@ function label(option: AgentConfigOption): ReactNode {
  * ever say, in the real font, and the value changing inside it moves nothing.
  */
 function chipInner(option: AgentConfigOption, parts: ChipParts): ReactNode {
-  /*
-   * Whether a glyph already says which control this is — see {@link label}, which
-   * is the same lookup and answers `null` for a category `CATEGORY_ICON` has never
-   * heard of.
-   */
-  const named = CATEGORY_ICON[option.category ?? ""] !== undefined;
   return (
     <>
       {label(option)}
       {/*
-       * **The caption leaves the layout below `sm`, and only where an icon can
-       * stand in for it.**
+       * **A caption is drawn at every width, and only a chip with no icon has
+       * one.** The two questions collapsed into one when `mode` joined
+       * `CAPTION_SILENT`: `showsCaption` is now false for every category
+       * `CATEGORY_ICON` knows, so a caption reaching this line belongs to a chip
+       * that has no glyph to hide behind — and hiding *that* below `sm` would
+       * leave a bare value in the overflow popover with nothing saying what it
+       * sets, at exactly the width where that matters most.
        *
-       * `showsCaption` decides whether a control *has* a name to draw and that is
-       * still a question about the category alone — `model` and `thought_level` are
-       * identified by their own values, `mode` is not. What this adds is a second,
-       * narrower question: on a 390px strip the name and the value compete, and the
-       * value is the half that says what the control is currently set to. Reported
-       * from a phone: `mode` drew its caption and truncated its own value, so the
-       * chip said which control it was and not what it was doing.
-       *
-       * `hidden sm:inline` rather than a shorter string, for `chipReserve`'s reason
-       * one block down: below `sm` the sizers already leave the layout, so a chip
-       * there is content-sized and truncates under pressure. Taking the caption out
-       * of flow is the same mechanism applied to the same problem.
-       *
-       * ⚠ **An unnamed category keeps its caption at every width**, which is the
-       * whole reason this is conditional. `CATEGORY_ICON` has no entry for a
-       * category nobody here has seen, so `label` draws nothing — and a chip with
-       * neither an icon nor a name is a value with no indication of what it sets.
+       * ⚠ **There was a `hidden sm:inline` here and it is gone rather than
+       * moved.** It existed because `mode` drew its caption and truncated its own
+       * value on a 390px strip — the chip saying which control it was and not what
+       * it was doing. Dropping the caption for `mode` outright answers that at
+       * every width instead of only below one, which is the same objection Q3.401
+       * made to the breakpoint it replaced, arriving a second time from the other
+       * end. Q3.559.
        */}
       {parts.caption !== null && (
-        <span className={`max-w-24 truncate text-faint ${named ? "hidden sm:inline" : ""}`}>
-          {parts.caption}
-        </span>
+        <span className={`${CHIP_MAX} truncate text-faint`}>{parts.caption}</span>
       )}
-      {parts.reserve === null ? (
-        <span className="max-w-40 truncate">{parts.value}</span>
-      ) : (
-        <span className="relative grid max-w-40">
-          {parts.reserve.map((candidate) => (
-            <span
-              key={candidate}
-              aria-hidden
-              /*
-               * `hidden sm:block`, and the breakpoint is about space rather than
-               * about taste — the one thing a breakpoint is honestly for.
-               * Reserving all three at once is ~500px of strip against a 390px
-               * phone, so below `sm` the sizers leave the layout entirely and the
-               * chips size to their content and truncate under pressure, exactly
-               * as they did before any of this. Above it there is room, and the
-               * width stops depending on what anything says.
-               */
-              className="invisible hidden col-start-1 row-start-1 whitespace-pre sm:block"
-            >
-              {candidate}
-            </span>
-          ))}
-          {/*
-           * **`sm:absolute` is what makes the reserve a width rather than a
-           * floor.** A grid column is as wide as the widest thing in it, so
-           * while the value was in flow beside the sizers, a value longer than
-           * any of them widened the column — `GPT-5.6-Luna` is one character
-           * more than the string this list was measured from, and that was
-           * enough for two codex sessions to draw two different chips. Out of
-           * flow it cannot size anything, so the column is exactly the reserve
-           * and a long value truncates inside it. Static below `sm`, where the
-           * sizers are gone and there would be nothing left to give the box a
-           * height.
-           */}
-          <span className="col-start-1 row-start-1 truncate sm:absolute sm:inset-0">{parts.value}</span>
-        </span>
-      )}
+      {/*
+       * **The value hugs its own text, bounded above and not below.**
+       *
+       * ⚠ **There was a fixed reserve here and it is gone.** `chipReserve`
+       * returned one list of strings per category — `Accept Edits`,
+       * `GPT-5.6-Luna`, `Adaptive`/`Ultracode` — and this span rendered all of
+       * them invisibly in one grid cell with the real value `sm:absolute` on top,
+       * so every chip was as wide as the longest ordinary value its category could
+       * ever show and *nothing moved* when a value changed. It was measured, it
+       * worked, and it is withdrawn on the owner's word: a chip sized for
+       * `Ultracode` while saying `Max` is mostly empty box, three times over, in
+       * the row with the least width in the app.
+       *
+       * What it cost is written down rather than discovered — Q3.564. The
+       * right-hand cluster is right-aligned, so a value that grows moves its
+       * neighbours again, which is the defect Q3.402 and Q3.417 were written
+       * about. `CHIP_MAX` is the only bound left: it stops a pathological name
+       * from taking the row, and it truncates with the full text in the menu and
+       * in the chip's `title`, which is what happened below `sm` all along.
+       */}
+      <span className={`${CHIP_MAX} truncate`}>{parts.value}</span>
     </>
   );
 }
@@ -889,12 +843,17 @@ function Absent({ option }: { option: AgentConfigOption }): ReactNode {
   return (
     <div ref={boxRef} className="relative">
       <button
+        // Explicit, and required rather than tidy: this row sits inside the
+        // composer's box, and the day somebody makes that box the `<form>` a
+        // typeless button becomes `type="submit"` and tapping a chip sends the
+        // draft. `webcheck` asserts every button in this file carries one.
+        type="button"
         onClick={() => setOpen(!open)}
         title={`${labelFor(option)}: ${hint}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`${labelFor(option)}: ${hint}`}
-        className={`${CHIP} border-edge-strong bg-surface px-2 text-muted hover:bg-raised`}
+        className={`${CHIP} border-transparent px-2 text-muted hover:bg-raised active:bg-raised`}
       >
         {/* The same contents the live chip draws, from the same function — which
             is what makes "this chip does not change width when the agent stops
@@ -909,7 +868,15 @@ function Absent({ option }: { option: AgentConfigOption }): ReactNode {
             slotFor(option) === "left" ? "left-0" : "right-0"
           } mb-1 w-60 max-w-[calc(100vw-1.5rem)] ${MENU_PANEL}`}
         >
-          <p className={MENU_HEADING}>{labelFor(option)}</p>
+          {/* The category glyph, which is the one the chip that opened this panel
+              draws — `label` is the same lookup, so a heading and its chip cannot
+              come to disagree about what a control looks like. It answers `null`
+              for a category `CATEGORY_ICON` has never heard of, which is exactly
+              the case where the heading is the only thing naming the control. */}
+          <p className={`${MENU_HEADING} flex items-center gap-1.5`}>
+            {label(option)}
+            {labelFor(option)}
+          </p>
           <p className="px-2.5 pt-1 pb-2 text-xs text-muted">{hint}</p>
         </div>
       )}
@@ -920,6 +887,7 @@ function Absent({ option }: { option: AgentConfigOption }): ReactNode {
 function Select({
   option,
   nested = [],
+  narrow = [],
   proseOf,
   disabled,
   locked,
@@ -935,6 +903,21 @@ function Select({
    * `NESTED_HOST` in `agentConfig.ts`.
    */
   nested?: readonly AgentConfigOption[];
+  /**
+   * Sections this control's picker draws **only below `sm`**, where a chip of
+   * their own has left the row.
+   *
+   * Distinct from {@link nested}, which is a control that has no chip at any
+   * width — codex's `collaboration_mode`, which `splitOptions` assigns to the
+   * `nested` slot outright. These still own a chip; it is `hidden sm:contents`,
+   * and this is where their choices go instead. They are therefore **not** a slot
+   * and do not enter the partition: the option is in `right` at every width, and
+   * what changes is which of two renderings the browser is drawing.
+   *
+   * No breakpoint class is needed on them, because only the sheet draws them and
+   * the sheet is `sm:hidden`.
+   */
+  narrow?: readonly AgentConfigOption[];
   /** Descriptions recovered from the transcript, since the snapshot strips them. */
   proseOf: (option: AgentConfigOption) => ConfigProse | undefined;
   /** No agent to ask. Inert **and** dimmed, because it is a state of the world. */
@@ -959,7 +942,394 @@ function Select({
    */
   const align = slotFor(option) === "left" ? "left-0" : "right-0";
   const [open, setOpen] = useState(false);
+  /**
+   * Dismissed, and still on screen for {@link SHEET_EXIT_MS} while it leaves.
+   *
+   * Two states rather than one because the two presentations want opposite
+   * things: the anchored panel is a popover and has to go **now**, and the sheet
+   * has to stay for its own animation. So `open && !leaving` draws the panel and
+   * `open` alone draws the sheet.
+   */
+  const [leaving, setLeaving] = useState(false);
+  /**
+   * Whether the sheet is on its second detent, and it exists only below `sm`.
+   *
+   * A phone picker opens at `.config-sheet`'s own resting cap — enough for a
+   * control's own rows without covering the message you are choosing for — and a
+   * model list is longer than that on every agent that publishes one. So there is
+   * somewhere to go: the list does **not** scroll at rest, and the gesture that
+   * would have scrolled it takes the sheet to {@link SHEET_FULL} first, where it
+   * does. Two detents rather than one scroller, which is what the phone clients
+   * this is modelled on do; the alternative — a taller sheet that always scrolls —
+   * is the shape that put the grab bar out of reach on the second screenful.
+   *
+   * ⚠ **It is the only React state this gesture touches, and it is not the
+   * geometry.** The panel's height is `paint`'s, off the render path entirely.
+   * This exists because the *list* inside it is drawn differently at each detent —
+   * clipped at rest, scrolling when full — and that is a class rather than a
+   * length.
+   */
+  const [expanded, setExpanded] = useState(false);
+  /**
+   * The panel's height at rest, measured once when it opens.
+   *
+   * There is no way to get this out of CSS: the resting height is `min(content,
+   * 60dvh)` and only the browser knows the first term. It is the pivot for the
+   * whole gesture — where shortening turns into sliding, and what a release is
+   * compared against — so it is read once, from the layout that has just happened,
+   * rather than per frame.
+   */
+  const restH = useRef<number | null>(null);
+  /**
+   * What the last `pointermove` decided, mirrored out of React.
+   *
+   * `pointerup` needs the finger's final position and reading it from state is a
+   * bet on React having flushed the render for the move that preceded it by a few
+   * milliseconds. This is the same value, owed to nobody.
+   */
+  const live = useRef({ height: 0, below: 0 });
+  const settle = useRef<number | null>(null);
+  /** A pending `requestAnimationFrame` that puts the sheet's transition back. */
+  const restore = useRef<number | null>(null);
+  /**
+   * The sheet's geometry, written straight onto the node.
+   *
+   * ⚠ **This is `AppShell`'s `--rail-w` rule one control further in, and it is a
+   * performance decision rather than a stylistic one.** A pointer moves sixty
+   * times a second; routing that through `useState` is sixty renders, and a render
+   * here is every row of the open picker — 362 of them on opencode, each a
+   * `<button>`. The panel would arrive where the finger had been. So React sets no
+   * `style` on the panel at all and the gesture sets these instead, over
+   * `.config-sheet`'s defaults, which **are** the resting sheet.
+   *
+   * `null` removes a property rather than writing a zero, so "at rest" is the
+   * absence of every one of them and cannot drift from what the CSS says rest is.
+   */
+  const paint = (vars: Record<string, string | null>): void => {
+    const panel = sheetRef.current;
+    if (panel === null) return;
+    for (const [name, value] of Object.entries(vars)) {
+      if (value === null) panel.style.removeProperty(name);
+      else panel.style.setProperty(name, value);
+    }
+  };
+  /** Every property this sheet writes, back to `.config-sheet`'s own defaults. */
+  const atRest = (): void =>
+    paint({
+      "--sheet-h": null,
+      "--sheet-y": null,
+      "--sheet-min": null,
+      "--sheet-max": null,
+    });
+  /**
+   * Whether the panel animates its own geometry, or takes it in one frame.
+   *
+   * ⚠ **An inline `transition` longhand, not a custom property inside
+   * `.config-sheet`'s shorthand.** That was the first shape and it is out: a
+   * `var()` in a shorthand makes every longhand a pending-substitution value, which
+   * is a thin place in more than one engine and harder to reason about than a
+   * literal. Inline, this cannot lose to anything, and React never writes `style`
+   * on this element so there is nobody to lose to anyway.
+   */
+  const settling = (on: boolean): void => {
+    /*
+     * ⚠ **Any pending restore is cancelled first.** `paintNow` puts the animation
+     * back a frame later, and a gesture starting inside that frame would have its
+     * transition switched back on underneath it — a drag that chases the finger
+     * instead of following it, intermittently and only just after a previous one.
+     */
+    if (restore.current !== null) {
+      window.cancelAnimationFrame(restore.current);
+      restore.current = null;
+    }
+    const panel = sheetRef.current;
+    if (panel === null) return;
+    panel.style.transition = on ? "" : "none";
+  };
+  /**
+   * A write that must land in one frame, with the animation put back afterwards.
+   *
+   * ⚠ **This is the fix for a bounce at the *end* of every gesture**, and it was
+   * the whole of what "the menu goes back to where it started and then winds round
+   * again" turned out to be. When the settle timer hands the height back to
+   * `.config-sheet`'s defaults it is changing `min-height` and `max-height` —
+   * animated properties — from the gesture's free bounds to the detent's. Settling
+   * to rest with a long list, `--sheet-max` went from 92dvh to the 60dvh default
+   * *over 300ms* while `--sheet-h` was cleared to `auto` in the same frame, so the
+   * panel sprang to full height and then shrank back. Opening a short picker was
+   * the same defect mirrored: `--sheet-min` climbing 0 → 92dvh while the height
+   * fell to its content. Neither is a movement anybody asked for — the panel is
+   * already exactly where it belongs by then, and this write only says so.
+   */
+  const paintNow = (vars: Record<string, string | null>): void => {
+    settling(false);
+    paint(vars);
+    // A frame later, or the very write above would be what the transition animates.
+    restore.current = window.requestAnimationFrame(() => {
+      restore.current = null;
+      settling(true);
+    });
+  };
+  const exit = useRef<number | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
+  /** The sheet's panel. Outside `boxRef`, being portalled — see the effect below. */
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  /** The sheet's scroller, which owns vertical movement once it has one. */
+  const listRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * Where a drag on the sheet started, and how tall the panel was then.
+   *
+   * A ref rather than state: it changes on every `pointermove` and renders
+   * nothing. `height` is measured at `pointerdown` rather than tracked, so the
+   * gesture is one subtraction per frame — `from.height - travelled` is where the
+   * panel's top edge wants to be, and everything else follows from clamping that.
+   *
+   * ⚠ **Reading a height here is not the measurement `AppShell`'s rule bans.**
+   * That rule is about *which layout* to draw, and this decides nothing of the
+   * kind — the picker's two presentations are still chosen by `display` and a
+   * resized window still cannot produce one that is not there. What is read here
+   * is where a finger is against where a panel is, which no class can answer.
+   */
+  const drag = useRef<{ id: number; y: number; height: number } | null>(null);
+  /**
+   * Whether the gesture in flight has already moved a detent.
+   *
+   * ⚠ **Without this, dragging the sheet down to close it also chooses whatever
+   * row the finger started on.** A touch that ends without the browser having
+   * scrolled anything still produces a `click`, and every row under the finger is
+   * a button — so the sheet would shut *and* switch the model. The panel's own
+   * capture-phase handler swallows that one click, which is one guard for every
+   * row rather than a check inside each.
+   */
+  const dragged = useRef(false);
+
+  /*
+   * Every way out of this picker, in one place.
+   *
+   * There were four call sites setting `open` to false — Escape, the outside
+   * press, the scrim, and choosing a row — and each one would have had to
+   * remember the timer. Re-entrant on purpose: a second dismissal while one is
+   * already running must not restart the clock, or a panel can be held on screen
+   * by tapping the scrim.
+   */
+  const dismiss = (): void => {
+    if (exit.current !== null) return;
+    setLeaving(true);
+    exit.current = window.setTimeout(() => {
+      exit.current = null;
+      setLeaving(false);
+      setOpen(false);
+    }, SHEET_EXIT_MS);
+  };
+
+  /*
+   * Opening cancels a exit that has not finished, which is what stops a fast
+   * tap-tap leaving the picker open with `leaving` still true — a sheet drawn in
+   * its final frame, off the bottom of the screen, that nothing will bring back.
+   */
+  const show = (): void => {
+    if (exit.current !== null) {
+      window.clearTimeout(exit.current);
+      exit.current = null;
+    }
+    setLeaving(false);
+    // At rest, always: a picker that reopened full-height because it was left that
+    // way last time would cover the message somebody is choosing a model for. And
+    // nothing inline survives an open, or the next control this component draws
+    // inherits the pixel height of the last one somebody dragged.
+    if (settle.current !== null) {
+      window.clearTimeout(settle.current);
+      settle.current = null;
+    }
+    drag.current = null;
+    restH.current = null;
+    live.current = { height: 0, below: 0 };
+    settling(true);
+    atRest();
+    setExpanded(false);
+    setOpen(true);
+  };
+
+  /*
+   * The resting height, read from the layout that has just happened.
+   *
+   * `useLayoutEffect` and not `useEffect`: this has to be true before the first
+   * frame anybody could start a gesture on. Guarded on a real height because above
+   * `sm` the whole portal is `display: none` and measures zero — a window resized
+   * across the breakpoint with the picker open would otherwise leave the pivot at
+   * nothing, and every drag would read as a dismissal.
+   */
+  useLayoutEffect(() => {
+    if (!open || sheetRef.current === null) return;
+    const height = sheetRef.current.getBoundingClientRect().height;
+    if (height > 0) restH.current = height;
+  }, [open]);
+
+  /*
+   * The sheet's gesture: the panel follows the finger, and lets go onto a detent.
+   *
+   * `pointerdown` sits on the panel and `pointermove`/`pointerup` on the **scrim**,
+   * which is the whole viewport — so a finger that leaves the panel on its way up
+   * keeps moving it. The panel captures the pointer once the drag engages, which is
+   * what delivers the release even when the finger is lifted outside the window;
+   * see `dragMove` for why that is taken there and not at `pointerdown`.
+   *
+   * Pointer events rather than touch events because they are the same three
+   * handlers for a mouse, which is how this is reachable at all in a desktop
+   * browser's device emulation — the only place most of this is ever exercised.
+   *
+   * ⚠ **It followed the finger in neither direction for one round.** A drag past
+   * {@link SHEET_DRAG_STEP} simply switched detent and the panel animated there on
+   * its own, which is a *button* worked by swiping: the sheet ignored the hand on
+   * it and then moved by itself, and the distance it moved had nothing to do with
+   * the distance dragged. Reported as *"the menu does not follow the finger — it
+   * just changes state"*. The threshold survives, now as the slop that separates a
+   * drag from a tap on a row rather than as the whole decision.
+   */
+  const fullHeight = (): number => window.innerHeight * SHEET_FULL_SHARE;
+  /* Half the screen if the panel has never been measured, which cannot normally
+     happen: the layout effect above runs before any gesture can start. */
+  const restHeight = (): number => restH.current ?? window.innerHeight / 2;
+
+  const dragStart = (event: ReactPointerEvent<HTMLElement>): void => {
+    dragged.current = false;
+    /*
+     * Once the list is a scroller it owns vertical movement inside itself, and
+     * taking it over here is how a sheet ends up unable to scroll at all. The grab
+     * bar above it never owns any, and neither does the list at rest, where it is
+     * `overflow-hidden` and there is nothing to scroll.
+     */
+    if (expanded && listRef.current?.contains(event.target as Node) === true) return;
+    const panel = sheetRef.current;
+    if (panel === null) return;
+    // Catching a sheet that is still settling starts the new drag from where it
+    // actually is, rather than from the detent it was on its way to.
+    if (settle.current !== null) {
+      window.clearTimeout(settle.current);
+      settle.current = null;
+    }
+    drag.current = { id: event.pointerId, y: event.clientY, height: panel.getBoundingClientRect().height };
+  };
+
+  const dragMove = (event: ReactPointerEvent<HTMLElement>): void => {
+    const from = drag.current;
+    if (from === null || from.id !== event.pointerId) return;
+    const travelled = event.clientY - from.y;
+    // The slop, and only once: past it the panel is following the finger and a
+    // move back inside it must not hand the gesture back to the row underneath.
+    if (!dragged.current && Math.abs(travelled) < SHEET_DRAG_STEP) return;
+    if (!dragged.current) {
+      dragged.current = true;
+      /*
+       * ⚠ **Capture on the *panel*, taken here rather than at `pointerdown`.** A
+       * captured pointer delivers its release even when the finger is lifted
+       * outside the window, which is what ends this gesture — `AppShell`'s rail
+       * argues the same for its own handle. Taking it at `pointerdown` would
+       * retarget the compatibility `click` for every *tap* as well, and the rows
+       * under the finger need theirs to arrive where they were aimed. Taken here
+       * it only ever retargets a click a drag produced, which is the one this
+       * panel's capture handler already swallows.
+       */
+      sheetRef.current?.setPointerCapture(event.pointerId);
+    }
+    /*
+     * Where the panel's top edge wants to be, as a height. Above the resting
+     * height that *is* the height, bounded by the full detent; below it the height
+     * stops and the panel slides instead, so the edge keeps tracking the finger
+     * either way and the hand-off has no discontinuity in it.
+     */
+    const rest = restHeight();
+    const wanted = from.height - travelled;
+    const next =
+      wanted >= rest
+        ? { height: Math.min(wanted, fullHeight()), below: 0 }
+        : { height: rest, below: rest - wanted };
+    live.current = next;
+    // No animation while a finger is down, or every frame starts a 300ms journey
+    // toward where the finger already was and the panel trails it by most of a
+    // second. The bounds go free in the same write: either would clamp the height
+    // back to a detent mid-gesture.
+    settling(false);
+    paint({
+      "--sheet-min": "0px",
+      "--sheet-max": SHEET_FULL,
+      "--sheet-h": `${next.height}px`,
+      "--sheet-y": `${next.below}px`,
+    });
+  };
+
+  const dragEnd = (pointerId: number): void => {
+    const from = drag.current;
+    if (from === null || from.id !== pointerId) return;
+    drag.current = null;
+    if (!dragged.current) return;
+    /*
+     * Pulled far enough below its resting height to be leaving, so let it leave —
+     * and **keep the offset**, because the exit keyframe has no `from` of its own
+     * and takes the element's current transform as one. Clearing it here would
+     * snap the panel back up by however far it had been pulled and then slide it
+     * down from there.
+     */
+    if (live.current.below > SHEET_DISMISS_PX) {
+      dismiss();
+      return;
+    }
+    // Otherwise the nearer of the two, which is the ordinary meaning of a detent.
+    const rest = restHeight();
+    const full = fullHeight();
+    const toFull = live.current.height > (rest + full) / 2;
+    // The settle itself: the transition comes back and the height is animated to
+    // the detent from wherever the hand let go, rather than jumping to it.
+    settling(true);
+    paint({ "--sheet-y": "0px", "--sheet-h": `${toFull ? full : rest}px` });
+    // The one render this gesture costs, and it is for the list rather than the
+    // panel: a full sheet scrolls its rows and a resting one clips them.
+    setExpanded(toFull);
+    /*
+     * And then the defaults take it back. The pixel height is what the settle
+     * animates, so it has to outlive the animation — but not by longer, or a sheet
+     * that has stopped moving is still pinned to a number that no longer matches
+     * its content, and the next thing this control opens inherits it.
+     */
+    settle.current = window.setTimeout(() => {
+      settle.current = null;
+      if (toFull) paintNow({ "--sheet-h": null, "--sheet-y": null, "--sheet-min": SHEET_FULL, "--sheet-max": SHEET_FULL });
+      else paintNow({ "--sheet-h": null, "--sheet-y": null, "--sheet-min": null, "--sheet-max": null });
+    }, SHEET_SETTLE_MS);
+  };
+
+  /*
+   * The grab bar's tap, which is the same two detents reached without a gesture.
+   *
+   * It writes the properties rather than toggling a class for the reason `paint`
+   * gives: one mechanism owns this element's geometry, or an inline property and a
+   * utility settle by emission order and the sheet's height becomes a race.
+   */
+  const toggleDetent = (): void => {
+    if (settle.current !== null) {
+      window.clearTimeout(settle.current);
+      settle.current = null;
+    }
+    // `--sheet-h` and `--sheet-y` go with it either way: a tap during a settle
+    // would otherwise leave the pixel height a drag was animating behind, dominated
+    // by the new bound and waiting to be inherited.
+    settling(true);
+    if (expanded) atRest();
+    else paint({ "--sheet-h": null, "--sheet-y": null, "--sheet-min": SHEET_FULL, "--sheet-max": SHEET_FULL });
+    setExpanded(!expanded);
+  };
+
+  // A timer outliving the component would call `setState` on an unmounted one —
+  // and this component unmounts on every session switch.
+  useEffect(
+    () => () => {
+      if (exit.current !== null) window.clearTimeout(exit.current);
+      if (settle.current !== null) window.clearTimeout(settle.current);
+      if (restore.current !== null) window.cancelAnimationFrame(restore.current);
+    },
+    [],
+  );
+
   const current = drawnChoices(option).find((choice) => choice.value === option.value);
   const currentProse =
     prose?.choices.get(String(option.value)) ?? current?.description ?? null;
@@ -1018,23 +1388,80 @@ function Select({
    * question, where `2` aimed at the model list resolved the permission
    * underneath it.
    */
-  useDismissible("menu", () => setOpen(false), open);
+  useDismissible("menu", dismiss, open);
 
-  // A pointer-down listener rather than blur: the menu contains buttons, and
-  // closing on blur would fire before the click that chose one landed.
+  /*
+   * A pointer-down listener rather than blur: the menu contains buttons, and
+   * closing on blur would fire before the click that chose one landed.
+   *
+   * ⚠ **Two boxes, because the sheet is portalled to `document.body` and is
+   * therefore *outside* `boxRef` by construction.** With only the anchored panel's
+   * box tested, every tap inside the sheet — including one on a row — was an
+   * outside press: it closed the picker on `pointerdown`, the sheet unmounted, and
+   * the `click` that would have chosen the value landed on nothing. So the control
+   * did nothing at all on a phone, silently, which is the exact failure this
+   * listener was written the way it is to avoid.
+   *
+   * The scrim is deliberately **not** inside `sheetRef`: a press on it has to
+   * close, and `ref` on the panel rather than on the positioner is what makes that
+   * fall out here instead of needing a second rule.
+   */
   useEffect(() => {
     if (!open) return;
     const close = (event: Event): void => {
-      if (boxRef.current?.contains(event.target as Node) !== true) setOpen(false);
+      const target = event.target as Node;
+      const inside =
+        boxRef.current?.contains(target) === true || sheetRef.current?.contains(target) === true;
+      if (!inside) dismiss();
     };
     window.addEventListener("pointerdown", close);
     return () => window.removeEventListener("pointerdown", close);
   }, [open]);
 
+  /*
+   * The rows, drawn once for whichever presentation the browser is showing.
+   *
+   * A function rather than a node, because the two lists are not the same list:
+   * the sheet carries `narrow` on the end and the panel does not. Written out
+   * twice they would be two markups for one menu, which is the defect
+   * `ChoiceSection` was extracted to end — the chip and the menu row disagreeing
+   * about what a value is called.
+   *
+   * `where` reaches `ChoiceSection` and namespaces the one id it generates —
+   * `sharedId`, on the refusal line. Both presentations are in the document at
+   * once, so without it the same refusal would carry the same id twice and the
+   * option rows' `aria-describedby` would resolve to whichever copy the browser
+   * found first, which on a phone is the one that is `display: none`. The option
+   * rows themselves carry no `id` and there is no `aria-activedescendant` here:
+   * neither presentation implements arrow-key navigation, so there is nothing
+   * for an active descendant to point at.
+   */
+  const sections = (list: readonly AgentConfigOption[], where: string): ReactNode =>
+    list.map((section, index) => (
+      <ChoiceSection
+        key={section.id}
+        where={where}
+        option={section}
+        prose={proseOf(section)}
+        // A rule above every section but the first, so a nested control reads as
+        // its own menu rather than as more rows of the host's.
+        divided={index > 0}
+        refuses={refuses}
+        onChoose={(value) => {
+          dismiss();
+          if (value !== section.value) onChange(section, value);
+        }}
+      />
+    ));
+
   return (
     <div ref={boxRef} className="relative">
       <button
-        onClick={() => setOpen(!open)}
+        // See `Absent`'s note: explicit because this row is inside the composer's
+        // box, and a typeless button one refactor away from being in its `<form>`
+        // sends the draft when it is tapped.
+        type="button"
+        onClick={() => (open ? dismiss() : show())}
         // Inert for both, dimmed for one: the fade keys on `disabled` rather than
         // on the attribute, which is what keeps a lock from reading as damage.
         disabled={disabled || locked}
@@ -1052,7 +1479,37 @@ function Select({
         // reserve spans are `aria-hidden`. A screen reader would otherwise
         // announce "Opus 5, menu" with nothing saying what Opus 5 *is* here.
         aria-label={labelFor(option)}
-        className={`${CHIP} border-edge-strong bg-surface px-2 text-fg hover:bg-raised ${disabled ? "opacity-40" : ""}`}
+        /*
+         * ⚠ **Dimmed by token, never by `opacity`, and that is a correction rather
+         * than a consequence of losing the border.**
+         *
+         * `opacity-40` over `surface` composites to 2.51:1 for `fg`, 1.94:1 for
+         * `muted`, 1.83:1 for `faint` — and **1.65:1 for `edge-strong`**. So the
+         * bordered chip was never the safe baseline it looked like: the fade
+         * already deleted the boundary it exists to hold, four fifths under the 3:1
+         * that motivates the token at all. `text-faint` puts the whole chip at
+         * 6.23:1, over the 4.5:1 floor for 12px and eleven points below the live
+         * chip's 17.37:1, so it still flattens unmistakably.
+         *
+         * It also fades rather than snapping: `.tap` transitions `color` and
+         * deliberately does not transition `opacity`. And it restores the
+         * distinction this component's own props promise — `disabled` dims,
+         * `locked` is inert and does not — which a fade that total had made
+         * invisible. This is the composer's resting appearance on every restart
+         * and every auto-resume, which is what makes it worth the paragraph.
+         *
+         * ⚠ **The live arm is `text-muted` (7.75:1) rather than `text-fg`, so the
+         * step down to `text-faint` is one and a half points and not eleven.** The
+         * chips are the quiet half of this box by request — the one dark thing
+         * below the field should be Send — and what carries the refusal instead is
+         * *flatness*: a live chip is two-tone, a `text-muted` value between
+         * `text-faint` glyphs, and a refused one is uniformly faint with no hover
+         * and no press fill anywhere on it. `stale` moves every chip in the row at
+         * once, so it reads as the row being away rather than as one dead control.
+         */
+        className={`${CHIP} border-transparent px-2 ${
+          disabled ? "text-faint" : "text-muted hover:bg-raised active:bg-raised hover:text-fg"
+        }`}
       >
         {/*
          * Contents from `chipParts`, drawn by `chipInner` — the same two calls the
@@ -1065,32 +1522,157 @@ function Select({
         <Icon as={ChevronDown} size={12} className="text-faint" />
       </button>
 
-      {open && (
+      {open && !leaving && (
         <div
           role="listbox"
           // `max-w` as well as the alignment: on a narrow phone even a
           // correctly-anchored 15rem panel is wider than the screen. Width and
           // placement stay here; the chrome comes from `bits.tsx`, which is the
           // third of the three consumers its comment names.
-          className={`absolute bottom-full ${align} mb-1 w-60 max-w-[calc(100vw-1.5rem)] ${MENU_PANEL}`}
+          className={`absolute bottom-full ${align} mb-1 hidden w-60 max-w-[calc(100vw-1.5rem)] sm:block ${MENU_PANEL}`}
         >
-          {[option, ...nested].map((section, sectionIndex) => (
-            <ChoiceSection
-              key={section.id}
-              option={section}
-              prose={proseOf(section)}
-              // A rule above every section but the first, so a nested control
-              // reads as its own menu rather than as more rows of the host's.
-              divided={sectionIndex > 0}
-              refuses={refuses}
-              onChoose={(value) => {
-                setOpen(false);
-                if (value !== section.value) onChange(section, value);
-              }}
-            />
-          ))}
+          {sections([option, ...nested], "panel")}
         </div>
       )}
+      {/*
+       * **The same choices as a bottom sheet, below `sm`, and it is the same
+       * `open` state deciding both.**
+       *
+       * Which one a reader gets is a **class** and never a measurement in
+       * JavaScript, which is `AppShell`'s standing rule for this app: a resized
+       * window cannot render a picker that is not there, because both are
+       * rendered and `display` chooses. The cost is that the rows are in the
+       * document twice while this control is open — see `sharedId` and the
+       * `where` it is namespaced by, which is what keeps the two copies'
+       * `aria-describedby` from resolving into each other.
+       *
+       * ⚠ **It is not `Sheet`, and could not be.** That component sets `inert`
+       * on `#root`, takes focus and registers itself the moment it mounts — side
+       * effects a `display` class cannot gate — so a `Sheet` rendered here would
+       * lock the whole app behind an *invisible* panel every time somebody opened
+       * a popover on a desktop. It is also route-backed, and its panel is
+       * `sm:h-[min(44rem,88dvh)] sm:max-w-2xl`: a 704px card for a four-row list.
+       * What is borrowed is the shape and the scrim; what is not is the machinery
+       * that assumes a sheet is the only thing on screen.
+       *
+       * So there is no `inert` and Back does not close it. Escape does — through
+       * the same `useDismissible("menu")` registration the anchored panel uses,
+       * once for both — and so does the scrim, and so does choosing a row. That is
+       * exactly the posture the popover it replaces already had.
+       */}
+      {open &&
+        createPortal(
+          <div
+            data-config-scrim=""
+            className={`${
+              leaving ? "animate-scrim-out" : "animate-scrim"
+            } fixed inset-0 ${LAYER.overlay} flex touch-manipulation flex-col justify-end bg-fg/25 sm:hidden`}
+            onClick={(event) => {
+              if (event.target === event.currentTarget) dismiss();
+            }}
+            // The move on the scrim rather than on the panel, so a finger that has
+            // travelled off the top of the sheet keeps moving it. The release is
+            // here *and* on `window`, which is the case the scrim cannot cover —
+            // see the effect above.
+            onPointerMove={dragMove}
+            onPointerUp={(event) => dragEnd(event.pointerId)}
+            onPointerCancel={(event) => dragEnd(event.pointerId)}
+          >
+            <div
+              ref={sheetRef}
+              onPointerDown={dragStart}
+              /*
+               * The one click a drag leaves behind, eaten before any row sees it.
+               *
+               * Capture phase and on the panel: a touch that ends without the
+               * browser having scrolled still fires a `click` on whatever was
+               * under it, and at rest that is a model row. Swallowing it here is
+               * one guard for every row in both sections rather than a flag each
+               * of them has to remember to read.
+               */
+              onClickCapture={(event) => {
+                if (!dragged.current) return;
+                dragged.current = false;
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              /*
+               * ⚠ **No `style` prop, ever.** `.config-sheet` holds this panel's
+               * whole geometry as five custom properties with defaults that *are*
+               * the resting sheet, and `paint` writes over them. React setting a
+               * style here would put two writers on one set of properties, which is
+               * the equal-specificity race `FIELD` warns about in `bits.tsx` and
+               * the same reason `AppShell` keeps an inline width off its `<aside>`.
+               */
+              className={`config-sheet pb-safe ${
+                leaving ? "animate-sheet-out" : "animate-sheet"
+              } flex w-full flex-col overflow-hidden overscroll-contain rounded-t-2xl border-t border-edge bg-surface shadow-2xl`}
+            >
+              {/*
+               * The grab bar, which is the whole of this sheet's head, and it is a
+               * **control** rather than a decoration now.
+               *
+               * A title row would say "Mode" directly above a `ChoiceSection`
+               * heading that already says it — and on the mode control the sheet
+               * carries three sections, so there is no one name for it to hold. So
+               * the head has one job left, which is the detent: tap it to expand or
+               * collapse, or drag it, or drag anywhere on the list at rest. It was
+               * an `aria-hidden` bar inside the scroller and had neither — it slid
+               * away with the first screenful, and the shape it advertised did
+               * nothing.
+               *
+               * ⚠ **32px of head with a 44px target**, which is the chips' own
+               * arrangement and `TAP_GROW_Y`'s measured one: 4px up and 8px down
+               * from a 32px box. It was a flat `min-h-11`, and 44px of head put
+               * twenty pixels of nothing between the sheet's top edge and a 4px
+               * bar — reported as too much room above the grabber. The growth
+               * reaches down over the first section's *heading*, which is text and
+               * not a control, so nothing pressable is under it. `shrink-0` is what
+               * pins it: it is a flex sibling of the scroller rather than its first
+               * child, which is the whole of why it stays.
+               *
+               * `touch-none` so the browser hands the gesture over instead of
+               * looking for something to pan, and `aria-expanded` because the two
+               * detents are the only thing this button has to say — including, on a
+               * short list that never needed a second one, that nothing happened.
+               */}
+              <button
+                type="button"
+                onClick={toggleDetent}
+                aria-label={expanded ? "Collapse the menu" : "Expand the menu"}
+                aria-expanded={expanded}
+                className={`tap relative flex min-h-8 shrink-0 touch-none items-center justify-center ${TAP_GROW_Y}`}
+              >
+                <span aria-hidden className="h-1 w-9 rounded-full bg-edge-strong" />
+              </button>
+              {/*
+               * The rows, and **at rest they do not scroll** — the gesture that
+               * would have scrolled them expands the sheet instead, which is what
+               * `dragStart` leaves alone once there is a scroller here.
+               *
+               * `overscroll-contain` on both this and the panel: the inner one
+               * stops a flick at the end of the model list from scrolling the
+               * conversation behind the scrim, and the outer one covers the rest
+               * for as long as this element is `overflow-hidden` and has no scroll
+               * chain of its own to end.
+               */}
+              <div
+                ref={listRef}
+                // The rows `sections` draws carry `role="option"`, and an option
+                // outside a `listbox` is an orphan. The anchored panel above owns
+                // the role for its copy; one `open` draws both, so this copy owns
+                // it too or the phone — the primary surface — is the one without.
+                role="listbox"
+                className={`min-h-0 overscroll-contain px-1.5 pb-1.5 ${
+                  expanded ? "flex-1 overflow-y-auto" : "touch-none overflow-hidden"
+                }`}
+              >
+                {sections([option, ...nested, ...narrow], "sheet")}
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -1106,12 +1688,23 @@ function Select({
  */
 function ChoiceSection({
   option,
+  where,
   prose,
   divided,
   refuses,
   onChoose,
 }: {
   option: AgentConfigOption;
+  /**
+   * Which of the two presentations this section is inside — `panel` or `sheet`.
+   *
+   * It exists for one reason: an id has to be unique in the *document*, and
+   * `Select` renders both presentations at once so `display` can choose between
+   * them. Without it the same control's refusal line carries the same id twice,
+   * and every `aria-describedby` pointing at it resolves to whichever copy the
+   * browser reaches first — which on a phone is the hidden one.
+   */
+  where: string;
   prose: ConfigProse | undefined;
   divided: boolean;
   /**
@@ -1150,10 +1743,27 @@ function ChoiceSection({
   const refused = refusals.filter((text): text is string => text !== null);
   const shared =
     refused.length > 1 && refused.every((text) => text === refused[0]) ? (refused[0] ?? null) : null;
-  const sharedId = `${option.id}-refusal`;
+  const sharedId = `${where}-${option.id}-refusal`;
   return (
     <div className={divided ? "mt-1 border-t border-edge pt-1" : undefined}>
-      <p className={MENU_HEADING}>{labelFor(option)}</p>
+      {/*
+       * The category glyph beside the section's name, and it is the **chip's** —
+       * `label` is the lookup the strip under the message box uses, so what opens
+       * a menu and what heads it cannot come to disagree about what a control
+       * looks like.
+       *
+       * It earns more here than on a chip. A sheet stacks a control's sections one
+       * under the other — mode, then collaboration, then, on a phone, the model
+       * that folded in behind it — and `MENU_HEADING` is `text-2xs` uppercase at
+       * `text-faint`, which is the quietest type in the app. The glyph is what
+       * makes the boundary between two sections findable at a glance instead of
+       * read. `null` for a category `CATEGORY_ICON` has never heard of, where the
+       * name is then the only thing naming the control and is drawn alone.
+       */}
+      <p className={`${MENU_HEADING} flex items-center gap-1.5`}>
+        {label(option)}
+        {labelFor(option)}
+      </p>
       {/*
        * The control's own description, when the agent gives one.
        *
@@ -1210,6 +1820,9 @@ function ChoiceSection({
                   <p className="mt-1 px-2 py-0.5 text-2xs text-faint">{choice.group}</p>
                 )}
                 <button
+                  // See `Absent`'s note; these rows are inside the composer's box
+                  // too, one popover down.
+                  type="button"
                   role="option"
                   aria-selected={choice.value === option.value}
                   /*
@@ -1234,8 +1847,26 @@ function ChoiceSection({
                     choice.value === option.value ? "font-medium" : ""
                   }`}
                 >
-                  <span className="mt-0.5 w-3 shrink-0">
-                    {choice.value === option.value && <Icon as={Check} size={11} />}
+                  {/*
+                   * **The check is centred on the row's first line rather than
+                   * nudged toward it.** `menuRow("start")` aligns to the top, so
+                   * this used to be an 11px glyph in a 12px box with `mt-0.5` —
+                   * two pixels of guess against a 20px line, which put the mark
+                   * above the cap height of the name beside it and visibly out of
+                   * line on a two-line row. `h-5` **is** that line box and
+                   * `items-center` puts the glyph in the middle of it, so the
+                   * alignment is the type's own rather than a number.
+                   *
+                   * 14px and `stroke-[2.5]`, up from 11px at the default weight:
+                   * this is the only thing in the panel that says which row is the
+                   * answer, and at 11px it was the lightest mark on screen.
+                   * The box is drawn whether or not it holds anything, or the
+                   * unselected rows would sit four pixels left of the selected one.
+                   */}
+                  <span className="flex h-5 w-4 shrink-0 items-center justify-center">
+                    {choice.value === option.value && (
+                      <Icon as={Check} size={14} className="stroke-[2.5]" />
+                    )}
                   </span>
                   <span className="min-w-0">
                     {/* The same relabelling the chip does, so the menu row and the
@@ -1326,18 +1957,35 @@ function Toggle({
   const on = option.value === true;
   return (
     <button
+      // See `Absent`'s note.
+      type="button"
       onClick={() => onChange(!on)}
       disabled={disabled || locked}
       title={prose?.description ?? option.description ?? labelFor(option)}
       aria-pressed={on}
-      className={`${CHIP} px-2 font-medium ${disabled ? "opacity-40" : ""} ${
-        on
-          ? "border-edge-strong bg-raised font-medium text-fg hover:bg-edge"
-          : "border-edge-strong bg-surface text-muted hover:bg-raised hover:text-fg"
+      /*
+       * ⚠ **The one chip that keeps a border, and only while it is on.**
+       *
+       * `bg-raised` on `surface` is 1.22:1 — it groups a chip, it cannot carry a
+       * boolean's whole state. Everything else in this row being borderless is
+       * what makes a border available as a *meaning* here rather than as chrome:
+       * an outline now says this toggle is on, which is more than it said when
+       * every chip wore one. `border` is in `CHIP` at every state, so taking the
+       * colour does not change the chip's width.
+       *
+       * The duplicate `font-medium` that used to sit in the base string beside
+       * this one is gone: weight was in both arms, so it differentiated nothing.
+       */
+      className={`${CHIP} px-2 ${
+        disabled
+          ? "border-transparent text-faint"
+          : on
+            ? "border-edge-strong bg-raised font-medium text-fg hover:bg-edge active:bg-edge"
+            : "border-transparent text-muted hover:bg-raised active:bg-raised hover:text-fg"
       }`}
     >
       {label(option)}
-      <span className="max-w-32 truncate">{labelFor(option)}</span>
+      <span className={`${CHIP_MAX} truncate`}>{labelFor(option)}</span>
     </button>
   );
 }

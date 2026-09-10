@@ -1,22 +1,32 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { check } from "./webcheck.env.js";
+import { stripComments } from "./webcheck.source.js";
 import { snapshot, workspaceAt } from "./webcheck.ws.js";
 import {
+  RANK_STEP,
   allRows,
+  canReorder,
   commandsPlan,
   configProse,
   currentView,
+  displayCwd,
+  effectiveRank,
+  folderLabel,
   folderNames,
   folderPathOf,
   foldersOf,
   machineTabs,
   matchesQuery,
+  orderSessions,
+  rankBetween,
+  resolveDrop,
   rowSubpath,
   selectMachine,
   selectedMachineIn,
   sessionGroups,
   sessionLabel,
   setQuery,
+  siblingsOf,
   toggleFolder,
   visibleRows,
   waitingFloor,
@@ -1045,6 +1055,38 @@ process.stdout.write("\nmachine groups\n");
    * *future* group that copies rather than the one that used to.
    */
   check("and the render order names it once", visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key), ["m_a/pb"]);
+
+  /*
+   * ⭐ **And when the view stops drawing it, the floor lifts it — which needed no
+   * fleet at all.**
+   *
+   * `waitingFloor` walked `groups.groups` for its candidates, and `place` in
+   * `sessionGroups` *moves* a pinned row into `groups.pinned` (and an ungranted
+   * one into `groups.orphans`), returning `null`. So a pinned blocked row was in
+   * neither `active` nor `ended`, was never a candidate, and — per the assertion
+   * three lines up — was never counted in `blockedCount` either. The subtraction
+   * the comment above calls "everything blocked minus what the view draws" was
+   * over a **subset** of the fleet.
+   *
+   * One machine and one needle is the whole reproduction: every count reads zero
+   * and only the header dot is left, which is the "typing four letters into the
+   * search box hid an approval" failure `waitingFloor`'s own comment records as
+   * fixed for the other groups. Driven through both doors the comment names — a
+   * needle: `pinnedFor` cuts by the needle, so the row leaves the view while
+   * still being blocked, which is precisely the state the floor exists for.
+   */
+  setQuery("zzz-matches-nothing");
+  check(
+    "a needle that hides a pinned blocked row does not hide the approval",
+    visibleRows(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key),
+    ["m_a/pb"],
+  );
+  check(
+    "and it is the floor that is holding it up",
+    waitingFloor(pinnedBlocked, currentView(pinnedBlocked)).map((r: { key: string }) => r.key),
+    ["m_a/pb"],
+  );
+  setQuery("");
 }
 
 process.stdout.write("\nwhat is actually on screen\n");
@@ -1060,19 +1102,35 @@ process.stdout.write("\nwhat is actually on screen\n");
   const machineOf = (id: string, name: string) => ({ id, name, reach: "online", offlineReason: null, route: null, tokenDegraded: false, scopes: [] });
 
   const rows = [
-      row("blocked", "m_a", { status: "blocked", pendingPermissions: [{ raisedAt: 1, title: "Edit" }], workspace: workspaceAt("/home/u/api") }),
-      row("live", "m_a", { status: "running", workspace: workspaceAt("/home/u/api/packages/web", "/home/u/api") }),
-      row("kept", "m_b", { status: "running", pinned: true, workspace: workspaceAt("/home/u/web") }),
-      row("other", "m_b", { status: "running", workspace: workspaceAt("/home/u/web") }),
+      /*
+       * ⚠ **The `createdAt`s are distinct on purpose, and this fixture had one
+       * value for all of them.** The rail's order is the reader's now — a rank
+       * defaulting to `createdAt` — so identical ages put every row into the
+       * comparator's *tie-break*, and the assertions below would have been
+       * pinning "sorted by key" while reading like claims about position. Newest
+       * first, so `live` (4) leads `blocked` (1) in the folder they share, which
+       * is the assertion that says the hoist is gone.
+       */
+      row("blocked", "m_a", { createdAt: 1, status: "blocked", pendingPermissions: [{ raisedAt: 1, title: "Edit" }], workspace: workspaceAt("/home/u/api") }),
+      row("live", "m_a", { createdAt: 4, status: "running", workspace: workspaceAt("/home/u/api/packages/web", "/home/u/api") }),
+      row("kept", "m_b", { createdAt: 3, status: "running", pinned: true, workspace: workspaceAt("/home/u/web") }),
+      // ⚠ **A second pin, on the *other* machine, and the fixture had none.** With
+      // one pin in the fleet every list of pins is the same list, so "cut to the
+      // selected machine" was a claim nothing here could have falsified — which is
+      // how `siblingsOf` came to walk the fleet's pins while the rail drew this
+      // tab's. It is `active`, so the default filter keeps it.
+      row("far", "m_a", { createdAt: 6, status: "running", pinned: true, workspace: workspaceAt("/home/u/api") }),
+      row("other", "m_b", { createdAt: 2, status: "running", workspace: workspaceAt("/home/u/web") }),
       // A terminal row, and the fixture had none — so every `ended` assertion below
       // was true of a list that could not have contained anything, and `rowsOf`
       // returning `group.active` for the ended filter would have passed just as
       // green. One row is the difference between an assertion and a tautology.
-      row("done", "m_b", { status: "exited", exit: { reason: "stopped" }, workspace: workspaceAt("/home/u/web") }),
+      row("done", "m_b", { createdAt: 5, status: "exited", exit: { reason: "stopped" }, workspace: workspaceAt("/home/u/web") }),
   ];
   const state = { sessions: rows, machines: [machineOf("m_a", "alpha"), machineOf("m_b", "beta")] } as never;
   const groups = sessionGroups(state);
   const keys = (rows: readonly { key: string }[]) => rows.map((r) => r.key);
+  const byKey = (key: string) => rows.find((r) => r.key === key) as never;
 
   /*
    * Which machine's chats are on screen, resolved against what exists.
@@ -1099,6 +1157,86 @@ process.stdout.write("\nwhat is actually on screen\n");
   check("while the folder's own row says nothing extra", rowSubpath(rows[0] as never, "/home/u/api"), null);
 
   /*
+   * ⚠ **A row with no folder header above it names the directory *without* the
+   * `~/` that says which root** — `folderLabel`, not `displayCwd`.
+   *
+   * Every session on a machine is under the same root in the ordinary case, so
+   * `~/` is two characters of pure agreement repeated down the rail, and they are
+   * the two nearest the eye. Reported from a phone against the pinned rows.
+   *
+   * ⚠ **Withholding the folder itself was tried first and was wrong**, so the
+   * negative is asserted beside the positive: cutting a pinned row against its own
+   * `folderPathOf` blanks the line for every session launched at its repository
+   * root, which is most of them. The folder has to still be there. Q3.581.
+   */
+  const ROOTS = ["/home/u"];
+  check("a row drops the root marker and keeps the folder", folderLabel("/home/u/api", ROOTS), "api");
+  check("and the marker is what displayCwd still carries", displayCwd("/home/u/api", ROOTS), "~/api");
+  check("a session deeper in keeps every level below the root", folderLabel("/home/u/api/packages/web", ROOTS), "api/packages/web");
+  check("the root itself stays the marker rather than becoming empty", folderLabel("/home/u", ROOTS), "~");
+  check("and a path under no root is untouched", folderLabel("/opt/srv/thing", []), "…/srv/thing");
+  check("withholding the folder is not the fix", rowSubpath(rows[0] as never, folderPathOf(rows[0] as never)), null);
+
+  /*
+   * ⚠ **And the title an unnamed session falls back to is the same string**, which
+   * is a coupling rather than a preference: `SessionLine` suppresses the subline
+   * when it would repeat the title, **by comparing the two strings**. A title
+   * reading `~/thing` beside a subline reading `thing` draws one folder twice —
+   * the exact defect that comparison was added to prevent. Asserted as the
+   * composition the row actually performs, so the two cannot drift apart.
+   */
+  const unnamed = { snapshot: { title: null, workspace: { requestedCwd: "/home/u/api" } } };
+  check("an unnamed session is named after its folder, with no marker", sessionLabel(unnamed as never, ROOTS), "api");
+  check(
+    "and the row's own path is the same string, so the duplicate is suppressed",
+    sessionLabel(unnamed as never, ROOTS) === folderLabel("/home/u/api", ROOTS),
+    true,
+  );
+
+  /*
+   * Read off disk, because the arm above lives in the JSX and a driver with no DOM
+   * cannot reach it. Without this the assertions are true of `paths.ts` and say
+   * nothing about which function the rail actually calls.
+   */
+  {
+    const rail = stripComments(readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8"));
+    check(
+      "the rail draws a folderless row with folderLabel, and no longer with displayCwd",
+      [/folderLabel\(row\.snapshot\.workspace\.requestedCwd, roots\)/.test(rail), /displayCwd\(/.test(rail)],
+      [true, false],
+    );
+    /*
+     * ⚠ **Asserted on the element, not on a window of characters.** This was one
+     * regex expecting `false`, requiring `folderPath={…}` within eighty characters
+     * of `drag={drag.bind(row, PINNED_FOLDER)}` — and the four props already
+     * between them are longer than that, so writing the forbidden prop in the
+     * obvious place would have left the pattern unmatched and the check green over
+     * the defect it names. A negative regex with a distance in it asserts the
+     * distance, not the property.
+     *
+     * Sliced instead: every `<SessionLine … />` in the file, the Pinned one picked
+     * out by the marker it drags against, and the prop looked for inside its own
+     * element. The two floors under it are that the slice found exactly one Pinned
+     * row, and that the sweep does see `folderPath` where it is genuinely passed —
+     * so neither an element that stopped matching nor a prop that was renamed can
+     * make this quiet.
+     */
+    const rows = rail.match(/<SessionLine[\s\S]*?\/>/g) ?? [];
+    const pinnedRow = rows.filter((element) => element.includes("PINNED_FOLDER"));
+    check("the Pinned rail row was found as an element", pinnedRow.length, 1);
+    check(
+      "and Pinned passes no folderPath, so its rows still name a folder",
+      pinnedRow.every((element) => !/folderPath=/.test(element)),
+      true,
+    );
+    check(
+      "while the folder section's row does pass one, so the sweep is not blind",
+      rows.filter((element) => /folderPath=/.test(element)).length,
+      1,
+    );
+  }
+
+  /*
    * A basename until it collides, then the shortest suffix that separates them.
    * Two rows both reading "api" is the failure this exists to prevent.
    */
@@ -1115,17 +1253,52 @@ process.stdout.write("\nwhat is actually on screen\n");
    * `m_b` it leads and is named once.
    */
   check("the selected machine's folders, with no other machine's pins", keys(visibleRows(groups, currentView(groups))), [
-    "m_a/blocked",
+    "m_a/far",
     "m_a/live",
+    "m_a/blocked",
   ]);
   selectMachine("m_b" as never);
   // After the waiting floor, which is `m_a/blocked` seen from `m_b`'s tab: a pin
   // leads its machine's list, and the floor leads everything.
   check("pinned leads on the machine it lives on", keys(visibleRows(groups, currentView(groups))), ["m_a/blocked", "m_b/kept", "m_b/other"]);
   selectMachine("all" as never);
-  check("and under All every pin is drawn", keys(visibleRows(groups, currentView(groups)))[0], "m_b/kept");
+  check("and under All every pin is drawn", keys(visibleRows(groups, currentView(groups))).slice(0, 2), ["m_a/far", "m_b/kept"]);
+  /*
+   * ⭐ **And the keyboard walks the list that is drawn, which it did not.**
+   *
+   * `siblingsOf` is what `Alt`+`↑`/`↓` moves a row within, and for a pinned row it
+   * answered `groups.pinned` — every pin in the fleet — while the rail draws
+   * `pinnedFor`, cut to the selected machine. So under `m_b`, `Alt`+`↓` on the
+   * only pin drawn computed a position against a pin on `m_a`, wrote it, and
+   * looked like it had done nothing; on the re-spacing path it wrote fresh
+   * positions to `m_a`'s rows, which is a change with no visible cause anywhere on
+   * screen.
+   *
+   * ⚠ **The filter is still ignored and that is not the same thing.** A row the
+   * filter withholds is one the reader chose to hide, and stepping past it keeps
+   * one press meaning one place however that control is set. A pin on another
+   * machine is on a list this tab cannot draw at all.
+   */
+  selectMachine("m_b" as never);
+  check("the keyboard's siblings for a pinned row are the pins on screen", keys(siblingsOf(byKey("m_b/kept"), groups)), ["m_b/kept"]);
   selectMachine("m_a" as never);
-  check("and blocked leads its folder", foldersOf(groups, currentView(groups))[0]?.rows[0]?.key, "m_a/blocked");
+  check("and on the other tab they are that tab's", keys(siblingsOf(byKey("m_a/far"), groups)), ["m_a/far"]);
+  selectMachine("all" as never);
+  check("while All walks every pin, because All draws every pin", keys(siblingsOf(byKey("m_b/kept"), groups)), ["m_a/far", "m_b/kept"]);
+  selectMachine("m_a" as never);
+  /*
+   * ⭐ **A blocked row does *not* lead its folder, and the absence is the
+   * assertion.** It did, for as long as the rail sorted itself, and the hoist is
+   * gone with the rest of that sorting: a position belongs to the reader, and one
+   * that moves because an agent asked a question is one that moved by itself. Both
+   * rows here are in `/home/u/api`; `live` is newer, so `live` is first.
+   *
+   * What carries "an approval cannot be hidden" is the line under this one, plus
+   * the ringed dot and the semibold title on the row itself, plus `waitingFloor`'s
+   * subtraction — three signals, none of which is a position, and all of which
+   * work on a folder that is shut.
+   */
+  check("a blocked row keeps the place its reader gave it", keys(foldersOf(groups, currentView(groups))[0]?.rows ?? []), ["m_a/live", "m_a/blocked"]);
   check("which the folder header says even when shut", foldersOf(groups, currentView(groups))[0]?.blockedCount, 1);
 
   /*
@@ -1160,17 +1333,18 @@ process.stdout.write("\nwhat is actually on screen\n");
    */
   const folder = foldersOf(groups, currentView(groups))[0]!;
   toggleFolder(folder.id);
-  check("collapsing a folder removes exactly its rows", keys(visibleRows(groups, currentView(groups))), []);
+  // Exactly its rows: the pin above the folders is in a different group and stays.
+  check("collapsing a folder removes exactly its rows", keys(visibleRows(groups, currentView(groups))), ["m_a/far"]);
   selectMachine("m_b" as never);
   check("a pinned row survives any collapse", keys(visibleRows(groups, currentView(groups))).includes("m_b/kept"), true);
   selectMachine("m_a" as never);
   // "blocked" would match nothing: the raw session id is deliberately not
   // searched, so a needle has to name something visible on the row.
   setQuery("api");
-  check("but a search opens it again", keys(visibleRows(groups, currentView(groups))), ["m_a/blocked", "m_a/live"]);
+  check("but a search opens it again", keys(visibleRows(groups, currentView(groups))), ["m_a/far", "m_a/live", "m_a/blocked"]);
   setQuery("");
   toggleFolder(folder.id);
-  check("expanding restores it", visibleRows(groups, currentView(groups)).length, 2);
+  check("expanding restores it", visibleRows(groups, currentView(groups)).length, 3);
 
   /*
    * The needle. `sessionLabel` first, which is the exact defect that got the last
@@ -1266,11 +1440,19 @@ process.stdout.write("\nwhat is actually on screen\n");
     // place for the row to be, so the two copies would be the same row twice in
     // one list with nothing between them explaining why.
     check("the flat list leaves out what is pinned", keys(allRows(groups, view)).includes("m_b/kept"), false);
-    check("and holds the rest of the fleet, newest first", keys(allRows(groups, { ...view, filter: "all" })), [
-      "m_a/blocked",
+    /*
+     * ⚠ **This read "newest first" and meant `lastActivity`.** Under All the order
+     * is the reader's too — anything else would make a conversation's position
+     * depend on which tab it is read from. `done` (5) then `live` (4) then `other`
+     * (2) then `blocked` (1), and the terminal row sitting at the top is the
+     * honest consequence of one order per list: pushing it down would be a second
+     * rule quietly undoing a drop onto it.
+     */
+    check("and holds the rest of the fleet in the order its reader gave it", keys(allRows(groups, { ...view, filter: "all" })), [
+      "m_b/done",
       "m_a/live",
       "m_b/other",
-      "m_b/done",
+      "m_a/blocked",
     ]);
     // Nothing is unreachable under All, so the band that exists because one
     // machine is on screen at a time has nothing to lift.
@@ -1337,12 +1519,14 @@ process.stdout.write("\nthe orphan section, drawn and walked from one list\n");
   // was open leaves exactly this state, which is why the group exists.
   const groups = sessionGroups({
     sessions: [
-      row("live", "m_gone", { status: "running" }),
-      row("done", "m_gone", { status: "exited", exit: { reason: "stopped" } }),
+      // Distinct ages, so what these assert is a position rather than the
+      // comparator's tie-break on the row key. Newest first.
+      row("live", "m_gone", { createdAt: 3, status: "running" }),
+      row("done", "m_gone", { createdAt: 1, status: "exited", exit: { reason: "stopped" } }),
       // Interrupted is the one the Ended filter must *not* collect — the daemon
       // ended it and is bringing it back — and it is the row most likely to be
       // mis-bucketed by a second, hand-written copy of the rule.
-      row("back", "m_gone", { status: "exited", exit: { reason: "daemon_restarted" } }),
+      row("back", "m_gone", { createdAt: 2, status: "exited", exit: { reason: "daemon_restarted" } }),
     ],
     machines: [],
   } as never);
@@ -1391,6 +1575,451 @@ process.stdout.write("\nthe orphan section, drawn and walked from one list\n");
   const browser = readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8");
   check("the rail's orphan section goes through the helper", /\borphansFor\(groups, filter\)/.test(browser), true);
   check("and never reaches past it to the raw group", /groups\.orphans/.test(browser), false);
+  /*
+   * ⭐ **The rail is a scroller before it is a drag surface**, and this is the one
+   * assertion that would catch the inversion of `agent-strip.md`'s own fix.
+   *
+   * There, `touch-none` on the handle is what makes a phone able to drag at all,
+   * and the class being silently dead was a real defect that shipped. Here the
+   * same class is the defect: the row *is* the surface a finger scrolls the
+   * session list with, so `touch-action: none` on it takes scrolling away from
+   * nine tenths of the rail to buy a gesture that arms only after 400ms of
+   * stillness. `rowDrag.ts` sets it on the node imperatively for the *length* of a
+   * drag, which cannot reach this string.
+   *
+   * ⚠ Not comment-stripped, exactly like the `groups.pinned` pair above: the ban
+   * has to cover a mention in prose too, or the next reader writes "we could use
+   * `touch-none` here" and the check goes quiet.
+   */
+  check("the rail is a scroller before it is a drag surface", /touch-none/.test(browser), false);
+  /*
+   * ⚠ **Comment-stripped, unlike the ban above it, and for the opposite reason.**
+   * `touch-none` is banned as a *string* so prose cannot reintroduce it quietly;
+   * this reads the row's own class expression, and the docblock beside it says in
+   * as many words why `.press` is not there — a `scale(0.97)` held for the length
+   * of a gesture reads as broken, which is `agent-strip.md`'s measurement. The
+   * explanation may not be the thing that fails the check.
+   */
+  const rowClass = (() => {
+    const code = stripComments(browser);
+    const at = code.indexOf("lifted\n          ?");
+    return at < 0 ? code.slice(code.indexOf("lifted"), code.indexOf("lifted") + 400) : code.slice(at, at + 400);
+  })();
+  check("and the row that lifts does not shrink under the finger", /\bpress\b/.test(rowClass), false);
+  /*
+   * The guard that does not depend on the cascade at all. React attaches
+   * `onTouchMove` passively, so this can only be an `addEventListener`, and both
+   * of the gesture's touch listeners are non-passive for the same reason: some
+   * engines decide at `touchstart` whether a gesture can be refused at all, from
+   * whether such a listener exists.
+   */
+  const rowDrag = readFileSync(new URL("../src/ui/rowDrag.ts", import.meta.url), "utf8");
+  check(
+    "a live drag can refuse the scroll it would otherwise become",
+    /addEventListener\("touchmove", going\.move, \{ passive: false \}\)/.test(rowDrag),
+    true,
+  );
+  check("and the drop suppresses the tap it sits on", /onClickCapture/.test(rowDrag), true);
+  /*
+   * All four endings, one `end`. A drag can finish by the pointer going up, by the
+   * engine cancelling it, by the capture being taken away, or by the row ceasing
+   * to exist — the last of which the phone's list → detail does on every
+   * navigation, mid-gesture or not.
+   */
+  check(
+    "and every way a drag can end is wired",
+    ["onPointerUp:", "onPointerCancel:", "onLostPointerCapture:", "useEffect(() => end", "touchend"].map((form) =>
+      rowDrag.includes(form),
+    ),
+    [true, true, true, true, true],
+  );
+  /*
+   * ⚠ **`pointercancel` ends a mouse gesture and must not end a touch one.** For a
+   * pointer it means the gesture is over; for a finger it means the browser has
+   * decided the gesture is *its*, which is exactly the state this drag exists to
+   * take back — and treating the two alike is what made three phone reports read
+   * the same. The finger lifting is what ends it.
+   */
+  check(
+    "a cancelled pointer ends a mouse drag and never a touch one",
+    /onPointerCancel: \(event\) => \{[\s\S]{0,200}event\.pointerType === "mouse"/.test(rowDrag),
+    true,
+  );
+  check("and losing capture is read the same way", /onLostPointerCapture: \(event\) => \{[\s\S]{0,300}event\.pointerType === "mouse"/.test(rowDrag), true);
+  /*
+   * ⭐ **A finger's gesture runs on the touch stream, and it *begins* there.**
+   *
+   * The pointer stream stops when the browser claims the gesture, so the drag was
+   * moved onto `touchmove` — but the setup stayed in `onPointerDown`, and that is
+   * the assumption three phone fixes never questioned: that `pointerdown` arrives
+   * before the engine has decided what the touch is for. Blink dispatches it
+   * first; nothing requires that, and on an engine that dispatches `touchstart`
+   * first every one of those fixes was one event too late, every time, on that
+   * engine only — which is the shape of a bug that works on every desktop and has
+   * never once worked on a phone.
+   *
+   * So `touchstart` is where a finger's press is decided, and the row is found
+   * from the event rather than from a closure.
+   */
+  check(
+    "and a finger's gesture begins at touchstart, not at pointerdown",
+    [
+      /node\.addEventListener\("touchstart", going\.start, \{ passive: false \}\)/.test(rowDrag),
+      /const onTouchStart = \(event: TouchEvent\): void => \{/.test(rowDrag),
+      /closest<HTMLElement>\("\[data-row-key\]\[data-zone\]"\)/.test(rowDrag),
+    ],
+    [true, true, true],
+  );
+  check(
+    "with the finger lifting as the ending",
+    [
+      /node\.addEventListener\("touchend", going\.stop\)/.test(rowDrag),
+      /node\.addEventListener\("touchcancel", going\.stop\)/.test(rowDrag),
+    ],
+    [true, true],
+  );
+  /*
+   * ⚠ **On the scroller, and put there by the ref callback.** A touch's target is
+   * latched at `touchstart`, so the scroller is in the path of every event of the
+   * gesture including those delivered after the finger has left it — and being an
+   * ordinary element it is clear of the passive-by-default treatment `window`,
+   * `document` and `body` receive. The ref callback rather than an effect because
+   * they have to exist before the first `touchstart` the node can receive, and
+   * because it is the only thing that answers the node being *replaced*.
+   */
+  check(
+    "and they go on the scroller as it arrives, and come off the node they went on",
+    /const scrollerRef = useCallback\([\s\S]{0,400}previous\.removeEventListener\("touchstart"/.test(rowDrag),
+    true,
+  );
+  /*
+   * ⭐ **Said in the one channel a thumb is covering the screen with.** A hold has
+   * no visible beginning: for 400ms the app must look like it is doing nothing and
+   * then it must be unmistakable that it is not — and the visual half of that is
+   * under the finger, which is the part of the screen nobody can see. Optional at
+   * the call because no desktop engine implements it and a missing method may not
+   * be the reason a drag does not start.
+   */
+  check("and the arming is felt as well as drawn", /navigator\.vibrate\?\.\(/.test(rowDrag), true);
+  /*
+   * ⭐ **A mouse waits for movement and a finger waits for time**, and the split is
+   * the whole reason this gesture existed and did nothing for a week. Holding a
+   * button still for 400ms is a *touch* idiom — invented because a finger's other
+   * verb on this surface is "scroll the rail" and the two have to be separated
+   * before either commits. A pointer has a button: the press already says which
+   * row, so waiting only put a window in front of the gesture in which the natural
+   * response cancelled it.
+   */
+  check(
+    "a mouse arms on movement rather than on time",
+    [
+      /onPointerDown: \(event\) => \{\s*if \(event\.pointerType !== "mouse" \|\| event\.button !== 0\) return;/.test(
+        stripComments(rowDrag),
+      ),
+      /> MOUSE_SLOP\) arm\(\)/.test(rowDrag),
+    ],
+    [true, true],
+  );
+  /*
+   * ⚠ **The pointer is taken when the drag arms, and taking it at the press
+   * silently broke opening a session by clicking it.** A captured pointer
+   * retargets everything that follows to the capturing element, the synthesised
+   * `click` included — and the row is a `<div>` holding a navigating `<button>`,
+   * so that click was delivered to the wrapper and the button was never in its
+   * path. Measured through the debugging protocol rather than reasoned: `mousedown`
+   * on the row's label, `click` on the wrapper, while the same click on the kebab
+   * reaches its own button because that press returns before capturing anything.
+   *
+   * Comment-stripped, because the sentence above has to be allowed to say
+   * `setPointerCapture` while the press is not allowed to call it.
+   */
+  check(
+    "and the press captures nothing, because that ate the click that opens a session",
+    (() => {
+      const code = stripComments(rowDrag);
+      const at = code.indexOf("onPointerDown: (event)");
+      return at < 0 ? true : code.slice(at, code.indexOf("onPointerMove:", at)).includes("setPointerCapture");
+    })(),
+    false,
+  );
+  check("while the arming does capture it", /if \(going\.byMove\) \{\s*try \{\s*going\.node\.setPointerCapture/.test(stripComments(rowDrag)), true);
+  check("and a finger still waits out the hold", /timer\.current = setTimeout\(arm, PRESS_MS\)/.test(rowDrag), true);
+  /*
+   * One `arm`, reached two ways. It was inline in the long-press timer, which is
+   * exactly how a mouse came to have no way in at all — the decision and
+   * everything after it were one block, so there was nowhere to enter but the top.
+   */
+  check("both reach the same arming, so only the decision differs", /const arm = \(\): void => \{/.test(rowDrag), true);
+  /*
+   * A row holds text, and a native drag of it would race ours and win — a ghost of
+   * the title following the cursor while the row itself stays put.
+   */
+  check("and the browser's own drag is refused", /onDragStart: \(event: React\.DragEvent/.test(rowDrag), true);
+  /*
+   * ⚠ **The keyboard's way in survives the menu rows going.** `Move up` and `Move
+   * down` are gone — reordering is a drag — and Q3.533's rule does not go with
+   * them: a pointer gesture that is the only way to reorder is a control a
+   * keyboard cannot reach at all. The row takes `Alt`+arrows, held with a modifier
+   * because the bare ones belong to the list.
+   */
+  check("a keyboard can still reorder without a menu row to do it from", /event\.altKey/.test(rowDrag), true);
+  check("and the menu no longer carries the two rows it did", /"Move up"|"Move down"/.test(readFileSync(new URL("../src/ui/SessionMenu.tsx", import.meta.url), "utf8")), false);
+  /*
+   * And the refusal says so, once somebody has plainly tried. A press is not yet a
+   * question; a press that travelled is.
+   */
+  check("a machine that cannot store an order says so when somebody drags", /daemon is too old to store an order/.test(rowDrag), true);
+  /*
+   * ⭐ **Neighbours stand aside; nothing draws a line.** An insertion rule drawn as
+   * a 2px bar tells a reader *where* but not *what*, and the list it is drawn over
+   * stays visibly unchanged until the drop — so the gesture reads as aiming rather
+   * than as moving. The agent strip's answer is the right one and is taken whole:
+   * the rows between where the dragged one left and where it is going shift by
+   * exactly one row, and the drop then changes nothing anybody can see.
+   */
+  // The bar itself, not the word: the docblocks beside it explain what it replaced
+  // and may not be what fails the check.
+  check("no insertion rule is drawn", [/drag\.line/.test(browser), /h-0\.5 bg-fg/.test(browser)], [false, false]);
+  check("the neighbours move instead", /shiftFor\(/.test(browser), true);
+  check("and the shift is a measured pixel count rather than a class", /transform: `translateY\(\$\{shift\}px\)`/.test(browser), true);
+  check(
+    "transitioned only while a drag is live, and never on the row under the pointer",
+    /sliding && !lifted \? "transition-transform" : ""/.test(browser),
+    true,
+  );
+  /*
+   * ⚠ **Leaving Pinned unpins even where the folder is not drawn.** A collapsed
+   * folder, or one the filter is hiding, is still where a session lives — so the
+   * drop writes `pinned: false` and leaves the position alone rather than refusing
+   * because it cannot see a list to place the row in.
+   */
+  check("leaving Pinned unpins whether or not the folder is on screen", /if \(zone === undefined\) \{[\s\S]{0,300}pinned: nowPinned/.test(rowDrag), true);
+  /*
+   * ⭐ **And a drop is never refused for arithmetic.** It answered *"there is no
+   * room between those two rows, move a neighbour first"* — a sentence handing the
+   * reader a problem they did not cause, cannot see and cannot act on. The gap is
+   * the module's business: `resolveDrop` re-spaces and the drop happens.
+   */
+  check("a drop is never refused for want of room", /no room between those two rows/.test(rowDrag), false);
+  check("it re-spaces instead", /resolveDrop\(/.test(rowDrag), true);
+  /*
+   * ⭐ **The last place in Pinned is reachable, and leaving Pinned costs a
+   * deliberate movement.** With the group's own edge as the boundary, "last, still
+   * pinned" was a band half a row tall with *unpinning* on the far side of it — so
+   * aiming at the end of the list unpinned instead. The margin is asymmetric on
+   * purpose: a row already in Pinned holds on past the edge, a row arriving from a
+   * folder is not leaving anything and has no need to.
+   */
+  check("a row in Pinned holds on to it past the edge", /const sticky = going\.origin\.zone === PINNED_FOLDER \? UNPIN_MARGIN : 0;/.test(rowDrag), true);
+  /*
+   * ⚠ **And the boundary is distance, never an edge.** Widening the band only for
+   * rows already pinned fixed the last slot for those and left it unreachable for
+   * a row arriving from a folder — the same bug, reported a second time. Inside a
+   * group is distance zero and the header gap between two groups splits down the
+   * middle, so nothing has an edge to fall off.
+   */
+  check("and the boundary between two groups is whichever is nearer", /const nearer = gap\(pinnedZone\) - sticky <= gap\(ownZone\) \? pinnedZone : ownZone;/.test(rowDrag), true);
+  /*
+   * ⚠ **A translate does not make room.** A row carried between groups makes one a
+   * row taller and the other a row shorter; shifting the rows below an insertion
+   * point moves them *over* whatever follows the group, which is Pinned riding on
+   * top of the sessions under it.
+   */
+  check("a group joined reserves the height and one left gives it back", /spaceFor\(/.test(browser), true);
+  check("and it is the group that takes it, not the rows", /marginBottom/.test(browser), true);
+  /*
+   * ⚠ **The room and the rows move on one clock.** The rows animate under
+   * `transition-transform`; the height they were moving into appeared in a jump,
+   * so a row crossing into Pinned slid while everything below it snapped. Bare
+   * `transition-[margin-bottom]` takes the same default duration and easing, which
+   * is the point: two numbers that had to agree became one.
+   */
+  check("and it animates on the same clock the rows do", /transition-\[margin-bottom\]/.test(browser), true);
+  /*
+   * ⚠ **And the dragged row is anchored to where it actually is.** Carrying it up
+   * into Pinned makes that group a row taller, which pushes the folder it came
+   * from — and the row itself — down by exactly one row. Against a fixed origin
+   * the transform did not know, and the row leapt a row's height at the crossing.
+   */
+  check("the dragged row's offset is measured from its real base", /getBoundingClientRect\(\)\.top - going\.applied/.test(rowDrag), true);
+  /*
+   * Unpinning is the one outcome of this gesture that carrying the row back does
+   * not undo, so it is the one that says what release will do before it happens.
+   */
+  check("what release will do is said at the pointer", /Release to unpin/.test(browser), true);
+  check("and it follows the pointer without a render a frame", /pillRef/.test(browser), true);
+  /*
+   * ⚠ **The row is the drag surface except where it already carries a control.** A
+   * mouse takes the pointer at the press, so the kebab's own `click` was retargeted
+   * to the row and the menu stopped opening at all.
+   */
+  check("the row's trailing controls are not a place to grab it by", /data-no-drag/.test(browser), true);
+  check("and the gesture honours that rather than testing for a tag", /closest\("\[data-no-drag\]"\)/.test(rowDrag), true);
+  /*
+   * iOS cancels a long press it has decided is a text selection, which fires
+   * `pointercancel` before the timer runs: a press that does nothing, on a phone,
+   * with nothing on screen saying why.
+   */
+  check("a long press is not handed to the platform's own selection", /-webkit-touch-callout/.test(rowDrag), true);
+  /*
+   * ⚠ **`-webkit-touch-callout` is set from `touchstart` and not from
+   * `pointerdown`**, which is the same ordering argument as the gesture's own: iOS
+   * decides at `touchstart` whether a long press on this element raises its
+   * callout, and set from a handler that may run afterwards it arrives after the
+   * decision it exists to change.
+   */
+  check(
+    "and it is switched off before the engine has decided, not after",
+    (() => {
+      const code = stripComments(rowDrag);
+      const at = code.indexOf("const onTouchStart");
+      return at < 0 ? false : code.slice(at, code.indexOf("const onTouchMove", at)).includes("-webkit-touch-callout");
+    })(),
+    true,
+  );
+
+  /*
+   * ⚠ **Only one index means "it did not move", and it used to be two.**
+   *
+   * `origin.index` counts the zone's rows *with* the dragged one among them;
+   * `target.index` is a slot among the others, which is what `resolveDrop` takes.
+   * In those two coordinate systems the sole drop that changes nothing is
+   * `target === origin` — slot `origin + 1` puts the row one place *below* where
+   * it was. Treating that as a no-op swallowed every move down by exactly one
+   * place, in silence, and the last slot of a group is reachable from the row
+   * above it in no other way. Reported twice, in two different words, before the
+   * two coordinate systems were written down beside each other.
+   *
+   * Comment-stripped, so the paragraph above may describe the bug in the terms
+   * the code is banned from using.
+   */
+  check(
+    "a drop one place further down is a move, not a no-op",
+    (() => {
+      const code = stripComments(rowDrag);
+      const at = code.indexOf("nowPinned === wasPinned && going.target.zone === going.origin.zone");
+      if (at < 0) return "the no-op guard is gone";
+      return (code.slice(at, at + 200).split("}")[0] ?? "").replace(/\s+/g, " ").trim();
+    })(),
+    "nowPinned === wasPinned && going.target.zone === going.origin.zone) { if (going.target.index === going.origin.index) return;",
+  );
+
+  /*
+   * ⚠ **Every row draws its menu, and the rule this replaces was a reveal on
+   * hover for every row but a pinned one.**
+   *
+   * Reported as "why do the pinned ones have three dots and the others not" —
+   * which is the reveal working exactly as written and being wrong anyway: two
+   * rows a few pixels apart, alike in every other way, and one of them has a
+   * control. Keyed on a *pointer* query rather than a width read, which was the
+   * right half; what it got wrong is that a row's only menu, hidden until the
+   * pointer is already on the row, is undiscoverable — and a list is being read
+   * rather than aimed at for almost all of the time it is on screen.
+   *
+   * The ink was already being spent, so nothing about the row's width, its
+   * truncation point or the tap pad's reach past the scroller moves: pinned rows
+   * have drawn it unconditionally all along.
+   */
+  check(
+    "the row's menu is drawn on every row, pinned or not",
+    (() => {
+      const code = stripComments(browser);
+      /*
+       * ⚠ **Anchored on `SessionMenu`, because `data-no-drag` is no longer
+       * unique in this file.** This read the *first* occurrence, which was the
+       * kebab only for as long as the kebab was the only control on the row —
+       * the rename field now carries the marker too, and it is drawn earlier, so
+       * the old spelling silently started asserting against the wrong tag. What
+       * is being pinned is unchanged: the kebab's opening tag is a constant
+       * class string, so a conditional reveal reintroduced there fails outright.
+       */
+      const menu = code.indexOf("<SessionMenu");
+      if (menu < 0) return "the kebab is gone";
+      const at = code.lastIndexOf("data-no-drag", menu);
+      return at < 0 ? "the kebab is not marked" : code.slice(at, code.indexOf(">", at) + 1).replace(/\s+/g, " ").trim();
+    })(),
+    'data-no-drag className="mr-2.5">',
+  );
+  check("and the reveal it used to be keyed on is gone with it", /focus-within:opacity-100/.test(browser), false);
+
+  /*
+   * ⚠ **Typing beats the reorder shortcut, which is the app's standing rule and
+   * the one place a new handler skipped it.** `web-shell.md`: typing beats every
+   * layer (`isTypingInto`). The rename field is a descendant of the element
+   * carrying `onKeyDown` and is autofocused, and on macOS Option+↑/↓ is a caret
+   * movement inside a text field — so without the guard, renaming a session
+   * silently reorders the list instead of moving the caret.
+   */
+  {
+    const drag = stripComments(readFileSync(new URL("../src/ui/rowDrag.ts", import.meta.url), "utf8"));
+    // `lastIndexOf`, because `RowDrag` declares `onKeyDown:` in its interface
+    // before `bind` implements it, and the declaration is not what is guarded.
+    const at = drag.lastIndexOf("onKeyDown:");
+    check(
+      "typing beats the reorder shortcut, like every other key in this app",
+      at >= 0 && /^[\s\S]{0,200}isTypingInto\(/.test(drag.slice(at)),
+      true,
+    );
+  }
+
+  /*
+   * ⚠ **A re-space writes the neighbours through one guarded helper, and both
+   * paths use it.**
+   *
+   * `resolveDrop` can hand back every row in a folder, and the loop that used to
+   * write them tested nothing and reported per row. Two failures came out of that,
+   * and both are invisible in a screenshot: under the All tab `PINNED_FOLDER` is
+   * one group spanning machines, so a neighbour can be on a daemon that has never
+   * heard of `rank` and answers 400 to a body carrying only that field; and a
+   * re-space of thirty rows answered with thirty toasts.
+   *
+   * Asserted as *no bare loop over `landed.also`* plus the two properties of the
+   * helper, because the fix is a shape rather than a value and there is no driver
+   * in this repository that can reach the gesture itself.
+   */
+  {
+    const drag = stripComments(readFileSync(new URL("../src/ui/rowDrag.ts", import.meta.url), "utf8"));
+    check(
+      "the neighbours a re-space moves go through one helper, on both paths",
+      [
+        (drag.match(/respace\(landed\.also\)/g) ?? []).length,
+        /for \(const also of landed\.also\)/.test(drag),
+      ],
+      [2, false],
+    );
+    const body = drag.slice(drag.indexOf("const respace ="), drag.indexOf("const clearTimer ="));
+    check(
+      "and it skips a row whose daemon cannot store one, and says so once for the group",
+      [/canReorder\(entry\.row\.snapshot\)/.test(body), /told = true/.test(body)],
+      [true, true],
+    );
+  }
+
+  /*
+   * ⚠ **The rename field is a control on the drag surface, and it has to say so.**
+   *
+   * `rowDrag.ts` states the rule — the row is the drag surface *except* where it
+   * already carries a control, marked on the markup rather than tested by tag —
+   * and a text field is the case where breaking it costs the most: a mouse
+   * drag-select over the name passes `MOUSE_SLOP` and arms the drag, and a long
+   * press to place a caret passes `PRESS_MS` and does the same, after which the
+   * row wears `user-select: none` and the field cannot be selected in at all.
+   * Asserted against the *wrapper immediately before* `RenameField` rather than
+   * anywhere in the file, so a marker that drifts off it fails.
+   */
+  check(
+    "the rename field is not a place to grab the row by",
+    (() => {
+      const code = stripComments(browser);
+      const field = code.indexOf("<RenameField");
+      if (field < 0) return "the rename field is gone";
+      const at = code.lastIndexOf("data-no-drag", field);
+      return at >= 0 && code.slice(at, field).indexOf("</") < 0;
+    })(),
+    true,
+  );
+
+
   check("the rail's pinned section goes through the helper too", /\bpinnedFor\(groups, view\)/.test(browser), true);
   check("and never reaches past that one either", /groups\.pinned/.test(browser), false);
 
@@ -1447,4 +2076,155 @@ process.stdout.write("\nsession labels\n");
   // than a path — hence trimmed rather than merely null-checked.
   check("a whitespace-only name falls back too", labelOf("   "), "…/work/proj");
   check("the result is always a plain string", typeof labelOf("x"), "string");
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Whose order the rail is in
+ *
+ * It used to be the app's: blocked rows to the top of their folder, everything
+ * else by its most recent event. Both were defensible, both were opinions about
+ * somebody else's conversations, and together they meant a list rearranged itself
+ * under a thumb on the four-second poll. The position belongs to the reader now.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhose order the rail is in\n");
+{
+  const at = (id: string, over: Record<string, unknown> = {}) =>
+    ({ key: `m/${id}`, ref: { machineId: "m", sessionId: id }, machineName: "m", snapshot: { ...snapshot, id, ...over }, daemonNow: 0, fetchedAt: 0 }) as never;
+  const ids = (rows: readonly { key: string }[]) => rows.map((row) => row.key.slice(2));
+
+  /*
+   * ⭐ **Three answers, not two, and the absent one is written as a *missing
+   * property* rather than as `rank: undefined`.** Spelling it the other way makes
+   * the case pass for the wrong reason: `"rank" in snapshot` is what tells a
+   * daemon that has never heard of the field from one saying nobody has moved this
+   * row, and only the first takes the gesture away.
+   */
+  check("an unset position is the moment the session was made", effectiveRank({ createdAt: 100 }), 100);
+  check("and so is one the daemon says nobody has set", effectiveRank({ createdAt: 100, rank: null }), 100);
+  check("while a set one is itself", effectiveRank({ createdAt: 100, rank: 7 }), 7);
+  check(
+    "a daemon that cannot store an order is known by the absent field, never by a version",
+    [canReorder({}), canReorder({ rank: null }), canReorder({ rank: 7 })],
+    [false, true, true],
+  );
+
+  /*
+   * ⚠ **Total, and that is correctness rather than tidiness.** Two sessions can
+   * share a millisecond, the input order changes between polls, and
+   * `Array.prototype.sort`'s stability says nothing about a list whose *input* is
+   * re-derived — so a comparator answering 0 for such a pair is two rows that swap
+   * places on the poll, which is the exact behaviour this whole change removes.
+   */
+  const tied = [at("c", { createdAt: 5 }), at("a", { createdAt: 5 }), at("b", { createdAt: 5 })];
+  check("rows sharing a millisecond still have one order", ids(orderSessions(tied)), ["a", "b", "c"]);
+  check("and it does not depend on the order they arrived in", ids(orderSessions([...tied].reverse())), ["a", "b", "c"]);
+  check("ordering twice changes nothing", ids(orderSessions(orderSessions(tied))), ["a", "b", "c"]);
+  check("and the input is never mutated", ids(tied), ["c", "a", "b"]);
+
+  /*
+   * **A new session is at the top of its folder, above a row somebody dragged
+   * there** — because a drop writes an instant between two that have already
+   * passed, and `RANK_STEP` is one millisecond. Any larger step would put a
+   * dragged row above sessions that do not exist yet.
+   */
+  const dragged = at("dragged", { createdAt: 10, rank: 1000 + RANK_STEP });
+  const fresh = at("fresh", { createdAt: 2000 });
+  check("a session created since a drag still leads it", ids(orderSessions([dragged, fresh])), ["fresh", "dragged"]);
+  check("and a row nobody touched sits by its age", ids(orderSessions([at("old", { createdAt: 1 }), at("new", { createdAt: 9 })])), ["new", "old"]);
+
+  /*
+   * **A drop is one write, and it lands strictly between its neighbours.** The
+   * ends are the two `null` arms: nothing above means the top of the group.
+   */
+  check("a drop between two rows lands between them", rankBetween(10, 8), 9);
+  /*
+   * ⚠ **These two read `8 - RANK_STEP` and `10 + RANK_STEP` and were both wrong**,
+   * which is what a case written from the implementation rather than from the
+   * intent buys: it agreed with an inversion that sent every drop at the top of a
+   * group to the bottom. The order is descending, so higher up the list is a
+   * *greater* number.
+   */
+  check("a drop at the top is one step above what is there", rankBetween(null, 8), 8 + RANK_STEP);
+  check("and at the bottom, one step below", rankBetween(10, null), 10 - RANK_STEP);
+  check("neighbours in the wrong order are refused rather than guessed", rankBetween(8, 10), null);
+  check("and so is a pair with nothing on either side", rankBetween(null, null), null);
+
+  /*
+   * ⚠ **Running out of room is a real answer.** At a `createdAt` around 1.77e12 a
+   * double's ulp is about 0.0005, so a one-millisecond gap admits roughly eleven
+   * bisections before the midpoint *is* an endpoint. Nobody reaches it by
+   * accident; what makes it worth detecting is that the failure is silent — two
+   * equal positions, the key tie-break decides, and the row appears not to have
+   * moved.
+   */
+  {
+    let above = 1_770_000_000_001;
+    const below = 1_770_000_000_000;
+    let steps = 0;
+    let last: number | null = null;
+    while (steps < 200) {
+      const mid = rankBetween(above, below);
+      if (mid === null) break;
+      check(`bisection ${steps} lands strictly inside`, mid < above && mid > below, true);
+      last = mid;
+      above = mid;
+      steps += 1;
+    }
+    check("bisecting one millisecond runs out rather than writing a tie", steps < 60 && steps > 0, true);
+    check("and every value it did answer was usable", last !== null, true);
+  }
+
+  /*
+   * ⭐ **A drop is never refused for arithmetic.** It used to answer *"there is no
+   * room between those two rows, move a neighbour first"* — a sentence handing the
+   * reader a problem they did not cause, cannot see and cannot act on. Where a gap
+   * is used up the group is re-spaced and the drop happens; what changes is how
+   * many rows are written, which is a fact about the request rather than about the
+   * gesture.
+   */
+  {
+    const row = (id: string, rank: number) => at(id, { createdAt: 1, rank });
+    const a = row("a", 30);
+    const b = row("b", 20);
+    const c = row("c", 10);
+    const dragged = row("d", 5);
+
+    const middle = resolveDrop([a, b, c], 2, dragged);
+    check("an ordinary drop is one write", middle.also.length, 0);
+    check("landing strictly between its new neighbours", middle.rank < 20 && middle.rank > 10, true);
+    check("a drop at the top needs no neighbour above it", resolveDrop([a, b, c], 0, dragged).rank > 30, true);
+    check("and one at the bottom none below", resolveDrop([a, b, c], 3, dragged).rank < 10, true);
+
+    /*
+     * Two rows whose positions are adjacent doubles: the gap is gone, and this is
+     * the state that used to be a sentence. Every row of the group is written,
+     * strictly descending, with the dragged one in the slot it was dropped into.
+     */
+    /*
+     * The two positions are adjacent doubles — `1e-6` below 1.77e12 is under the
+     * ulp there, so the pair is as close as a double can be and the midpoint *is*
+     * an endpoint. This is the state that used to be a sentence.
+     */
+    const packedTop = 1_770_000_000_001;
+    const tight = [row("x", packedTop), row("y", packedTop - 1e-6)];
+    check("the fixture really has no room left in it", rankBetween(packedTop, packedTop - 1e-6), null);
+    const packed = resolveDrop(tight, 1, dragged);
+    check("a gap that is used up re-spaces rather than refusing", packed.also.length > 0, true);
+    // The fixtures are cast for the driver's stubbed shapes, so the key is read
+    // through one narrow accessor rather than by widening every one of them.
+    const keyOf = (value: unknown): string => (value as { key: string }).key;
+    const all: { key: string; rank: number }[] = [
+      ...packed.also.map((entry) => ({ key: keyOf(entry.row), rank: entry.rank })),
+      { key: keyOf(dragged), rank: packed.rank },
+    ].sort((l, r) => r.rank - l.rank);
+    check("and every position it writes is distinct", new Set(all.map((entry) => entry.rank)).size, all.length);
+    check("with the dropped row in the slot it was dropped into", all[1]?.key, keyOf(dragged));
+    check(
+      "and the whole group lands above where it was, so nothing it passed can tie with it",
+      all.every((entry) => entry.rank > 1_770_000_000_000),
+      true,
+    );
+  }
 }

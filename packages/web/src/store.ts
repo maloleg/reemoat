@@ -5,10 +5,11 @@ import { forgetAsks } from "./ask";
 import { forgetChoices } from "./choices";
 import * as cp from "./cp";
 import { DaemonClient } from "./daemon";
-import { ApiError, isTransportFailure, meansLater } from "./http";
+import { ApiError, errorText, isTransportFailure, meansLater } from "./http";
 import type { InstanceConfig } from "./instance";
 import { keyOf, machineId, refOf, sessionId, type MachineId, type SessionKey, type SessionRef } from "./ids";
 import { describe, MachineConnection, type MachineState } from "./machine";
+import { mergeOptimistic } from "./sessionOrder";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
 import {
   countsAsLive,
@@ -225,12 +226,17 @@ export interface Transcript {
    *
    * The `/clear` prompt itself sits *below* the marker — `registry.ts` appends the
    * prompt and then the marker — so cutting strictly below the marker hides the
-   * prompt with the conversation it ended and leaves the divider as the top row,
-   * which is what says a cut happened at all.
+   * prompt with the conversation it ended and leaves the marker as the top row.
+   * `EventList` draws that row as the command *and* the words, because the marker
+   * is the only thing `clearContext` emits and nothing else reaches it.
+   *
+   * **There is no way back past it and that is deliberate.** A control offering to
+   * re-fetch the conversation above was drawn here for two releases and is gone on
+   * the owner's word: what the agent has been told to forget is not something this
+   * client offers to read. It is still on the daemon, and `pnpm client` still
+   * prints it.
    */
   clearedAt: number | null;
-  /** Somebody asked for what is above `clearedAt`. Paging resumes to seq 1. */
-  revealedBeforeClear: boolean;
   loadingHistory: boolean;
   stream: StreamStatus | null;
 }
@@ -475,7 +481,6 @@ export interface LoadState {
   /** The lowest seq the daemon still holds. Below it there is nothing to ask for. */
   daemonFirstSeq: number;
   clearedAt: number | null;
-  revealedBeforeClear: boolean;
   /** How many events are held. A count, so the ceiling can be asserted without 50 000 objects. */
   heldEvents: number;
   /** Roughly how many bytes those are — the ceiling that actually decides. */
@@ -493,7 +498,9 @@ export interface LoadState {
  *   - `start_of_log` — the ordinary ending, and it is **`max(1, daemonFirstSeq)`
  *     rather than 1**. See below.
  *   - `cleared` — the agent's own cut, and the bottom of what is worth showing.
- *     `revealedBeforeClear` is what carries on past it.
+ *     **Nothing carries on past it.** A `revealedBeforeClear` flag did, set by a
+ *     button at the head of the transcript, and both are deleted: a conversation
+ *     the agent has been told to forget is not one this client offers to re-read.
  *   - `held_full` — `MAX_TRANSCRIPT_BYTES`, the tab's own and **only** ceiling.
  *     Without it a terminal session — which receives no events and so never
  *     reaches `onEvents`' trim at the other end — grew on every single open, for
@@ -525,7 +532,7 @@ export interface LoadState {
  */
 export function loadStop(held: LoadState): LoadStop | null {
   if (held.loadedFrom <= Math.max(1, held.daemonFirstSeq)) return "start_of_log";
-  if (held.clearedAt !== null && !held.revealedBeforeClear) return "cleared";
+  if (held.clearedAt !== null) return "cleared";
   // One ceiling, and it is bytes — see `MAX_TRANSCRIPT_BYTES` for why the event
   // count that used to be beside this is deleted rather than raised.
   if (held.heldBytes >= MAX_TRANSCRIPT_BYTES) return "held_full";
@@ -602,8 +609,11 @@ export interface NoticeState extends LoadState {
  * is still willing) and this says `null` (nothing to report) is precisely the hole
  * that was here, so `webcheck` asserts the pair rather than either alone.
  *
- *   - `null` under a cut, because the reveal button is the thing to read there and
- *     `unfetched` is enormous by construction — everything above the marker.
+ *   - `null` under a cut, because the marker row is the thing to read there — it
+ *     draws the `/clear` that caused it and says the context was cleared — and
+ *     `unfetched` is enormous by construction, being everything above it. Nothing
+ *     offers to fetch that any more, so a sentence counting it would name a number
+ *     with no control behind it.
  *   - `floor` / `empty` — paging has reached the bottom. `showFloor` used to
  *     require `!loadingHistory`; dropped, because at `unfetched === 0` the
  *     destroyed prefix is a permanent fact about the daemon that no run can
@@ -618,7 +628,7 @@ export interface NoticeState extends LoadState {
  *     to do and the client retries by itself.
  */
 export function transcriptNotice(held: NoticeState): TranscriptNotice {
-  if (held.clearedAt !== null && !held.revealedBeforeClear) return null;
+  if (held.clearedAt !== null) return null;
   const destroyed = held.daemonFirstSeq > 1 ? held.daemonFirstSeq - 1 : 0;
   const unfetched = Math.max(0, held.loadedFrom - Math.max(1, held.daemonFirstSeq));
   if (unfetched === 0) {
@@ -703,7 +713,6 @@ function stopFor(held: Transcript | undefined): LoadStop | null {
     loadedFrom: held.loadedFrom,
     daemonFirstSeq: held.daemonFirstSeq,
     clearedAt: held.clearedAt,
-    revealedBeforeClear: held.revealedBeforeClear,
     heldEvents: held.events.length,
     heldBytes: held.heldBytes,
   });
@@ -716,28 +725,22 @@ function stopFor(held: Transcript | undefined): LoadStop | null {
  * does — it is the same fact, and which side of the socket it came from is not
  * something the reader should be able to tell.
  *
- * Newest in the batch wins, and it clears `revealedBeforeClear` with it: having
- * asked to see what was above the *previous* cut is not a standing request to
- * see everything above every future one. Clearing again means clearing again.
+ * Newest in the batch wins. It used to clear a `revealedBeforeClear` flag with it,
+ * and that flag is gone — nothing offers to read past a cut any more, so there is
+ * one field here rather than a pair that could disagree.
  *
- * A batch with no marker changes neither field, and that is the overwhelmingly
- * ordinary case — every streamed token takes it. It is written as a walk that
- * finds nothing rather than as a branch in front of one, which is what keeps
- * "newest wins" a single rule instead of two that can disagree.
+ * A batch with no marker changes nothing, and that is the overwhelmingly ordinary
+ * case — every streamed token takes it. It is written as a walk that finds nothing
+ * rather than as a branch in front of one, which is what keeps "newest wins" a
+ * single rule instead of two that can disagree.
  */
-export function nextCut(
-  clearedAt: number | null,
-  revealedBeforeClear: boolean,
-  batch: readonly StoredEvent[],
-): { clearedAt: number | null; revealedBeforeClear: boolean } {
+export function nextCut(clearedAt: number | null, batch: readonly StoredEvent[]): number | null {
   let cut = clearedAt;
-  let revealed = revealedBeforeClear;
   for (const stored of batch) {
     if (stored.event.type !== "context_cleared") continue;
     cut = stored.seq;
-    revealed = false;
   }
-  return { clearedAt: cut, revealedBeforeClear: revealed };
+  return cut;
 }
 
 /** What to do about a session's command list, given what is held and what the daemon says. */
@@ -938,7 +941,6 @@ const EMPTY_TRANSCRIPT: Transcript = {
   loadedFrom: 0,
   daemonFirstSeq: 0,
   clearedAt: null,
-  revealedBeforeClear: false,
   loadingHistory: false,
   stream: null,
 };
@@ -1066,6 +1068,30 @@ class AppStore implements StreamSink {
    * is a request per machine per poll for a value that cannot change.
    */
   private readonly rootsByMachine = new Map<MachineId, readonly string[]>();
+
+  /**
+   * Position writes that have not been answered yet, per session.
+   *
+   * The rail is derived from `sessions`, and the four-second poll replaces that
+   * array whole — so without this a row dropped into place springs back under the
+   * finger and lands again when the answer arrives. Applied at **both** places a
+   * row is written, the poll and `onSnapshot`, because a socket frame is as able
+   * to carry the pre-write value as a listing is.
+   *
+   * ⚠ **The overlay lives exactly as long as a request does, and that is the whole
+   * of the concurrency argument.** `MachineAgentsSection` needs two sequence
+   * counters for its strip because it holds a *local list* that a stale answer can
+   * repaint; here there is no second copy — the daemon's snapshot is the row — so
+   * once nothing is in flight the truth is whatever the daemon last said, whether
+   * the last write succeeded or was refused. What makes that sound is that writes
+   * for one session are **chained**: `POST /sessions/:id/meta` assigns rather than
+   * merges, so two in flight over a relay could otherwise be applied either way
+   * round and the loser would be the one this client believed had won.
+   */
+  private readonly metaWrites = new Map<
+    SessionKey,
+    { patch: { pinned?: boolean; rank?: number | null }; inFlight: number; queue: Promise<unknown> }
+  >();
   private readonly pluginsByMachine = new Map<MachineId, readonly PluginSummary[]>();
   private machinesCache: MachineState[] | null = null;
   private sessionsCache: SessionRow[] | null = null;
@@ -1802,7 +1828,7 @@ class AppStore implements StreamSink {
         key,
         ref,
         machineName: name,
-        snapshot,
+        snapshot: mergeOptimistic(snapshot, this.metaWrites.get(key)?.patch),
         daemonNow: listed.now,
         fetchedAt,
         heldConfig: holdConfig(this.rows.get(key)?.heldConfig, snapshot),
@@ -2166,9 +2192,9 @@ class AppStore implements StreamSink {
     // paging does, and `nextCut` is that rule — out of here so `webcheck` can
     // assert it, since which side of the socket a cut came from is precisely what
     // the reader must not be able to tell.
-    const cut = nextCut(current.clearedAt, current.revealedBeforeClear, events);
+    const clearedAt = nextCut(current.clearedAt, events);
 
-    this.transcripts.set(key, { ...current, events: merged, heldBytes, loadedFrom, ...cut });
+    this.transcripts.set(key, { ...current, events: merged, heldBytes, loadedFrom, clearedAt });
     /*
      * The message somebody sent is now in the log, so the copy drawn for them
      * while it was in flight goes.
@@ -2225,7 +2251,7 @@ class AppStore implements StreamSink {
       key,
       ref,
       machineName: existing?.machineName ?? this.connections.get(ref.machineId)?.state().name ?? "",
-      snapshot: session,
+      snapshot: mergeOptimistic(session, this.metaWrites.get(key)?.patch),
       heldConfig: holdConfig(existing?.heldConfig, session),
       daemonNow: existing?.daemonNow ?? unanchored,
       fetchedAt: existing?.fetchedAt ?? unanchored,
@@ -2514,13 +2540,11 @@ class AppStore implements StreamSink {
         // Only what this window brought is searched: an older marker already found
         // is the one we are stopped at, and one below it is two conversations ago.
         let cleared = latest.clearedAt;
-        if (!latest.revealedBeforeClear) {
-          for (let i = block.length - 1; i >= 0; i -= 1) {
-            const stored = block[i];
-            if (stored?.event.type === "context_cleared") {
-              cleared = stored.seq;
-              break;
-            }
+        for (let i = block.length - 1; i >= 0; i -= 1) {
+          const stored = block[i];
+          if (stored?.event.type === "context_cleared") {
+            cleared = stored.seq;
+            break;
           }
         }
 
@@ -2590,20 +2614,15 @@ class AppStore implements StreamSink {
     }
   }
 
-  /**
-   * Show what the agent was told to forget, and go and fetch it.
-   *
-   * The one control left in the transcript, and the only thing that ever grows it
-   * by hand. Everything else arrives on its own.
+  /*
+   * **There is no `revealBeforeClear` and there must not be one again.** It was
+   * the only control that ever grew a transcript by hand — a button at the head
+   * offering to fetch the conversation above the agent's own `/clear` — and it is
+   * gone on the owner's word: what the agent has been told to forget is not
+   * something this client offers to read back. `loadStop` therefore stops at
+   * `clearedAt` unconditionally, and `Transcript` carries one field rather than a
+   * pair. The events are still on the daemon; `pnpm client` still prints them.
    */
-  revealBeforeClear(ref: SessionRef): void {
-    const key = keyOf(ref);
-    const current = this.transcripts.get(key);
-    if (current === undefined || current.revealedBeforeClear) return;
-    this.transcripts.set(key, { ...current, revealedBeforeClear: true });
-    this.emitTranscripts();
-    void this.loadAll(ref);
-  }
 
   /** Read-modify-write on a transcript that may have been dropped under us. */
   private setTranscript(key: SessionKey, update: (held: Transcript) => Transcript): void {
@@ -2689,6 +2708,80 @@ class AppStore implements StreamSink {
   /** Fold an action's returned snapshot straight into the list, so the UI moves now. */
   applySnapshot(ref: SessionRef, session: SessionSnapshot): void {
     this.onSnapshot(ref, session);
+  }
+
+  /**
+   * Rename a session, pin it, or move it — the one write path for all three.
+   *
+   * It is here rather than in `SessionMenu` because two callers need it now and
+   * they need different halves: the kebab writes one field on a tap, and a drag
+   * writes a position several times a second and must not have any of them
+   * reordered. Both need the same three things — the row drawn where it was put
+   * before the daemon answers, the answer folded in when it comes, and a refusal
+   * that puts back what the daemon actually holds rather than what was on screen
+   * one edit ago.
+   *
+   * ⚠ **It reports through a callback and never draws anything itself.** `toast`
+   * lives in a `.tsx` under `ui/`, and `webcheck` imports this module with a
+   * two-field `document` — so a store that reached for it would move a driver's
+   * failure from an assertion to a module-evaluation crash. It is also the wrong
+   * direction: `store.ts` is under every screen here.
+   *
+   * Answers whether the write was **issued**, not whether it succeeded. `false`
+   * means the machine is not reachable and nothing was sent, which is the one
+   * outcome the caller has to describe in its own words — *what did not take*,
+   * "so the pin was not changed", "so the row was not moved". A bare fact about
+   * the fleet leaves the reader working out for themselves whether the thing they
+   * just tapped landed.
+   */
+  setSessionMeta(
+    ref: SessionRef,
+    patch: { title?: string | null; pinned?: boolean; rank?: number | null },
+    report: (message: string) => void,
+  ): boolean {
+    const daemon = this.daemonFor(ref.machineId);
+    if (daemon === undefined) return false;
+    const key = keyOf(ref);
+    const held = this.metaWrites.get(key);
+    /*
+     * The overlay is the *accumulated* patch, so a second drop before the first
+     * has answered draws the second rather than blinking through the first. Only
+     * the position half is overlaid: a title is drawn from the same snapshot but
+     * nothing about it moves a row, so an optimistic name would be this client
+     * claiming something it has not been told.
+     */
+    const entry = held ?? { patch: {}, inFlight: 0, queue: Promise.resolve() };
+    if (patch.pinned !== undefined) entry.patch.pinned = patch.pinned;
+    if (patch.rank !== undefined) entry.patch.rank = patch.rank;
+    entry.inFlight += 1;
+    this.metaWrites.set(key, entry);
+    // Re-fold the row it is about, so the overlay is on screen this frame rather
+    // than at the next poll.
+    const current = this.rows.get(key);
+    if (current !== undefined) this.onSnapshot(ref, current.snapshot);
+
+    const settle = (): void => {
+      entry.inFlight -= 1;
+      // Nothing else outstanding, so the daemon's own answer is the truth — which
+      // is what a refusal must fall back to as well. Dropping the overlay here is
+      // what makes the failure path "restore what the daemon last confirmed"
+      // rather than "restore what was on screen one edit ago".
+      if (entry.inFlight <= 0) this.metaWrites.delete(key);
+    };
+    entry.queue = entry.queue.then(async () => {
+      try {
+        const result = await daemon.setSessionMeta(ref.sessionId, patch);
+        settle();
+        this.applySnapshot(ref, result.session);
+      } catch (cause: unknown) {
+        settle();
+        // The row is already back to what the daemon holds; the sentence says the
+        // act did not take, which is the half a reader cannot see for themselves.
+        report(errorText(cause));
+        void this.resume("action-failed");
+      }
+    });
+    return true;
   }
 
   /**
@@ -2804,20 +2897,31 @@ export function sessionLists(state: AppState): SessionLists {
       blocked.push({ row, oldest: oldestWait(row.snapshot) });
     } else if (showsAsEnded(row.snapshot)) {
       // `showsAsEnded` and not `isTerminal`: a session the daemon ended is not
-      // one *anybody* ended, so it stays in Active — where `recentFirst` puts it
-      // near the top, which is where a conversation interrupted a minute ago
-      // belongs. Ended means somebody decided it was over.
+      // one *anybody* ended, so it stays in Active, where it keeps the place its
+      // reader gave it. Ended means somebody decided it was over.
       ended.push(row);
     } else {
       active.push(row);
     }
   }
 
+  /*
+   * **`blocked` is sorted and the other two are not, and the asymmetry is the
+   * whole of what this function decides now.**
+   *
+   * Oldest wait first, because `Sheet`'s `WaitingHere` takes `waiting[0]` and
+   * means *the one that has been waiting longest* — a queue question, and the only
+   * order here that any surface still reads.
+   *
+   * `active` and `ended` used to sort most-recent-first, and that was the rail's
+   * display order: a list that rearranged itself on the four-second poll while
+   * somebody was reading it. The rail's order belongs to its reader now
+   * (`orderSessions` in `sessionOrder.ts`, applied where `groups.ts` produces the
+   * rows), so these two are **memberships rather than orders** and sorting them
+   * would be arithmetic nothing looks at. Which bucket a row lands in is still
+   * exactly as load-bearing as it was.
+   */
   blocked.sort((a, b) => a.oldest - b.oldest);
-  const recentFirst = (a: SessionRow, b: SessionRow): number =>
-    (b.snapshot.lastEventAt ?? b.snapshot.createdAt) - (a.snapshot.lastEventAt ?? a.snapshot.createdAt);
-  active.sort(recentFirst);
-  ended.sort(recentFirst);
 
   listsCache = { blocked: blocked.map((entry) => entry.row), active, ended, countByMachine };
   listsFor = state.sessions;
@@ -2858,12 +2962,23 @@ export interface MachineGroup {
    */
   ownerDisabled: boolean;
   /**
-   * Blocked first, then most-recent first.
+   * This machine's live rows, as a membership rather than as an order.
    *
-   * Pinned rows **are** here, and are also in `pinned`. They used to be only in
-   * `pinned`, which made `liveCount` below disagree with what the section drew:
-   * that count comes from `countByMachine`, which never knew about pinning, so a
-   * machine whose one live session was pinned read "1 live" over an empty body.
+   * ⚠ **It said "blocked first, then most-recent first", and neither half is true
+   * any more.** What a reader sees is `orderSessions` applied where `groups.ts`
+   * produces the rows, so the sequence here decides nothing — the loops in
+   * `sessionGroups` fill this in bucket order only because `blockedCount` is
+   * counted off what `place` returned, which is Q3.12's rule and unrelated to
+   * sequence.
+   *
+   * ⚠ **And pinned rows are *not* here.** Pinning moves rather than copies
+   * (Q3.11), so `place` files them into `pinned` and answers `null`. The
+   * paragraph this replaces described the era when it copied, down to a
+   * `liveCount` defect that era fixed. The `liveCount` disagreement that does
+   * survive is the opposite one and is recorded rather than fixed: that count
+   * comes from `countByMachine`, which counts a pinned session as live, so a
+   * machine whose only live session is pinned reads "1 live" over a section that
+   * draws it one group higher up.
    */
   active: SessionRow[];
   ended: SessionRow[];

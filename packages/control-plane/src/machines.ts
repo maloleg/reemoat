@@ -332,13 +332,14 @@ export function nameVisibleTo(db: DatabaseSync, userId: string, label: string, e
  * ---
  *
  * **This is the last door that gives a machine a *name*. It is not the last door
- * that makes a name visible, and `PUT /v1/admin/grants` is knowingly open.**
+ * that makes a name visible, and `PUT /v1/machines/:id/grants` is knowingly
+ * open.**
  *
  * Written down because the difference is easy to lose: the five guarded routes
  * all *write* a label or a name, and a grant writes neither — it hands somebody a
  * machine that is already called something. The state it can reach is the same
- * one. ada owns a machine she labelled `laptop`; an admin grants her an ownerless
- * legacy row whose `machines.name` is `laptop`; her list now draws two
+ * one. ada owns a machine she labelled `laptop`; somebody shares with her an
+ * ownerless legacy row whose `machines.name` is `laptop`; her list now draws two
  * indistinguishable `laptop` rows through `labelOrName`, and `resolveMachineRef`
  * probes id, then her own label, then `machines.name` — first hit wins — so
  * `POST /v1/tokens {machine: "laptop"}` resolves to her own for the life of the
@@ -346,12 +347,20 @@ export function nameVisibleTo(db: DatabaseSync, userId: string, label: string, e
  *
  * Not an escalation: `POST /v1/tokens` still checks the grant after resolving, so
  * this costs reachability rather than authority. It is left open because the
- * remedy is not obviously right — refusing the grant would refuse an admin a
- * share over a collision only the grantee can see, on the one route `cpctl admin
- * grant` drives and the only remaining way to share a machine at all. The honest
- * state is a sentence here rather than a guard nobody weighed, which is the
- * `sessionOf` rule read the way round it is usually needed: say what is not
- * covered, so the next reader does not infer coverage from the four checks above.
+ * remedy is not obviously right — refusing the grant would refuse a share over a
+ * collision only the **grantee** can see, and the sharer cannot see it either.
+ *
+ * ⚠ That last sentence used to end "on the one route `cpctl admin grant` drives
+ * and the only remaining way to share a machine at all", which is no longer
+ * true and was the argument for leaving *the admin route* open rather than for
+ * leaving *this state* open. `PUT`/`DELETE /v1/admin/grants` are deleted and
+ * sharing is the owner's `PUT /v1/machines/:id/grants`; the collision reasoning
+ * survives the move unchanged, because it was never about who was asking.
+ *
+ * The honest state is a sentence here rather than a guard nobody weighed, which
+ * is the `sessionOf` rule read the way round it is usually needed: say what is
+ * not covered, so the next reader does not infer coverage from the four checks
+ * above.
  */
 export function nameVisibleToGrantees(db: DatabaseSync, machineId: string, name: string): boolean {
   const owner = ownerOf(db, machineId);
@@ -414,7 +423,7 @@ export function createOwnedMachine(
       now,
     );
     /*
-     * Every scope, not the two `cpctl admin grant` defaults.
+     * Every scope, not the two `cpctl share` defaults.
      *
      * `machine:admin` is what guards `DELETE /sessions/:id/workspace` on the
      * daemon, so a grant without it means the owner of a machine cannot remove a

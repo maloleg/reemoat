@@ -54,6 +54,14 @@ export function depthOf(route: Route): number {
     case "session":
       return 1;
     /*
+     * A detail reached from a link and left by one fixed destination, which is
+     * `session`'s shape — so it shares `session`'s depth and `session`'s answer
+     * in {@link upFrom}. Two documents are the same depth, so moving between them
+     * animates nothing, which is what reading a cross-reference should look like.
+     */
+    case "legal":
+      return 1;
+    /*
      * A plugin's screen is one depth inside its own stack and has nothing deeper,
      * which is what makes every navigation *within* it `null` — the same shape
      * `/new` has, and for the same reason: there is one screen.
@@ -171,6 +179,9 @@ export function sheetKind(route: Route): string | null {
     case "home":
     case "gate":
     case "session":
+    // A document is a screen of its own, drawn over nothing. It is not a pop-up,
+    // and `isOverlayPath` does not list it either — the two have to agree.
+    case "legal":
       return null;
   }
 }
@@ -363,6 +374,8 @@ export function sheetTitle(route: Route): string | null {
     case "home":
     case "gate":
     case "session":
+    // No panel head: the document draws its own `<h1>`, which is its title.
+    case "legal":
       return null;
   }
 }
@@ -511,6 +524,15 @@ export function upFrom(route: Route, under: string, origin: string | null = null
     case "gate":
       return null;
     case "session":
+      return "/";
+    /*
+     * ⚠ **A destination, and never `null`.** `App` hands this value straight to
+     * `setTelegramBack`, which draws **✕ Close** on `null` — so a document opened
+     * from the sign-up form inside the mini app would have no way back to it that
+     * was not closing the whole app. `"/"` rather than a history entry, which is
+     * this file's standing rule for every leading control.
+     */
+    case "legal":
       return "/";
     case "new":
     case "plugin":

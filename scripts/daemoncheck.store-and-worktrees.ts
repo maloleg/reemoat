@@ -63,12 +63,12 @@ process.stdout.write("\nthe database, across a restart\n");
   const dbPath = join(sandbox, "store", "reemoat.db");
   const old = now - 30 * 24 * 60 * 60 * 1000;
   const week = 7 * 24 * 60 * 60 * 1000;
-  const persisted = (id: string, meta: { title?: string | null; pinned?: boolean } = {}) =>
+  const persisted = (id: string, meta: { title?: string | null; pinned?: boolean; rank?: number | null } = {}) =>
     rowFor(id, join(sandbox, "store-work", id), meta);
 
   {
     const first = openStores({ path: dbPath, instanceId: "i_writer" });
-    first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", pinned: true });
+    first.sessions.put({ ...persisted("s_named"), title: "Fix the reconnect", pinned: true, rank: 1_700_000_000_123.5 });
     first.sessions.put(persisted("s_plain"));
     first.credentials.save("claude", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01");
     first.credentials.save("kimi", "KIMI_API_KEY", "kimi-key");
@@ -290,14 +290,29 @@ process.stdout.write("\nthe database, across a restart\n");
     [{ id: "ca_abcd1234", name: "Codex · GPT", harness: "codex", system: "openai", model: "gpt-5-codex", createdAt: now }],
   );
   const named = rows.find((r) => r.id === "s_named");
-  // v5's two columns, and the only ones on this table meant to change after
-  // creation — so they are the only ones a `DO UPDATE` clause has to carry.
+  // The record's mutable preferences — the ones a later touch is *supposed* to
+  // rewrite, and therefore the ones a `DO UPDATE` clause has to carry. What may
+  // never be in that clause is identity, which is the property that paragraph is
+  // actually about.
   check("a title survives the restart", named?.title, "Fix the reconnect");
   check("and so does a pin", named?.pinned, true);
+  /*
+   * A position outlives the process, and it outlives it as a **fraction**. The
+   * column is REAL because a drop between two adjacent milliseconds has to land
+   * strictly between them; stored as INTEGER it would round to a tie, and a tie is
+   * a row that appears not to have moved.
+   */
+  check("and so does a position, fraction included", named?.rank, 1_700_000_000_123.5);
   const plain = rows.find((r) => r.id === "s_plain");
   // `null` and `false`, never `"null"` and `true`: the columns are NULL for every
   // row written before v5, and `String(null)` would name a session "null".
   check("a session written without them reads back unnamed", plain?.title, null);
+  /*
+   * `null`, never 0 — `Number(null)` is 0, which is not "no position" but the
+   * *oldest* one there is, so a coercion on the way out would move every row that
+   * predates this column to the bottom of its folder.
+   */
+  check("and one nobody positioned follows its age rather than leading the list", plain?.rank, null);
   check("and unpinned", plain?.pinned, false);
 
   check("the file is stamped with the version it now matches", Number(second.db.prepare("PRAGMA user_version").get()?.["user_version"]), SCHEMA_VERSION);
@@ -593,6 +608,22 @@ process.stdout.write("\nthe database, across a restart\n");
       daemon_shutdown: "kept",
       daemon_restarted: "kept",
       config_changed: "kept",
+      /*
+       * ⚠ **Kept, and it is the reason this table is a `Record` rather than a
+       * list.** `parked` is the daemon letting an idle agent go while keeping the
+       * conversation, so the row is one somebody is expected to come back to —
+       * the strongest case there is for keeping it. But it is deliberately *not*
+       * in `DAEMON_EXIT_REASONS` (the boot pass must not un-park), and
+       * `isActiveRow` read that narrow predicate: so on the day the reason was
+       * added, every parked session became inactive, swept by age and ranked
+       * under the cap. Q2.222's incident, re-aimed at the quiet sessions.
+       *
+       * Nothing else would have caught it. `isActiveRow` has no `switch` to go
+       * non-exhaustive and the prune has no other assertion about a reason it has
+       * never seen; this line is the whole net, and it was red before
+       * `keepsItsConversation` existed.
+       */
+      parked: "kept",
     };
     const reasons = Object.keys(byReason) as ExitReason[];
     for (const reason of reasons) seed(row(`s_b_${reason}`, reason), stale);

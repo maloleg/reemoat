@@ -1658,6 +1658,24 @@ export class PluginHost {
           ended = false;
           return;
         }
+        /*
+         * ⚠ **A released agent has not ended anything, and this is the one
+         * surface with no compile-time partition to say so.**
+         *
+         * `parked` is an `ExitReason`, so a parked session arrives here with an
+         * `exit` like any other — and the latch above is reset by the wake, so
+         * without this line every conversation left quiet fans `session.ended`
+         * once per idle period, for ever. The shipped board plugin answers that
+         * hook by moving the card to the last column, so a conversation nobody
+         * had touched for half an hour was marked finished and was not.
+         *
+         * `SessionStatus`'s own `parked` member exists to make exactly this
+         * unsayable one layer down; there is no equivalent here, because a hook
+         * name is a string. If a plugin should ever learn about this, it wants a
+         * `session.parked`/`session.resumed` pair so the two stay symmetric —
+         * `session.ended` cannot carry it, having no counterpart to undo it.
+         */
+        if (snapshot.exit.reason === "parked") return;
         if (ended) return;
         ended = true;
         /*

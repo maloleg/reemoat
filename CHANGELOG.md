@@ -25,6 +25,348 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-11
+
+### Added
+
+- **Terms of Use, an Acceptable Use Policy and a Privacy Policy, at `/terms`,
+  `/acceptable-use` and `/privacy`.** Readable with no account, because the sign-up
+  form links to them and because they are the URLs somebody is given when they ask
+  what the terms are. Signing up now needs a ticked box, which gates the form and
+  is refused by `POST /v1/register` without an `acceptedTerms` field — but nothing
+  is stored, so this instance still cannot prove what anybody agreed to and does
+  not claim to. All of it is off unless `REEMOAT_CP_LEGAL_DOCUMENTS` says
+  otherwise: an instance that has not claimed the documents draws no pages, no
+  box, and refuses nobody. The
+  documents are adapted from the 37signals policies (CC BY 4.0, credited on the
+  page) and `github/site-policy` (CC0), and they name **one operator** — a fork
+  must replace the `OPERATOR` block in `packages/web/src/legal/operator.ts`. English
+  only.
+
+- **An idle agent is now shut down and the conversation kept.** A session nobody has
+  touched for `REEMOAT_IDLE_PARK_MINUTES` — 30 by default, on by default, `0` to
+  switch it off — is stopped with a new `parked` exit reason: the process goes, the
+  conversation, the worktree and the branch stay, and **the next message brings it
+  back**. There is no Resume control for one, deliberately; the composer is the whole
+  affordance. Measured before it was built: a resident agent is ~397 MB and comes
+  back in ~1.3s at the median, so a machine holding three sessions nobody had opened
+  in 48 hours was holding 1 384 MB to save that. It draws as an ordinary idle session
+  and says nothing, Stop still works on it, and its model and mode chips stay live —
+  a tap is recorded and applied when the agent returns.
+
+- **`GET` and `PATCH /settings` on the daemon, and a control on the machine's
+  settings screen** for the number above. A saved value **overrides**
+  `REEMOAT_IDLE_PARK_MINUTES`, which is therefore the default for a machine nobody
+  has set; it takes effect without a restart. The daemon's configuration is still env
+  only — this is the narrower class of setting whose owner is the person using the
+  machine rather than the one who deployed it.
+
+- **`parked` joins the `SessionStatus` and `ExitReason` unions**, and it is neither
+  `interrupted` (the daemon owes it back by itself) nor `exited` (somebody ended it).
+  A client older than this release has never heard of it; it keeps the composer and
+  reads the session as live, which is the safe direction, but it will label the exit
+  `ended: parked`. Deploy the control plane, which carries the web client, before the
+  daemons.
+
+- **Give up a share somebody made to you** — `DELETE /v1/machines/:id/grants/me`,
+  driven by `cpctl leave <machineId>`. Sharing writes a permanent row for any user
+  id with nothing asked of the person named, and the three verbs beside it all
+  resolve through ownership — so until now the only account that could undo a share
+  was the one that made it. Your own grant only, and never on a machine you own:
+  the machine list is a join over `grants`, so an owner without one would own a
+  machine that appears in no list. Retiring it is the verb for that.
+- **Share a machine you own** — `GET` · `PUT` · `DELETE /v1/machines/:id/grants`,
+  driven by `cpctl shares` / `share` / `unshare`. The other person is named by
+  **user id**, which they read off `cpctl me` and tell you: there is no directory
+  an ordinary account may read, and a name lookup here would be a way for anyone
+  signed in to test whether an account exists. Your own grant is refused on both
+  writes — narrowing it would take `machine:admin` off your own hardware, and
+  removing it would hide the machine from its owner. Retiring the machine is the
+  verb for giving up your own access.
+- **`enrolledBy` on `GET /v1/machines`**, and drawn on the machine row: whose
+  enrollment code a machine enrolled with, when that was not yours. It is the
+  disclosure for a composition no single refusal closes — revoke somebody's
+  machine, register a new one under the name that frees, enroll it on your own
+  hardware, and their list draws the name they lost, owned and online. Every step
+  has to stay, so the composition is made visible instead. A name is something to
+  recognise rather than an alarm: the installer's wizard enrolls on an admin's
+  code too.
+
+  Machines that enrolled **before** this column existed — which on the day of the
+  upgrade is all of them — say *somebody this control plane did not record* rather
+  than nothing, because nothing is what a machine you enrolled yourself draws and
+  folding them together would have left the disclosure silent for exactly the
+  population it is for. There is no backfill: the table it would read from is swept
+  seven days after a code is used.
+
+  Two limits, stated because a disclosure nobody has bounded gets trusted past what
+  it says. It names who **minted** the code, never who redeemed it — `POST
+  /v1/enroll` is public and a daemon presents no account, so a code of your own
+  that leaks and is redeemed elsewhere reports you. And it moves when the machine
+  list is read, on a wake or a reload, not on the four-second poll.
+- The session rail is ordered by you. Grab a chat with the mouse and drag it up or
+  down inside its folder; on a touch screen hold it briefly first, so the gesture
+  and scrolling the list stay apart. Drop it in Pinned to pin it, and drag it back
+  out to unpin. `Alt`+`↑`/`↓` on a focused row does the same from a keyboard. The
+  order is stored per machine on the daemon, so one set from a laptop is the one a
+  phone opens.
+- **Up one folder** in the New session directory picker, beside the path — a 44px
+  square with a ground of its own, sized for a thumb. Always drawn and greyed out
+  at the top of the tree rather than appearing when it becomes usable; the path
+  itself is still tappable segment by segment.
+- A way back from **Import code**. Its ✕, Escape and a tap outside now return to
+  New session with the machine, agent and folder still chosen, and there is a
+  chevron that says where it goes. Closing it mid-upload also stops the upload,
+  which used to hold the machine's import lock.
+- A second control on the error screen: **Go to sessions**, beside Reload. A
+  screen that throws every time it renders made Reload a loop.
+
+- An instance can point somebody who has no machine at somewhere to get one.
+  `REEMOAT_CP_MACHINES_OFFER_URL` in the control plane's environment takes an
+  `https://` address, and the three screens that already print the one-line
+  installer draw a second, quieter link beside it. Environment-only on purpose:
+  it names one particular shop, and a runtime setting would draw it on the
+  Server settings screen of every instance. **Empty by default**, and an instance that never sets it
+  looks exactly as it did before. The signed-in person's email address travels in
+  the link as `?email=`, so a checkout on the far side can prefill its own form;
+  it goes only when they tap it, and every response here already carries
+  `referrer-policy: no-referrer`, so nothing else about the instance goes with it.
+  The address is configured rather than compiled in because this is AGPL software
+  and forks run their own control planes.
+  The offer is drawn only where a machine may still be added: at or over the
+  machine limit a bought host would be refused at the dial, so offering one there
+  would sell something this control plane will not connect.
+
+### Changed
+
+- **A machine at its session ceiling now releases an idle agent instead of refusing.**
+  `POST /sessions` and any wake take the least recently used **idle** slot rather than
+  answering `429`, and a turn in flight, an unanswered permission and an unanswered
+  question are never taken at any ceiling. A create is still refused when every live
+  session is genuinely busy, and the sentence says so. The ceiling therefore counts
+  agents resident rather than conversations held.
+
+- **An admin may no longer mint an enrollment code over a live one somebody else
+  made.** `POST /v1/admin/machines/:id/enrollments` answers `409 code_outstanding`.
+  Minting supersedes the machine's current code, so on a machine that is owned but
+  has not enrolled yet — which is what an install in progress looks like — an admin
+  minting here killed whatever the owner was holding: their install failed against
+  the deliberately undifferentiated `409 code_unusable`, nothing on their screen
+  said why, and it could be repeated for as long as somebody cared to, because
+  `enrolled_at` never left NULL and the guard beside it never started applying.
+  The two uses that stay are the two it was for: `install.sh`'s wizard mints on a
+  row that has no code at all, and an admin re-minting their own supersedes only
+  what they are replacing.
+- **Deleting an account no longer strands a machine it was the last person on.**
+  `DELETE /v1/admin/users/:id` already revoked the machines the account *owned*; a
+  machine it merely held a grant on was left ownerless, enrolled, dialling the
+  relay and in nobody's list. That is the failure user-owned machines exists to
+  remove, and it was also a way to *manufacture* the state the two admin guards
+  protect — delete the last grantee, and an ownerless enrolled row becomes
+  adoptable with every scope. Scoped to machines the deleted account was actually
+  on: a legacy row that was already grantless is left exactly as it was.
+- **An admin may no longer take a machine off the person who has it.** `PUT
+  /v1/admin/machines/:id/owner` answers `403 machine_owned` for a machine with a
+  live owner other than the target, and `403 machine_granted` when adopting an
+  ownerless machine somebody already holds a grant on unless they are the one
+  being handed it. What it still does is what it was written for: adopting a row
+  registered before ownership existed, and re-labelling a machine for the owner it
+  already has. Adopting now also burns that machine's outstanding enrollment codes
+  — the guard below protects minting, and a code kept from before an adoption
+  would otherwise still replace the daemon afterwards.
+- **`POST /v1/admin/machines/:id/enrollments` answers `409 machine_enrolled`** for
+  a machine that is enrolled and has an owner or grantees. Redeeming a code
+  retires the running daemon's tunnel credential, so minting one for somebody
+  else's live machine does not read it — it replaces it, and every grant-holder's
+  traffic lands in the new process while the owner's list still says owned and
+  online. Its owner mints their own. A machine that has never enrolled is
+  untouched, which is what the installer's wizard does.
+- **Nothing in the rail reorders itself any more.** Rows used to sort by their most
+  recent event, and a chat waiting on you jumped to the top of its folder — so the
+  list moved under your thumb on every poll. A chat waiting on you still says so
+  three ways: the ring on its status dot, its title going semibold, and the count
+  on its folder's header. A new session appears at the top of its folder, which is
+  now the only thing that moves by itself.
+- The back and close controls in every pop-up are bigger — 32px of ink instead of
+  24px, with the same 44px target they always had.
+- The directory picker writes `~` instead of your home directory in full, and the
+  path reads as one string rather than one with wider gaps between some of its
+  slashes. The session header cuts the same prefix.
+- The `in <folder>` line at the foot of New session is gone. It named the folder
+  the picker above it was already showing.
+- A row you press down on says so straight away, instead of waiting out the hold
+  in silence — holding still is what starts a drag, and nothing on screen was
+  saying so. It now lifts under a shadow rather than a change of tone, which is
+  the cue a thumb covering the row does not hide, and a phone gives a short
+  vibration at the moment the chat comes off the list.
+- **The ⋮ menu is drawn on every row in the rail.** It used to appear on hover,
+  except on pinned rows, which drew it always — so two rows a few pixels apart,
+  alike in every other way, had a different number of controls. A row's only menu
+  should not be hidden until you are already pointing at the row.
+
+### Removed
+
+- **`PUT` and `DELETE /v1/admin/grants`, and with them `cpctl admin grant` and
+  `cpctl admin ungrant`.** A grant is full access to a machine that runs coding
+  agents as its owner, with no sandbox — and these wrote one for *any* machine on
+  an admin credential alone, with no consent from the person whose machine it was
+  and nothing on any screen afterwards. Sharing is the owner's verb now (below).
+  The two `cpctl` verbs answer with the replacement rather than "unknown command",
+  because the old spellings are in scripts and in shell history. `GET
+  /v1/admin/grants` is kept: seeing who holds what is not the power that was
+  removed, and an operator who cannot read that table cannot answer "why can this
+  person reach that machine".
+
+- The context-window ring is gone from the web client. It reported how full an
+  agent's window was and reported nothing at all on kimi, which never sends the
+  notification it was built on, and nothing on any session waiting for its agent —
+  a control that was blank for most agents most of the time, in a row where
+  everything else changes what the next turn does. Nothing changed on the daemon:
+  the reading is still measured, still on every session snapshot, and still
+  printed by `pnpm client`.
+
+### Fixed
+
+- **A chat crossing into or out of Pinned jumped.** Making that group a row taller
+  pushes the folder below it — and the chat being carried — down by exactly one
+  row, which the drag did not know about because it measured from where the row had
+  been when the gesture started. It measures from where the row actually is now,
+  every frame. The room a group makes also animates on the same clock the rows do,
+  instead of appearing in one jump under rows that were still sliding.
+- **The last place in Pinned could not be reached.** Aiming at the end of the group
+  unpinned the chat instead: "still pinned, at the end" was a band half a row tall
+  with unpinning on the other side of it. Carrying a chat out of Pinned now takes a
+  deliberate movement past the group, and says **Release to unpin** at the pointer
+  while you are out there — it is the one outcome of a drag that dragging back does
+  not undo. (Fixed twice: the first attempt widened the boundary only for chats
+  already pinned, which left the same slot unreachable for one arriving from a
+  folder. The boundary between two groups is now simply whichever is nearer.)
+- **`Alt`+`↑`/`↓` on a pinned chat could move a chat on another machine.** The
+  keyboard walked every pin in the fleet while the rail draws only the selected
+  machine's, so the keypress computed a position among rows that are not on screen
+  — usually looking like nothing happened, and occasionally rewriting the positions
+  of another machine's pins.
+- **Moving a chat down by exactly one place did nothing**, in silence — which is
+  why the last slot of a group could not be reached from the row directly above
+  it, and why "I still cannot put anything in the last place in Pinned, I can only
+  carry the last one higher" was reported after the boundary was fixed. The drop
+  compared two positions counted in two different ways, one of them counting the
+  chat being dragged and the other not, and treated a genuine one-place move as
+  landing where it started.
+- **Pinned rode on top of the sessions under it** while a chat was carried into it
+  from a folder. Moving rows aside does not make room for one; the group being
+  joined now takes the height and the group being left gives it back, so nothing
+  past either of them moves.
+- **The ⋮ menu on a row stopped opening.** The drag took the pointer at the press
+  and the button never heard the click meant for it. The row is the drag surface
+  everywhere except where it already carries a control.
+- **Dragging on a phone did nothing, through four attempts.** The first two treated
+  a cancelled pointer as the gesture ending, which is right for a mouse and wrong
+  for a finger: on a touch screen it means the browser has decided the gesture is
+  its own, which it does the moment it commits to a scroll. The third moved the
+  drag itself onto touch events, which the browser goes on delivering. All three
+  left the *setup* — the hold, the listeners, the refusal of the platform's own
+  long press — in the pointer press, and that is the assumption none of them
+  questioned: that the pointer press arrives before the browser has decided what
+  the touch is for. Nothing requires that, and on a browser that decides first,
+  every one of those fixes was one event too late, every time. A finger's gesture
+  now begins, moves and ends on the touch stream, and the pointer handlers say in
+  their own text that they are a mouse's.
+- **A drag showed a line instead of moving anything.** The rows now step aside as
+  you go, exactly as they do on the agent list, and the drop changes nothing you
+  can see — which is what tells you it landed where you left it.
+- **Dragging a chat out of Pinned now unpins it** even when the folder it belongs
+  to is collapsed or hidden by the filter. It was refused when there was no list on
+  screen to drop into.
+- **"There is no room between those two rows"** is gone. A drop is never refused
+  for arithmetic; the positions around it are re-spaced and the drop happens.
+- **A drop at the top of a group sent the chat to the bottom.** Two branches of the
+  position arithmetic were the wrong way round, and the test covering them had been
+  written from the code rather than from what a drop means, so it agreed.
+- **Clicking a chat in the rail with the mouse stopped opening it**, which arrived
+  with the mouse drag and had not been noticed. Taking the pointer at the press
+  hands every later event to the row's wrapper, the click included, so the button
+  inside it that does the opening was never in the click's path. The pointer is
+  taken when the drag actually starts instead. Found by driving a real browser
+  through the debugging protocol rather than by reading.
+- **Dragging a session with the mouse did nothing.** A mouse was being asked to
+  long-press, which is a touch idiom: a finger has to be told apart from scrolling
+  the list, and a button does not. A press and 4px of movement start the drag now.
+- **And on a daemon that had not been restarted it could not have worked, silently.**
+  The column that stores the order arrives with the daemon's own migration. Trying
+  to drag a row on such a machine now says so. **Restart the daemon once after
+  updating.**
+
+- The composer is one box. The message field, the attachment chips, the paperclip,
+  the agent's controls and Send now sit inside a single rounded container instead
+  of a bordered field, a bordered send button and a separate strip of bordered
+  pills below it — seven outlines in two rows at the bottom of a phone. The chips
+  lost their borders with it: the box is what says a control is there, and each
+  chip's chevron is what says a list opens. A chip that cannot be tapped now dims
+  by dropping its ink rather than by fading the whole control, which is a
+  correction as much as a restyle — at 40% opacity the border it used to rely on
+  was already below the contrast it existed to hold. The rule that used to run
+  above the composer is gone; so is the backdrop blur, which was blurring a
+  backdrop nothing ever scrolled under.
+- Send is a circle with an arrow in it. A paper plane is a mail metaphor for
+  something that is not mail, and a filled hard-cornered square is the shape a
+  **stop** control has — in the one slot where Stop appears a second after a turn
+  starts. All four things that occupy that slot take the circle, so it never
+  changes shape under a thumb.
+- The mode chip says what it is set to and no longer also says "Mode". The glyph
+  beside it, its fixed position and its accessible name already said so, and the
+  word was spending width on the narrowest screen next to the value it was pushing
+  into a truncation. A chip now draws its own name exactly where no glyph does.
+- The controls below the message field rest a shade quieter, and are grouped by
+  spacing: a wider gap where the kind of control changes — the paperclip acts on
+  the message, the chips describe the turn, Send is the action — and a narrower one
+  inside each group.
+- Send sits on that row too, level with the attach control and the agent's
+  settings, which is what makes the composer read as one object rather than as a
+  field with a toolbar under it. On a narrow phone the row is now over its width
+  and the chip values truncate, which is what they have always done there under
+  pressure; there is no arrangement in which three pills and two icon buttons fit
+  a 390px line.
+- The empty composer says `Type / for commands` instead of `message…`, because
+  `/` is the one thing in the box that nothing on screen advertised and an empty
+  box already reads as somewhere to write. It still says just `message…` on a
+  session whose agent is away, where that key would open nothing.
+- Send is smaller: the same 32px box as the controls beside it, so the row is one
+  height end to end and the filled circle is no longer the loudest object in the
+  composer. It still reaches the 44px tap minimum, the same way the chips do.
+- The picker sheet slides back down when it is dismissed instead of vanishing
+  between two frames, its section headings carry the same icon as the chip that
+  opened them, and the check beside the chosen row is heavier and now sits on the
+  line of the name rather than above it.
+- That sheet has two heights and a grab bar that stays put, and it moves with your
+  finger rather than after it. It opens at about three fifths of the screen with
+  its options not scrolling; dragging it, or dragging the list, takes it exactly as
+  far as you drag, and it settles onto whichever height is nearer when you let go —
+  full, where the options scroll, or back to where it started. Pulled far enough
+  below that, it closes. The bar used to scroll away with the first screenful of a
+  long model list and did nothing when you pulled on it, and every control opens to
+  full height now, not only the ones with more rows than fit. The sheet also stops
+  moving when it arrives: it used to spring back past the height it had settled on
+  and wind round to it a second time.
+- Less room above the grab bar at the top of that sheet, and a little more between
+  a control's icon and the word beside it — at four pixels the two were reading as
+  one shape.
+- On a phone the agent's settings open as a bottom sheet over a scrim instead of
+  as a small panel above the box, and the model control folds into the mode
+  picker rather than keeping a chip of its own — so the row is the attach button,
+  mode, effort and Send. On a desktop nothing changes: the same panel, in the same
+  place, with the model chip still on the row. Both are drawn and the browser
+  chooses, so a window dragged across the boundary can never show a picker that is
+  not there. The sheet is closed by Escape, by the scrim, or by choosing a row;
+  the platform Back button does not close it.
+- A chip is as wide as what it says again, capped at 128px and clipped past that,
+  and the space inside it between the glyph, the value and the chevron came down
+  from six pixels to four. Each chip used to hold open the width of the longest
+  value its control could ever show, which is why nothing moved when a value
+  changed — and why three chips sat side by side mostly empty. That trade is
+  reversed: they hug their content, and a value that grows moves its neighbours
+  again.
+
 ## [0.7.0] - 2026-09-06
 
 ### Changed
@@ -991,6 +1333,7 @@ holds them in full, with what would settle each.
 - Three agent-login questions on macOS are written but unmeasured, all settled by
   one real device-code login.
 
-[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/rends-east/reemoat/releases/tag/v0.8.0
 [0.2.0]: https://github.com/rends-east/reemoat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rends-east/reemoat/releases/tag/v0.1.0

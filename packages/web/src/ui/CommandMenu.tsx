@@ -19,8 +19,9 @@ import { Icon, MENU_HEADING, MENU_PANEL, menuRow, Spinner } from "./bits";
  * direction by asking the window is breakpoint-state-in-JavaScript wearing a
  * different hat. A caret-following popup would break the same rule twice over —
  * it needs a mirror element and text metrics — and on a phone it would put the
- * panel under the thumb that is typing. Anchored to the composer's full width
- * instead, above the box, where the soft keyboard cannot cover it.
+ * panel under the thumb that is typing. Anchored to the composer's box instead —
+ * its full width, flush with its own edges — above it, where the soft keyboard
+ * cannot cover it.
  *
  * Both lists are drawn here and neither is computed here: `active` is an index
  * into whichever one is showing, and the arrow keys that move it live in the
@@ -109,7 +110,12 @@ export function CommandMenu({
     // and `aria-label` already carries the same words.
     <div
       ref={boxRef}
-      className={`absolute right-3 bottom-full left-3 mb-1 ${MENU_PANEL} max-h-[min(18rem,50dvh)]`}
+      // `inset-x-0` rather than the `left-3 right-3` this carried: the panel is
+      // positioned against the composer's **box** now — that is where `relative`
+      // sits — and the box is already inset from the window by its wrapper, so a
+      // second 12px would draw a completion panel narrower than the field it
+      // completes.
+      className={`absolute inset-x-0 bottom-full mb-1 ${MENU_PANEL} max-h-[min(18rem,50dvh)]`}
     >
       {/* Through `labelFor`, not `stage.name`: this heading is one tap from the
           `/effort` row that opened it, and on kimi the agent's own word for that

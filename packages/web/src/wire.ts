@@ -607,9 +607,28 @@ export type SessionStatus =
   | "stopping"
   | "exited"
   | "failed"
-  | "interrupted";
+  | "interrupted"
+  /**
+   * The daemon let go of this session's agent because nobody was using it.
+   *
+   * Terminal in the same sense `interrupted` is — no process on the other end —
+   * and it must not be drawn like it. `interrupted` means something happened to
+   * the daemon and it is coming back on its own; this means nothing happened at
+   * all, the conversation is whole, and it comes back when you type into it. The
+   * one thing it may never read as is *ended*: nobody ended it.
+   */
+  | "parked";
 
-export const TERMINAL_STATUSES: readonly SessionStatus[] = ["exited", "failed", "interrupted"];
+export const TERMINAL_STATUSES: readonly SessionStatus[] = [
+  "exited",
+  "failed",
+  "interrupted",
+  // Terminal because there is no agent to ask anything of — which is all
+  // `isTerminal` has ever meant here. What it does *not* decide is how the
+  // session is drawn: that is the four-way partition below, where `parked` is
+  // its own arm precisely so it lands in neither "coming back" nor "ended".
+  "parked",
+];
 
 export function isTerminal(status: SessionStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
@@ -636,6 +655,28 @@ export function hasLiveAgent(status: SessionStatus): boolean {
   return AGENT_LIVE_STATUSES.includes(status);
 }
 
+/**
+ * A machine's own preferences. Hand-mirrored from `src/registry.ts`.
+ *
+ * The number and nothing else: this carried a `source` saying whether the value
+ * was stored here or came from the machine's env file, and the line it fed was
+ * removed as noise — the daemon's copy of this interface holds the argument.
+ *
+ * ⚠ **The name is the daemon's, and matching it is what makes this mirror
+ * checked at all.** `webcheck.plugin-protocol.ts` guards every interface here
+ * against the daemon's own by looking the *name* up in `src/`, and a name with no
+ * counterpart hits its `continue` and is never compared. Its floor is a floor on
+ * how many pairs were compared, so a pair that was skipped does not lower it —
+ * which makes the miss invisible in both directions. This was `MachineSettings`
+ * for one release and the sweep covered none of it; the docblock over that
+ * `continue` already records the same failure for three other types, one release
+ * earlier. Renaming either side without the other switches the guard off silently.
+ */
+export interface MachineSettingsView {
+  /** Minutes a conversation may sit untouched before its agent is shut down. `0` never does. */
+  idleReleaseMinutes: number;
+}
+
 export type ExitReason =
   | "stopped"
   | "agent_exited"
@@ -659,7 +700,12 @@ export type ExitReason =
    * daemon exit: nothing brings these back on its own. Signing in again does,
    * because that is the same person reversing it.
    */
-  | "agent_signed_out";
+  | "agent_signed_out"
+  /**
+   * The daemon released an idle agent and kept the conversation. Typing brings it
+   * back; nothing else does, and nothing else needs to.
+   */
+  | "parked";
 
 /**
  * The exits that mean the daemon went away rather than that anybody decided.
@@ -670,11 +716,12 @@ export type ExitReason =
  * behaviour turns on, and the daemon uses the identical function to decide which
  * sessions it brings back.
  *
- * The exhaustive list, and why each of the other five is out: `stopped` is a
+ * The exhaustive list, and why each of the others is out: `stopped` is a
  * human's decision — the point. `start_failed`/`start_timeout` never had a
  * conversation. `agent_exited` is the agent quitting under a daemon that never
  * went anywhere, so the *daemon* did not end it. `agent_kill_failed` is legacy
- * and ambiguous.
+ * and ambiguous. `agent_signed_out` is a person to reverse it. And `parked` is in
+ * neither this list nor `FINAL_EXIT_REASONS` — it is its own part, see `isParked`.
  *
  * **A copy is only worth having while it is the same copy**, and this one was
  * wrong for exactly one release: `config_changed` was added to `src/events.ts`
@@ -695,8 +742,8 @@ export const DAEMON_EXIT_REASONS: readonly ExitReason[] = [
  *
  * Written out rather than derived, because it is what `endedWithDaemon` actually
  * tests — and the direction of that test is the whole point. `webcheck` asserts
- * the two lists partition the daemon's union, so this one cannot silently fall
- * behind either.
+ * that these two lists **plus `parked`** partition the daemon's union — three
+ * parts, not two — so neither can silently fall behind.
  */
 export const FINAL_EXIT_REASONS: readonly ExitReason[] = [
   "stopped",
@@ -864,6 +911,15 @@ export interface ElicitationField {
   max: number | null;
   format: "email" | "uri" | "date" | "date-time" | null;
   default: string | number | boolean | string[] | null;
+  /**
+   * The key of the field this one is an alternative answer to, or `null`.
+   *
+   * Optional on the wire, because a daemon older than it simply does not send it —
+   * and `null` is what an agent that declares nothing already produces, so absent
+   * and "no" are the same state here rather than two. See `src/events.ts` for what
+   * declares it and why no key is ever parsed to find out.
+   */
+  alternativeTo?: string | null;
 }
 
 export interface ElicitationRequestEvent {
@@ -984,6 +1040,22 @@ export interface SessionSnapshot {
   title?: string | null;
   /** Kept at the top of its group, and never dropped by a `?limit=` cut. */
   pinned?: boolean;
+  /**
+   * Where this session sits in the list, or `null` for wherever its age puts it.
+   *
+   * ⚠ **Three-valued, and `undefined` is the compatibility signal rather than a
+   * missing value.** A daemon that can store an order always sends the field, so
+   * an absent one names a daemon that cannot — and that machine's rows lose the
+   * drag and the Move items while everything else about them works. `null` is the
+   * ordinary answer from a daemon that can: nobody has moved this row.
+   *
+   * Nothing branches on `DAEMON_VERSION`; an old daemon is known by the shape of
+   * what it answers, which is `compatibility.md`'s rule 1. And the degradation is
+   * not a blank list — `effectiveRank` reads both absent and `null` as
+   * `createdAt`, so an old machine draws a stable, creation-ordered list rather
+   * than the recency shuffle it drew before.
+   */
+  rank?: number | null;
   /** Absent on an older daemon, and on every session it has no reason to resume. */
   resume?: SessionResumeState;
 }
@@ -1002,13 +1074,22 @@ export function isResumable(session: SessionSnapshot): boolean {
 }
 
 /*
- * How a terminal session is presented, in four pure functions.
+ * How a terminal session is presented, in five pure functions.
  *
  * The property that makes them assertable, and that `webcheck` states directly:
- * **for any terminal session exactly one of `waitingForDaemon`, `resumeStalled`
- * and `showsAsEnded` is true, and for a live session none of them is.** They are
- * a partition, not three independent tests, which is why they are written here
- * together rather than inlined at the three call sites that need them.
+ * **for any terminal session exactly one of `isParked`, `waitingForDaemon`,
+ * `resumeStalled` and `showsAsEnded` is true, and for a live session none of them
+ * is.** They are a partition, not four independent tests, which is why they are
+ * written here together rather than inlined at the call sites that need them.
+ *
+ * ⚠ **`isParked` is the newest arm and it had to go *first*, ahead of
+ * `endedWithDaemon`.** That predicate is written as "not one of the final
+ * reasons", so a reason it has never been told about answers `true` — the
+ * fail-safe that keeps an old tab from taking the composer away from a live
+ * conversation, and exactly the wrong answer for this one. Left to it, a parked
+ * session would have drawn "reconnecting after a restart" under a daemon that was
+ * doing nothing of the kind and would never have started. The order of the tests
+ * below is the fix, and it is the whole of it.
  *
  * Every one of them keys on `exit.reason` and never on `status` alone. That is
  * the whole correction: `daemon_shutdown` — the ordinary deploy — used to derive
@@ -1018,8 +1099,51 @@ export function isResumable(session: SessionSnapshot): boolean {
  * agree, but agreeing by construction is better than agreeing by coincidence.
  */
 
+/**
+ * The daemon let its agent go for being idle. Nothing is wrong and nothing is
+ * happening; sending a message starts it again.
+ *
+ * Keyed on `exit.reason` like its siblings rather than on `status === "parked"`,
+ * and for their reason: the reason is what the daemon *decided*, while the status
+ * is derived from it, so a client that asks the derived question is one
+ * derivation away from being wrong. Here the two happen to be one-to-one, which
+ * makes asking the reason free rather than unnecessary.
+ *
+ * `agentSessionId === null` is deliberately not a case: parking requires one, so
+ * a parked session without it did not come from this daemon and is better drawn
+ * as stalled — which is where the ordering below leaves it.
+ */
+export function isParked(session: SessionSnapshot): boolean {
+  if (!isTerminal(session.status) || session.exit?.reason !== "parked") return false;
+  return session.agentSessionId !== null;
+}
+
+/**
+ * A session this daemon released, on a daemon that cannot put it back.
+ *
+ * ⚠ **The rollback door, and it is recognised by the *shape of the answer* rather
+ * than by a version**, which is `compatibility.md`'s rule and the same trick the
+ * import flow uses on an old daemon. A build that knows about parking derives
+ * `status: "parked"` from the reason; one that predates it has no such member and
+ * its `status` switch has a `default:` arm, so the pair arrives as `parked`
+ * carried on `exited` — a combination no current daemon can produce.
+ *
+ * It matters because a rollback is somebody's break-glass. The older
+ * `autoResumable` is a `switch` with no `default:` and no `parked` arm, so it
+ * answers `undefined` — falsy on both triggers — and the transparent resume a
+ * prompt performs never fires: every message answers `409 session_terminal`. The
+ * conversation, its transcript and its worktree are all intact, and `POST
+ * /sessions/:id/resume` still works, because that route calls `resume()` directly
+ * rather than asking `autoResumable`. So the only thing missing is the control,
+ * which this restores — and only in the state where a message would not do.
+ */
+export function parkedByOlderDaemon(session: SessionSnapshot): boolean {
+  return isParked(session) && session.status !== "parked";
+}
+
 /** The daemon ended it and is bringing it back. Draw it as ordinary. */
 export function waitingForDaemon(session: SessionSnapshot): boolean {
+  if (isParked(session)) return false;
   if (!isTerminal(session.status) || !endedWithDaemon(session.exit)) return false;
   return session.agentSessionId !== null && session.resume?.state !== "failed";
 }
@@ -1033,13 +1157,19 @@ export function waitingForDaemon(session: SessionSnapshot): boolean {
  * reattach to, which is what the copy says.
  */
 export function resumeStalled(session: SessionSnapshot): boolean {
+  if (isParked(session)) return false;
   if (!isTerminal(session.status) || !endedWithDaemon(session.exit)) return false;
   return session.resume?.state === "failed" || session.agentSessionId === null;
 }
 
 /** It is over, and somebody meant it. The only case that loses its composer. */
 export function showsAsEnded(session: SessionSnapshot): boolean {
-  return isTerminal(session.status) && !waitingForDaemon(session) && !resumeStalled(session);
+  return (
+    isTerminal(session.status) &&
+    !isParked(session) &&
+    !waitingForDaemon(session) &&
+    !resumeStalled(session)
+  );
 }
 
 /**
@@ -1806,6 +1936,33 @@ export function lastSeenText(at: number | null | undefined, now = Date.now()): s
 }
 
 /**
+ * Who brought this machine online, as the line a screen draws — or `null` where
+ * there is nothing to say.
+ *
+ * **One string for two surfaces**, the machine list's row and the machine's own
+ * screen, for the reason the control plane's own `labelOrName` gives one file
+ * over: a rule with two homes has no way to keep them agreeing, and this one is
+ * a *disclosure* — two spellings of it would be two disclosures, one of which
+ * somebody would eventually shorten. `lastSeenText` beside it is the same shape
+ * for the same reason.
+ *
+ * **The punctuation is deliberately not here.** The list's sublines are
+ * fragments ("online", "last seen 3 h ago") and take no full stop; the machine
+ * screen's lines are sentences and do. The *fact* is shared and the register
+ * belongs to the surface, so each caller ends the line the way its neighbours
+ * end theirs.
+ *
+ * `null` in is every case that means *unknown* — see `MachineRecord.enrolledBy`,
+ * which is where the argument for the field lives — and `null` out is what
+ * makes "only render it when there is something to render" a property of this
+ * function rather than a condition each screen re-derives.
+ */
+export function enrolledByText(who: string | null | undefined): string | null {
+  if (who === undefined || who === null || who.length === 0) return null;
+  return `Enrolled by ${who}`;
+}
+
+/**
  * The names that name more than one machine in this list, case-folded.
  *
  * **This is what lets a row draw its id only where the id is doing something.**
@@ -1900,6 +2057,61 @@ export interface MachineRecord {
    * owns: a banned owner cannot reach this app at all.
    */
   ownerDisabled?: boolean;
+  /**
+   * Whose enrollment code brought this machine online, where that was not the
+   * person reading the list.
+   *
+   * **This is the whole of a disclosure that could not be a refusal.** An admin
+   * may revoke a machine — which frees its label — register a new one for the
+   * same person under that freed name, mint its first code and redeem it on
+   * their own hardware. The row that then appears in the victim's list carries
+   * the name they just lost, `owned: true`, enrolled and online, and it is
+   * somebody else's computer. Every step is a route that has to stay: revoking
+   * is the denial side, and registering a machine *for* somebody is what
+   * `deploy/install.sh`'s daemon wizard does from the host being installed,
+   * which is a real flow rather than an attack. So the composition is made
+   * **visible** instead, and this field is the visibility.
+   *
+   * Five answers, and the last four are named rather than collapsed into the
+   * first — collapsing them is exactly what made the control plane's first two
+   * attempts at this reassuring and wrong:
+   *
+   * * **`null` or absent** — you enrolled it yourself, this machine has never
+   *   enrolled, or the control plane predates the field. Nothing is drawn.
+   * * **a display name** — this machine enrolled with somebody else's code.
+   * * **`"a provisioning key"`** — `POST /v1/provision`, which needs no account
+   *   at all, only `REEMOAT_CP_PROVISION_KEY`. The *most* alarming case, so it
+   *   is the one that must never read as the absent one.
+   * * **`"a deleted account"`** — the enroller's account has gone since. The
+   *   column is deliberately left dangling there and says so.
+   * * **`"somebody this control plane did not record"`** — the machine enrolled
+   *   before the column existed. ⚠ **This is the answer the first release
+   *   folded into `null`**, and it was not an edge: `machines.enrolled_by` is
+   *   written only at redemption, so on the day the column shipped it was the
+   *   answer for *every machine in the fleet* — the whole disclosure reading as
+   *   "I enrolled this myself" on the screen built to say otherwise.
+   *
+   * ⚠ **A name is not by itself a substitution, and that is this field's stated
+   * limit.** The daemon wizard runs `cpctl admin addmachine --owner` then `cpctl
+   * admin enroll`, so *every* wizard-installed machine names the admin who ran
+   * the installer, and a substitution draws the same row as a normal install.
+   * What it buys is that the owner can tell *this enrolled with somebody else's
+   * code* from *with mine*, and recognise the name or not; the remedy for one they
+   * do not recognise is to re-enroll the machine themselves, which sets this back
+   * to nothing.
+   *
+   * ⚠ **And the field names who *minted* the code, never who redeemed it.**
+   * `POST /v1/enroll` is public — the credential is the body, and a daemon
+   * redeeming a code presents no account — so there is no redeemer to record.
+   * A code **you** minted that leaks and is redeemed on somebody else's hardware
+   * therefore reports *you*, which is `null`, which draws nothing. That shape is
+   * outside what this field is evidence about; `store.ts` carries the argument.
+   *
+   * Optional, per the mirror's rule for a field added after the first release:
+   * an older control plane sends nothing, and nothing is the same silence as the
+   * `null` this side could not tell it apart from anyway.
+   */
+  enrolledBy?: string | null;
   scopes: Scope[];
   relayUrl: string | null;
   relayOnline: boolean;

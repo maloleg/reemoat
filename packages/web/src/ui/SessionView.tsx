@@ -12,7 +12,7 @@ import { echoFor, echoVersion, subscribeEchoes } from "../echo";
 import { permissionContext } from "../permission";
 import { keyOf, type SessionRef } from "../ids";
 import { describe, missingRowReason } from "../machine";
-import { displayCwd, downloadablePath, relativeTo } from "../paths";
+import { displayCwd, downloadablePath, folderLabel, relativeTo } from "../paths";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, store, type AppState, type SessionRow } from "../store";
@@ -74,6 +74,26 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
    */
   const [tailRequest, setTailRequest] = useState(0);
 
+  /*
+   * How tall the parked card is, so the transcript can be scrolled clear of it.
+   *
+   * ⚠ **The card is `absolute` and therefore invisible to every mechanism this
+   * screen has for absorbing a height change** — which is why the last rows of a
+   * conversation sat underneath it with no way out, folded or open. `AskCard`
+   * measures itself and reports here; `Transcript` turns the number into trailing
+   * padding inside its own scroller. The card still moves nothing: padding grows
+   * `scrollHeight` and leaves `clientHeight` alone.
+   *
+   * React state rather than a custom property written onto the node — which is the
+   * idiom `AppShell` uses for `--rail-w` — because the two cases are different.
+   * That one is a finger dragging at 60fps; this changes on mount, on a fold, on a
+   * step and when the card's context pages in. Four discrete moments are what
+   * React state is for, and the re-render is one component with one scroll box.
+   *
+   * `0` with no card, which is also what `AskCard` reports as it unmounts.
+   */
+  const [askHeight, setAskHeight] = useState(0);
+
   // Attaching is an effect of *viewing*, so it belongs here rather than in the
   // router. The store's LRU decides what stays live when this unmounts, which is
   // what lets two sessions on different machines keep streaming at once.
@@ -110,10 +130,34 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
    * for as long as the snapshot is, and `null` short-circuits before any walk
    * happens at all.
    */
+  /*
+   * ⚠ **`?? []` here for the same reason the card below has it, and it became
+   * load-bearing when the plan card stopped drawing a refusal.**
+   *
+   * This read `events !== undefined`, i.e. "only once a transcript exists" — and
+   * `openSession` returns without creating one when the machine has no connection,
+   * which is the cold-open the card's own comment describes at length. So on that
+   * path the plan was on screen, `revising` was false, and the composer said
+   * *answer the request above first* about the request it is the answer to.
+   *
+   * ⚠ **It is not a ✕-only dead end, and the first version of this comment said it
+   * was.** `planControls` gates on `context.kind === "switch_mode"`, and the kind
+   * rides the `tool_call` — so with an empty window it answers `null`, the curated
+   * two-button card is never drawn, and the card falls back to `permissionButtons`:
+   * every option the agent sent, refusal included, as rows. Driven, not read.
+   *
+   * Which makes the gate worse than a dead end would have been, in the way that is
+   * easy to miss. On exactly the screen where the card is at its *least* readable —
+   * four full-width rows in the agent's own 46-character wording, the layout this
+   * whole card was curated to avoid — the one control that lets somebody decline
+   * with a reason was switched off, and the placeholder told them to go and answer
+   * something. The plan comes off the *snapshot*, not the window, exactly as the
+   * card's context does; an empty window costs the markdown, never the state.
+   */
   const pendingAsk = asking !== undefined && asking.kind === "permission" ? asking.permission : null;
   const events = transcript?.events;
   const awaitingPlan = useMemo(
-    () => pendingAsk !== null && events !== undefined && permissionContext(pendingAsk, events).plan !== null,
+    () => pendingAsk !== null && permissionContext(pendingAsk, events ?? []).plan !== null,
     [pendingAsk, events],
   );
 
@@ -269,7 +313,13 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
             )}
           </>
         }
-        subtitle={<WorkspaceLine machineName={row.machineName} workspace={session.workspace} />}
+        subtitle={
+          <WorkspaceLine
+            machineName={row.machineName}
+            workspace={session.workspace}
+            roots={state.rootsByMachine.get(sessionRef.machineId) ?? []}
+          />
+        }
         close
       >
         {/*
@@ -345,7 +395,13 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
         knowledge of how tall the composer currently is.
       */}
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <Transcript sessionRef={sessionRef} state={state} tailRequest={tailRequest} stale={stale} />
+        <Transcript
+          sessionRef={sessionRef}
+          state={state}
+          tailRequest={tailRequest}
+          stale={stale}
+          askHeight={askHeight}
+        />
 
         {/*
           Last, so it paints over everything left in this region — which is the
@@ -399,6 +455,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
               events={transcript?.events ?? []}
               agent={session.agent}
               more={waitingCount(session) - 1}
+              onHeight={setAskHeight}
             />
           ) : (
             <ElicitationCard
@@ -406,6 +463,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
               sessionRef={sessionRef}
               pending={asking.elicitation}
               more={waitingCount(session) - 1}
+              onHeight={setAskHeight}
             />
           ))}
       </div>
@@ -444,14 +502,17 @@ function SessionTitle({
   onRenaming,
 }: {
   row: SessionRow;
-  /** This machine's browse roots, so the fallback name is `~/thing`. */
+  /** This machine's browse roots, so the fallback name is `thing`, not `…/rends/thing`. */
   roots: readonly string[];
   renaming: boolean;
   onRenaming: (next: boolean) => void;
 }): ReactNode {
   // The same string `sessionLabel` falls back to, which is what makes the rename
-  // box's placeholder show exactly what the header is showing.
-  const fallback = displayCwd(row.snapshot.workspace.requestedCwd, roots);
+  // box's placeholder show exactly what the header is showing. **`folderLabel`,
+  // so it stays that string** — `sessionLabel` dropped the `~/` and a placeholder
+  // still carrying one would offer to name the session something the header has
+  // never displayed.
+  const fallback = folderLabel(row.snapshot.workspace.requestedCwd, roots);
 
   if (renaming) {
     return (
@@ -583,10 +644,35 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
 function WorkspaceLine({
   machineName,
   workspace,
+  roots,
 }: {
   machineName: string;
   workspace: SessionSnapshot["workspace"];
+  /**
+   * The machine's own browse roots, so this line cuts the same prefix every row
+   * in the rail does. Empty is the older daemon, the unreachable one and the
+   * listing that has not landed, and `displayCwd` answers all three by falling
+   * back to `shortPath` — which is exactly what this line drew before.
+   */
+  roots: readonly string[];
 }): ReactNode {
+  /*
+   * ⚠ **This drew the absolute path, and one line above it `SessionTitle` was
+   * already drawing the short form of the same directory.** For a session nobody
+   * has named, `sessionLabel` falls back to the directory, so the header read
+   * `~/thing` over `mac · /Users/rends/thing`: one fact, two renderings, one row
+   * apart, and most of the second spent on the home directory every session on
+   * that machine shares. Q3.441's defect, resurfaced in the header.
+   *
+   * The two are `thing` over `mac · ~/thing` now — `sessionLabel` names a session
+   * and takes `folderLabel`, this line draws a path and keeps `displayCwd`'s `~/`,
+   * which is the marker saying what the rest hangs off. Q3.581.
+   *
+   * What is *not* fixed here, deliberately: the echo itself. `headlineWorthDrawing`
+   * refuses a subline that repeats its title, and the same judgement would drop
+   * the path from this line entirely — leaving `mac · main`, which is a different
+   * decision about what this line is for, not a rendering fix.
+   */
   const where = workspace.requestedCwd;
   const branch = workspace.git?.branch ?? null;
   return (
@@ -598,7 +684,11 @@ function WorkspaceLine({
           beside it is the one with room to give. */}
       <span className="shrink-0">{machineName}</span>
       <span className="shrink-0 text-faint">·</span>
-      <span className="truncate">{where}</span>
+      {/* `font-mono` because this is a path: a string somebody compares against
+          their own shell, character by character. See `.claude/rules/web-typography.md`
+          — the session's *name* above is prose and stays sans, and these two lines
+          drawing one workspace in two families is what that rule was written for. */}
+      <span className="truncate font-mono" title={where}>{displayCwd(where, roots)}</span>
       {workspace.mode === "worktree" && branch !== null && (
         <>
           <span className="text-faint">·</span>
@@ -631,6 +721,7 @@ function Transcript({
   state,
   tailRequest,
   stale,
+  askHeight,
 }: {
   sessionRef: SessionRef;
   state: AppState;
@@ -656,6 +747,24 @@ function Transcript({
    * that claims the agent is working right now.
    */
   stale: boolean;
+  /**
+   * The parked card's height, handed to `EventList` as the foot of its column.
+   *
+   * ⚠ **Without it the end of a conversation is unreachable.** `AskCard` is
+   * `absolute inset-0` over this box, so it changes neither `scrollHeight` nor
+   * `clientHeight` and the observer below cannot see it — the last rows are simply
+   * painted over, folded card included, which is the one state the fold exists to
+   * make readable (Q3.39). Padding is the remedy the card cannot apply to itself:
+   * it grows the scrollable extent and moves nothing that is drawn, so "the card
+   * moves nothing behind it" stays true and the rows can still be brought out from
+   * under it.
+   *
+   * ⚠ **It is spent inside the column and not on this scroller**, which is the
+   * correction: that column already ends in 48px of its own, so a second padding
+   * out here left 56px between the last row and the card. `EventList` takes the
+   * `max` of the two, so there is one number rather than two that add up.
+   */
+  askHeight: number;
 }): ReactNode {
   const key = keyOf(sessionRef);
   /*
@@ -907,6 +1016,27 @@ function Transcript({
     return () => observer.disconnect();
   }, []);
 
+  /*
+   * The one height change the observer above cannot see.
+   *
+   * ⚠ **`askHeight` becomes padding, and padding is not a resize.** It grows
+   * `scrollHeight` — inside `EventList`'s column — and leaves this box's
+   * `clientHeight` exactly where it was, so the `ResizeObserver` fires for none of
+   * it. That is the whole reason the general form up there is not general enough
+   * here and this is a second effect rather than a widening of that one.
+   *
+   * Only the parked-at-the-bottom case is corrected, for the reason the observer
+   * gives: somebody reading history keeps their `scrollTop`, and moving it by the
+   * delta is what would take the ground out from under them. At the tail it is the
+   * opposite — the reserve exists precisely so the last row can come out from
+   * under the card, and it only does that if something scrolls into it.
+   */
+  useEffect(() => {
+    const box = boxRef.current;
+    if (box === null) return;
+    if (atBottomRef.current) box.scrollTop = box.scrollHeight;
+  }, [askHeight]);
+
   // Reset when the session changes under a mounted pane — the desktop two-pane
   // case, where this component is not remounted. A new conversation starts at
   // its end.
@@ -993,11 +1123,11 @@ function Transcript({
               files={files}
               echo={echo}
               transcript={transcript}
+              askHeight={askHeight}
               working={working}
               reporting={reporting}
               stale={stale}
               turnElapsedMs={turnElapsedMs}
-              onReveal={() => store.revealBeforeClear(sessionRef)}
               onResized={remeasure}
             />
           </FileAccessContext.Provider>

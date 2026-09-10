@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
-import { isResumable, isTerminal } from "../wire";
+import { isParked, isResumable, isTerminal, parkedByOlderDaemon } from "../wire";
 import { Icon, IconButton, MENU_PANEL } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
@@ -79,7 +79,41 @@ export function SessionMenu({
   const boxRef = useRef<HTMLDivElement | null>(null);
   const row = state.rowsByKey.get(keyOf(sessionRef));
   const session = row?.snapshot;
-  const canResume = session !== undefined && isTerminal(session.status) && isResumable(session);
+  /*
+   * ⚠ **`!isParked` is doing real work here, and without it this control appears
+   * on its own.**
+   *
+   * A parked session is terminal and has an `agentSessionId`, so it satisfies
+   * both of the other two clauses — the daemon would resume it, the route works,
+   * and a Resume item would have shown up for every quiet conversation on the
+   * machine with nobody having decided that.
+   *
+   * The decision is that **a message is the only way back**. That is not a
+   * shortage of buttons: parking is the daemon doing housekeeping, and a control
+   * offering to undo housekeeping invites somebody to sit on a session list waking
+   * agents one at a time, which is the memory this feature exists to release. The
+   * composer is on screen unconditionally for a session that is coming back —
+   * `Composer.tsx` has no early return, Q7.103 — so the affordance already exists
+   * and needs no companion; `sessionNotice` says so in words.
+   *
+   * `interrupted` keeps its Resume item. There the daemon is trying and may have
+   * given up, so a person pressing it is retrying something that failed, which is
+   * a different act from starting something that was never attempted.
+   */
+  /*
+   * ⚠ **…unless the daemon it is pointed at cannot wake it, which is the one
+   * state where a message is not the way back.** See `parkedByOlderDaemon`: a
+   * `parked` reason arriving under a status that is not `parked` is a daemon
+   * older than this feature, whose prompt path answers `409 session_terminal`
+   * for ever. Hiding Resume there leaves a conversation reachable only from
+   * `pnpm client resume`, which is the dead end Q2.224 already fixed once for
+   * the auto-resume-off case and did not cover for a rollback.
+   */
+  const canResume =
+    session !== undefined &&
+    isTerminal(session.status) &&
+    isResumable(session) &&
+    (!isParked(session) || parkedByOlderDaemon(session));
   const pinned = session?.pinned === true;
 
   // Same dismissal as every other popover here: pointerdown rather than blur,
@@ -117,23 +151,27 @@ export function SessionMenu({
       .finally(() => setBusy(false));
   };
 
-  const setMeta = (patch: { pinned?: boolean }): void => {
-    const daemon = store.daemonFor(sessionRef.machineId);
-    if (daemon === undefined) {
-      // A sentence, and it names what did not happen. This said "that machine is
-      // not reachable" — a lower-case fragment stating a fact about the fleet next
-      // to a menu row that had visibly done nothing, leaving the reader to work out
-      // for themselves whether the pin they just tapped had taken. The one caller
-      // toggles `pinned`, so the consequence can be named exactly.
-      toast("error", "That machine is not reachable right now, so the pin was not changed.");
-      return;
-    }
-    setBusy(true);
-    void daemon
-      .setSessionMeta(sessionRef.sessionId, patch)
-      .then((result) => store.applySnapshot(sessionRef, result.session))
-      .catch((cause: unknown) => toast("error", errorText(cause)))
-      .finally(() => setBusy(false));
+  /**
+   * Pin, unpin, or move — all three through the store's one write path.
+   *
+   * ⚠ **It used to call the daemon here**, which was fine while the only field
+   * was a pin: a pin is a tap, and a tap that is not answered for a second is a
+   * tap nobody notices. A *position* is not — the rail is derived from the poll,
+   * so a move drawn only when the answer lands springs back under the finger
+   * first. The overlay, the ordering of two writes about one session and the
+   * restore on a refusal all live in `store.setSessionMeta` now, and this passes
+   * the sentence that says what did not take.
+   */
+  const setMeta = (patch: { pinned?: boolean; rank?: number | null }, whatDidNotHappen: string): void => {
+    /*
+     * ⚠ **No `busy` here, and the pair that used to bracket this was dead.** It
+     * survived the move of the await into `store.setSessionMeta`: with nothing
+     * asynchronous left between them, React batches both writes into one render
+     * and `busy` is never once observed `true`. The three call sites below still
+     * hold real awaits and still need it.
+     */
+    const issued = store.setSessionMeta(sessionRef, patch, (message) => toast("error", message));
+    if (!issued) toast("error", `That machine is not reachable right now, ${whatDidNotHappen}`);
   };
 
   /**
@@ -208,7 +246,7 @@ export function SessionMenu({
             label={pinned ? "Unpin" : "Pin"}
             onClick={() => {
               setOpen(false);
-              setMeta({ pinned: !pinned });
+              setMeta({ pinned: !pinned }, "so the pin was not changed.");
             }}
           />
 
@@ -244,7 +282,9 @@ export function SessionMenu({
             />
           ))}
 
-          {(canResume || !isTerminal(session.status)) && <div className="my-1 border-t border-edge/60" />}
+          {(canResume || !isTerminal(session.status) || isParked(session)) && (
+            <div className="my-1 border-t border-edge/60" />
+          )}
 
           {canResume && (
             <MenuItem
@@ -259,7 +299,18 @@ export function SessionMenu({
           {/* Last, separated, and the only red thing in the menu. Stopping an
               agent mid-turn is the one action here with no way back — and it is
               last whatever is installed, which is what the band above buys. */}
-          {!isTerminal(session.status) && (
+          {/*
+            ⚠ `|| isParked` is not symmetry with the row above — it repairs a
+            regression. A parked session is terminal, so this guard alone took Stop
+            away from every conversation the daemon had quietly released: the one
+            way to end it became "send a message, wait for the agent to come back,
+            then stop it". Before parking existed, a quiet session was live and Stop
+            was simply there. It is drawn exactly as it is for an idle session,
+            which is what the reader sees anyway — see `statusTone`.
+            `ManagedSession.stop` is what makes the press land; without that half
+            this button answers 200 and changes nothing.
+          */}
+          {(!isTerminal(session.status) || isParked(session)) && (
             <MenuItem
               icon={Square}
               label="Stop"
@@ -282,6 +333,7 @@ function MenuItem({
   note,
   onClick,
   tone = "plain",
+  disabled = false,
 }: {
   icon: ComponentType<{ size?: number | string; className?: string }>;
   label: string;
@@ -303,11 +355,26 @@ function MenuItem({
   note?: string;
   onClick: () => void;
   tone?: "plain" | "danger";
+  /**
+   * Drawn and inert, rather than absent.
+   *
+   * The rule this exists for: an act that is unavailable *right now* keeps its
+   * pixels, so the row under it does not move onto them and take a tap aimed
+   * somewhere else — the mis-tap `TwoStep`'s ordering rule prevents one screen
+   * over. `text-faint` rather than `opacity`, this file's standing rule for a
+   * dimmed thing.
+   *
+   * No caller passes it today: the two rows that did — `Move up` and `Move down` —
+   * are gone, reordering being a drag. Kept because it is the shape of the
+   * question and the next inert row costs nothing to draw honestly.
+   */
+  disabled?: boolean;
 }): ReactNode {
   return (
     <button
       role="menuitem"
       onClick={onClick}
+      disabled={disabled}
       // The whole label, for a pointer that can hover. A phone gets the truncation
       // and nothing else, which is why the split above is the real fix rather than
       // this.
@@ -316,8 +383,8 @@ function MenuItem({
       // rows use rather than a second menu-row height living in this file. This
       // menu was 37px, which is under the platform minimum on the one popover in
       // the app containing `Stop`, described above as the action with no way back.
-      className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-raised ${
-        tone === "danger" ? "text-danger hover:bg-danger/15" : "text-fg"
+      className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm disabled:pointer-events-none disabled:text-faint ${
+        tone === "danger" ? "text-danger hover:bg-danger/15" : "text-fg hover:bg-raised"
       }`}
     >
       <Icon as={icon} size={13} className="shrink-0" />

@@ -198,7 +198,10 @@ export function PluginsSheet({ state, route }: { state: AppState; route: MarketR
              * the accessible name is the worst version of it.
              */
             label={marketUpLabel(route, origin)}
-            size="sm"
+            /* `nav`, the size every pane's leading chevron takes — see
+               `ICON_BUTTON_SIZE`. It was `sm`, which reached the same 44px target
+               and was reported as hard to see rather than hard to hit. */
+            size="nav"
             className="-ml-1"
             onClick={() => navigate(up, true)}
           />

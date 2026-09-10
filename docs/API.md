@@ -45,7 +45,7 @@ auth gate.
 
 ---
 
-## The daemon — 55 routes
+## The daemon — 57 routes
 
 Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
 
@@ -83,6 +83,7 @@ plugin *manifest* does name all three, disclosed in `consent.adds` on
 | `PUT /systems/:system` · `DELETE /systems/:system` | Set or clear that system's key |
 | `GET /agents/capabilities` | What each harness offers and what it can be pointed at. **Starts an agent per harness**, cached ten minutes. Each row carries `cli` — which build of the harness's own CLI published `models` (`version` may be `null`; `source` is `override` or `path`) — `null` where nothing was spawned, absent from daemons older than this field, and never the path it was resolved from |
 | `GET /custom-agents` · `POST /custom-agents` · `PATCH /custom-agents/:id` · `DELETE /custom-agents/:id` | The harness+system+model presets on this machine. A `PATCH` carries all four fields — an edit is a replace, so the pairing is never weighed against a merge |
+| `GET /settings` · `PATCH /settings` | This machine's own preferences — today one: how many minutes a conversation may sit untouched before its agent is shut down, `0` never. **Not the daemon's configuration**, which is env only; this is the narrow class whose owner is the person using the machine. A stored value **overrides** `REEMOAT_IDLE_PARK_MINUTES`, which is the default for a machine nobody has set. `PATCH` rather than `PUT` because the body names only what is changing, so an older client cannot erase a key it has never heard of. Applied to the running daemon before the route answers. Without a durable store the `GET` still answers and the `PATCH` is `503` |
 | `GET /agent-strip` · `PUT /agent-strip` | Which agents this machine's New session strip offers, and in what order. A **partial** record — a position and a hidden flag for what somebody moved or hid — merged by the client against the two listings above, so a `ref` naming something that is gone keeps its place and is simply not drawn. The `PUT` carries the whole list and replaces it; no `ref` is validated against anything |
 
 ### The filesystem the picker sees
@@ -104,7 +105,7 @@ plugin *manifest* does name all three, disclosed in `consent.adds` on
 | `POST /sessions/:id/prompt` | Answers 202; the turn runs on the daemon |
 | `POST /sessions/:id/cancel` | Stop the turn. The conversation stays loaded |
 | `POST /sessions/:id/config` | The agent's own controls — mode, model, effort |
-| `POST /sessions/:id/meta` | Title, pin |
+| `POST /sessions/:id/meta` | Title, pin, and where the row sits in the list. `rank` is a position clock — a millisecond, `null` for "follows its age" — and it is **always** on the snapshot, so an absent field names a daemon that cannot store an order. A drop into the pinned group carries `pinned` and `rank` in one request, which is why this is not a route of its own |
 
 ### Being asked something
 
@@ -173,7 +174,7 @@ plugin_failed` for anything the plugin's own code raised.
 
 ---
 
-## The control plane — 58 routes
+## The control plane — 60 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -188,11 +189,11 @@ these, so a new route is private by doing nothing. "Public" is not
 | | |
 |---|---|
 | `GET /health` · `GET /v1/jwks` | Liveness, and the public keys every daemon verifies tokens against |
-| `GET /v1/instance` | What this instance allows, its plugin catalogue address (`plugins.catalogue`, `null` on an instance with no market) and its AGPL §13 source offer |
+| `GET /v1/instance` | What this instance allows, its plugin catalogue address (`plugins.catalogue`, `null` on an instance with no market), where it points somebody who has no machine (`machines.offer`, `null` on one that points nowhere), whether it publishes the built-in legal documents as its own (`legal.documents`, `false` on an instance that has not claimed them **and** on one predating the field) and its AGPL §13 source offer |
 | `POST /v1/login` | A name **or a confirmed email address**, plus a password, for a bearer session token — not a cookie; nothing here is ambient. Throttled on the submitted identifier and the caller's address |
 | `POST /v1/enroll` | A daemon's one and only control-plane request, ever |
 | `POST /v1/provision` | Add a daemon for somebody else. Takes a `pk_`, not an account |
-| `POST /v1/register` · `POST /v1/register/confirm` | Sign up, then prove the address. A taken name answers 409; a taken address does not |
+| `POST /v1/register` · `POST /v1/register/confirm` | Sign up, then prove the address. A taken name answers 409; a taken address does not. Where the instance publishes legal documents (`legal.documents`), `acceptedTerms: true` is required and its absence answers `400 terms_not_accepted`; nothing about the acceptance is stored |
 | `POST /v1/forgot` · `POST /v1/reset` | Mailed recovery. `forgot` answers identically for known, unknown and unverified |
 
 ### Your own account
@@ -209,9 +210,11 @@ these, so a new route is private by doing nothing. "Public" is not
 
 | | |
 |---|---|
-| `GET` · `POST /v1/machines` · `PATCH /v1/machines/:id` | The machines you own: list, add, rename |
+| `GET` · `POST /v1/machines` · `PATCH /v1/machines/:id` | The machines you own: list, add, rename. Each listed machine carries **`enrolledBy`**, whose enrollment code it enrolled with where that was not yours: a display name, or `"a provisioning key"` (`POST /v1/provision` needs no account, only `REEMOAT_CP_PROVISION_KEY`, so it is the most alarming answer rather than the absent one), or `"a deleted account"` where the enroller's account has gone since, or `"somebody this control plane did not record"` for a machine that enrolled before the column existed — which on an upgraded instance is every machine, and is named rather than folded into the absent case. **Absent or `null`** is your own code, a machine that has never enrolled, or a control plane too old to send the field. It names who **minted** the code, never who redeemed it: `POST /v1/enroll` is public and a daemon presents no account, so a leaked code of your own reports you. It is the disclosure for a substitution no refusal closes; `SECURITY.md` carries the argument and the limits |
 | `POST /v1/machines/:id/enrollments` | Mint a single-use code; minting burns the previous |
 | `POST /v1/machines/:id/revoke` | Retire one, which gives its slot back to the limit |
+| `GET` · `PUT` · `DELETE /v1/machines/:id/grants` | Share a machine **you own**, and take it back. A grant is **full access** to the machine, so this is the owner's verb: the admin routes that wrote one are deleted. Addressed by user id — there is no directory an ordinary account may read, so the other person reads theirs off `GET /v1/me`. `404 machine_not_found` for one you do not own, which is the anti-mapping rule rather than a lie; `409 grant_is_owner` for your own grant on both writes (narrowing it would take `machine:admin` off your own hardware, removing it would hide the machine from its owner — retiring it is the verb for that); `404 user_not_found`; `409 user_disabled` for a suspended account, which would otherwise become live the moment somebody re-enabled them; `400 bad_request` for a `userId` that is missing on either verb; `404 grant_not_found` on an unshare that removed nothing |
+| `DELETE /v1/machines/:id/grants/me` | **Give up a share somebody made to you.** The three routes above all resolve through ownership, so a grantee could reach none of them — and a share is written for any `userId` with no consent asked, so what somebody can do to you unasked now has something you can do about it. Your own grant only, and there is no `userId` parameter: the caller is the subject, and a route that took an id would be `DELETE /v1/admin/grants` under another name. `409 grant_is_owner` on a machine you own, because `GET /v1/machines` joins `grants` and an owner without one owns a machine in no list — retiring it is the verb for that; `404 grant_not_found` for both "no such grant" and "no such machine", which is the same anti-mapping rule |
 | `POST /v1/tokens` | The short-lived token a browser uses. Quota is checked **after** the grant is proved |
 
 ### Admin
@@ -225,8 +228,8 @@ password change is refused all of it by a second positional gate.
 | `POST /v1/admin/users/:id/disable` · `/enable` · `/invite` | Suspend and restore an account, or mail an invitation |
 | `PUT` · `DELETE /v1/admin/users/:id/machine-limit` | The commercial limit, per person |
 | `GET` · `POST · PATCH /v1/admin/machines[/:id]` | Every machine in the fleet, whoever owns it |
-| `POST /v1/admin/machines/:id/enrollments` · `/revoke` · `PUT /v1/admin/machines/:id/owner` | Mint a single-use enrollment code, revoke a machine, hand one to somebody else |
-| `GET` · `PUT` · `DELETE /v1/admin/grants` | A grant is **full access** to the machine |
+| `POST /v1/admin/machines/:id/enrollments` · `/revoke` · `PUT /v1/admin/machines/:id/owner` | Mint a code, revoke a machine, adopt an ownerless one. **The enrollment mint refuses a machine that is enrolled and has an owner *or grantees*** (`409 machine_enrolled`) — redeeming a code retires the running daemon's tunnel key, so it would replace somebody's machine rather than read it; its owner mints their own. **The owner route refuses a transfer away from a live owner** (`403 machine_owned`), and refuses adopting an ownerless machine somebody holds a grant on unless they are the one being handed it (`403 machine_granted`) — so what it adopts is a row nobody depends on, and what it re-labels is a machine for the owner it already has. Adopting burns that machine's outstanding codes and says how many |
+| `GET /v1/admin/grants` | Who holds what, paged. **The `PUT` and `DELETE` are deleted** — a grant is full access to a machine that runs agents as its owner, and an admin writing one for a machine they do not own was one request from that. Sharing is `PUT /v1/machines/:id/grants`; the read is kept, because an operator who cannot see this table cannot answer "why can this person reach that machine" |
 | `GET` · `PUT /v1/admin/settings` · `POST /v1/admin/settings/test` | Env-seeded, database-owned; the answer says which side won |
 | `GET /v1/admin/mail` · `POST /v1/admin/mail/:id/retry` | The outbox, and pushing a stuck message again |
 | `GET` · `POST /v1/admin/signing-keys` · `DELETE /v1/admin/signing-keys/:kid` | Rotate publishes **both**; retire once the fleet has re-enrolled |

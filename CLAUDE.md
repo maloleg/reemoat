@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 864 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 923 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -74,7 +74,10 @@ pnpm authcheck                       # token verification and enrollment
 pnpm daemoncheck                     # the daemon's HTTP surface and durable state: routes,
                                      #   the v6 migration, the login pty, the WS, subagent lineage,
                                      #   permissions, stopping a turn, the SQLite log, changes/diff,
-                                     #   uploads — and the bounds an agent can push against,
+                                     #   uploads, and letting an idle agent go — the refusals one
+                                     #   at a time, that a released session reads as neither
+                                     #   stopped nor interrupted, and the sweep on a fake clock —
+                                     #   and the bounds an agent can push against,
                                      #   all of them refusals now: a permission's title and
                                      #   options weighed as one 8 KiB thing rather than clipped,
                                      #   a form's prose carried whole against one 32 KiB
@@ -152,10 +155,34 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   720 states, its pair with `loadStop`, and the one string
                                      #   feeding both the line and the live region — plus a retry
                                      #   schedule long enough to outlast a daemon redialling.
-                                     #   And the newest is a repair rather than a subject: **two**
+                                     #   And a repair rather than a subject: **two**
                                      #   sentences for a pairing failure where one was pinned — a
                                      #   spelling and a protocol may not read alike, and the check
-                                     #   asserting they must is what kept the false one shipping
+                                     #   asserting they must is what kept the false one shipping.
+                                     #   The newest are four, and the sharpest is the one that was
+                                     #   green over a card nobody could reach: the plan-mode
+                                     #   curation was measured against an adapter two versions
+                                     #   back, so its fixture was the only request it still
+                                     #   matched. Now every shape the *pinned* adapter builds,
+                                     #   each with the order and the words this app puts on it,
+                                     #   plus the mixture of two that must match neither. Beside
+                                     #   it: that a `/clear` leaves the command and the words and
+                                     #   nothing offers the conversation back, asserted as an
+                                     #   absence on three files; that the parked card measures
+                                     #   itself and the transcript reserves the room, pinned on
+                                     #   both sides because either half alone is silent; and that
+                                     #   a question says how many of its answers you may pick —
+                                     #   a box or a circle, with the role claimed only where a
+                                     #   button keeps it, on both halves of one form.
+                                     #   Newest again, and both are about a fact this app was
+                                     #   asserting against itself: that a plan card offers the
+                                     #   two grants and *which* two it drops, by name, so
+                                     #   dropping a third cannot pass as "still two buttons";
+                                     #   and that Telegram is asked where its own chrome is
+                                     #   rather than told, driven as the sequence that actually
+                                     #   happens — latch the launch version, wipe the fragment
+                                     #   the way a navigation does, then ask. Both drivers were
+                                     #   green for months over code no phone could reach
 pnpm pincheck                        # every place a version is written down. The agents':
                                      #   three copies each, and the adapters actually installed.
                                      #   And five of this release's six — the root and both
@@ -348,8 +375,12 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `cp-machines.md` | `packages/control-plane/src/machines.ts`, `quota.ts`, `packages/web/src/quota.ts` | Who owns a machine and what a name may collide with · the ceiling against the limit · what a revoke gives back · adding a daemon for somebody else |
 | `cp-mail.md` | `packages/control-plane/src/mail/`, `emails.ts` | Why a mail outage must never become a sign-in outage · what sits in the outbox and for how long · what a mailed link may carry |
 | `web-shell.md` | `packages/web/src/ui/AppShell.tsx`, `SessionBrowser.tsx`, `groups.ts`, `overlay.ts`, `settings/`, `packages/web/src/store.ts` | The one question this screen is shaped around, and the rules that keep it answerable · who owns Escape · what a folder is · what a client may not draw optimistically |
-| `web-transcript.md` | `packages/web/src/ui/tail.ts`, `EventList.tsx`, `DiffView.tsx`, `AskCard.tsx`, `packages/web/src/diff.ts` | What a conversation may leave out and what it must say instead · what folds into a run and what may never · how a diff is drawn, and what refuses to draw one |
+| `web-transcript.md` | `packages/web/src/ui/tail.ts`, `EventList.tsx`, `DiffView.tsx`, `packages/web/src/diff.ts` | What a conversation may leave out and what it must say instead · what folds into a run and what may never · how a diff is drawn, and what refuses to draw one · what a `/clear` leaves behind |
+| `ask-card.md` | `packages/web/src/ui/AskCard.tsx`, `PermissionCard.tsx`, `ElicitationCard.tsx`, `packages/web/src/permission.ts`, `ask.ts`, `elicitation.ts` | The one card for "the agent is waiting on you" · where it sits and what it may cover · which plan-mode requests are curated and which are drawn as sent · what may be picked, how many, and why nothing you typed is ever erased |
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
+| `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |
+| `telegram-mini-app.md` | `packages/web/src/telegram.ts`, `main.tsx`, `index.css` | Why the bridge is hand-written and must stay so · what a `navigate` destroys and what is latched against it · the one control Telegram draws · the three places its chrome can be, and why only Telegram knows |
+| `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
 | `plugin-contributions.md` | `src/plugins/contributions.ts`, `manifest.ts`, `src/acp/`, `src/runtime/local.ts`, `packages/web/src/ui/agentCard.ts` | A plugin that adds an *agent* or a *provider* · which id is checked for membership and which only for shape, and what each costs to get wrong · where a base URL may point now · what a machine's ceiling is and why it is a refusal |
 | `plugin-ui.md` | `packages/web/src/plugins.ts`, `catalogue.ts`, `install.ts`, `ui/plugins/`, `PluginView.tsx` | What the browser draws for a plugin and what it refuses to draw · where a plugin is installed from and what somebody agreed to · the one client that fails *closed* · what a draft of a fleet is |

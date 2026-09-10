@@ -78,7 +78,7 @@ export function setDraftField(
 /**
  * Everything held for one request, once it has been answered one way or another.
  *
- * **Three statements and not one `||` chain**, which is what this was and which
+ * **Four statements and not one `||` chain**, which is what this was and which
  * did not do what its own first line says. `a.delete(k) || b.delete(k)` stops at
  * the first `true`, so any elicitation that had a draft dropped the draft and
  * leaked its step index and its collapsed flag — visible when a poll already in
@@ -91,7 +91,16 @@ export function dropAsk(session: SessionKey, askId: string): void {
   const hadDraft = drafts.delete(key);
   const hadStep = steps.delete(key);
   const hadCollapse = collapsed.delete(key);
-  if (hadDraft || hadStep || hadCollapse) changed();
+  // Four statements and not an `||` chain, for the reason above: `a.delete(k) ||
+  // b.delete(k)` stops at the first `true`.
+  let hadExcluded = false;
+  for (const entry of [...excluded]) {
+    if (entry.startsWith(`${key}/`)) {
+      excluded.delete(entry);
+      hadExcluded = true;
+    }
+  }
+  if (hadDraft || hadStep || hadCollapse || hadExcluded) changed();
 }
 
 /**
@@ -112,6 +121,7 @@ export function forgetAsks(session: SessionKey): void {
   }
   for (const key of [...steps.keys()]) if (mine(key)) steps.delete(key);
   for (const key of [...collapsed]) if (mine(key)) collapsed.delete(key);
+  for (const key of [...excluded]) if (mine(key)) excluded.delete(key);
   if (removed) changed();
 }
 
@@ -125,6 +135,25 @@ export function forgetAsks(session: SessionKey): void {
  */
 const steps = new Map<string, number>();
 const collapsed = new Set<string>();
+
+/**
+ * Answers somebody has switched **off** without deleting, keyed `session/ask/field`.
+ *
+ * ⚠ **The whole reason this exists is that nothing typed may be erased.** A
+ * question's free-text box is one of its answers, so it needs a way to stop being
+ * one — and the obvious implementations both destroy: emptying the box, or leaving
+ * it out of the draft. *"The user may tap by accident and then change their mind;
+ * they simply chose another option, the field is not zeroed."*
+ *
+ * So the text stays in the draft, where it is what the box shows, and this says
+ * whether it counts. `elicitationAnswer` reads it and omits the field from the
+ * body; the row keeps its content and loses its mark.
+ *
+ * Beside the draft rather than in it, because `DraftValue` is what the *control*
+ * holds and there is no spelling of "present but not an answer" in a string. Keyed
+ * per field for the same reason the draft is: a form can have several.
+ */
+const excluded = new Set<string>();
 
 export function stepFor(session: SessionKey, elicitationId: string): number {
   return steps.get(keyFor(session, elicitationId)) ?? 0;
@@ -156,6 +185,29 @@ export function setCollapsed(session: SessionKey, askId: string, next: boolean):
   const key = keyFor(session, askId);
   if (next) collapsed.add(key);
   else collapsed.delete(key);
+  changed();
+}
+
+/**
+ * The answers this request has switched off, as the set `elicitationAnswer` takes.
+ *
+ * A fresh `Set` per call would defeat the `useMemo` on the answer, which runs on
+ * every keystroke — so an empty request answers one frozen instance.
+ */
+export function excludedFor(session: SessionKey, askId: string): ReadonlySet<string> {
+  const prefix = `${keyFor(session, askId)}/`;
+  const out = new Set<string>();
+  for (const entry of excluded) if (entry.startsWith(prefix)) out.add(entry.slice(prefix.length));
+  return out.size === 0 ? NO_EXCLUSIONS : out;
+}
+
+const NO_EXCLUSIONS: ReadonlySet<string> = Object.freeze(new Set<string>());
+
+/** Switch one answer off, or back on. The value it holds is never touched. */
+export function setExcluded(session: SessionKey, askId: string, field: string, off: boolean): void {
+  const entry = `${keyFor(session, askId)}/${field}`;
+  if (off) excluded.add(entry);
+  else excluded.delete(entry);
   changed();
 }
 

@@ -312,6 +312,14 @@ export function registerError(error: unknown): string {
       return error.message;
     case "too_many_attempts":
       return tooManyAttemptsText(error);
+    /*
+     * Reachable only by a client that did not send the field the form always
+     * sends — an older bundle against a newer control plane, or a script. The
+     * sentence names the box rather than the field, because whoever reads it is
+     * looking at a form and not at a request.
+     */
+    case "terms_not_accepted":
+      return "Tick the box to say you agree, then try again.";
     default:
       return error.message;
   }

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } fro
 import type { MachineId, SessionKey } from "../ids";
 import { installCommand } from "../enrollment";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
-import { displayCwd } from "../paths";
+import { folderLabel } from "../paths";
 import { navigate, newPath, sessionPath } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, sessionGroups, sessionLists, type AppState, type SessionRow } from "../store";
@@ -47,7 +47,9 @@ import {
   type FolderId,
   type MachineTab,
 } from "./groups";
+import { useRowDrag, type RowDrag } from "./rowDrag";
 import { CommandLine } from "./CommandLine";
+import { MachineOffer } from "./MachineOffer";
 import { Mark } from "./Mark";
 import { HelpButton, ProfileMenu } from "./ProfileMenu";
 import { RenameField, SessionMenu } from "./SessionMenu";
@@ -79,6 +81,10 @@ export function SessionBrowser({
   activeKey?: SessionKey | null;
 }): ReactNode {
   const groups = sessionGroups(state);
+  // Dragging a row. It owns the scroller's ref, every row's pointer handlers and
+  // how far each neighbour stands aside; this component hands it rows, a zone and
+  // an index, and knows nothing else about the gesture. See `rowDrag.ts`.
+  const drag = useRowDrag(state);
   // Collapse, the filter, the selected tab and the needle all live outside React,
   // so they survive the phone's list → detail → back, which unmounts this. See
   // `groups.ts`.
@@ -194,8 +200,51 @@ export function SessionBrowser({
        * header. An outline contributes nothing to scrollable overflow, so it was
        * never part of the problem and was pure collateral.
        */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {/* Skeletons only while the answer is genuinely unknown. "No sessions"
+      {/*
+       * `relative` so a lifted row's `z-10` has a stacking context to sit in, and
+       * because every drop slot is measured in this box's own content coordinates
+       * — which is what lets auto-scroll move the box under a gesture without any
+       * of the arithmetic needing a correction.
+       */}
+      <div ref={drag.scrollerRef} className="relative min-h-0 flex-1 overflow-y-auto">
+        {drag.unpinning && (
+          /*
+           * **What letting go will do, said in words, at the pointer.**
+           *
+           * Unpinning is the one outcome of this gesture that carrying the row
+           * back does not undo — every other drop is a position, and a position is
+           * one more drag away. So it is the one that owes a sentence before it
+           * happens rather than a toast after.
+           *
+           * `text-danger` is this palette's only non-monochrome ink and is
+           * otherwise reserved for acts nothing brings back. The deviation is
+           * deliberate and narrow: this is not destruction, it is the one state
+           * change in a gesture whose every other outcome is reversible by
+           * continuing to drag, and it lasts only while the pointer is out there.
+           * The ground stays `surface` with `edge-strong`, which is the ordinary
+           * rule for a control on a plane of its own.
+           */
+          <div
+            ref={drag.pillRef}
+            /* Two elements: the outer one is *where*, written by the gesture as a
+               single transform rather than as two React re-renders a frame; the
+               inner one is *what*, offset from its own size so the chip clears the
+               pointer whatever its text measures. */
+            className="pointer-events-none absolute top-0 left-0 z-30"
+          >
+            {/* ⚠ **Above the contact point, not centred on it.** Centred is where a
+                mouse cursor wants it and where a thumb hides it: this is the one
+                pre-commit notice in the gesture — the only outcome carrying the row
+                back does not undo — and on the surface this rail is read from, the
+                finger holding the row covered it completely. Horizontal centring
+                stays; the vertical half is what had to move, by the chip's own
+                height plus a thumb's clearance. */}
+            <div className="-translate-x-1/2 -translate-y-[calc(100%+18px)] rounded-md border border-edge-strong bg-surface px-2 py-1 text-2xs font-medium whitespace-nowrap text-danger shadow-sm">
+              Release to unpin
+            </div>
+          </div>
+        )}
+          {/* Skeletons only while the answer is genuinely unknown. "No sessions"
             from a machine that has answered is information; from one that is
             still probing it is a guess that flickers. */}
         {folders.length === 0 && everything.length === 0 && pinned.length === 0 && probing && (
@@ -249,6 +298,12 @@ export function SessionBrowser({
                   <div className="text-left">
                     <CommandLine command={installCommand(location.origin)} />
                   </div>
+                  {/* ⚠ **Inside `lg:hidden`, with the command.** At `lg` the pane
+                      draws both instead, and an offer hoisted out of this div
+                      would render twice — once in a 280px rail and once beside
+                      it. The same reason the command is in here. No wrapper: the
+                      component fills its box and centres its own contents. */}
+                  <MachineOffer config={state.config} me={state.me} />
                 </div>
               </>
             ) : (
@@ -277,8 +332,10 @@ export function SessionBrowser({
             name="Pinned"
             id={PINNED_FOLDER}
             blockedCount={pinned.filter((row) => needsHuman(row.snapshot)).length}
+            space={drag.spaceFor(PINNED_FOLDER)}
+            sliding={drag.sliding}
           >
-            {pinned.map((row) => (
+            {pinned.map((row, index) => (
               <SessionLine
                 key={row.key}
                 row={row}
@@ -286,6 +343,11 @@ export function SessionBrowser({
                 selected={row.key === activeKey}
                 showMachine={view.all}
                 indented
+                drag={drag.bind(row, PINNED_FOLDER)}
+                lifted={drag.dragging === row.key}
+                pressed={drag.pressing === row.key && drag.dragging !== row.key}
+                sliding={drag.sliding}
+                shift={drag.shiftFor(PINNED_FOLDER, index, row.key)}
               />
             ))}
           </GroupSection>
@@ -324,6 +386,7 @@ export function SessionBrowser({
             folder={folder}
             state={state}
             activeKey={activeKey}
+            drag={drag}
           />
         ))}
 
@@ -905,6 +968,10 @@ function WaitingElsewhere({
 }): ReactNode {
   return (
     <div className="shrink-0 border-y border-edge bg-raised">
+      {/* Not `SETTINGS_HEADING`: this is the same type at `text-fg` rather than
+          `text-muted`, and the tone is the point — a floor of sessions waiting on
+          another machine is the one band in this list that should read louder than
+          the rows under it. See `.claude/rules/web-typography.md`. */}
       <p className="px-3 pt-2 pb-1 text-2xs font-semibold tracking-wider text-fg uppercase">
         Waiting elsewhere · {rows.length}
       </p>
@@ -1115,18 +1182,48 @@ function GroupSection({
   id,
   blockedCount,
   children,
+  space = 0,
+  sliding = false,
 }: {
   icon: typeof Pin;
   name: string;
   id: FolderId;
   blockedCount: number;
   children: ReactNode;
+  /**
+   * How much taller or shorter this group is while a row is in the air over it.
+   *
+   * ⚠ **A `translateY` on the rows does not make room for one.** A row carried in
+   * from a folder makes this group one row taller and its folder one row shorter,
+   * and shifting the rows below the insertion point moves them *over* whatever
+   * follows the group — reported as Pinned riding on top of the sessions under it.
+   * The group being joined takes the height and the group being left gives it
+   * back, so everything past both of them stays where it is.
+   */
+  space?: number;
+  /** Some row is being dragged, so the room this group makes is worth animating. */
+  sliding?: boolean;
 }): ReactNode {
   // A query overrides collapse, the same rule `foldersOf` applies and for the
   // same reason: you search, get a match, and it is inside something you shut.
   const collapsed = currentQuery().trim().length === 0 && isFolderCollapsed(id);
   return (
-    <section>
+    /*
+     * ⚠ **The room a group makes animates on the same clock the rows do.** The
+     * rows move under `transition-transform`; the height they are moving into
+     * appeared in one jump, so a row crossing into Pinned slid smoothly while
+     * everything below it snapped — reported as the motion being jerky in exactly
+     * that direction. Bare `transition-[margin-bottom]` takes the same default
+     * duration and easing the rows take, which is the point: two numbers that had
+     * to agree are now one.
+     *
+     * Off at rest for the transform's own reason — a transition left on would
+     * animate the margin back to zero over a layout that has already reflowed.
+     */
+    <section
+      className={sliding ? "transition-[margin-bottom]" : ""}
+      style={space === 0 ? undefined : { marginBottom: `${space}px` }}
+    >
       <h2>
         <button
           type="button"
@@ -1186,13 +1283,28 @@ function FolderSection({
   folder,
   state,
   activeKey,
+  drag,
 }: {
   folder: Folder;
   state: AppState;
   activeKey: SessionKey | null;
+  /**
+   * The drag, passed down rather than started here.
+   *
+   * One gesture spans several of these — a row leaves its folder for Pinned and
+   * comes back — so the state has to live above every folder. A hook per section
+   * would give the row and its destination two different drags.
+   */
+  drag: RowDrag;
 }): ReactNode {
   return (
-    <section>
+    // Reserves or gives back a row's height while one is in the air between this
+    // folder and Pinned. See `GroupSection`'s own `space`.
+    <section
+      // Same clock as the rows, and off at rest. See `GroupSection`'s own `space`.
+      className={drag.sliding ? "transition-[margin-bottom]" : ""}
+      style={{ marginBottom: `${drag.spaceFor(folder.id)}px` }}
+    >
       <h2>
         {/*
          * **A row of two controls, not one button with things inside it.**
@@ -1270,9 +1382,12 @@ function FolderSection({
            * feeding a routed dialog forgets itself on back-and-forward. So this is
            * a real link — deep-linkable, and Back closes it.
            *
-           * Revealed on hover and always present on a coarse pointer, the same rule
-           * the row kebab follows and expressed the same way: a *pointer* query in
-           * CSS, never a width read in JavaScript.
+           * Revealed on hover and always present on a coarse pointer: a *pointer*
+           * query in CSS, never a width read in JavaScript. The row kebab below
+           * followed this rule and no longer does — it is drawn on every row now,
+           * for the reason recorded there. This one stays hidden because it is an
+           * *addition* to a header that already has a control, where the kebab is
+           * the only way into its row's menu at all.
            *
            * ⚠ **`chip`, and it was `h-7 w-7` — 28px, hand-rolled, with no growth of
            * any kind.** It was never one of the `h-9 w-9` copies, so no earlier scan
@@ -1299,7 +1414,7 @@ function FolderSection({
         </div>
       </h2>
       {!folder.collapsed &&
-        folder.rows.map((row) => (
+        folder.rows.map((row, index) => (
           <SessionLine
             key={row.key}
             row={row}
@@ -1307,6 +1422,11 @@ function FolderSection({
             selected={row.key === activeKey}
             folderPath={folder.path}
             indented
+            drag={drag.bind(row, folder.id)}
+            lifted={drag.dragging === row.key}
+            pressed={drag.pressing === row.key && drag.dragging !== row.key}
+            sliding={drag.sliding}
+            shift={drag.shiftFor(folder.id, index, row.key)}
           />
         ))}
     </section>
@@ -1321,6 +1441,11 @@ function SessionLine({
   folderPath = null,
   indented = false,
   showPath = true,
+  drag,
+  lifted = false,
+  pressed = false,
+  sliding = false,
+  shift = 0,
 }: {
   row: SessionRow;
   /** For the menu, which reads the live snapshot rather than this row's copy. */
@@ -1358,11 +1483,56 @@ function SessionLine({
    * withholding the path left the pinned rows as the only ones in the rail that
    * did not say where they work, which is the thing a folder was a folder for.
    *
-   * No caller passes it now. It is kept as a parameter rather than deleted
-   * because it is the shape of the question, and the day a group has a real
-   * reason to withhold a path this is where that reason goes.
+   * ⚠ **And turning it back on overshot, which is why Pinned is still not the
+   * caller this was waiting for.** On it, a pin drew its whole `displayCwd` and
+   * became the only row in the rail that named the directory it was *launched
+   * from* — the one thing the reader already knew, since they pinned it. But the
+   * fix is not this switch and it is not `folderPath` either: cutting a pinned row
+   * against its own folder was tried and blanked the line for every session
+   * launched at its repository root, which is most of them. That history is
+   * written once, at `located` below, where the arm it is about lives.
+   *
+   * What Pinned actually passes is **neither** — no `showPath={false}` and no
+   * `folderPath` — so it takes `located`'s folderless arm and draws `folderLabel`:
+   * the whole directory minus the `~/` marker every row on a machine shares. The
+   * complaint was never that a pin named a directory; it was that it spent the
+   * row's first characters on the part that is the same everywhere. Q3.581.
+   *
+   * No caller passes this switch now. It is kept as a parameter rather than
+   * deleted because it is the shape of the question, and the day a group has a
+   * real reason to withhold a path this is where that reason goes.
    */
   showPath?: boolean;
+  /**
+   * What the long-press drag needs on this row, or nothing where it cannot happen.
+   *
+   * Absent in the waiting floor and under All — the floor is a *view* of rows that
+   * live elsewhere, and All has no folders, so in both there is no group a drop
+   * could name. `useRowDrag` supplies the whole set; the row spreads it and knows
+   * none of it, which is what keeps the gesture out of this file.
+   */
+  drag?: Record<string, unknown>;
+  /** True while this row is the one under the finger. */
+  lifted?: boolean;
+  /**
+   * True between the finger landing and the press becoming a drag.
+   *
+   * Its own state rather than a shade of `lifted`, because it answers a different
+   * question: `lifted` says *this row is moving*, and this says *I heard you, keep
+   * holding*. Without the second one the 400ms before a drag arms is 400ms of the
+   * app doing nothing, which reads as the gesture not existing.
+   */
+  pressed?: boolean;
+  /** Some row is being dragged, so a shift is worth animating. */
+  sliding?: boolean;
+  /**
+   * How far this row stands aside while another is dragged over it, in pixels.
+   *
+   * A measured pixel count rather than one of a set of positions, so it is a style
+   * rather than a class — and it is the only inline style here, the dragged row's
+   * own offset never going through React at all.
+   */
+  shift?: number;
 }): ReactNode {
   const at = row.snapshot.turnStartedAt ?? row.snapshot.lastEventAt ?? row.snapshot.createdAt;
   // Both kinds, oldest first — a question waiting on you is the same fact as an
@@ -1370,7 +1540,6 @@ function SessionLine({
   const requests = humanRequests(row.snapshot);
   const waiting = requests.length;
   const pending = requests[0];
-  const pinned = row.snapshot.pinned === true;
   const roots = state.rootsByMachine.get(row.ref.machineId) ?? [];
   const label = sessionLabel(row, roots);
   /*
@@ -1382,8 +1551,8 @@ function SessionLine({
    * of them mostly `/Users/rends`.
    *
    * Two separate faults, and this is both fixes. The path is cut against the
-   * daemon's own roots now (`displayCwd`, reached through `sessionLabel` and
-   * `rowSubpath`), so it reads `~/2026-07-tare-reemoat`. And a session **nobody
+   * daemon's own roots now (`folderLabel` and `rowSubpath`, both reaching
+   * `displayCwd`'s own cut), so it reads `2026-07-tare-reemoat`. And a session **nobody
    * has named** has a title that *is* its directory — `sessionLabel` falls back
    * to exactly this string — so repeating it below is one fact drawn twice, in a
    * row 40 characters wide. `headlineWorthDrawing` in `tail.ts` refuses an echo
@@ -1392,12 +1561,26 @@ function SessionLine({
    * Compared rather than keyed on `title`, because the two are only *usually* the
    * same question: a folder row draws a subpath the title never had, and a named
    * session draws both because they say different things.
+   *
+   * **A row with no folder header above it draws `folderLabel`, not `displayCwd`
+   * — the folder, without the `~/` that says which root.** Pinned, All, the
+   * waiting floor and the orphans all name the directory in full because nothing
+   * else on screen does; what they drop is the prefix every row on a machine
+   * shares. `~/2026-07-taskmanager` is `2026-07-taskmanager` here, and the two
+   * characters go from the end nearest the reader's eye.
+   *
+   * ⚠ **Withholding the folder itself was tried here and was wrong.** Cutting a
+   * pinned row against its own `folderPathOf` blanked the line for every session
+   * launched at its repository root, which is most of them — the folder vanished
+   * instead of getting shorter. The complaint was never that a pin named a
+   * directory; it was that it spent the row's first characters on the part of the
+   * path that is the same on every row. Q3.581.
    */
   const located =
     !showPath
       ? null
       : folderPath === null
-        ? displayCwd(row.snapshot.workspace.requestedCwd, roots)
+        ? folderLabel(row.snapshot.workspace.requestedCwd, roots)
         : rowSubpath(row, folderPath);
   const subpath = located === label ? null : located;
   // Only when the daemon actually gave up. A session it is still working
@@ -1437,7 +1620,58 @@ function SessionLine({
    */
   return (
     <div
-      className={`group relative flex items-center ${selected ? "bg-raised" : "hover:bg-raised/50"}`}
+      {...drag}
+      style={shift === 0 ? undefined : { transform: `translateY(${shift}px)` }}
+      /*
+       * ⚠ **`select-none` only while this row is the one moving.** A long press
+       * starts a text selection on every engine, and the selection then follows
+       * the finger over the rows the drag is passing. Putting it on the list
+       * unconditionally would take selection away from the rail permanently to
+       * fix a state that lasts a second.
+       *
+       * `shadow-lg` and its own ground, so the row reads as picked up rather than
+       * as sliding under its neighbours; `z-10` because the sections around it
+       * paint their own backgrounds. **No `.press`** — `scale(0.97)` held for the
+       * length of a gesture reads as broken, which is `agent-strip.md`'s
+       * measurement rather than a preference here.
+       */
+      /*
+       * ⚠ **The transition is on only while a drag is live, and taking it off at
+       * the drop is the point.** Clearing the transform and reordering the keyed
+       * children happen in one commit, and a transition takes its start value from
+       * the last style recalc — so a row left with the class would animate
+       * `translateY(±h) → none` over a layout that has *already* moved by ∓h,
+       * overshooting by a full row and sliding back on every drop.
+       *
+       * ⚠ **And the row under the pointer is never transitioned.** Its transform is
+       * rewritten on every pointer event; with one, each write restarts the
+       * interpolation from wherever the last had reached and the row crawls after
+       * the finger instead of following it. Both are `agent-strip.md`'s
+       * measurements rather than preferences.
+       */
+      className={`group relative flex items-center ${sliding ? "select-none" : ""} ${
+        sliding && !lifted ? "transition-transform" : ""
+      } ${
+        lifted
+          ? "z-10 bg-surface shadow-lg will-change-transform"
+          : pressed
+            ? /*
+               * ⚠ **The hold has to be visible before it has done anything, and
+               * `bg-raised` on `ink` is 1.15:1 — under a thumb, on a phone, that
+               * is nothing at all.** So the press wears a shadow, which is the
+               * one cue that spills past the finger covering the row, and it is
+               * the *same* cue the lift wears one step stronger: the row is
+               * picked up gradually rather than switching appearance at 400ms.
+               * A shadow and never a `scale`, because `measure` reads this row's
+               * own height at the moment it arms and a transformed rect would
+               * report the wrong one. The other half of the answer is haptic and
+               * lives at `arm` in `rowDrag.ts`.
+               */
+              "z-10 bg-raised shadow-md"
+            : selected
+              ? "bg-raised"
+              : "hover:bg-raised/50"
+      }`}
     >
       <button
         onClick={() => navigate(sessionPath(row.ref))}
@@ -1470,12 +1704,27 @@ function SessionLine({
                 one fixed left edge for its name. */}
             <StatusDot session={row.snapshot} />
             {renaming ? (
-              <RenameField
-                sessionRef={row.ref}
-                current={row.snapshot.title ?? null}
-                placeholder={label}
-                onDone={() => setRenaming(false)}
-              />
+              /*
+               * ⚠ **`data-no-drag`, the same marker the kebab carries, and for a
+               * sharper reason.** The row is the drag surface and this is a text
+               * field inside it: without the marker a mouse drag-select over the
+               * name passes `MOUSE_SLOP` and arms the row drag, and a long press
+               * to place a caret passes `PRESS_MS` and does the same — after
+               * which `rowDrag` writes `user-select: none` and
+               * `-webkit-touch-callout: none` onto the row and `preventDefault`s
+               * the touchmove, so the field cannot be selected in at all and the
+               * session is reordered instead of renamed. `rowDrag.ts` states the
+               * rule: the row is the drag surface *except* where it already
+               * carries a control.
+               */
+              <span data-no-drag className="flex min-w-0 flex-1">
+                <RenameField
+                  sessionRef={row.ref}
+                  current={row.snapshot.title ?? null}
+                  placeholder={label}
+                  onDone={() => setRenaming(false)}
+                />
+              </span>
             ) : (
               // Semibold when it is waiting on you. With the amber gone this is
               // half of what makes a blocked row findable at arm's length — the
@@ -1511,7 +1760,29 @@ function SessionLine({
              * it joins the sentence that was already being written: agent, then
              * where, in one `text-muted` line under the title.
              */
-            <div className="mt-0.5 truncate text-xs text-muted">
+            /*
+             * ⚠ **Sans, and `text-2xs` — this line is the one place a path is *not*
+             * drawn in mono, and the reason is the same one that keeps the title
+             * above it sans.**
+             *
+             * A row is the tightest slot in the app: at 390px this line shares its
+             * width with the age and the overflow control, and mono's ~0.6em average
+             * advance against sans's ~0.5em spends about a fifth of the characters on
+             * the family. Measured on the reported row — `~/2026-07-ta…` was as far as
+             * 12px mono reached; sans at the same step carries roughly a quarter more,
+             * and the whole line dropping from `text-xs` adds to that.
+             *
+             * That is not an exception to `.claude/rules/web-typography.md`, it is the
+             * carve-out that rule already makes one paragraph up: what a row draws is a
+             * *name* — the thing you scan a list for — and a name is prose. Mono is for
+             * where a path is being read as a path and there is room to read it: the
+             * session header, the picker's crumbs, a diff, the import sheet.
+             *
+             * One size and one family for the whole line, rather than the path
+             * differing from the two names beside it. A subline that changed font
+             * halfway is what made this row unreadable in the first place.
+             */
+            <div className="mt-0.5 truncate text-2xs text-muted">
               {row.snapshot.agent}
               {showMachine && ` · ${row.machineName}`}
               {/* The path left this row when the folder took it. What comes back
@@ -1530,10 +1801,22 @@ function SessionLine({
       </button>
 
       {/*
-       * Revealed on hover or focus, and always present on a coarse pointer, which
-       * has no hover to reveal it with. A *pointer* query and never a width one,
-       * expressed in CSS and never read in JavaScript. A pinned row keeps the menu
-       * visible regardless, since that is a row you return to.
+       * ⚠ **Always drawn, and it used to be revealed on hover for every row but a
+       * pinned one.** Reported as "why do the pinned ones have three dots and the
+       * others not — make them all show it", which is the reveal working exactly
+       * as written and being wrong anyway: two rows a few pixels apart, identical
+       * in every other way, and one of them has a control. The rule was a *pointer*
+       * query rather than a width read and that part was right; what it got wrong
+       * is that hiding a row's only menu until the pointer is already on the row
+       * makes the menu undiscoverable and makes the list look inconsistent to
+       * anybody whose pointer is elsewhere — which is the state a list is in
+       * whenever somebody is reading it rather than aiming at it.
+       *
+       * The ink this costs was already being spent: `pinned` rows have drawn it
+       * unconditionally all along, so nothing about the row's width, its
+       * truncation point or the tap pad's reach past the scroller changes — see
+       * the `mr-2.5` note above, which is the measurement that keeps a permanent
+       * horizontal scrollbar off the bottom of the rail.
        */}
       {/*
        * `mr-2.5` and not `mr-1`, and the 10px is measured rather than chosen:
@@ -1543,13 +1826,15 @@ function SessionLine({
        * list's content edge and put a permanent horizontal scrollbar along the
        * bottom of the rail. See the note on that box.
        */}
-      <span
-        className={`mr-2.5 ${
-          pinned
-            ? ""
-            : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 [@media(pointer:coarse)]:opacity-100"
-        }`}
-      >
+      {/*
+       * ⚠ **`data-no-drag`: the row is the drag surface *except* here.** A mouse
+       * takes the pointer at the press, so without this every later event — the
+       * `click` this menu needs included — was retargeted to the row and the kebab
+       * simply stopped working. Marked on the markup rather than tested by tag in
+       * `rowDrag.ts`, so the next control added to this end of the row inherits it
+       * without that file learning its name.
+       */}
+      <span data-no-drag className="mr-2.5">
         <SessionMenu sessionRef={row.ref} state={state} size="sm" onRename={() => setRenaming(true)} />
       </span>
     </div>

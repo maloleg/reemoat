@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { AGENT_IDS, AGENT_LOGIN, MANAGED_CLI_DIRS } from "../src/acp/agents.js";
+import { SETTING_KEYS, envNameFor } from "../packages/control-plane/src/settings.js";
 import { tmp } from "./tmp.js";
 
 /**
@@ -842,6 +843,31 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * so, or the pair is worse documented than neither.
    */
   check("and the credential directory is named as not being one of them", /CODEX_HOME/.test(daemonExample), true);
+
+  /*
+   * ⚠ **Every runtime setting, swept against the control plane's own example.**
+   *
+   * `SETTING_KEYS` already has its environment mapping asserted in a loop by
+   * `relaycheck`, and its route projection asserted by count — but nothing
+   * anywhere held the *documentation* to the list. All of the keys that existed
+   * when this was written were documented by hand and this sweep passed on the
+   * day it was added, which is exactly when a ratchet is worth putting in: it
+   * costs nothing now and refuses the next key that arrives without a line.
+   *
+   * The shape is the commented assignment above's, and for its reason — a
+   * variable named only in prose is one an operator cannot copy, and one whose
+   * default nobody wrote down. A key whose default is "unset" is a bare `=`,
+   * which `^#\s*KEY=` matches as happily as one with a value.
+   *
+   * Derived through `envNameFor` rather than transcribed, so a key renamed on
+   * that side comes here rather than quietly passing against its old spelling.
+   */
+  const cpExample = readFileSync(join(repoRoot, "packages", "control-plane", ".env.example"), "utf8");
+  check(
+    "every runtime setting is documented as a commented assignment",
+    SETTING_KEYS.filter((key) => !new RegExp(`^#\\s*${envNameFor(key)}=`, "m").test(cpExample)),
+    [],
+  );
   /*
    * And the one variable here that is *ours*: where `deploy/agents.sh` gets the
    * CLIs from. `vendor` is each vendor's own installer and `npm` is the registry,
@@ -1993,6 +2019,43 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * line says that `$2` is `AGENT_SOURCE`.
    */
   const bootFn = (name: string): string => blockIn("bootstrap.sh", bootLines, name, `${name}() {`, "}");
+
+  /*
+   * ⚠ **The installer is the *second* client of `POST /v1/register`, and it went
+   * one release without the field that route began requiring.**
+   *
+   * `packages/web` sends `acceptedTerms` from a checkbox; this script builds its
+   * own body, and it built `{name, password}` and nothing else — so on any instance
+   * with `REEMOAT_CP_LEGAL_DOCUMENTS` set, `curl install.sh | sh` reached the
+   * catch-all refusal arm and died with "the terms have to be accepted", after
+   * `ensure_node` had already written ~50 MB, with no box to tick in a terminal.
+   * `packages/web/src/account.ts` even words that refusal as "Tick the box", which
+   * is help for the one client that cannot be looking at it.
+   *
+   * Asserted as the three lines it actually takes, inside the functions they
+   * belong to, because a sweep over the whole file would pass on a mention in a
+   * comment: the switch is read off the same response two other fields come from,
+   * the consent is asked on the tty, and the body carries it. A rename fails here
+   * naming the reader that moved rather than passing on an empty search.
+   */
+  const probeInstance = bootFn("probe_instance");
+  const credentialBody = bootFn("credential_body");
+  const registerFn = bootFn("register");
+  check(
+    "the installer reads whether the instance publishes documents",
+    /REG_LEGAL=\$\(json_path legal\.documents/.test(probeInstance),
+    true,
+  );
+  check(
+    "and asks for agreement on the tty before creating an account",
+    [/\[ "\$REG_LEGAL" = true \]/.test(registerFn), registerFn.includes("$CP/terms"), /_agree.*=.*yes/.test(registerFn)],
+    [true, true, true],
+  );
+  check(
+    "and sends acceptedTerms only when it was asked for",
+    [/acceptedTerms = true/.test(credentialBody), /accepted === "yes"/.test(credentialBody)],
+    [true, true],
+  );
   check("the bootstrap defaults the agent source", lineIn("bootstrap.sh", bootLines, "the agent-source default", "AGENT_SOURCE="), "AGENT_SOURCE=vendor");
   const parseFlags = bootFn("parse_flags");
   check(
@@ -2273,6 +2336,37 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     true,
   );
   check("the control-plane wizard writes it", new RegExp(`set_env ${KEY} `).test(installer), true);
+
+  /*
+   * ⚠ **The two environment-only values, which the sweep above cannot reach.**
+   * `SETTING_KEYS` is swept against this file in one loop, and neither of these
+   * is a member — the catalogue because a database-owned value could name an
+   * origin the CSP refuses, the offer because it points at one particular shop
+   * and that array is drawn on every instance's Server settings screen. Being
+   * outside the sweep is exactly why they are named here: an env-only variable
+   * that nothing documents is one an operator has no way to discover.
+   */
+  for (const envOnly of [
+    "REEMOAT_CP_PLUGIN_CATALOGUE_URL",
+    "REEMOAT_CP_MACHINES_OFFER_URL",
+    // The third member, and the same argument at its sharpest: the documents this
+    // switch publishes name one party, so a row on every fork's Server settings
+    // screen would offer somebody else's contract as a toggle.
+    "REEMOAT_CP_LEGAL_DOCUMENTS",
+  ]) {
+    check(
+      `the example documents ${envOnly} as a commented assignment`,
+      new RegExp(`^#\\s*${envOnly}=`, "m").test(cpExample),
+      true,
+    );
+    check(
+      `and ${envOnly} is read from the environment rather than the settings table`,
+      new RegExp(`process\\.env\\["${envOnly}"\\]`).test(
+        readFileSync(join(repoRoot, "packages/control-plane/src/main.ts"), "utf8"),
+      ),
+      true,
+    );
+  }
   /*
    * And asks rather than assuming. A `set_env` with a literal would be a
    * decision made on the operator's behalf about whether a proxy exists, which

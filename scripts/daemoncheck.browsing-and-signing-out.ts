@@ -430,6 +430,27 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
     /async signOutSessions[\s\S]*?\n  \}/.exec(reg)?.[0] ?? "",
   ), false);
   check("and the route waits for it before answering", /await registry\.signOutSessions\(agent\)/.test(routes), true);
+  /*
+   * ⚠ **Including the ones the daemon parked, which `!terminal` alone left out.**
+   *
+   * A parked session is terminal with no process and is coming back on the next
+   * message, so selecting `!terminal` meant signing out of an agent while every
+   * quiet conversation on it went on believing it still had the credential: drawn
+   * as an ordinary sleeping session with a live composer, woken into `Failed to
+   * authenticate` inside the transcript, and skipped by `reloadCredentials`, whose
+   * revive filter looks for `agent_signed_out` and found `parked`.
+   *
+   * Asserted as the selector rather than as a count, because the count is what was
+   * wrong: the route reported how many it ended, and the parked ones were neither
+   * ended nor counted. Both halves — that the parked reason is named here, and
+   * that `stop()` will relabel it rather than needing a teardown it cannot do.
+   */
+  const sweep = /async signOutSessions[\s\S]*?\n  \}/.exec(reg)?.[0] ?? "";
+  check(
+    "and the ones it had parked, which have no process to stop",
+    [/exit\?\.reason === "parked"/.test(sweep), /RELABELS_PARKED/.test(reg)],
+    [true, true],
+  );
 
   /*
    * **A credential that went away some other way is reported by the agent**, not

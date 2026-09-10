@@ -290,18 +290,25 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
     if (!REACHES_44.test(classes)) shortStart.push(classes.slice(0, 60));
   }
   /*
-   * ⚠ **Eight, and it was nine.** The `Edit <preset>` control under the picker is
-   * gone: editing an assembled agent is a row on the machine's Agents screen now,
-   * where the thing being edited is a full-width row rather than a 112px tile in a
-   * strip you drag sideways. What replaced the `+` beside it is the gear, which is
-   * the same control in the same slot and therefore still counted here.
+   * ⚠ **Nine, and it was eight, and before that nine.** The `Edit <preset>`
+   * control under the picker went when editing an assembled agent became a row on
+   * the machine's Agents screen — a full-width row rather than a 112px tile in a
+   * strip you drag sideways — and the `+` beside it became the gear, the same
+   * control in the same slot and therefore still counted.
+   *
+   * What brings it back to nine is **up one folder**, in the breadcrumb bar. It is
+   * a plain `<button>` rather than an `IconButton` deliberately: this walks a
+   * filesystem on another machine, while a `ChevronLeft` in this app always leaves
+   * a *screen* for a fixed destination taken from the URL, and one glyph for both
+   * is how the two become one thing in a reader's head. So it owes its 44px the
+   * hard way, in its own class string, which is exactly what the line below reads.
    *
    * A count going *down* is only good news if the act moved rather than
    * disappeared, which is the trap `PluginsPanel`'s kebab assertion was written
    * against one section down. What answers it here is the pair below: this file
    * builds no path into the builder, and `MachineAgentsSection` builds both.
    */
-  check("the new-session sweep actually found the screen's controls", aimed, 8);
+  check("the new-session sweep actually found the screen's controls", aimed, 9);
   check("and every one of them clears 44px", shortStart, []);
 
   /*
@@ -873,6 +880,82 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      */
     check("the action and the plugin's name are two elements", /note=\{offer\.plugin\.name\}/.test(menu), true);
     check("and both of them truncate", (menu.match(/truncate/g) ?? []).length >= 2, true);
+
+    /*
+     * ⚠ **A released session offers no Resume, and this has to be asserted as an
+     * absence because the row appears by *default*.**
+     *
+     * `canResume` is `isTerminal && isResumable`, and a parked session satisfies
+     * both — it is terminal and it has an `agentSessionId`, which is the whole
+     * point of it. So doing nothing produces a Resume item on every quiet
+     * conversation on the machine, and the decision was the opposite: a message
+     * is the only way back. Nothing typed can hold that, and no rendering test
+     * would either, since the wrong version renders a perfectly good button.
+     *
+     * Read as "the guard is present in the expression that decides the row", the
+     * same shape the Stop-ordering pins above use. It is a weaker instrument than
+     * a behavioural check and it is the strongest one available here — the
+     * alternative is the assertion nobody writes.
+     */
+    const decides = menu.slice(menu.indexOf("const canResume"), menu.indexOf("const pinned"));
+    check("a released session is not offered a Resume it does not need", /!isParked\(/.test(decides), true);
+    check("and the guard is on the row that draws it", /canResume/.test(menu.slice(menu.indexOf('label="Resume"') - 400, menu.indexOf('label="Resume"'))), true);
+
+    /*
+     * ⚠ **And Stop *is* offered, which is the opposite correction on the same
+     * menu.** `!isTerminal(session.status)` alone took Stop away from every
+     * released conversation — so ending one meant sending a message, waiting for
+     * the agent to come back, and stopping that. A person sees an ordinary quiet
+     * session (`statusTone` draws it as `idle`), so a menu missing the one action
+     * that session has is a hole with nothing on screen explaining it. Read as the
+     * guard on the row, since no render can hold "the same menu as an idle one".
+     */
+    const stopGuard = menu.slice(menu.indexOf('label="Stop"') - 700, menu.indexOf('label="Stop"'));
+    check("a released session can still be ended", /isParked\(session\)\)? &&/.test(stopGuard) || /\|\| isParked\(session\)/.test(stopGuard), true);
+  }
+  {
+    /*
+     * The one sentence under the machine's idle setting, held to what it must and
+     * must not say.
+     *
+     * ⚠ **The prohibition is the assertion, and nothing typed can hold it.** The
+     * daemon calls this state `parked` and so does every docblock, which is
+     * exactly why the word leaks into a screen: it is the name everybody working
+     * on it uses. On a settings row it would name a mechanism the reader has no
+     * way to see and cannot act on, turning housekeeping into a term to learn.
+     * The owner asked for it by name, and a rule stated only in a commit message
+     * is one the next edit does not know about.
+     *
+     * The other half is that the sentence still has to *say* the two things a
+     * reader needs — that the agent is shut down, and that nothing is lost — or
+     * "no jargon" is satisfied by saying nothing.
+     */
+    const section = readFileSync(new URL("../src/ui/settings/MachineSection.tsx", import.meta.url), "utf8");
+    const drawn = stripComments(section);
+    const sentence = /A conversation left untouched this long[^<]*/.exec(drawn)?.[0]?.trim() ?? "";
+    check("the idle setting explains itself in one sentence", sentence.length > 0 && sentence.split(".").filter((part) => part.trim().length > 0).length === 1, true);
+    /*
+     * ⚠ Asserted over the **whole drawn screen**, not over the sentence extracted
+     * above. Read off the extract it passes vacuously the moment the sentence is
+     * reworded past the pattern — which is exactly when somebody is rewriting it
+     * and most likely to reach for the word. Comments are stripped first, so the
+     * docblocks that *do* call this parking are untouched: the prohibition is on
+     * what a person reads, not on what the code is called.
+     */
+    check("without naming the mechanism, anywhere a reader could see it", /park/i.test(drawn), false);
+    check("saying what happens and that nothing is lost", [
+      /shut down/i.test(sentence),
+      /where you left off/i.test(sentence),
+    ], [true, true]);
+    /*
+     * And the heading above it, held to the same rule — a heading is read first,
+     * so it is the likelier place for the mechanism's name to surface. Asserted
+     * over *every* heading on this screen rather than the one, because the word
+     * arriving on a neighbouring row is the same defect.
+     */
+    const headings = [...drawn.matchAll(/SETTINGS_HEADING\}>([^<]*)</g)].map((match) => match[1] ?? "");
+    check("the screen has a heading for it", headings.includes("Idle sessions"), true);
+    check("and no heading on it names the mechanism", headings.filter((heading) => /park/i.test(heading)), []);
   }
 
   /*
@@ -957,14 +1040,16 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
   );
   check("the size table was found and has entries in it", sizes.length >= 3, true);
   /*
-   * The three mechanisms, spelled once. `sm` grows a transparent `::after` by 10px
+   * The four mechanisms, spelled once. `sm` grows a transparent `::after` by 10px
    * a side, `chip` grows vertically only through the shared `TAP_GROW_Y` — a
    * symmetric inset would put its target on the mode chip's *face*, and the chip
-   * beside it changes the model — and `lg` simply is 44px. A size that reaches the
-   * floor some fourth way has to say so here, which is the point: the assertion is
-   * that the table *states* how, not that it happens to.
+   * beside it changes the model — `nav` grows symmetrically by 6px from a 32px box,
+   * which fits because it sits alone at the end of a `gap-2` head row where `sm`'s
+   * 10px would not, and `lg` simply is 44px. A size that reaches the floor some
+   * fifth way has to say so here, which is the point: the assertion is that the
+   * table *states* how, not that it happens to.
    */
-  const NAMES_ITS_44 = /after:-inset-2\.5|\$\{TAP_GROW_Y\}|\bh-11\b/;
+  const NAMES_ITS_44 = /after:-inset-2\.5|after:-inset-1\.5|\$\{TAP_GROW_Y\}|\bh-11\b/;
   check(
     "and every size a caller can name says how it reaches 44px",
     sizes.filter(([, classes]) => !NAMES_ITS_44.test(classes)).map(([name]) => name),
@@ -976,6 +1061,43 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * remembers as 36px is worse than no size at all, and `h-9 w-9` under any other
    * name is the same defect with the evidence removed.
    */
+  /*
+   * ⭐ **And every size has a glyph somebody chose.**
+   *
+   * The glyph was `size === "sm" ? 12 : size === "chip" ? 14 : 16` — a chain whose
+   * last arm answered for every name not written into it. `nav` took its 16 that
+   * way and 16 happened to be right; the entry after it is the one where falling
+   * off the end is a 16px glyph in a 24px box, which is a control with no ink
+   * margin at all. Keyed on the size table, so an entry with no glyph is a compile
+   * error rather than a default.
+   */
+  const glyphAt = bitsCode.indexOf("const ICON_BUTTON_GLYPH");
+  const glyphTable = bitsCode.slice(glyphAt, bitsCode.indexOf("};", glyphAt));
+  const glyphs = new Map(
+    [...glyphTable.matchAll(/^ {2}(\w+): (\d+),$/gm)].map((entry) => [entry[1] ?? "", Number(entry[2] ?? 0)]),
+  );
+  check("the glyph table was found", glyphs.size > 0, true);
+  check(
+    "and every size a caller can name has a glyph chosen rather than fallen through to",
+    sizes.map(([name]) => name).filter((name) => !glyphs.has(name)),
+    [],
+  );
+  check("keyed on the size table, so the compiler refuses an unglyphed one", /Record<keyof typeof ICON_BUTTON_SIZE, number>/.test(bitsCode), true);
+  check("and the chain that answered for names nobody wrote is gone", /size === "sm" \? 12/.test(bitsCode), false);
+  /*
+   * A fact about CSS no type can hold: the glyph has to fit the box it is centred
+   * in with room to spare, or it touches the hover ground the box paints. 4px a
+   * side is the floor every entry clears today.
+   */
+  check(
+    "and every glyph leaves ink margin inside its box",
+    sizes
+      .map(([name, classes]) => [name, /\bh-(\d+)\b/.exec(classes)?.[1] ?? null] as const)
+      .filter(([name, h]) => h !== null && Number(h) * 4 - (glyphs.get(name) ?? 0) < 8)
+      .map(([name]) => name),
+    [],
+  );
+
   check(
     "and the one that never reached it is gone rather than renamed",
     [sizes.some(([name]) => name === "md"), /h-9 w-9/.test(sizeTable)],

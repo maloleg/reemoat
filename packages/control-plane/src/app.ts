@@ -48,7 +48,7 @@ import {
   verifiedOwnerOf,
 } from "./emails.js";
 import { checkEmailAddress, MAX_EMAIL_CHARS } from "./mail/address.js";
-import { mailHealth, NOTICE_INTERVAL_MS, sentRecently, type MailSender } from "./mail/outbox.js";
+import { mailAccepts, mailHealth, NOTICE_INTERVAL_MS, sentRecently, type MailSender } from "./mail/outbox.js";
 import {
   emailChanged,
   emailVerify,
@@ -63,6 +63,7 @@ import {
 import {
   burnRegistration,
   claimRegistration,
+  foldName,
   mintRegistration,
   nameTaken,
   nameTakenByAnother,
@@ -170,7 +171,7 @@ import {
  * against `package.json` instead, so the two cannot drift silently.
  */
 const SOURCE_URL = "https://github.com/rends-east/reemoat";
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 
 /**
  * Work a route answered before doing, still owed.
@@ -425,6 +426,16 @@ export interface ControlPlaneOptions {
    * because installing from a file never involved this at all.
    */
   pluginCatalogueUrl?: string | null;
+  machineOfferUrl?: string | null;
+  /**
+   * Whether this deployment publishes the built-in legal documents as its own.
+   *
+   * Environment-only and with no compiled-in default, for
+   * `machineOfferUrl`'s reason one degree sharper: those documents name one
+   * particular party, and a deployment that has not adopted them would otherwise
+   * be asking its users to agree to a contract with a stranger.
+   */
+  legalDocuments?: boolean;
   /** Live tunnel state, or `null` when the relay is switched off. */
   relay?: RelayView | null;
   /**
@@ -494,6 +505,8 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const relayUrl = options.relayUrl ?? null;
   const relayUrls = options.relayUrls ?? null;
   const pluginCatalogueUrl = options.pluginCatalogueUrl ?? null;
+  const machineOfferUrl = options.machineOfferUrl ?? null;
+  const legalDocuments = options.legalDocuments ?? false;
   const relay = options.relay ?? null;
   const trustedProxyHops = options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS;
   const app = new Hono<AppEnv>();
@@ -858,7 +871,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * constantly — `GET /v1/machines` every wake, `GET /v1/me`. Call sites that say
    * why they are there is the smaller thing to keep true.
    *
-   * There are **seven**, and there were two. `POST /v1/machines` and
+   * There are **twelve**, and there were two. `POST /v1/machines` and
    * `POST /v1/machines/:id/revoke` are a loop that costs three fsync'd
    * transactions a turn under `PRAGMA synchronous = FULL`, on the file the relay
    * shares, and leaves permanent rows behind either way; `POST /v1/me/keys` and
@@ -873,6 +886,31 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * being renamed, so renaming it to the name it already has succeeds every time.
    * The count is stated here rather than derived, so it is the thing to check
    * against `spendWrite(` when a route is added.
+   *
+   * ⚠ **The eighth and ninth are `POST /v1/me/password` and `PUT /v1/me/email`,
+   * and the paragraph above was wrong a second time in the same way** — the
+   * count went uncorrected while the set it names grew. Both were missed for the
+   * opposite reason to the rename: they *do* read like writes, but this
+   * enumeration was assembled from what costs a **transaction**, and what makes
+   * these two the most expensive routes below THE LINE is not their rows. Each
+   * reaches `scrypt` at N = 2^15 twice per request, on the lane Q1.407 gives an
+   * unconditional preference to, so the cost lands on `/v1/login` rather than
+   * here; `PUT /v1/me/email` also enqueues two messages into a 500-row outbox
+   * shared with password recovery. Their own route docblocks carry the argument.
+   *
+   * ⚠ **The tenth and eleventh are `PUT` and `DELETE /v1/machines/:id/grants`,
+   * and this paragraph was wrong a third time** — which is the whole reason the
+   * count is written down rather than derived. They are one row each rather than
+   * a transaction, so they were missed for the rename's reason; what earns them
+   * a budget is that sharing is a route *every* signed-in owner can reach and
+   * each request leaves a permanent `grants` row behind, on the file the relay
+   * shares.
+   *
+   * The twelfth is `DELETE /v1/machines/:id/grants/me`, and it is counted for the
+   * half of that argument that survives being pointed the other way: it is one row
+   * on the same shared file, reachable by every signed-in account, and unlike the
+   * two above it takes no ownership lookup ahead of the write — so the throttle is
+   * the only thing standing between it and a loop.
    */
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
@@ -1358,7 +1396,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       );
     }
 
-    const row = db.prepare("SELECT machine_id FROM enrollment_codes WHERE code_hash = ?").get(hash);
+    const row = db.prepare("SELECT machine_id, created_by FROM enrollment_codes WHERE code_hash = ?").get(hash);
     const machineId = String(row?.["machine_id"] ?? "");
     const machine = db.prepare("SELECT id, revoked_at FROM machines WHERE id = ?").get(machineId);
     if (!machine) {
@@ -1370,7 +1408,29 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       return jsonError(c, 403, "machine_revoked", "this machine has been revoked");
     }
 
-    db.prepare("UPDATE machines SET enrolled_at = ? WHERE id = ?").run(now, machineId);
+    /*
+     * `enrolled_by` is written here and nowhere else, in the same statement as
+     * `enrolled_at`, because this is the only moment that knows which code the
+     * running daemon actually redeemed. `store.ts` carries the four ways
+     * deriving it from `enrollment_codes` afterwards got it wrong.
+     *
+     * The value is whatever minted the code: a user id, or a `pk_` provisioning
+     * key id. It is stored as it stands and resolved to a name at read time, so
+     * an account deleted later leaves a row that still says *somebody else*.
+     *
+     * ⚠ **NULL rather than `""` on the branch that cannot happen.**
+     * `enrollment_codes.created_by` is `NOT NULL` and this row was just matched by
+     * `code_hash`, so the fallback is unreachable today — but it used to write
+     * `""`, which is a second on-disk spelling of *unknown*, and this column has
+     * exactly one predicate worth keeping total: `enrolled_by IS NULL`. There are
+     * no down-migrations here, so one stray `''` would be permanent.
+     */
+    const enroller = row?.["created_by"];
+    db.prepare("UPDATE machines SET enrolled_at = ?, enrolled_by = ? WHERE id = ?").run(
+      now,
+      typeof enroller === "string" && enroller.length > 0 ? enroller : null,
+      machineId,
+    );
 
     // Public halves only. Enrollment hands a daemon the keys that *verify* tokens
     // addressed to it; it never signs anything here.
@@ -1475,6 +1535,27 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       registration: { enabled: mode.enabled, requiresEmail: mode.requiresEmail },
       mail: { configured: mailConfigured(db).configured },
       /*
+       * Where somebody with no machine can get one, or `null`.
+       *
+       * `plugins.catalogue` below, in shape and in argument: **the address,
+       * never a boolean.** What differs is which header each has to satisfy, and
+       * it is worth stating here because the inconsistency otherwise looks like
+       * one somebody should fix — a catalogue is `fetch`ed and so needs
+       * `connect-src`, which is why it is environment-only and pinned to the CSP
+       * built once at construction; this is an `<a href>`, the policy above has
+       * no `navigate-to` and neither `form-action` nor `base-uri` constrains a
+       * link, so it can be an ordinary `SETTING_KEYS` row an admin owns without
+       * a redeploy.
+       *
+       * Above the credential line with the rest of this route, and correctly so:
+       * whether this instance points anywhere for a machine is a fact about the
+       * instance. The *address* is public; the person's email is not, and it is
+       * appended in the browser out of `GET /v1/me` — this route has no caller to
+       * know one for.
+       */
+      machines: { offer: machineOfferUrl },
+      legal: { documents: legalDocuments },
+      /*
        * Where the plugin market's catalogue lives, or `null`.
        *
        * ⚠ **The value rather than a boolean, and it is safe to publish because
@@ -1534,6 +1615,25 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     }
     const weak = checkPasswordPolicy(password, trimmed);
     if (weak !== null) return jsonError(c, 400, "weak_password", weak);
+
+    /*
+     * ⚠ **Required exactly when this deployment publishes documents, and this is
+     * a statement rather than a proof.**
+     *
+     * A caller that sends `true` is indistinguishable from a person who ticked a
+     * box, so what this buys is that the *route* names the requirement instead of
+     * leaving it to one screen: the browser is no longer the only thing that
+     * knows an account may not be created without agreeing. Nothing is stored —
+     * no column, no timestamp, no version — so this instance still cannot say
+     * what anybody agreed to and still does not claim to. Q3.599, Q7.134.
+     *
+     * Gated on `legalDocuments` because the documents name one particular party:
+     * a deployment that has not claimed them must not refuse anybody for failing
+     * to accept a contract it does not publish. Q1.638.
+     */
+    if (legalDocuments && body["acceptedTerms"] !== true) {
+      return jsonError(c, 400, "terms_not_accepted", "the terms have to be accepted to create an account");
+    }
 
     /*
      * The address is required exactly when mail works, and **refused when it does
@@ -1649,6 +1749,60 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * day, because that message is itself mail sent to a third party on an
      * anonymous request.
      */
+    /*
+     * ⚠ **Whether the live sign-up on this address is the caller's own, and
+     * nothing established that until now.** The resend arm below re-mails
+     * `pending`'s stored name and hash on the strength of the *address* alone,
+     * and its docblock says that answers somebody "who re-submits the form
+     * because their mail never arrived" with "another copy of *their* link" —
+     * true only if the row is theirs, which the code never asked.
+     *
+     * Reversed, it is a squat. A stranger signs up as `mallory` against
+     * `victim@`, which is anonymous and reserves nothing anybody notices. The
+     * victim later signs up as themselves with their own address, falls into
+     * that arm, and is mailed a link that creates **`mallory`** — with mallory's
+     * password and an `INSERT INTO user_emails … verified_at` for the victim's
+     * address. `verifiedOwnerOf` then answers mallory for ever: the victim can
+     * never register that address, and `/v1/forgot` for it mails them on
+     * mallory's behalf. That is exactly the squatting
+     * `idx_user_emails_verified` exists to prevent, reached by handing the
+     * verification to the squatter.
+     */
+    /*
+     * ⚠ **Exact, never folded, and folded was an account takeover that survived
+     * the fix above by one capital letter.** `foldName` is trim + lower-case, and
+     * `USER_NAME` admits mixed case, so `Victim` and `victim` fold alike while
+     * `users.name` holds them as two different accounts.
+     *
+     * Measured path: a stranger signs up as `Victim` against `victim@`.
+     * `nameTakenByAnother` then lets the real person through as `victim` — its
+     * `email_folded IS NOT ?` clause exempts a pending row on the *same* address,
+     * deliberately, so that re-submitting the form resends your own link. A folded
+     * `mine` called that row theirs, the resend arm re-minted `pending`'s **stored**
+     * name and hash, and the mailbox received a link creating `Victim` with the
+     * stranger's password and `victim@` marked verified. `verifiedOwnerOf` answers
+     * the stranger for ever after: the address can never be registered again, and
+     * `/v1/forgot` for it mails the victim on the stranger's behalf.
+     *
+     * The name half is `nameTakenByAnother`'s own rule, which already refuses a
+     * fold-variant of an existing **user** via `lower(name)`. The pending-row
+     * exemption was simply wider than the table's, and the refusal below narrows it
+     * to match.
+     */
+    const mine = pending !== null && pending.name === trimmed;
+    /*
+     * A live sign-up on this address under a name that folds onto the caller's but
+     * is not it. `409 name_taken` rather than the third arm below, and the second
+     * reason is the arm's own: `mintRegistration` supersedes on
+     * `(email_folded, name_folded)`, which these two share — so two rows here would
+     * retire each other in turn rather than standing beside each other, which is
+     * the property that arm rests on. Same answer, same status and same sentence a
+     * fold-equal existing user already gets.
+     */
+    if (pending !== null && !mine && foldName(pending.name) === foldName(trimmed)) {
+      return jsonError(c, 409, "name_taken", "somebody already has that name");
+    }
+
     if (existingOwner !== null || pending !== null) {
       if (existingOwner !== null && !noticeAlreadySent(folded, now) && mayMail(folded)) {
         send(
@@ -1661,7 +1815,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           }),
           now + REGISTRATION_TTL_MS,
         );
-      } else if (pending !== null && mayMail(folded)) {
+      } else if (pending !== null && mine && mayMail(folded)) {
         /*
          * **This is where the resend route went, and the row is the reason it
          * had to come here rather than be replaced by "just sign up again".**
@@ -1699,6 +1853,49 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
             lifetime: lifetimeText(REGISTRATION_TTL_MS),
           }),
           again.expiresAt,
+        );
+      } else if (existingOwner === null && !mine && mayMail(folded)) {
+        /*
+         * **Somebody else's live sign-up is holding this address, so this caller
+         * gets their own link beside it rather than nothing.**
+         *
+         * The narrow fix — refuse the arm above and send nothing — closes the
+         * squat and leaves the squatter holding the address anyway: they re-post
+         * their own pair, `mintRegistration` re-extends the 24 hours, and the
+         * person who owns the mailbox never receives a single mail or any way to
+         * find out why. Two rows instead, because **the mailbox is the only
+         * party that can decide between them**: two links arrive, each naming the
+         * account it would create, and only one of them is the name the reader
+         * asked for. Whoever holds the address wins by clicking, which is the
+         * property the whole confirmation flow is built to give them.
+         *
+         * The values are the caller's own, never `pending`'s — that direction is
+         * the takeover the arm above refuses — and `mintRegistration`'s supersede
+         * is scoped to `(email_folded, name_folded)`, so this insert cannot
+         * retire the row it is standing beside. `claimRegistration` needs no
+         * change: the loser's link stays live until its own TTL and then fails on
+         * `verifiedOwnerOf` at confirm time, which is already the "somebody else
+         * proved it first" path and already burns with `email_taken`.
+         *
+         * Still silent, and still the same body: this arm and the two above are
+         * indistinguishable to the caller, so none of them says whether the
+         * address was spoken for.
+         */
+        const own = mintRegistration(
+          db,
+          { name: trimmed, email: email?.address ?? "", passwordHash: hash },
+          REGISTRATION_TTL_MS,
+          now,
+        );
+        send(
+          email?.address ?? "",
+          "register",
+          registrationConfirm({
+            name: trimmed,
+            url: `${publicOrigin()}/confirm#t=${own.token}`,
+            lifetime: lifetimeText(REGISTRATION_TTL_MS),
+          }),
+          own.expiresAt,
         );
       }
       return c.json({ pending: true, expiresAt: now + REGISTRATION_TTL_MS });
@@ -1938,13 +2135,33 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     const now = Date.now();
     defer(() => {
       try {
+        /*
+         * ⚠ **Asked before anything is spent or burned, because both are
+         * one-way.** `mayMailReset` spends one of this address's three attempts
+         * and `mintEmailToken` burns whatever live reset link the account
+         * already had — so discovering a full queue *after* them leaves somebody
+         * strictly worse off than never asking: no new mail, and the link
+         * already sitting in their inbox now dead. Three of those and they are
+         * blocked for fifteen minutes, which on an instance with no admin
+         * password reset is the whole way in.
+         *
+         * `reset` is not a caller-driven kind, so this can only be false on a
+         * genuine backlog rather than because somebody flooded the cheap kinds
+         * — that is what `MAX_OUTBOX_CALLER_DRIVEN` is for. Reported to stderr
+         * because nobody is waiting on this: the response went out before this
+         * block ran, and it must keep saying `{sent: true}` either way.
+         */
+        if (!mailAccepts(db, "reset", now)) {
+          console.error("forgot: the outbox is full, so no recovery mail was queued and no attempt was spent");
+          return;
+        }
         const userId = verifiedOwnerOf(db, checked.folded);
         if (userId === null || !mayMailReset(checked.folded)) return;
         const user = db.prepare("SELECT name, disabled_at FROM users WHERE id = ?").get(userId);
         // A disabled account gets nothing, and says so to nobody.
         if (user === undefined || user["disabled_at"] !== null) return;
         const minted = mintEmailToken(db, userId, "reset", checked.folded, RESET_TTL_MS, now);
-        send(
+        const queued = send(
           checked.address,
           "reset",
           passwordReset({
@@ -1954,6 +2171,30 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
           }),
           minted.expiresAt,
         );
+        /*
+         * ⚠ **`send`'s answer was thrown away here, and it is the only signal
+         * that a recovery mail was lost.** The guard above closes the case this
+         * process can see coming; this closes the race, and a `mail === null`
+         * instance where `send` is false always. Giving the attempt back is the
+         * conservative direction: the caller received nothing, so charging them
+         * for it converts an outage of ours into a lockout of theirs.
+         *
+         * ⚠ **`forgive` and never `succeed`, which is the rule this file's
+         * throttle states and which `/v1/login` already broke once on
+         * `addressKey`.** `succeed` deletes the whole entry, and that is right
+         * only for a counter one person spends against themselves.
+         * `resetMailKey` follows the **recipient**: any anonymous caller spends
+         * it for any address, so clearing it here would hand back all three
+         * attempts, not the one that was not used — and an attacker able to make
+         * `send` fail intermittently could then walk RESET_MAIL_THROTTLE's
+         * roughly-four-an-hour bound off a victim's mailbox indefinitely,
+         * two delivered messages at a time. One optimistic `fail`, one
+         * `forgive`.
+         */
+        if (!queued) {
+          resetMailThrottle.forgive(resetMailKey(checked.folded));
+          console.error("forgot: the outbox refused a recovery mail, so the attempt was given back");
+        }
       } catch (error) {
         console.error(`forgot failed after answering: ${describeError(error)}`);
       }
@@ -2313,6 +2554,40 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      */
     const before = effectiveLimit(db, ownerId);
     const owned = machineCount(db, ownerId);
+
+    /*
+     * ⚠ **Already over the limit is a refusal, because raising it here would
+     * undo an admin's suspension with a credential that may not.**
+     *
+     * Q1.503 fixed the *failed* provision — the write moved below the create so a
+     * refusal changes nothing — and its own "Why" describes this damage exactly:
+     * "a 409 that created nothing had un-suspended forty-five machines an admin
+     * had deliberately switched off, reported nowhere". What it did not do is
+     * stop the **successful** provision from doing the same thing, and the
+     * arithmetic above is why it can: `raisedTo` is `owned + 1`, computed from
+     * the machine *count*, so when an admin has lowered the limit below the count
+     * the new limit clears every machine the lowering switched off.
+     *
+     * `PUT /v1/admin/users/:id/machine-limit` returns the ids it suspended, so
+     * the lowering is a deliberate, reported act. The inverse arrives here on a
+     * `pk_` provisioning key, which `schema.sql` and `cp-machines.md` both state
+     * is not an admin credential — "it revokes, renames, grants and reads
+     * nothing" — and the 201 names no machine, so nothing tells the admin their
+     * suspension was reversed. One call, arbitrarily many machines back online on
+     * the daemon's own reconnect backoff.
+     *
+     * Refusing costs an automated provisioner exactly the case where a human has
+     * already intervened, which is the case that should stop it.
+     */
+    if (owned > before.limit) {
+      return jsonError(
+        c,
+        409,
+        "machine_limit",
+        `that user has ${owned} machines against a limit of ${before.limit}, so ${owned - before.limit} are switched off — raise their limit first`,
+      );
+    }
+
     const raisedTo = owned >= before.limit ? Math.min(owned + 1, MAX_MACHINES_PER_USER) : null;
 
     /*
@@ -2599,6 +2874,32 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * make the migration impossible rather than safe.
    */
   app.post("/v1/me/password", async (c) => {
+    /*
+     * ⚠ **The most expensive authenticated route in this service, and it was
+     * the one with no counter.** Q1.413 enumerated what an ordinary account
+     * could drive as fast as it could ask and named a signature and a
+     * transaction; it missed the two routes that reach `scrypt` — N = 2^15,
+     * 32 MiB — *twice* per request, once to verify and once to hash.
+     *
+     * `passwordChangeKey` is not the bound. It counts wrong guesses, and
+     * `verifyCurrentPassword` calls `throttle.succeed(key)` on every correct
+     * one, so a caller who knows their own password never arms it: posting
+     * `{currentPassword: P, newPassword: P}` in a loop is unbounded, and
+     * `checkPasswordPolicy` has no reuse test to stop it.
+     *
+     * What makes that a fleet outage rather than a warm CPU is Q1.407's
+     * unconditional preference: `release` wakes an authenticated waiter first,
+     * so a permanently non-empty authenticated queue means `wake("public")`
+     * never runs. Five concurrent requests pin `active` at MAX_CONCURRENT and
+     * `/v1/login`, `/v1/register` and `/v1/reset` queue to MAX_QUEUED_PUBLIC
+     * and then answer `503 overloaded` — including for the admin who would
+     * come to stop it. Q1.407 records the login-spray direction of that
+     * starvation as a known limitation; this is the same weapon pointed the
+     * other way, and unlike a spray it is bounded by a counter that exists.
+     */
+    const writeGuard = spendWrite(c, "password");
+    if (writeGuard !== null) return writeGuard;
+
     const caller = c.get("caller");
     const body = await readJsonObject(c);
     if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
@@ -2948,6 +3249,32 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * index makes worth nothing — and the *verification* is what answers 409.
    */
   app.put("/v1/me/email", async (c) => {
+    /*
+     * ⚠ **The only authenticated route that enqueues mail on every call, and
+     * its one counter follows the recipient rather than the caller.**
+     * `mayMail(checked.folded)` is keyed on the address the caller just typed —
+     * its own docblock calls that out as the single victim-keyed counter here —
+     * so a distinct address per request gets a fresh budget every time
+     * (`foldEmail` does no plus-address canonicalisation). Each accepted call
+     * puts two rows in `mail_outbox`, and `MAX_OUTBOX_PENDING` is 500 with no
+     * per-kind reservation, so one signed-in session could fill the queue and
+     * `enqueueMail` would start answering `null` for everybody — taking
+     * `/v1/forgot` with it, which is the state `RESET_MAIL_THROTTLE` exists to
+     * make unreachable, arrived at through the shared outbox instead of the
+     * shared throttle.
+     *
+     * This bounds the caller at Q1.413's 60/minute. It does **not** close the
+     * outbox side: a per-kind ceiling that keeps headroom for `reset` and
+     * `invite` is the other half and is a change to what Q7.79 says the queue
+     * costs, so it is asked rather than assumed.
+     *
+     * Also the second of the two 32 MiB KDF doors — the API-key arm below
+     * reaches `verifyCurrentPassword` on the `"authenticated"` lane, which is
+     * `/v1/me/password`'s starvation argument reached by another door.
+     */
+    const writeGuard = spendWrite(c, "email");
+    if (writeGuard !== null) return writeGuard;
+
     const caller = c.get("caller");
     if (!mailConfigured(db).configured) {
       return jsonError(c, 409, "mail_unconfigured", "this control plane cannot send mail, so it cannot confirm an address");
@@ -3112,12 +3439,36 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     return c.json({ email: current.email, verified: true });
   });
 
+  /**
+   * Who depends on this machine — its owner if it has one, and everybody holding
+   * a grant on it either way.
+   *
+   * **The two admin guards below key on this rather than on `ownerOf` alone, and
+   * the difference is a whole class of machine.** Both were written as "an
+   * ownerless row has nobody to ask", which quietly reads *no owner* as *no
+   * users*: a machine registered before ownership existed can be enrolled,
+   * online and carrying other people's grants — that is precisely the state
+   * `nameVisibleToGrantees` exists for. Keyed on ownership alone, an admin could
+   * adopt such a row with every scope, or re-enroll it out from under its
+   * grantees, and both answered 200.
+   *
+   * A genuinely orphan row — enrolled, no owner, no grants — has nobody to ask
+   * and stays the operator's, which is the case the guards were justified by.
+   */
+  const dependants = (machineId: string): { owner: OwnedMachine | null; grantees: string[] } => ({
+    owner: ownerOf(db, machineId),
+    grantees: db
+      .prepare("SELECT user_id FROM grants WHERE machine_id = ?")
+      .all(machineId)
+      .map((row) => String(row["user_id"])),
+  });
+
   /** The machines this user may reach. The registry, from the user's side. */
   app.get("/v1/machines", (c) => {
     const caller = c.get("caller");
     const rows = db
       .prepare(
-        "SELECT m.id, m.name, m.enrolled_at, g.scopes, o.label FROM grants g " +
+        "SELECT m.id, m.name, m.enrolled_at, m.enrolled_by, g.scopes, o.label FROM grants g " +
           "JOIN machines m ON m.id = g.machine_id " +
           "LEFT JOIN machine_owners o ON o.machine_id = m.id AND o.user_id = g.user_id " +
           "WHERE g.user_id = ? AND m.revoked_at IS NULL " +
@@ -3139,6 +3490,118 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     // than `machineStanding` per row, which is N+1 on the route the web client
     // polls per machine every four seconds.
     const ownerDisabled = ownerDisabledMachineIds(db);
+    /*
+     * Who minted the code this machine enrolled with, where that was not the
+     * person reading the list.
+     *
+     * **This is the only thing standing between an owner and a machine that is
+     * not theirs.** An admin can revoke a machine (`releaseOwner` frees the
+     * label), register a new one for the same person under the same name
+     * (`nameVisibleTo` filters `revoked_at IS NULL`, so the freed label passes),
+     * mint its first code and redeem it on their own hardware. The victim's list
+     * then draws a machine with the name they just lost, `owned: true`, enrolled
+     * and online — and it is somebody else's computer. Every step is a route this
+     * change deliberately keeps: revoking is the denial side, and registering a
+     * machine *for* somebody is what `deploy/install.sh`'s daemon wizard does
+     * from the host being installed, which is a real flow and not an attack.
+     *
+     * So the composition cannot be refused without breaking the wizard, and it is
+     * made **visible** instead. A machine you enrolled yourself reports `null`
+     * here; one somebody else enrolled for you names them, and a provisioning key
+     * or a since-deleted account is named as such rather than collapsed to `null`.
+     *
+     * **Read off `machines.enrolled_by`, which is written at the redemption it
+     * describes.** This was derived from `enrollment_codes` for one release and
+     * was wrong four ways, all of them reverting to the reassuring answer;
+     * `store.ts`'s docblock for the column enumerates them. The lesson worth
+     * keeping is the shape rather than the four: provenance read out of a table
+     * that is swept, mutated by burns and joined to rows somebody may delete is
+     * not provenance.
+     *
+     * ⚠ **A name is not by itself a substitution, and this is the field's real
+     * limit.** `deploy/install.sh`'s daemon wizard runs `cpctl admin addmachine
+     * --owner` then `cpctl admin enroll`, so *every* wizard-installed machine
+     * names the admin who ran the installer, and a substitution draws the same
+     * row as a normal install. What the field buys is that the owner can tell
+     * *somebody else brought this online* from *I did*, and recognise the name or
+     * not. It is a name to show rather than a flag to trust, and the honest
+     * remedy for a name you do not recognise is to re-enroll the machine
+     * yourself, which sets this back to you.
+     */
+    const enrolledByIds = new Set(
+      rows.map((row) => String(row["enrolled_by"] ?? "")).filter((id) => id.length > 0 && id !== caller.userId),
+    );
+    /*
+     * One `IN` over the handful of ids this listing actually names, rather than
+     * the whole fleet's redemption history. The predecessor scanned and sorted
+     * `enrollment_codes` entire on every request — no `machine_id` filter, no
+     * index on `used_at`, on a route `packages/web` polls every four seconds per
+     * machine, against a table any signed-in caller can grow as fast as
+     * `WRITE_THROTTLE` allows. Measured at 200k retained rows it was 168 ms of
+     * synchronous event-loop block per poll, on the file the relay shares.
+     *
+     * ⚠ **This used to say `MAX_MACHINES_PER_USER` bounds the set at fifty, and
+     * that is false in the direction that matters.** That ceiling is counted over
+     * `machine_owners`, in `createOwnedMachine`, so it bounds what a caller
+     * **owns**. This listing selects from `grants` with no `LIMIT`, and a grant is
+     * something *other people* write: `PUT /v1/machines/:id/grants` lets any owner
+     * add a permanent row to any account's listing, and the recipient has no verb
+     * for removing one. So both the row set and this placeholder list grow with
+     * shares received, which nothing caps.
+     *
+     * The placeholder list is the smaller half of that — it is one entry per
+     * *distinct enroller*, not per row — but it is written down here because the
+     * sentence it replaces was the one licensing the growth. Whether shares
+     * received should be bounded is Q7's question, not this route's.
+     */
+    const enrolledByName = new Map<string, string>();
+    if (enrolledByIds.size > 0) {
+      const ids = [...enrolledByIds];
+      for (const row of db
+        .prepare(`SELECT id, name FROM users WHERE id IN (${ids.map(() => "?").join(",")})`)
+        .all(...ids)) {
+        enrolledByName.set(String(row["id"]), String(row["name"]));
+      }
+    }
+    /*
+     * Three answers rather than a name or nothing, because collapsing the other
+     * two into `null` is what made the predecessor lie. A `pk_` id is a
+     * provisioning key — `POST /v1/provision` creates a machine for any account
+     * with no account at all, only `REEMOAT_CP_PROVISION_KEY`, and an admin
+     * mints themselves one in a single request — so it is the *most* alarming
+     * case, not the absent one. An id with no `users` row is an account that has
+     * been deleted since; `enrollment_codes.created_by` was already documented
+     * as deliberately dangling, and this column inherits that and says so.
+     */
+    /*
+     * ⚠ **The empty case is split on `enrolled_at`, and that split is the whole
+     * of what this disclosure is worth on an upgraded instance.**
+     *
+     * `enrolled_by` is written at redemption and nowhere else, so **every machine
+     * that enrolled before this column shipped carries NULL** — which is to say,
+     * on the day this deploys, all of them. Collapsed into the caller's own `null`
+     * the row draws nothing, and nothing is what a machine you enrolled yourself
+     * draws: the entire existing fleet would have read as *you did this*, on the
+     * one screen built to say when somebody else did. That is the fifth instance
+     * of the failure the four in `store.ts` are about, arriving through the
+     * migration rather than through the query.
+     *
+     * `enrolled_at IS NOT NULL AND enrolled_by IS NULL` is exactly "enrolled
+     * before this was recorded" — no derivation, no guessing — so the state is
+     * named rather than folded. A machine that has never enrolled keeps the
+     * silence, because there is genuinely nothing to have recorded.
+     *
+     * There is no backfill and there cannot be a trustworthy one: the rows it
+     * would read are swept seven days after a code is used, and the four ways
+     * deriving this from `enrollment_codes` was wrong apply to a backfill
+     * identically.
+     */
+    const enrolledByFor = (id: string, hasEnrolled: boolean): string | null => {
+      if (id.length === 0) return hasEnrolled ? "somebody this control plane did not record" : null;
+      if (id === caller.userId) return null;
+      if (id.startsWith("pk_")) return "a provisioning key";
+      return enrolledByName.get(id) ?? "a deleted account";
+    };
     return c.json({
       machines: rows.map((row) => ({
         id: String(row["id"]),
@@ -3187,6 +3650,21 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
          * answering, and until the table existed nothing could answer it.
          */
         lastSeenAt: lastSeenAt(String(row["id"])),
+        /*
+         * `null` in exactly two cases now: this caller's own code, and a machine
+         * that has never enrolled. A machine enrolled *before* the column existed
+         * says so instead — see `enrolledByFor`, where that split is argued.
+         *
+         * ⚠ **Not "where the code has been swept"**, which is what this used to
+         * say — that was true of the `enrollment_codes` derivation this replaced
+         * and is the first of the four failures `store.ts` enumerates; the value
+         * is read off `machines.enrolled_by` now, which the sweeper never touches.
+         *
+         * A name here means the machine enrolled with somebody else's code, which
+         * for an owned machine is the one fact that distinguishes a substitution
+         * from the machine it is imitating.
+         */
+        enrolledBy: enrolledByFor(String(row["enrolled_by"] ?? ""), row["enrolled_at"] !== null),
       })),
     });
   });
@@ -3202,8 +3680,17 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * exists to remove.
    *
    * An admin can still register one *for* somebody through `/v1/admin/machines`,
-   * and that grants nothing new: an admin can already mint an API key for any
-   * user and act as them.
+   * which `deploy/install.sh`'s daemon wizard runs from the host being installed.
+   *
+   * ⚠ **That used to be justified here by "an admin can already mint an API key
+   * for any user and act as them", and that sentence is false.** Q1.631 deleted
+   * every admin route touching somebody else's keys, and Q7.74 deleted the two
+   * that issued a credential for another account, leaving the property *no route
+   * in this service issues a credential for an account other than the caller's
+   * own*. So registering a machine for somebody is no longer covered by a larger
+   * power the admin already had: it is its own power, and what bounds it is that
+   * the owner's list names whoever enrolled it (`enrolledBy` on
+   * `GET /v1/machines`) rather than that the act was harmless all along.
    */
   app.post("/v1/machines", async (c) => {
     /*
@@ -3470,6 +3957,242 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       enrollmentCodesInvalidated: burned,
       outstandingTokensExpireWithinSeconds: tokenTtlSeconds,
     });
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Sharing a machine
+   *
+   * **Sharing is the owner's verb, and it used to be the admin's.** `PUT
+   * /v1/admin/grants` upserted any `{userId, machineId, scopes}` behind
+   * `requireAdmin` alone, with no check that the caller owned the machine and
+   * nothing said to the person who did — so one request turned an admin
+   * credential into a grant on somebody else's computer, and a grant is full
+   * access to it (Q1.11). It was the only way to share a machine at all, which
+   * is why it survived so long: deleting it without this replacement would have
+   * removed co-working rather than a privilege.
+   *
+   * These two routes are that replacement, and the difference is one line —
+   * `ownedMachine(c)`, the same resolver `PATCH /v1/machines/:id`,
+   * `POST /v1/machines/:id/enrollments` and `POST /v1/machines/:id/revoke`
+   * already use. A machine you do not own is a 404 here for its reason too: a
+   * caller must not be able to map the fleet by watching which ids answer
+   * differently.
+   *
+   * **What this does not buy, so that nobody infers it.** Whoever operates this
+   * control plane holds `signing_keys.private_pem` and can sign a token for any
+   * machine with any `sub` — the daemon checks the signature, the issuer and the
+   * audience, and never compares the subject to anything (`src/auth.ts`). This
+   * removes a *route*, which is worth doing because it is the door an admin
+   * credential alone opens; it does not remove the operator's reach, and
+   * `SECURITY.md` says so in the same breath.
+   * ---------------------------------------------------------------- */
+
+  /** Who this machine is shared with. The owner's own grant is not a share. */
+  app.get("/v1/machines/:id/grants", (c) => {
+    const owned = ownedMachine(c);
+    if (owned === null) return jsonError(c, 404, "machine_not_found", "no such machine");
+    const rows = db
+      .prepare(
+        "SELECT g.user_id, g.scopes, u.name FROM grants g JOIN users u ON u.id = g.user_id " +
+          "WHERE g.machine_id = ? AND g.user_id != ? ORDER BY g.created_at ASC, g.user_id ASC",
+      )
+      .all(owned.id, owned.userId);
+    return c.json({
+      machineId: owned.id,
+      grants: rows.map((row) => ({
+        userId: String(row["user_id"]),
+        name: String(row["name"]),
+        scopes: parseScopes(String(row["scopes"])),
+      })),
+    });
+  });
+
+  /**
+   * Share a machine you own with somebody, or change what they may do on it.
+   *
+   * **Addressed by user id, and that is a limitation rather than a preference.**
+   * There is no directory an ordinary account may read, and adding a name lookup
+   * here would be a user-enumeration oracle on a route every signed-in person can
+   * reach — a new one, since `registration.enabled` can be off and close the one
+   * Q7.78 concedes. So the person being shared with reads their own id off
+   * `GET /v1/me` and says it out loud. A share-by-name flow is a product
+   * decision with its own oracle to weigh, and it is not this change.
+   *
+   * **The owner's own grant is refused rather than upserted.** It already exists,
+   * it carries every scope, and the only thing this route could do to it is
+   * narrow it — which would take the owner's `machine:admin` away on their own
+   * hardware with no way back through this route. Retiring the machine is the
+   * verb for undoing an owner's access.
+   *
+   * A revoked machine needs no check: `releaseOwner` drops the ownership row in
+   * the same transaction that revokes, so `ownedMachine` answers 404 first.
+   *
+   * Nothing is said here about the machine being over its owner's limit. A grant
+   * carries no quota, the machine is switched off for the owner too, and
+   * `POST /v1/tokens` refuses it for grantee and owner alike — so a share made
+   * now starts working when the limit is raised, which is the answer somebody
+   * would predict.
+   */
+  app.put("/v1/machines/:id/grants", async (c) => {
+    // Counted before the ownership lookup, for the reason every guard on these
+    // routes is first: a refusal must not be the expensive path.
+    const writeGuard = spendWrite(c, "machine_share");
+    if (writeGuard !== null) return writeGuard;
+
+    /*
+     * **The body is read before the machine is resolved, and the order is the
+     * fix rather than the style.** It was the other way round, and `await
+     * readJsonObject(c)` between `ownedMachine(c)` and the `INSERT` is a window
+     * a caller controls: send a valid `content-length`, let the ownership check
+     * pass, have the machine revoked, then finish the body. The insert lands on
+     * a machine with no owner, and `DELETE` below then answers 404 — a grant its
+     * owner cannot remove. With every `await` ahead of the check, the check and
+     * the write are one synchronous run of the event loop and the window is not
+     * expressible. `relabelMachine` states the same rule for the same shape.
+     */
+    const body = await readJsonObject(c);
+    if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
+    const userId = body["userId"];
+    if (typeof userId !== "string" || userId.length === 0) {
+      return jsonError(c, 400, "bad_request", "userId is required");
+    }
+    const scopes = readScopes(body["scopes"]);
+    if (scopes === null) {
+      return jsonError(c, 400, "bad_request", `scopes must be an array drawn from ${ALL_SCOPES.join(", ")}`);
+    }
+
+    const owned = ownedMachine(c);
+    if (owned === null) return jsonError(c, 404, "machine_not_found", "no such machine");
+    if (userId === owned.userId) {
+      return jsonError(c, 409, "grant_is_owner", "you own this machine, so you already hold every scope on it");
+    }
+    /*
+     * Disabled is refused rather than written. A grant written to a suspended
+     * account is inert while `callerAuth` reads `disabled_at` live — and then
+     * becomes live the moment somebody re-enables them, with nothing on the
+     * owner's screen having said so. The share the owner would have wanted is the
+     * one they make after the account is back.
+     *
+     * ⚠ **409, and the precedent is `POST /v1/admin/users/:id/invite` alone.**
+     * This paragraph used to cite `POST /v1/provision` beside it as if the two
+     * agreed; that route answers **403** `user_disabled`, as do the four other
+     * sites in this file that name the state. The one this follows is the invite,
+     * and for its reason: the account is not forbidden to the caller, it is in a
+     * state that makes this the wrong moment — the remedy is to enable it and ask
+     * again, which is a conflict rather than a refusal.
+     */
+    const target = db.prepare("SELECT id, disabled_at FROM users WHERE id = ?").get(userId);
+    if (!target) {
+      return jsonError(c, 404, "user_not_found", "no such user");
+    }
+    if (target["disabled_at"] !== null) {
+      return jsonError(c, 409, "user_disabled", "that account is suspended; enable it before sharing with them");
+    }
+
+    db.prepare(
+      "INSERT INTO grants (user_id, machine_id, scopes, created_at) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT(user_id, machine_id) DO UPDATE SET scopes = excluded.scopes",
+    ).run(userId, owned.id, scopes.join(" "), Date.now());
+
+    return c.json({ userId, machineId: owned.id, scopes });
+  });
+
+  /**
+   * Stop sharing a machine you own.
+   *
+   * The owner's own grant is refused for the reason it is refused above, and
+   * with more at stake: `GET /v1/machines` joins `grants`, so an owner who
+   * removed their own would own a machine that appears in no list — the exact
+   * failure user-owned machines exists to remove.
+   */
+  app.delete("/v1/machines/:id/grants", (c) => {
+    const writeGuard = spendWrite(c, "machine_unshare");
+    if (writeGuard !== null) return writeGuard;
+
+    const owned = ownedMachine(c);
+    if (owned === null) return jsonError(c, 404, "machine_not_found", "no such machine");
+    /*
+     * Absent and "nobody by that id" are different answers, and the codes point
+     * at opposite remedies. The deleted admin route defaulted to `""` and let
+     * the `DELETE` match nothing, so a caller who forgot the parameter was told
+     * the grant did not exist — which under `docs/API.md`'s *read the code,
+     * never the status* is a lie about the other person.
+     */
+    const userId = c.req.query("userId") ?? "";
+    if (userId.length === 0) return jsonError(c, 400, "bad_request", "userId is required");
+    if (userId === owned.userId) {
+      return jsonError(
+        c,
+        409,
+        "grant_is_owner",
+        "you own this machine; retiring it is the verb for giving up your own access",
+      );
+    }
+    const changed = db.prepare("DELETE FROM grants WHERE user_id = ? AND machine_id = ?").run(userId, owned.id);
+    if (changed.changes !== 1) return jsonError(c, 404, "grant_not_found", "no such grant");
+    // The daemon is never asked, so an outstanding token keeps working until it
+    // expires. Said here rather than implied, as `POST /v1/machines/:id/revoke`
+    // says it.
+    return c.json({ revoked: true, outstandingTokensExpireWithinSeconds: tokenTtlSeconds });
+  });
+
+  /**
+   * Give up a share somebody made to you.
+   *
+   * ⚠ **Sharing had no exit, and moving it off `/v1/admin` is what made that
+   * matter.** `PUT /v1/machines/:id/grants` writes a permanent `grants` row for
+   * any `userId`, with no consent asked and none of the three verbs above
+   * reachable by the person it names: they all resolve through `ownedMachine`, so
+   * a grantee gets 404 on every one. Under the deleted admin routes that was an
+   * operator's problem; now it is every signed-in account's, and what somebody can
+   * do to you unasked should have something you can do about it.
+   *
+   * What the row costs the recipient is not nothing. `GET /v1/machines` selects
+   * from `grants` with no `LIMIT`, the web client builds a `MachineConnection` per
+   * listed row and mints a token for each on resume, and `POST /v1/tokens` is
+   * counted against the same per-account write throttle as everything else — so a
+   * large enough listing of machines somebody else pushed in crowds out the
+   * requests for the machines that are actually theirs.
+   *
+   * **Your own grant only, and never on a machine you own** — that is the
+   * `grant_is_owner` rule from the two routes above, read from the other side:
+   * `GET /v1/machines` joins `grants`, so an owner who dropped their own would own
+   * a machine that appears in no list. Retiring it is the verb for that.
+   *
+   * No `userId` parameter, in the path or in a query. The caller is the subject,
+   * and a route that took an id would be `DELETE /v1/admin/grants` again with a
+   * different spelling.
+   */
+  app.delete("/v1/machines/:id/grants/me", (c) => {
+    const writeGuard = spendWrite(c, "grant_leave");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const machineId = c.req.param("id") ?? "";
+    /*
+     * The owner check is by ownership rather than by `ownedMachine`, because this
+     * route wants the *opposite* answer from the three above: they refuse a
+     * machine you do not own, and this one refuses a machine you do.
+     */
+    const owner = ownerOf(db, machineId);
+    if (owner !== null && owner.userId === caller.userId) {
+      return jsonError(
+        c,
+        409,
+        "grant_is_owner",
+        "you own this machine; retiring it is the verb for giving up your own access",
+      );
+    }
+    /*
+     * One answer for "no such grant" and "no such machine", which is the
+     * anti-mapping rule the three routes above follow: a caller must not learn
+     * which machine ids exist by watching which ones answer differently.
+     */
+    const changed = db.prepare("DELETE FROM grants WHERE user_id = ? AND machine_id = ?").run(caller.userId, machineId);
+    if (changed.changes !== 1) return jsonError(c, 404, "grant_not_found", "no such grant");
+    // The same sentence the unshare above ends on, and true for the same reason:
+    // the daemon is never asked, so a token already issued outlives this.
+    return c.json({ revoked: true, outstandingTokensExpireWithinSeconds: tokenTtlSeconds });
   });
 
   /**
@@ -4655,7 +5378,57 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
        * names the admin and `burnUserCodes` cannot see it.
        */
       codesInvalidated = burnGranteeCodes(db, userId, "user_deleted", removedAt);
+      /*
+       * ⚠ **Which ownerless machines this delete is about to strand, read before
+       * the grants that name them are gone.**
+       *
+       * `dependants()` is what the two admin guards key on, and it reads *live*
+       * `grants` rows. So an admin who wants a machine those guards protect can
+       * manufacture the state instead of finding it: delete the account of its
+       * last grantee, and an ownerless enrolled row that somebody depended on a
+       * moment ago is a "genuinely orphan row" — adoptable with every scope, or
+       * re-enrollable out from under nobody. Two requests. The guards' own
+       * justification is that such a row *has nobody to ask*, which reads as a
+       * state the operator discovers rather than one they create.
+       *
+       * The fix is not a guard on the guards, it is that this route should not
+       * leave the row behind at all. A machine with no owner and no grants is
+       * enrolled, dialling the relay, holding a tunnel and in **nobody's** list —
+       * the exact failure user-owned machines exists to remove, and the same thing
+       * this route already refuses to leave when the deleted account *owned* it.
+       *
+       * Scoped to machines this user actually held a grant on: legacy ownerless
+       * rows that were already grantless are none of this delete's business, and
+       * sweeping those would revoke hardware unrelated to the account going away.
+       */
+      const mayStrand = db
+        .prepare(
+          "SELECT g.machine_id FROM grants g JOIN machines m ON m.id = g.machine_id " +
+            "WHERE g.user_id = ? AND m.revoked_at IS NULL " +
+            "AND NOT EXISTS (SELECT 1 FROM machine_owners o WHERE o.machine_id = g.machine_id)",
+        )
+        .all(userId)
+        .map((row) => String(row["machine_id"]));
       db.prepare("DELETE FROM grants WHERE user_id = ?").run(userId);
+      /*
+       * Now that the grants are gone, the ones nobody is left on. Revoked with the
+       * same three statements the owned loop below runs, for the same reasons and
+       * in the same transaction, so a partial delete cannot leave a machine marked
+       * revoked with a live code on it.
+       */
+      for (const machineId of mayStrand) {
+        const stillGranted = db.prepare("SELECT 1 AS hit FROM grants WHERE machine_id = ? LIMIT 1").get(machineId);
+        if (stillGranted !== undefined) continue;
+        const marked = Number(
+          db
+            .prepare("UPDATE machines SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+            .run(removedAt, machineId).changes,
+        );
+        if (marked === 1) {
+          codesInvalidated += burnMachineCodes(db, machineId, removedAt);
+          machinesRevoked += 1;
+        }
+      }
       /*
        * The address and every link that could reach it.
        *
@@ -4892,9 +5665,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * on the fifth and last door that gives a machine a name.
    *
    * **Last that *names* one, not last that makes a name visible** — `PUT
-   * /v1/admin/grants` reaches the identical two-indistinguishable-rows state by
-   * handing somebody a machine that is already called something, and it checks
-   * nothing. Knowingly open; the reasoning is at `nameVisibleToGrantees`.
+   * /v1/machines/:id/grants` reaches the identical two-indistinguishable-rows
+   * state by handing somebody a machine that is already called something, and it
+   * checks nothing. Knowingly open; the reasoning is at `nameVisibleToGrantees`.
    */
   app.patch("/v1/admin/machines/:id", requireAdmin, async (c) => {
     const body = await readJsonObject(c);
@@ -5157,10 +5930,94 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    */
   app.post("/v1/admin/machines/:id/enrollments", requireAdmin, (c) => {
     const machineId = c.req.param("id");
-    const machine = db.prepare("SELECT id, revoked_at FROM machines WHERE id = ?").get(machineId);
+    const machine = db.prepare("SELECT id, revoked_at, enrolled_at FROM machines WHERE id = ?").get(machineId);
     if (!machine) return jsonError(c, 404, "machine_not_found", "no such machine");
     if (machine["revoked_at"] !== null) {
       return jsonError(c, 403, "machine_revoked", "this machine has been revoked");
+    }
+
+    /*
+     * ⚠ **Not for a machine that is both enrolled and owned, and this was the
+     * sharpest of the admin routes.**
+     *
+     * Redeeming a code calls `issueTunnelKey`, which *retires* the machine's
+     * current tunnel credential. So minting one here and redeeming it on another
+     * host does not read somebody's machine — it **replaces** it: the owner's
+     * daemon is dropped from the relay as superseded, and every grant-holder's
+     * traffic for that machine, prompts and uploads and bearer tokens included,
+     * is delivered into the new process instead. The owner's list still shows the
+     * machine, owned and online.
+     *
+     * The owner's twin route (`POST /v1/machines/:id/enrollments`) allows exactly
+     * this and says why in its docblock: re-enrolling takes the machine away from
+     * whatever holds it, "but since only the owner can ask, the thing it takes it
+     * away from is their own daemon, which is what re-installing a host means."
+     * That sentence is the whole justification, and it does not transfer to a
+     * caller who is not the owner. This route had no such restriction.
+     *
+     * **Owned is the condition, not enrolled alone**, because the two legitimate
+     * uses both survive it. `install.sh`'s wizard is `addmachine --owner` then
+     * `enroll` on a row created one line earlier, so `enrolled_at` is null and
+     * nothing changes. And a machine registered before ownership existed has no
+     * owner to ask, so an operator re-installing their own admin-managed host is
+     * untouched — refusing there would leave no path at all rather than moving
+     * one.
+     *
+     * 409 rather than 403: the machine is not forbidden, it is in a state that
+     * makes this the wrong verb, and the remedy names the person who has the
+     * right one.
+     */
+    const enrollDependants = dependants(machineId);
+    if (
+      machine["enrolled_at"] !== null &&
+      (enrollDependants.owner !== null || enrollDependants.grantees.length > 0)
+    ) {
+      return jsonError(
+        c,
+        409,
+        "machine_enrolled",
+        "this machine is enrolled and somebody depends on it; redeeming a new code would take it away " +
+          "from their daemon, so its owner mints their own from POST /v1/machines/:id/enrollments",
+      );
+    }
+
+    /*
+     * ⚠ **And not over a live code somebody else minted, which is the same
+     * denial primitive one route earlier.**
+     *
+     * The guard above keys on `enrolled_at`, so it says nothing about a machine
+     * that is **owned but has not enrolled yet** — and that is precisely the
+     * window an install is in. `mintEnrollmentCode` opens with `UPDATE
+     * enrollment_codes SET used_at = ?, used_from = 'superseded' … WHERE
+     * machine_id = ? AND used_at IS NULL`, so an admin minting here kills whatever
+     * the owner is holding. Their install then fails against the deliberately
+     * undifferentiated `409 code_unusable`, with nothing on their screen saying
+     * why, and it can be repeated: `enrolled_at` never leaves NULL, so the guard
+     * above never starts applying. `PUT /v1/admin/machines/:id/owner` had this
+     * exact shape and was narrowed to `isAcquisition` for this exact reason.
+     *
+     * **The condition is somebody else's live code, not any live code**, because
+     * the two legitimate uses both survive it. `install.sh`'s wizard mints on a
+     * row created one line earlier, which has no code at all. And an admin
+     * re-minting their own — the ordinary "I lost the paste" retry — names
+     * themselves in `created_by` and supersedes only what they are replacing.
+     *
+     * 409 for the reason the guard above is one: the machine is not forbidden,
+     * this is the wrong moment, and the remedy is somebody else's to run.
+     */
+    const outstanding = db
+      .prepare(
+        "SELECT created_by FROM enrollment_codes WHERE machine_id = ? AND used_at IS NULL AND expires_at > ?",
+      )
+      .get(machineId, Date.now());
+    if (outstanding !== undefined && String(outstanding["created_by"]) !== c.get("caller").userId) {
+      return jsonError(
+        c,
+        409,
+        "code_outstanding",
+        "somebody else minted a code for this machine and it has not been used yet; minting here would " +
+          "kill it silently, so wait for it to expire or have its owner mint their own",
+      );
     }
 
     ensureSigningKey(db);
@@ -5244,8 +6101,15 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    *
    * The **previous** owner's grant is deliberately left alone. Ownership and
    * access are different things here: two people may hold a grant on one machine,
-   * and taking somebody's access away is `DELETE /v1/admin/grants`, which is its
-   * own verb with its own audit story.
+   * and taking somebody's access away is `DELETE /v1/machines/:id/grants` — the
+   * owner's own verb, since `DELETE /v1/admin/grants` is deleted.
+   *
+   * ⚠ That paragraph now describes a case this route can no longer reach, and it
+   * is kept because the *rule* it states is still the rule: the guard below
+   * refuses any transfer away from a live owner, so the only previous owner left
+   * to leave alone is the same user being handed the machine back. Read it as
+   * the reason `releaseOwner` is followed by an insert rather than by a sweep of
+   * `grants`.
    */
   app.put("/v1/admin/machines/:id/owner", requireAdmin, async (c) => {
     const body = await readJsonObject(c);
@@ -5269,6 +6133,70 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     }
     if (!db.prepare("SELECT id FROM users WHERE id = ?").get(userId)) {
       return jsonError(c, 404, "user_not_found", "no such user");
+    }
+
+    /*
+     * ⚠ **A machine that has a live owner may only be handed back to that same
+     * owner.** Taking one from somebody is what this route used to do, and it is
+     * the sharpest thing it did: `releaseOwner` plus an insert plus a grant with
+     * every scope, in one request, with the previous owner's own grant left
+     * deliberately in place so nothing they can see changes. One request from an
+     * admin credential to full authority on a working machine.
+     *
+     * **The two uses this keeps are the two it was justified by.** Adopting an
+     * *ownerless* row — a machine registered before ownership existed — is the
+     * case the docblock above describes, and it is untouched. Re-labelling a
+     * machine for the owner it already has is the other, which is why this
+     * compares the target rather than refusing every owned machine: this route is
+     * the admin's only writer of `machine_owners.label`, `PATCH
+     * /v1/admin/machines/:id` writing `machines.name` instead, and the
+     * `acquiredAt` rule below exists precisely to make the same-owner case
+     * behave.
+     *
+     * The re-homing case the docblock names — a machine stranded by `DELETE
+     * /v1/admin/users/:id` — is unaffected for a second reason as well: that
+     * route revokes each owned machine, and the revoked check above already
+     * refuses those. What it can still adopt is the legacy row, which is what it
+     * was written for.
+     *
+     * 403 rather than 404: the caller is an admin who can already list every
+     * machine and its owner, so there is nothing here to conceal, and a 404 over
+     * a machine `GET /v1/admin/machines` just showed them would be a lie about
+     * existence rather than a refusal.
+     */
+    const { owner: existingOwner, grantees } = dependants(machineId);
+    if (existingOwner !== null && existingOwner.userId !== userId) {
+      return jsonError(
+        c,
+        403,
+        "machine_owned",
+        "this machine has an owner; ownership is theirs to release, and sharing it is theirs to grant",
+      );
+    }
+    /*
+     * ⚠ **An ownerless row that somebody already holds a grant on may only be
+     * adopted *to* one of them.** Adoption writes a grant with every scope, so
+     * on a legacy machine that is enrolled and carrying grantees it is the same
+     * escalation the deleted `PUT /v1/admin/grants` was: one admin request to
+     * full authority on a working machine, with the people already on it seeing
+     * nothing change.
+     *
+     * Handing it to an existing grantee is the case the route was written for
+     * and stays open, and it is also the answer to the other half. Deleting the
+     * admin grant writes left legacy grantees with no way to list, re-scope or
+     * revoke a share, because every replacement route resolves through
+     * `ownedMachine`; regularising the row to one of them gives them the owner's
+     * verbs and gives the machine a person to ask. An operator who wants it for
+     * themselves revokes it, which is the denial side and is visible.
+     */
+    if (existingOwner === null && grantees.length > 0 && !grantees.includes(userId)) {
+      return jsonError(
+        c,
+        403,
+        "machine_granted",
+        "this machine has no owner but somebody holds a grant on it; adopt it to one of them, " +
+          "who then shares it from PUT /v1/machines/:id/grants",
+      );
     }
 
     /*
@@ -5318,6 +6246,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     }
 
     const now = Date.now();
+    // Reported the way `POST /v1/machines/:id/revoke` reports it, so an operator
+    // who adopted a machine learns that a code they minted for it is now dead.
+    let codesInvalidated = 0;
     /*
      * **When this user acquired the machine — and re-labelling is not acquiring
      * it.**
@@ -5340,8 +6271,12 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * Read before `releaseOwner`, because that is what destroys it.
      */
     const previous = db.prepare("SELECT user_id, created_at FROM machine_owners WHERE machine_id = ?").get(machineId);
-    const acquiredAt =
-      previous !== undefined && String(previous["user_id"]) === userId ? Number(previous["created_at"]) : now;
+    // Named once and used twice — for `created_at` below and for the code burn
+    // inside the transaction — so the two can never answer differently about the
+    // same request. Read off the owner row rather than off the timestamp, which
+    // a same-millisecond re-label would have made ambiguous.
+    const isAcquisition = !(previous !== undefined && String(previous["user_id"]) === userId);
+    const acquiredAt = isAcquisition ? now : Number(previous["created_at"]);
     db.exec("BEGIN");
     try {
       // Replace rather than upsert: `machine_owners` is keyed on the machine, so
@@ -5357,49 +6292,86 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         "INSERT INTO grants (user_id, machine_id, scopes, created_at) VALUES (?, ?, ?, ?) " +
           "ON CONFLICT(user_id, machine_id) DO UPDATE SET scopes = excluded.scopes",
       ).run(userId, machineId, ALL_SCOPES.join(" "), now);
+      /*
+       * ⚠ **Outstanding codes are burned here, because the enrollment guard
+       * above protects *minting* and not *redemption*.** Without this the 409 is
+       * one request out of order away from nothing: mint a code for an enrolled
+       * ownerless row while it is still nobody's, adopt it to somebody, then
+       * redeem the code you kept. A fresh mint now answers 409 while the
+       * retained one still returns a tunnel key and replaces the daemon — so the
+       * machine acquires an owner and is substituted after they have it.
+       *
+       * Burning is the same act `POST /v1/machines/:id/revoke` and the account
+       * sweep perform, and it costs the adopting owner nothing they cannot redo:
+       * minting is their own route now.
+       */
+      // ⚠ **Only on an acquisition, never on a re-label.** Burning
+      // unconditionally made this route a silent, repeatable denial primitive
+      // against an owner's own install: an admin re-labels a machine — a
+      // legitimate act with no ownership change — and the owner's in-flight code
+      // dies, answering the deliberately undifferentiated `409 code_unusable`,
+      // with the count reported to the admin and nothing at all to the owner.
+      // Repeated, it holds `enrolled_at` at NULL, which is the exact window the
+      // mint guard above keys on. The same test `acquiredAt` uses, because it is
+      // the same question: did this machine change hands?
+      if (isAcquisition) codesInvalidated = burnMachineCodes(db, machineId, now);
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
       throw error;
     }
 
-    return c.json({ machineId, userId, label, scopes: [...ALL_SCOPES] });
+    return c.json({ machineId, userId, label, scopes: [...ALL_SCOPES], enrollmentCodesInvalidated: codesInvalidated });
   });
 
-  app.put("/v1/admin/grants", requireAdmin, async (c) => {
-    const body = await readJsonObject(c);
-    if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
-    const userId = body["userId"];
-    const machineId = body["machineId"];
-    if (typeof userId !== "string" || typeof machineId !== "string") {
-      return jsonError(c, 400, "bad_request", "userId and machineId are required");
-    }
-    const scopes = readScopes(body["scopes"]);
-    if (scopes === null) {
-      return jsonError(c, 400, "bad_request", `scopes must be an array drawn from ${ALL_SCOPES.join(", ")}`);
-    }
-    if (!db.prepare("SELECT id FROM users WHERE id = ?").get(userId)) {
-      return jsonError(c, 404, "user_not_found", "no such user");
-    }
-    if (!db.prepare("SELECT id FROM machines WHERE id = ?").get(machineId)) {
-      return jsonError(c, 404, "machine_not_found", "no such machine");
-    }
-
-    db.prepare(
-      "INSERT INTO grants (user_id, machine_id, scopes, created_at) VALUES (?, ?, ?, ?) " +
-        "ON CONFLICT(user_id, machine_id) DO UPDATE SET scopes = excluded.scopes",
-    ).run(userId, machineId, scopes.join(" "), Date.now());
-
-    return c.json({ userId, machineId, scopes });
-  });
-
-  app.delete("/v1/admin/grants", requireAdmin, (c) => {
-    const userId = c.req.query("userId") ?? "";
-    const machineId = c.req.query("machineId") ?? "";
-    const changed = db.prepare("DELETE FROM grants WHERE user_id = ? AND machine_id = ?").run(userId, machineId);
-    if (changed.changes !== 1) return jsonError(c, 404, "grant_not_found", "no such grant");
-    return c.json({ revoked: true, outstandingTokensExpireWithinSeconds: tokenTtlSeconds });
-  });
+  /*
+   * ⚠ **`PUT /v1/admin/grants` and `DELETE /v1/admin/grants` used to live here
+   * and are deleted.** They upserted and removed any `{userId, machineId}`
+   * behind `requireAdmin` alone — no check that the caller owned the machine, no
+   * consent from the person who did, and nothing on any screen afterwards. Since
+   * a grant is full access to a machine (Q1.11) and that machine runs agents as
+   * its owner's uid with no sandbox, the pair was one request from an admin
+   * credential to arbitrary code execution on somebody's computer.
+   *
+   * `machines.ts` called it "knowingly open" and left it so on the argument that
+   * it was **the only remaining way to share a machine at all**. That argument
+   * was correct and is now spent: `PUT`/`DELETE /v1/machines/:id/grants` share
+   * the same machines through `ownedMachine`, so the capability moved to the
+   * person whose machine it is rather than being removed.
+   *
+   * The invariant this buys, stated as a property of the service rather than of
+   * a route, and greppable the way the `api_keys` one above is — `INSERT INTO
+   * grants` appears in exactly three places — `app.ts` twice and `machines.ts`
+   * once: **no route under `/v1/admin` adds or widens a grant on a machine that
+   * already has an owner, for anybody other than that owner.**
+   *
+   * The three writers, and why none is an exception:
+   *   - `createOwnedMachine` (`machines.ts`), reached by `POST /v1/machines` and
+   *     `POST /v1/admin/machines` — a machine coming into existence, granted to
+   *     the owner it is being created for.
+   *   - `PUT /v1/admin/machines/:id/owner` — refuses a transfer *away* from a
+   *     live owner, so what it can still adopt is an ownerless legacy row. ⚠ It
+   *     is not "refuses any owned machine": the same-owner re-label falls
+   *     through and re-upserts that owner's own all-scopes grant, which is why
+   *     the invariant is stated as *for somebody other than the machine's
+   *     existing owner*. Widening a grant the owner already holds in full is not
+   *     the power that was removed, and `relaycheck` pins the re-label at 200.
+   *   - `PUT /v1/machines/:id/grants` — the owner's own verb, above.
+   * And one sweep, which is not a fact about a grant: `DELETE
+   * /v1/admin/users/:id` runs `DELETE FROM grants WHERE user_id = ?` inside the
+   * account ceasing to exist.
+   *
+   * **What is deliberately kept is the read below.** Seeing who holds what is
+   * not the power that was removed, and an operator who cannot see the grant
+   * table cannot answer "why can this person reach that machine" at all.
+   *
+   * ⚠ And what none of this removes: whoever operates this control plane holds
+   * `signing_keys.private_pem`. They can sign a token for any machine with any
+   * `sub`, and the daemon checks the signature, the issuer and the audience
+   * without ever comparing the subject to anything (`src/auth.ts`). This
+   * deletion closes the door an admin *credential* opens. It does not close the
+   * operator's reach, no route deletion can, and `SECURITY.md` says so.
+   */
 
   /*
    * Bounded, because grants are users × machines.
@@ -5608,6 +6580,29 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       return served ?? jsonError(c, 404, "not_found", "no such endpoint");
     });
   }
+
+  /*
+   * **Every unmatched path answers in this service's own envelope, whatever the
+   * method.**
+   *
+   * The `/v1/` arm above is inside `app.get("*")` and inside the `webRoot`
+   * branch, so it covered exactly one method on one deployment shape. Everything
+   * else — a `PUT` or `DELETE` to a path this build does not serve, or any
+   * method at all when no web root is configured — fell through to Hono's
+   * default plain-text `404 Not Found`, against `docs/API.md`'s *every non-2xx
+   * answers one envelope* and its *read the code, never the status*.
+   *
+   * It bites where a route is **deleted**: `PUT`/`DELETE /v1/admin/grants` are
+   * gone, and a client still calling them got a status it could read and no
+   * `error.code` to branch on. `cpctl` degraded quietly because its `api()`
+   * wraps an unparseable body as `{raw: text}`, which is exactly the kind of
+   * accident that keeps a contract violation invisible.
+   *
+   * Registered last and as `notFound` rather than as another `app.all("*")`, so
+   * it cannot shadow a route and does not depend on where in this function it
+   * sits.
+   */
+  app.notFound((c) => jsonError(c, 404, "not_found", "no such endpoint"));
 
   return app;
 }

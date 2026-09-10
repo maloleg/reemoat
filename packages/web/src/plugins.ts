@@ -232,9 +232,20 @@ export function pluginDestination(
  * Separate from the field list because a form is edited and a view is redrawn:
  * the screen holds this and hands it back on submit, so a plugin does not have to
  * re-derive what somebody typed from a view it has not been sent yet.
+ *
+ * ⚠ **No prototype, because the key is a plugin's string and `clampField` only
+ * *clips* it.** `out["__proto__"] = "x"` on an ordinary object reaches
+ * `Object.prototype`'s setter, which ignores a non-object and creates no own
+ * property at all — so the field reads back as `Object.prototype`, an object,
+ * which `?? ""` does not catch and React refuses as a child. That throw reaches
+ * `RootErrorBoundary` and blanks the origin holding `reemoat.credential`, taking
+ * every live session stream with it, on nothing more than opening an installed
+ * plugin's settings pane. `PluginConsent`'s `said` is the same defect answered at
+ * the read; this answers it at the write, and {@link PluginView}'s read is
+ * guarded too because the spread that edits this map re-introduces a prototype.
  */
 export function seedForm(fields: readonly PluginField[]): Record<string, string> {
-  const out: Record<string, string> = {};
+  const out = Object.create(null) as Record<string, string>;
   for (const one of fields) {
     // A toggle whose value the plugin left unset reads as off. Every field is a
     // string on the wire, including a toggle, so there is one narrowing here and

@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { ageText } from "../../account";
 import type { ApiKeyRecord } from "../../cp";
 import { errorText } from "../../http";
-import { Badge, Button, Spinner } from "../bits";
+import { Badge, Button, SETTINGS_HEADING, Spinner } from "../bits";
 import { toast } from "../Toast";
 
 /**
@@ -22,7 +22,7 @@ export function KeyTable({ children }: { children: ReactNode }): ReactNode {
   return (
     <table className="mt-2 w-full text-sm">
       <thead>
-        <tr className="text-left text-2xs font-semibold tracking-wider text-muted uppercase">
+        <tr className={`text-left ${SETTINGS_HEADING}`}>
           <th className="py-1.5 pr-3 font-semibold">Key</th>
           <th className="py-1.5 pr-3 font-semibold">Made</th>
           <th className="py-1.5 pr-3 font-semibold">Last used</th>

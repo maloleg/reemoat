@@ -417,8 +417,19 @@ process.stdout.write("\nthe machine limit\n");
      * host itself, so the poll re-lists an empty fleet every tick and re-reads
      * `me` — the count the limit is enforced against — once the first machine
      * lands. Both halves pinned on `store.ts`, since neither has a screen.
+     *
+     * ⚠ **The second alternative used to be `createMachine\(`, and it went
+     * vacuous when that function was deleted from `cp.ts`** — a negative naming a
+     * string nothing in the tree can write any more, which is the anti-pattern
+     * the note above warns about, reached by deletion rather than by a move. The
+     * route is what survives it: this screen may not `POST /v1/machines` under
+     * any spelling, whatever the client function is called.
      */
-    check("nothing on this screen adds a machine by name", /machinesChanged\("machine-added"\)|createMachine\(/.test(src), false);
+    check(
+      "nothing on this screen adds a machine by name",
+      /machinesChanged\("machine-added"\)|"\/v1\/machines",\s*\{\s*method:\s*"POST"/.test(src),
+      false,
+    );
     {
       const storeSrc = strip(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
       check("an empty fleet is re-listed by the poll rather than waiting for a wake", /resume\(this\.snapshot\.phase === "loading" \? "cp-retry" : "awaiting-first-machine"\)/.test(storeSrc), true);
@@ -537,6 +548,102 @@ process.stdout.write("\nthe machine limit\n");
     check("the retire toast carries no facts nothing can re-read", /enrollment code.*stopped working|expire within/.test(machineSrc), false);
     // The unreachable arm no longer restates its own position.
     check("the unreachable line names the reason and stops", /so its systems, agents and plugins/.test(machineSrc), false);
+    /*
+     * ⭐ **Who brought a machine online, said on both surfaces and said nowhere
+     * when there is nothing to say.**
+     *
+     * `GET /v1/machines` answers `enrolledBy`: `null` where this caller enrolled
+     * the machine themselves or where nothing knows, a display name where
+     * somebody else's code did, and the two literal strings `"a provisioning
+     * key"` and `"a deleted account"` for the cases the control plane
+     * deliberately refuses to collapse into the reassuring one. It exists
+     * because an admin can revoke a machine — which frees its label — register a
+     * new one for the same person under that freed name and enroll it on their
+     * own hardware; every step is a route that has to stay, so the composition
+     * is **disclosed rather than refused**, and this line is the whole of the
+     * disclosure. A client that quietly drew nothing would leave the composition
+     * with no disclosure at all and nothing failing anywhere.
+     */
+    {
+      const { enrolledByText } = await import("../src/wire.js");
+      /*
+       * The sentence, and the two silences that draw none of it. `null` is the
+       * server saying *unknown* rather than "you", and `undefined` is a control
+       * plane that predates the field — the same silence here on purpose, which
+       * is the one place this client is allowed to collapse two absences.
+       */
+      check("nobody is named where the reader enrolled it themselves", enrolledByText(null), null);
+      check("nor on a control plane that predates the field", enrolledByText(undefined), null);
+      /*
+       * The third silence, and the only one of the three the guard tests
+       * separately: `who.length === 0`. Nothing sends `""` today, and that is the
+       * point — an upstream `?? ""` is exactly the kind of change that would
+       * arrive without a screen, and what it would draw is a bare "Enrolled by"
+       * on both surfaces.
+       */
+      check("nor on an empty name, which would otherwise draw a sentence with nobody in it", enrolledByText(""), null);
+      check("somebody else's code names them", enrolledByText("casey"), "Enrolled by casey");
+      check("a provisioning key is named as one", enrolledByText("a provisioning key"), "Enrolled by a provisioning key");
+      check("and so is an account that has gone since", enrolledByText("a deleted account"), "Enrolled by a deleted account");
+      /*
+       * ⚠ **The fifth answer, and the one the first release did not have.** A
+       * machine that enrolled before `machines.enrolled_by` existed was folded
+       * into `null` and drew nothing — which is what a machine you enrolled
+       * yourself draws — so on the day the column shipped the disclosure was
+       * silent for **every machine in the fleet**. The control plane names the
+       * state now; this side has only to carry it through, and carrying it
+       * through is the whole of what a client can get wrong here.
+       */
+      check(
+        "a machine enrolled before this was recorded says so rather than nothing",
+        enrolledByText("somebody this control plane did not record"),
+        "Enrolled by somebody this control plane did not record",
+      );
+      /*
+       * **No full stop in the shared string**, which is what lets one function
+       * feed two registers: the list's sublines are fragments beside "online"
+       * and "last seen 3 h ago", and the machine's own screen ends the sentence
+       * itself. Pinned because the natural tidy-up is to move the stop in here,
+       * which puts one in the middle of a row that is a fragment.
+       */
+      check("the fragment carries no punctuation of its own", /[.!?]$/.test(enrolledByText("casey") ?? ""), false);
+    }
+    /*
+     * ⚠ **Nothing typed can hold a placement**, so both surfaces are read off
+     * disk. Three facts per surface: the line is drawn, it is guarded on the
+     * function's `null` so a machine you enrolled yourself grows no row, and the
+     * sentence comes from `enrolledByText` rather than a second spelling — a
+     * disclosure with two homes is two disclosures, and only one of them
+     * survives the next shortening pass.
+     */
+    check("the list row draws it as a subline of its own", /\{provenance !== null && <span className="block truncate text-2xs text-muted">\{provenance\}<\/span>\}/.test(src), true);
+    check("the machine's own screen draws it as a sentence", /\{provenance !== null && <p className="mt-1 text-xs text-muted">\{provenance\}\.<\/p>\}/.test(machineSrc), true);
+    check(
+      "both from the one shared sentence",
+      [
+        /const provenance = enrolledByText\(machine\.enrolledBy\);/.test(src),
+        /const provenance = enrolledByText\(machine\.enrolledBy\);/.test(machineSrc),
+      ],
+      [true, true],
+    );
+    check(
+      "and neither spells it by hand",
+      [/["`>]Enrolled by/.test(src), /["`>]Enrolled by/.test(machineSrc)],
+      [false, false],
+    );
+    /*
+     * ⚠ **And it may not ride the `standing` line**, which is the lesson the
+     * `shared` badge above already had to learn: " · not yours to rename or
+     * retire" was a clause on that truncating subline, so on a 390px phone the
+     * one fact worth reading was the part that got cut. `standing` is also about
+     * *now* and turns over on the four-second poll, while this changes only when
+     * somebody re-enrolls the machine — one line cannot be both. Asserted on the
+     * expression itself rather than on a distance in the file, so the two cannot
+     * be joined by moving either of them.
+     */
+    const standingExpr = /const standing =([\s\S]*?);\n/.exec(src)?.[1] ?? "";
+    check("the standing line is still there to be kept clear of", standingExpr.length > 0, true);
+    check("and carries no part of the provenance", /provenance|enrolledBy/.test(standingExpr), false);
   }
 
   {
@@ -1281,6 +1388,32 @@ process.stdout.write("\nimporting a codebase\n");
    * the only thing it can see. So the sentence above was unreachable in exactly
    * the case it exists for, and the ordering is what makes it reachable.
    */
+  /*
+   * ⭐ **The four ways out of this sheet, and that they all mean the same thing.**
+   *
+   * This pop-up has no route of its own, so `Sheet`'s own `close` — `navigate(under,
+   * true)` — reached past it to whatever the *New session* overlay was drawn over.
+   * The ✕, Escape and the scrim therefore each destroyed the machine, the agent and
+   * the folder somebody had walked to, while the file's own docblock said the
+   * opposite in as many words. Prose is what stood in for this check for four
+   * releases, which is the whole argument for reading the props off disk.
+   *
+   * `onClose` is asserted on **both** files: the caller handing it over, and the
+   * primitive taking it as an override rather than as the rule — so the default
+   * cannot be quietly inverted for the four pop-ups the URL does name.
+   */
+  const sheet = stripComments(readFileSync(new URL("../src/ui/Sheet.tsx", import.meta.url), "utf8"));
+  check("the import sheet closes back to the form rather than out of it", /onClose=\{onClose\}/.test(src), true);
+  check("and its chevron goes to the same place", /up=\{onClose\}/.test(src), true);
+  check("and names where that is", /upLabel="New session"/.test(src), true);
+  check("which is a thing only a caller can hand over", /const close = onClose \?\?/.test(sheet), true);
+  /*
+   * And the cost of that close having become cheap: `POST /fs/import` is one at a
+   * time per machine (`409 import_busy`), so an upload nobody is watching holds the
+   * lock and the next attempt is refused for a reason nothing on screen explains.
+   */
+  check("an abandoned upload does not keep the machine's import lock", /useEffect\(\(\) => \(\) => abort\.current\?\.abort\(\), \[\]\)/.test(src), true);
+
   check("the route is probed before any bytes are sent", /importSupported\(\)/.test(src), true);
   check(
     "and the upload only starts once that has answered",

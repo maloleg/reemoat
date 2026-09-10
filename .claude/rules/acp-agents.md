@@ -73,11 +73,22 @@ guessing this codebase refuses everywhere. What is unified is the *chrome*, by
 its keys are different from claude's** — `<question>__other` against
 `<question>_custom`, plus a `_meta.codex` block on every property. `toElicitationForm`
 projects both onto the same two fields, which is what makes the difference invisible
-to a card. `_meta` is
-dropped at ingest and the suffix is never parsed, because a client keyed on either
-name would render one agent's question and refuse the other's; both fixtures sit in
-`daemoncheck` beside each other. codex's model-initiated question is behind its own
-`default_mode_request_user_input` feature flag, which is off and which this daemon
+to a card. The suffix is never parsed, because a client keyed on either name would
+render one agent's question and refuse the other's; both fixtures sit in
+`daemoncheck` beside each other.
+
+⚠ **One thing is read out of `_meta` now** — `customAnswerFor`, projected to
+`ElicitationField.alternativeTo`, and the rest is still dropped at ingest. Both
+agents declare which question their free-text box answers (claude
+`_askUserQuestionCustomAnswer`, codex `codex.isOtherAnswer`, each with a
+`questionId`) and both then use that text **instead of** the selection — measured
+2026-09-09 on 0.73.0's `applyAskElicitationResponse` and 1.8.0's
+`convertUserInputResponse`. Without it a card draws two answers to one question and
+sends both. A declaration is the agent saying so; a suffix would be us guessing, and
+that stays refused. Q3.592.
+
+**codex's model-initiated question is behind its own
+`default_mode_request_user_input` feature flag**, which is off and which this daemon
 does **not** flip; `tool_call_mcp_elicitation` is stable and on, so MCP tool
 approvals arrive as elicitations with no flag at all. Q6.54.
 

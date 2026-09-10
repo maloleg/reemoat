@@ -17,12 +17,14 @@ import { systemSecretFor } from "../src/acp/systems.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import { AgentUpdates, agentChannelFrom, agentSourceFrom } from "../src/agentupdate.js";
+import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
 import { codeFingerprint, enroll, EnrollError } from "../src/enroll.js";
 import { boundedInt } from "../src/http.js";
 import { atOrUnder, expandHome } from "../src/paths.js";
 import {
+  IDLE_PARK_MS,
   MAX_LIVE_SESSIONS,
   SESSION_CREATE_BURST,
   SESSION_CREATE_REFILL_MS,
@@ -571,6 +573,58 @@ registry.setSessionLimits({
   live: boundedInt(process.env["REEMOAT_MAX_LIVE_SESSIONS"], MAX_LIVE_SESSIONS),
   burst: boundedInt(process.env["REEMOAT_SESSION_CREATE_BURST"], SESSION_CREATE_BURST),
   refillMs: boundedInt(process.env["REEMOAT_SESSION_CREATE_REFILL_MS"], SESSION_CREATE_REFILL_MS),
+  /*
+   * Minutes on the outside, milliseconds within — the one unit conversion in
+   * this file, and it is here because thirty minutes is a thing an operator has
+   * an opinion about and 1 800 000 is not.
+   *
+   * `boundedInt` treats a non-integer or a negative as "unset" and falls back to
+   * the default, so `0` is the *only* way to switch parking off and it is an
+   * explicit one. That matters more than usual here: parking is on by default, so
+   * a typo that silently disabled it would leave a machine holding every agent it
+   * ever started with nothing saying why.
+   */
+  idleParkMs:
+    boundedInt(process.env["REEMOAT_IDLE_PARK_MINUTES"], IDLE_PARK_MS / 60_000) * 60_000,
+});
+/*
+ * And what somebody set on the settings screen, which **overrides** the line
+ * above.
+ *
+ * After `setSessionLimits`, because that is what it overrides and reading them in
+ * the other order would leave the env value winning until the first save. The
+ * daemon's *config* is still env only — this is the narrow class of setting whose
+ * owner is the person using the machine rather than the one who provisioned it.
+ *
+ * ⚠ **The screen does not say which of the two is in force, and that is settled
+ * rather than missing.** It said so for one round, off a `source` on the wire;
+ * the owner removed the line as noise about env files on a screen that mentions
+ * none, and the field went with it. So the number drawn there is simply the one
+ * that applies, and the way back to `REEMOAT_IDLE_PARK_MINUTES` is typing it.
+ * See `MachineSettingsView`. Q2.225.
+ */
+registry.setMachineSettingsStore(stores.machineSettings);
+
+/**
+ * Letting go of the agents nobody is using.
+ *
+ * Started after `setSessionLimits`, which is where the threshold it reads was
+ * put, and after `restore()` — a sweep that ran before the registry held its
+ * sessions would find nothing and arm again a minute later, which is harmless but
+ * reads as a bug the first time somebody follows it.
+ *
+ * The `enabled` thunk asks the registry rather than re-reading the environment,
+ * so there is exactly one place the threshold lives and `0` means the same thing
+ * to both halves: no sweep, and no eviction on a wake either.
+ */
+const idleParking = IdleParking.start({
+  park: () => registry.parkIdleSessions(),
+  enabled: () => registry.idleParkEnabled,
+  onParked: (ids) => {
+    console.log(
+      `parked ${ids.length} idle session(s), agent(s) released: ${ids.join(", ")}`,
+    );
+  },
 });
 
 // Every spelling of "no" the `mode:` note below accepts; `deploycheck` reads this
@@ -732,6 +786,7 @@ const { app, injectWebSocket } = createApp({
     customAgents: stores.customAgents,
     strip: stores.agentStrip,
   },
+  machineSettings: stores.machineSettings,
   asks: agentAsks,
   logins: agentLogins,
   uploads,
@@ -1059,6 +1114,11 @@ async function shutdown(signal: string): Promise<void> {
   // Disarms the schedule; a run already in flight is deliberately left alone rather
   // than killed — see `AgentUpdates.doShutdown`.
   await agentUpdates.shutdown();
+  // Beside the updater and for the same reason: it only disarms a timer. A sweep
+  // in flight is stopping sessions that the session shutdown below stops anyway,
+  // and `parkIdleSessions` checks `shuttingDown` between sessions so the overlap
+  // is one session wide.
+  await idleParking.shutdown();
   /*
    * ⚠ **Before the plugin host, and that ordering is the whole of this line.** A
    * model ask is started *by* a plugin, so draining the host first would leave

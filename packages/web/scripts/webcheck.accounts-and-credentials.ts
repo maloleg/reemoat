@@ -1139,8 +1139,10 @@ process.stdout.write("\nyour own API keys\n");
    * dismiss a secret. A copy that could not land says so rather than doing
    * nothing, which on a plain-http LAN origin is the common case. "Copied" is
    * the only confirmation the tap gets, so it is announced. And the value is
-   * `text-xs`: 10px monospace is where `0`/`O` stop being distinguishable, on
-   * the one string somebody transcribes into a terminal.
+   * `text-xs`, 13px: around 10px monospace is where `0` and `O` stop being
+   * distinguishable, and this is the one string somebody transcribes into a
+   * terminal. The floor is the step, not the pixel count — `--text-xs` was 12px
+   * when this was written.
    */
   const secret = read("OneTimeSecret.tsx");
   check("Done is required of every caller", [/onDone: \(\) => void;/.test(secret), /onDone\?:/.test(secret)], [true, false]);

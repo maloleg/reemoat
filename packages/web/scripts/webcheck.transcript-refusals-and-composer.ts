@@ -620,20 +620,62 @@ process.stdout.write("\nwho is working, and what the box says\n");
   );
 
   const say = (over: Record<string, boolean>): string =>
-    composerPlaceholder({ blocked: false, reconnecting: false, working: false, revising: false, ...over });
-  check("an idle box asks for a message", say({}), "message…");
-  check("a working one says so", say({ working: true }), "agent is working…");
+    composerPlaceholder({
+      blocked: false,
+      reconnecting: false,
+      working: false,
+      revising: false,
+      hasCommands: true,
+      ...over,
+    });
+  /*
+   * The idle line, and the pair is the assertion rather than either half. It
+   * teaches `/` — the one affordance in the composer nothing else advertises —
+   * and it may only do so where the key would open something. A session whose
+   * agent is away publishes no commands and has no `agentConfig` for the three
+   * synthesized controls to be built from, so an unconditional hint would be the
+   * box promising a key that does nothing on every restored session.
+   */
+  check("an idle box teaches the one key nothing else does", say({}), "Type / for commands");
+  check("but only where that key opens something", say({ hasCommands: false }), "Message…");
+  /*
+   * ⚠ **Every placeholder this box can draw is sentence-cased, and the split that
+   * used to govern them is gone.**
+   *
+   * It was: an *instruction* took a capital, a *caption about the state* stayed a
+   * lowercase fragment. Argued at length here, and withdrawn on the owner's word —
+   * the six appear one at a time, seconds apart, in the same few pixels, so a
+   * reader meets them as a sequence rather than as a table and a register split
+   * nobody can see reads as five strings somebody forgot to capitalise.
+   *
+   * Asserted over **every** state rather than on two samples, so a seventh
+   * placeholder has to declare itself here rather than arriving lowercase and
+   * looking like the others.
+   */
+  {
+    const every: string[] = [];
+    for (const blocked of [false, true])
+      for (const reconnecting of [false, true])
+        for (const working of [false, true])
+          for (const revising of [false, true])
+            for (const hasCommands of [false, true])
+              every.push(say({ blocked, reconnecting, working, revising, hasCommands }));
+    const distinct = [...new Set(every)].sort();
+    check("every placeholder this box can draw", distinct.length, 6);
+    check("and each of them starts with a capital", distinct.filter((line) => !/^[A-Z]/.test(line)), []);
+  }
+  check("a working one says so", say({ working: true }), "Agent is working…");
   // Wins over `working`: it is the rarer fact, and the one explaining the spinner.
   check(
     "an in-flight send during a restart explains the wait",
     say({ working: true, reconnecting: true }),
-    "reconnecting the agent…",
+    "Reconnecting the agent…",
   );
   // Wins over both: nothing typed here moves until the card above is answered.
   check(
     "and a blocked one points at the request above",
     say({ working: true, reconnecting: true, blocked: true }),
-    "answer the request above first",
+    "Answer the request above first",
   );
   /*
    * **And a plan outranks even that, because it is the one blocked state where
@@ -645,12 +687,12 @@ process.stdout.write("\nwho is working, and what the box says\n");
   check(
     "a plan on screen asks for the correction instead",
     say({ blocked: true, revising: true }),
-    "say what to change…",
+    "Say what to change…",
   );
   check(
     "and it says so whatever else is true",
     say({ blocked: true, working: true, reconnecting: true, revising: true }),
-    "say what to change…",
+    "Say what to change…",
   );
 
   /* ---- the three places that state has to hold together ---- */
@@ -719,6 +761,37 @@ process.stdout.write("\nwho is working, and what the box says\n");
   check("the guard clause is still where this check thinks it is", guard > 0, true);
   const late = [...body.matchAll(/\buse[A-Z]\w*\(/g)].filter((m) => (m.index ?? 0) > guard);
   check("no hook runs after SessionView's guard clause", late.map((m) => m[0]), []);
+
+  /*
+   * ⚠ **`revising` may not wait for a transcript, and this is the one state where
+   * that is a dead end rather than a delay.**
+   *
+   * `openSession` returns *without* creating a transcript when the machine has no
+   * connection, which is why `PermissionCard` beside this reads `transcript?.events
+   * ?? []` and says so at length. `awaitingPlan` was reading `events !== undefined`
+   * instead: same screen, same request, opposite answer — the plan drawn, and the
+   * composer beneath it saying *answer the request above first* about the request
+   * it is the answer to.
+   *
+   * ⚠ **And the state it was switching the composer off in is the *worst* one, not
+   * a dead end** — which is the correction this comment exists to carry. With no
+   * window `planControls` answers `null` (the kind rides the `tool_call`), so the
+   * curated two-button card is not drawn at all and the fallback puts every option
+   * the agent sent on screen as rows, in its own 46-character wording. That is the
+   * layout the curation exists to avoid, and it was the one screen where the box
+   * that says *what to change* had been turned off. The plan comes off the snapshot
+   * either way; an empty window costs the markdown and never the state.
+   */
+  check(
+    "a plan is recognised before its transcript exists",
+    /permissionContext\(pendingAsk, events \?\? \[\]\)\.plan !== null/.test(sessionViewSrc),
+    true,
+  );
+  check(
+    "and the card it is drawn beside makes the same read",
+    /events=\{transcript\?\.events \?\? \[\]\}/.test(sessionViewSrc),
+    true,
+  );
 }
 
 process.stdout.write("\nwho gets the caret on a session switch\n");

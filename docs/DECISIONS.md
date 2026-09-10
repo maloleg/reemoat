@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 124 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 80 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 300 | `####` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 131 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 83 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 345 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 109 | `####` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 131 | `###` |
-| | | **864** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 134 | `###` |
+| | | **923** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 864 rather than the 455
+dividers. So the count is over **both** depths, and it says 923 rather than the 468
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -1012,12 +1012,21 @@ cannot remove a workspace on their own hardware.
 
 **Rejected.** Also moving the *previous* owner's grant. Ownership and access are
 different things here — two people may hold a grant on one machine — and taking
-somebody's access away is `DELETE /v1/admin/grants`, its own verb with its own
-audit story. A revoked machine is refused rather than adopted, because revoking is
-what *frees* the label and the slot and handing one back would spend both on
-something nothing can reach.
+somebody's access away is its own verb with its own audit story. A revoked machine
+is refused rather than adopted, because revoking is what *frees* the label and the
+slot and handing one back would spend both on something nothing can reach.
 
-**Status.** Current
+⚠ **Superseded in part, and named here rather than quietly rewritten.** That verb
+used to be `DELETE /v1/admin/grants`, which is deleted: taking somebody's access
+away is the machine owner's `DELETE /v1/machines/:id/grants` now, because a grant
+is full access to a machine that runs agents as its owner (Q1.633). And the case
+this paragraph leaves the previous owner's grant alone *for* is one this route can
+no longer reach: it refuses `403 machine_owned` on any transfer away from a live
+owner (Q1.635), so the only previous owner left to leave alone is the same user
+being handed the machine back. Read it as the reason `releaseOwner` is followed by
+an insert rather than by a sweep of `grants`.
+
+**Status.** Current, amended by Q1.633 and Q1.635
 
 ### Q1.44 — Is the enrollment paste shell data or shell source?
 
@@ -2164,18 +2173,26 @@ tests both, so nothing can check one rule and forget the other.
 
 ### Q1.501 — Can a grant put two machines with the same name in one list?
 
-**Position.** Yes, and it is knowingly left open. `PUT /v1/admin/grants` is a
-sixth path that reaches the same state as the five `nameVisibleTo` guards
+**Position.** Yes, and it is knowingly left open. `PUT /v1/machines/:id/grants`
+is a sixth path that reaches the same state as the five `nameVisibleTo` guards
 (Q1.48), without naming anything: a grant hands somebody a machine that is
 already called something, so the collision arrives with no write to a label or a
 name and no check on the way.
 
-**Why it is not refused.** Refusing would refuse an admin a share over a
-collision only the grantee can see, on the one route `cpctl admin grant` drives
-and the only remaining way to share a machine at all. What it costs is
+**Why it is not refused.** Refusing would refuse a share over a collision only
+the **grantee** can see — and which the sharer cannot see either, since it is
+composed of a name on their side and a label on the other. What it costs is
 reachability rather than authority: `POST /v1/tokens` still checks the grant
 after resolving, so the worst outcome is that `resolveMachineRef` picks one of
 the two by name and the other must be addressed by id.
+
+⚠ **That paragraph used to end "on the one route `cpctl admin grant` drives and
+the only remaining way to share a machine at all", and that half is spent.**
+`PUT`/`DELETE /v1/admin/grants` are deleted and sharing is the owner's `PUT
+/v1/machines/:id/grants` (Q1.633). It is recorded rather than swapped because the
+two halves are not the same argument: the spent one was a reason to leave *that
+admin route* open, and the collision reasoning survives the move unchanged,
+because it was never about who was asking.
 
 **Why it is written down.** Four guarded routes in a row read as coverage. The
 gap is in the fifth thing somebody would assume was covered.
@@ -3268,6 +3285,459 @@ listed, a second revoke a 404 — and, by reading `app.ts`, that no route
 mounted under `/v1/admin/users/:id/` reads or updates `api_keys`. `webcheck`
 asserts `UsersSection` imports nothing from `KeyRow`, that `cp.ts` exports
 neither function, and that the row's one panel is the machine limit.
+
+### Q1.632 — Where does an instance point somebody who has no machine?
+
+**Decision.** At an address the operator sets in the environment, and at nothing
+by default. `REEMOAT_CP_MACHINES_OFFER_URL` is read once in `main.ts`, validated
+with `isBrowserReachable`, warned-and-ignored if it is not http(s), and handed to
+`createControlPlaneApp` as an option; `GET /v1/instance` publishes it as
+`machines.offer`. In the browser `parseInstanceConfig` reads it through the
+existing `isAbsoluteHttpUrl`, `machineOffer` answers `null` fail-closed on an
+unknown config, and `machineOfferHref` builds the link with `URLSearchParams`,
+putting `me.email` in it so the far side can prefill its own form.
+`MachineOffer` draws one row and returns `null` when there is nothing to offer,
+on `MachinesSection`, `SessionBrowser` and `AppShell` — inside the
+`mayAddMachine` arm, below `installCommand`, and never in the composer strip.
+
+**Why.** The checkout at `get.reemoat.com` has accepted `?email=` since it was
+built, with a docblock naming "a link in the app" as the case it was for, and
+nothing had ever generated one: the app had no notion the shop existed and the
+shop cannot ask who is signed in. What was missing was the one place both facts
+are known at once, which is the screen a new account lands on with an empty
+fleet.
+
+**Environment-only, and not a `SETTING_KEYS` row — which it was, for half a
+day.** The first version put it beside `machines.per_user` with a field on the
+Server settings screen, on the argument that an admin owning the value is what
+lets a fork use the feature for its own shop. The owner's instruction on
+2026-09-06 was that the option is not for public use, and the argument behind it
+is stronger than the one it replaced: `SETTING_KEYS` is drawn on the settings
+screen of *every* instance and projected by `GET /v1/admin/settings` to every
+admin, so a row there does not offer a fork a feature — it puts one particular
+shop, run by whoever runs the deployment, in front of every administrator of
+every copy. `pluginCatalogueUrl` is already kept out of that array, so the shape
+existed; only its reason is different (a CSP built once at construction cannot
+follow a database). Whoever owns the deployment owns the env file. The price is
+that changing the address needs a restart, which is right for a value that
+changes about never.
+
+**An address rather than a boolean, which is `pluginCatalogueUrl`'s decision and
+its argument.** A client that renders a link cannot be told "there is an offer"
+and left to invent where it goes. The stake here is one degree higher than a
+refused `fetch`: this value goes into an `href` a person taps, carrying their
+email address. And the boolean form needs a URL compiled into `packages/web` —
+which, under AGPL, puts one project's shop on every fork's screens in a build
+they are entitled to and have not changed. Absence-is-off is already this file's
+dominant idiom (`plugins.catalogue`, `registration.email_domains`,
+`mail.reply_to`), so a URL setting *is* the parameter that is off by default.
+
+**Only in the `mayAddMachine` arm, and the reason is commercial as well as
+structural.** A machine bought on the far side comes back here to enroll, which
+needs a free slot: at or over the limit the dial is refused with a `403`. An
+offer in the other arm therefore takes money for a host this control plane will
+not connect — and draws it beside the sentence saying the fleet is full, which
+makes the "Add a machine" heading a lie while `machineQuotaNotice` stays
+literally `null`-iff-`mayAddMachine`. `webcheck` pins it from both sides: after
+`installCommand(` and before the `machineQuotaNotice(` call.
+
+**`URLSearchParams`, not concatenation, and measured.** The base is
+operator-supplied and may carry a path, a trailing slash, an existing query or a
+fragment. Against `https://get.example#top`, `` `${base}?email=…` `` produces
+`https://get.example#top?email=…` — the whole query inside the fragment, so the
+far side receives none of it and the link still opens and still looks right.
+`encodeURIComponent` cannot fix that; it does not answer `?` against `&`, or
+where the `#` goes. `set` rather than `append`, so a base already naming an
+address is replaced rather than joined by a second the receiver picks between
+arbitrarily. And the serialisation turns `+` into `%2B`, which is not cosmetic:
+the service on the other side reads the query with Hono, whose decoder replaces
+`+` with a space *before* percent-decoding, into a field that page renders
+`readonly` — so a bare `+` would arrive as a mangled address nobody could
+correct.
+
+**An unverified address is still prefilled.** `emailVerified` answers whether
+*this* control plane may send to it — it gates recovery and invitation, and
+exists because an unverified claim reserves nothing here. That is a statement
+about this instance's trust, not about whether the string is the one the person
+would type into somebody else's checkout. Withholding it would empty the form
+for exactly the newest account, whose confirmation link is still in their inbox,
+and that is the person this offer is most for.
+
+**Alternatives taken out.** A boolean flag with `get.reemoat.com` compiled in:
+shortest, and wrong for a fork. A pair — `offer_enabled` beside `offer_url` —
+worse than either: two fields that can disagree, which is what `mailConfigured`'s
+docblock exists to argue against. A `SETTING_KEYS` row with the admin control
+removed but the key left in: the screen would stop drawing it and
+`GET /v1/admin/settings` would go on projecting it to every admin, which is the
+half of the exposure that mattered. Deep-linking the checkout as
+`/checkout?plan=cloud&email=…`: it works today and is brittle by construction —
+that route names a catalogue row and answers 404 for one that is not active, the
+catalogue is Postgres rows in a service on another deploy pipeline this build
+cannot see, and a plan had just been retired there by switching a row off. The
+link names the shop's root instead, and the shop resolves its own plan. Drawing it in the composer strip: `MachineLine` has
+the same three-arm empty state and is the obvious fourth site, and a link off the
+origin between somebody and starting work is the worst instance of a control
+leaving the strip. Signing the address so the far side could trust it: it
+protects a form default — the order is built from the POST body either way — at
+the cost of a shared secret spanning two repositories with no rotation story.
+
+### Q1.633 — May an admin hand somebody a grant on a machine they do not own?
+
+**Decision.** No, and the routes that did it are deleted rather than guarded.
+`PUT /v1/admin/grants` and `DELETE /v1/admin/grants` are gone. Sharing is the
+owner's verb — `GET`, `PUT` and `DELETE /v1/machines/:id/grants`, driven by
+`cpctl shares`, `cpctl share` and `cpctl unshare`. `GET /v1/admin/grants` is
+kept.
+
+**Why.** The two deleted routes upserted and removed any `{userId, machineId,
+scopes}` behind `requireAdmin` alone: no check that the caller owned the machine,
+no consent from the person who did, and nothing on any screen afterwards. A grant
+is *full access* to a machine (Q1.11), and that machine runs agents as its
+owner's uid with no sandbox, so the pair was **one request from an admin
+credential to arbitrary code execution on somebody's computer**. It is the same
+class of escalation Q7.74 spent a whole change removing — an admin credential
+becoming somebody else's — arriving through the door marked *access* rather than
+the one marked *identity*, which is why deleting the identity routes left it
+standing.
+
+**Why it survived so long, and why that argument is now spent.** It was the only
+way to share a machine at all — the sentence `machines.ts` used to justify
+leaving the name collision at `nameVisibleToGrantees` open (Q1.501). Deleting it
+on its own would have removed co-working rather than a privilege. So this is a
+*move*, and the replacement differs by one line: `ownedMachine(c)`, the resolver
+`PATCH /v1/machines/:id`, `POST /v1/machines/:id/enrollments` and `POST
+/v1/machines/:id/revoke` already use. A machine you do not own answers `404
+machine_not_found` rather than 403, for that resolver's reason: nobody may map
+the fleet by watching which ids answer differently.
+
+**The invariant this buys**, stated over the service rather than over a route —
+the shape Q7.74 used for `api_keys`, and greppable the same way. `INSERT INTO
+grants` appears in exactly three places: `createOwnedMachine` (a machine coming
+into existence, granted to the owner it is created for), `PUT
+/v1/admin/machines/:id/owner` (Q1.635) and the owner's own route. **No route
+under `/v1/admin` adds or widens a grant on a machine that already has an owner,
+for anybody other than that owner.** ⚠ The last clause is not decoration: the
+same-owner re-label falls through Q1.635's guard and re-upserts that owner's own
+all-scopes grant, so the shorter wording would be false against the code, and
+widening a grant somebody already holds in full is not the power that was
+removed. `DELETE /v1/admin/users/:id`'s `DELETE FROM grants WHERE user_id = ?` is
+a sweep inside an account ceasing to exist, not a fact about a grant.
+
+**What is deliberately kept, and why a read is not the power.** `GET
+/v1/admin/grants` stays. An operator who cannot see the grant table cannot answer
+*why can this person reach that machine* at all, and the audit is the half of
+this that has to survive the deletion of the write.
+
+**The body is read before the machine is resolved, and the order is the fix
+rather than the style.** It was the other way round first, and an `await
+readJsonObject(c)` between `ownedMachine(c)` and the `INSERT` is a window the
+caller controls: send a valid `content-length`, let the ownership check pass, have
+the machine revoked, then finish the body. The insert lands on a machine with no
+owner, and the `DELETE` then answers 404 — a grant its owner cannot remove. With
+every `await` ahead of the check, the check and the write are one synchronous run
+of the event loop and the window is not expressible. `relabelMachine` states the
+same rule for the same shape.
+
+**Both writes cost a write-throttle slot** (`spendWrite`, as `machine_share` and
+`machine_unshare`), which took that budget from nine call sites to eleven. They
+are one row each rather than a transaction, which is why they were nearly missed;
+what earns them a slot is that sharing is reachable by *every* signed-in owner and
+each request leaves a permanent `grants` row behind, on the file the relay shares.
+
+**⚠ What none of this buys, so that nobody infers it.** Whoever operates this
+control plane holds `signing_keys.private_pem` and can sign a token for any
+machine with any `sub`; the daemon checks the signature, the issuer and the
+audience and never compares the subject to anything (`src/auth.ts`). This closes
+the door an admin *credential* opens. No route deletion closes the operator's
+reach, and self-hosting stays the only version of "not trusted" this system has —
+`SECURITY.md` says so in the same breath as the claim, on purpose.
+
+**Alternatives taken out.** Guarding the admin routes with an ownership check
+instead of deleting them: two spellings of one verb, and the one no client drives
+is the one that rots — the shape Q7.74's `withKey` was deleted for. Keeping
+`DELETE /v1/admin/grants` alone, on the argument that an admin should be able to
+take access away: the denial side an admin still has is revoking the machine,
+which the owner can see, where a silently removed grant is a change to somebody's
+access with nothing anywhere saying so. Leaving both routes and dropping the
+`cpctl` verbs: a route no client reaches is not a route nobody can reach — the
+credential is an HTTP one.
+
+**Status.** Applied. `relaycheck` asserts both admin writes answer `[404, 404]`
+while the read still answers 200, that a non-owner sharing a machine is told `404
+machine_not_found` rather than 403, that an admin cannot get the machine into
+their own list because there is no admin door left to do it with, and the owner's
+whole path: share, list, widen, take back, a second un-share as
+`404 grant_not_found`, and both refusals of the owner's own grant as `409
+grant_is_owner`.
+
+### Q1.634 — Who is a share addressed to, and why is there no name box?
+
+**Rule.** A user id, typed in full. `PUT /v1/machines/:id/grants` takes `userId`
+and nothing else; the person being shared with reads their own id off `GET /v1/me`
+(`cpctl me`) and says it out loud. `GET /v1/machines/:id/grants` answers with the
+name beside the id, because by then the owner has already been told who that is.
+
+**Why not a name.** There is no directory an ordinary account may read, and a name
+lookup here would create one — a user-enumeration oracle on a route *every*
+signed-in person can reach, answering `404 user_not_found` for a name nobody has
+and 200 for one somebody does. That is a **new** oracle rather than a second copy
+of an old one: Q7.78 concedes registration's and bounds it, and
+`registration.enabled` can be switched off, which closes that door while leaving
+this one open. Addressing by id is not the same exposure, because an id is
+unguessable where a name is the thing its owner tells people: probing ids
+enumerates nothing, which is the whole of why the harder-to-use form is the one
+that ships.
+
+**What it costs, said plainly.** Sharing is a two-step human protocol: one person
+reads an id off their own account, the other types it. That is worse than a name
+box and it is the price of the route being reachable by everybody rather than by
+an admin. A share-by-name flow is a product decision with its own oracle to weigh,
+and it is deliberately not this change.
+
+**A suspended account is refused rather than written**, matching `POST
+/v1/provision` and `POST /v1/admin/users/:id/invite`, which both name the state
+(`409 user_disabled`). A grant written to a disabled account is inert while
+`callerAuth` reads `disabled_at` live, and then goes live the moment somebody
+re-enables them, with nothing on the owner's screen ever having said so. The share
+the owner would have wanted is the one they make after the account is back.
+
+**The owner's own grant is refused on both writes** (`409 grant_is_owner`) rather
+than upserted. It exists already and carries every scope, so the only thing `PUT`
+could do to it is narrow it — taking `machine:admin` off the owner's own hardware
+with no way back through this route — and `DELETE` would leave somebody owning a
+machine that appears in no list, since `GET /v1/machines` joins `grants`. That is
+the exact failure user-owned machines exists to remove, and the lesson
+`createOwnedMachine` already records. Retiring the machine is the verb for giving
+up your own access.
+
+**Status.** Known limitation
+
+### Q1.635 — May an admin take a machine from the person who owns it?
+
+**Decision.** No. `PUT /v1/admin/machines/:id/owner` answers `403 machine_owned`
+whenever the machine has a live owner who is not the target, so what it can still
+do is adopt an *ownerless* row and re-label a machine for the owner it already
+has. An ownerless row somebody already holds a grant on may be adopted only **to
+one of those grantees** (`403 machine_granted`). Adoption burns the machine's
+outstanding enrollment codes and reports `enrollmentCodesInvalidated`.
+
+**Why the first guard.** Taking a machine from somebody was one request:
+`releaseOwner`, an insert, and a grant with every scope — with the previous
+owner's own grant deliberately left in place (Q1.43), so that nothing they can see
+changes. Full authority on a working machine, invisible to the person on it.
+
+**Why the second, which is the class the first misses.** Both guards were first
+written as *an ownerless row has nobody to ask*, which quietly reads **no owner**
+as **no users**. A machine registered before ownership existed can be enrolled,
+online and carrying other people's grants — precisely the state
+`nameVisibleToGrantees` exists for. Keyed on `ownerOf` alone, an admin could adopt
+such a row with every scope and be answered 200. `dependants` answers both halves
+— the owner and the grantees — and it is what this route and Q1.636's guard both
+read. A genuinely
+orphan row (enrolled, no owner, no grants) has nobody to ask and stays the
+operator's, which is the case the guards were justified by in the first place.
+
+**Why adopting to an existing grantee stays open.** It is what the route was
+written for, and it is also the answer to what Q1.633 took away: deleting the
+admin grant writes left legacy grantees with no way to list, re-scope or revoke a
+share, because every replacement route resolves through `ownedMachine`.
+Regularising the row to one of them gives the machine a person to ask and gives
+them the owner's verbs. An operator who wants it for themselves revokes it, which
+is the denial side and is visible.
+
+**Why the codes are burned in the same transaction.** ⚠ Q1.636's guard protects
+*minting* and not *redemption*, so without this it is one request out of order
+away from nothing: mint a code for an enrolled ownerless row while it is still
+nobody's, adopt it to somebody, then redeem the code you kept. A fresh mint now
+answers 409 while the retained one still returns a tunnel key and replaces the
+daemon — the machine acquires an owner and is substituted *after* they have it.
+`burnMachineCodes` is the same act `POST /v1/machines/:id/revoke` and the account
+sweep already perform, and it costs the adopting owner nothing they cannot redo,
+since minting is their own route now.
+
+**403 rather than 404**, against the 404 rule the owner's routes follow. The
+caller is an admin who can already list every machine and its owner through `GET
+/v1/admin/machines`, so there is nothing here to conceal, and a 404 over a row
+they were just shown would be a lie about existence rather than a refusal.
+
+**Status.** Applied. `relaycheck` asserts the refusal *and* that the ownership row
+and `acquiredAt` are unchanged after it — ⚠ the assertion it replaced proved the
+opposite, that a real transfer moves the date, which is what a driver written
+against the old behaviour is for — and that an ownerless legacy row is still
+adoptable, so a guard written as "refuse every owned machine" fails here rather
+than shipping.
+
+### Q1.636 — May an admin mint an enrollment code for a machine that is already enrolled?
+
+**Decision.** Not while somebody depends on it. `POST
+/v1/admin/machines/:id/enrollments` answers `409 machine_enrolled` for a machine
+that has enrolled **and** has an owner or grantees.
+
+**Why.** Redeeming a code calls `issueTunnelKey`, which *retires* the machine's
+current tunnel credential. So minting one here and redeeming it on another host
+does not read somebody's machine — it **replaces** it. The owner's daemon is
+dropped from the relay as superseded, and every grant-holder's traffic for that
+machine, prompts and uploads and bearer tokens included, is delivered into the new
+process, while the owner's list still reads owned, enrolled and online.
+
+**Why the owner's twin route allows exactly this.** `POST
+/v1/machines/:id/enrollments` says so in its own docblock: re-enrolling takes the
+machine away from whatever holds it, *"but since only the owner can ask, the thing
+it takes it away from is their own daemon, which is what re-installing a host
+means."* That sentence is the entire justification and it does not transfer to a
+caller who is not the owner. This route carried no restriction at all.
+
+**Why owned, and not enrolled alone.** Both legitimate uses survive the narrower
+condition. `deploy/install.sh`'s daemon wizard runs `cpctl admin addmachine
+--owner` and then `cpctl admin enroll` against a row created one line earlier, so
+`enrolled_at` is null and nothing changes. And a machine registered before
+ownership existed has nobody to ask, so an operator re-installing their own
+admin-managed host is untouched — refusing there would leave no path rather than
+move one.
+
+**409 rather than 403.** The machine is not forbidden; it is in a state that makes
+this the wrong verb, and the message names the person who holds the right one.
+
+**Status.** Applied. `relaycheck` drives a machine that is created, enrolled and
+then refused, rather than asserting over a row it wrote by hand: a guard on
+`enrolled_at` that has never seen a real redemption presents as *the machine did
+not enrol* and passes for the wrong reason.
+
+### Q1.637 — What is left after those refusals, and why is it disclosed rather than refused?
+
+**Position.** Machine **substitution** is left. It cannot be refused without
+restoring defects this record already closed, so it is made *visible* instead:
+`GET /v1/machines` carries **`enrolledBy`**, naming whoever's enrollment code
+brought a machine online when that was not the person reading the list.
+
+**The composition, in three requests each of which has to stay.** Revoke somebody's
+machine — `releaseOwner` frees the label in the same transaction (Q1.43). Register
+a new one *for them* under that freed name — `nameVisibleTo` filters `revoked_at
+IS NULL`, so the name passes (Q1.48). Mint its first code — the machine has never
+enrolled, so Q1.636's guard does not fire — and redeem it on your own hardware.
+Their list then draws the name they just lost, `owned: true`, enrolled and online,
+and it is your computer. No single route is wrong, which is why the driver for it
+runs all three end to end: a test per route passes while the composition stands.
+
+**Why neither obvious refusal is taken.** Keeping the label on revoke reinstates
+Q1.43's own defect — revoke `laptop`, create `laptop` again, and get a 409 naming
+a machine that appears in no list and can never be reached. Teaching
+`nameVisibleTo` about revoked rows refuses the owner their own recreate. And
+registering a machine for somebody is what `deploy/install.sh`'s daemon wizard
+does from the host being installed, which is a real flow rather than an attack.
+
+**Read off `machines.enrolled_by`, and the derived version is the lesson.** The
+column is added in `migrate()` and written at the redemption that sets
+`enrolled_at`, from the same statement, holding whatever minted the code — a user
+id, or a `pk_` provisioning-key id. It was derived from `enrollment_codes` first
+and was wrong four ways, ⚠ **all four reverting to `null`, which the route reports
+as *you enrolled this yourself***:
+
+- the rows are swept seven days after a code is used, so the answer expired;
+- `created_by` is deliberately left dangling on `DELETE /v1/admin/users/:id`, so
+  an `INNER JOIN users` dropped it the moment the enroller's account went;
+- `POST /v1/provision` writes a `pk_` id no `users` row matches, so every
+  provisioned machine named nobody at all;
+- `used_at` is stamped by four *burn* paths as well as by redemption
+  (`superseded`, `revoked`, `user_disabled`, `user_deleted`), so an owner pressing
+  "new enrollment code" twice — the likeliest reaction to noticing something odd —
+  overwrote the other person's name with their own.
+
+The shape is worth more than the four: provenance read out of a table that is
+swept, mutated by burns and joined to rows somebody may delete is not provenance.
+
+**Measured.** The derived version also scanned and sorted the whole fleet's
+`enrollment_codes` per request — no machine filter, no index on `used_at` — on a
+route the web client polls every four seconds per machine, against a table any
+signed-in caller can grow as fast as `WRITE_THROTTLE` allows: **168 ms of
+synchronous event-loop block at 200k retained rows**, on the file the relay
+shares. The column costs one `IN` over the handful of ids a listing actually
+names, bounded by `MAX_MACHINES_PER_USER` at fifty. The `grants` read beside it
+got the index it had never had — `idx_grants_machine`, after the same listing
+measured 0.8 ms at 10k grants against **62.5 ms at 500k**, to return a single row.
+
+**Three answers rather than a name or nothing**, because collapsing the other two
+into `null` is what made the predecessor lie. `enrolledByFor` answers `null` only
+for the caller's own id or an absent one; a `pk_` id is *a provisioning key* —
+`POST /v1/provision` creates a machine for any account with no account at all,
+only `REEMOAT_CP_PROVISION_KEY`, so it is the **most** alarming case rather than
+the absent one — and an id with no `users` row is *a deleted account*.
+
+**⚠ The limit, stated because a disclosure that overstates itself is worse than
+none.** A name here does not by itself mean a substitution: `install.sh`'s daemon
+wizard is `admin addmachine --owner` then `admin enroll`, so *every*
+wizard-installed machine names the admin who ran the installer, and a substitution
+draws exactly the row a normal install draws. It is a name to recognise rather
+than a flag to trust, and the honest remedy for one you do not recognise is to
+re-enroll the machine yourself, which sets the field back to you.
+
+**Where it is drawn, and why it is one string.** `cpctl machines` prints
+`[enrolled by …]` last on the row, so it never pushes the columns above it out of
+line, and the browser renders the same fact from one function: `enrolledByText`
+answers `null` for every case that means *unknown* — you enrolled it, the machine
+predates the column, the control plane predates the field — so `MachinesSection`
+grows a subline and `MachineSection` a sentence **only** in the case the
+disclosure is about, rather than a line reassuring somebody it was them. One
+function rather than two spellings, because two spellings of one disclosure are
+two disclosures and only one of them survives the next shortening pass; the
+punctuation is each surface's own, the list's sublines being fragments where the
+machine screen's lines are sentences.
+
+**Status.** Known limitation
+
+### Q1.638 — Whose terms does a fork's control plane serve?
+
+**Decision.** The three documents are compiled into `packages/web/src/legal.ts`,
+and the party they bind is compiled in beside them, in `OPERATOR` — one named
+sole proprietor in one jurisdiction, with a ⚠ block at the top of the file saying
+so and telling a fork to replace it. That is a deliberate departure from the rule
+`.claude/rules/cp-accounts.md` states for the two environment-only values, and it
+is the owner's call rather than a derivation.
+
+**Why the rule points the other way.** Of `REEMOAT_CP_MACHINES_OFFER_URL` that
+rule says it *"points at one particular shop run by whoever runs the deployment"*
+and that neither it nor the catalogue URL has a compiled-in default, *"because
+this is AGPL software and forks run their own control planes."* Terms are that
+argument sharpened: they name a legal person with liability behind them, and they
+are drawn on the sign-up screen of **every** instance rather than on an admin
+screen. A fork that forgets to replace them is telling its users they have a
+contract with somebody who has never heard of them, and collecting their
+agreement to it under a button they pressed to sign up.
+
+**Why it is compiled in anyway.** `SOURCE_URL` is the counter-precedent and it is
+the shape adopted: a value that names one deployment, compiled in, carrying the
+instruction to change it at the site of the value. Two things decide it. The
+**prose** describes this software's behaviour — what an account is, what an agent
+may do on a machine, what the control plane stores and for how long — so a fork
+inherits documents that are *true*, and the marker tells it the one field that is
+not. And the documents were required at short notice for the instance this
+repository's author runs; a seam that made them absent by default on that
+instance would have solved a fork's problem by creating the operator's.
+
+**⚠ Amended: a switch was built, and it is not the one priced below.** The party
+stays compiled in; what became environment-driven is whether a deployment
+*publishes* these documents at all. `REEMOAT_CP_LEGAL_DOCUMENTS` is env-only with
+no compiled default, the third member of the family `cp-accounts.md` describes,
+and off is the default — an instance claims the documents rather than inherits
+them. With it off there is no document page, no consent box and no requirement on
+the register route, so a fork's users are never shown one operator's contract and
+never refused for failing to accept it. The party being compiled in thereby stops
+being a statement made to a fork's users and becomes a value that fork must
+replace before turning the switch on, which is what the ⚠ block at the head of
+`legal.ts` says. `instance.ts` reads the flag strictly — only literal `true` is a
+claim — and `App.tsx` has three states for a document route rather than two,
+because *not yet known* may not be drawn either way.
+
+**The way back for the party itself is written down so nobody re-derives it.** Move the party to an
+environment variable named REEMOAT\_CP\_LEGAL\_OPERATOR, published on
+`GET /v1/instance` beside `machines.offer`, read in `instance.ts` with the guard
+`isAbsoluteHttpUrl`'s sibling, and fall back to *"whoever runs this control
+plane"* — `gateNotice`'s own sentence, so two screens cannot disagree about who
+somebody is being asked to deal with. Its price is a field on that route, which
+`webcheck` lifts with `new Function`: the handler gains a free variable or the
+driver throws `ReferenceError` at call time, and four flat fixtures gain a field.
+
+**Status.** Current
 
 ## Session lifecycle, questions and attachments
 
@@ -4726,9 +5196,25 @@ table rather than in either reader.
 
 **Rule.** Two bounds, kept apart: **64 live**, and **16 creations then one per two
 minutes**. Both answer `429`, and the refusal is made *before* the cwd is resolved,
-so it costs no filesystem probe. **Resume is deliberately outside both** — putting
-an agent back in front of an existing conversation is not manufacturing a session.
-They are in memory; `REEMOAT_MAX_LIVE_SESSIONS` and its siblings move them.
+so it costs no filesystem probe. **A resume is never refused by either** — putting
+an agent back in front of an existing conversation is not manufacturing a session,
+and telling somebody who has just typed that their own conversation is unavailable
+is worse than being briefly over a soft ceiling. They are in memory;
+`REEMOAT_MAX_LIVE_SESSIONS` and its siblings move them.
+
+⚠ **What the live ceiling *means* changed with parking (Q2.224), and the number did
+not.** It counts sessions holding an agent, which used only to be bounded from one
+end — `create()` refused past it and nothing ever released anything — so it read as
+"how many conversations you may have open" and was never a memory bound at all: at
+the ~397 MB a live session was measured to cost, 64 of them is ~25 GB. Since the
+daemon lets an idle agent go, the population it counts is bounded from both ends,
+and what it caps is **agents resident at once** rather than conversations somebody
+may have. The enforcement moved with the meaning: crossing the
+ceiling — by waking a conversation or by creating one — releases the least recently
+used *idle* session first, so the bound is kept by eviction rather than by refusal.
+The two ends differ only in the last resort: a wake proceeds anyway, a `create`
+answers `429`, and it does so only when every live session is mid-turn or waiting
+on a person.
 
 **Why.** `create()` had no bound of any kind, and the only thing counting sessions
 anywhere was the startup prune — which counts in order to **delete**, keeping the
@@ -5736,7 +6222,39 @@ and the rows it has *given up* coming back to sit inside them, which is D27 and
 closes the one class rule 1 had left unbounded. So the file holds at most the cap
 in inactive rows plus the active ones, and those have bounds of their own: a live
 row counts against `MAX_LIVE_SESSIONS`, and a daemon-ended row was a live one
-under that ceiling, which the next boot restores or gives up. At ~8 MB a session
+under that ceiling, which the next boot restores or gives up.
+
+⚠ **That last sentence stopped being true when parking landed, and this is the
+correction rather than a second opinion.** A `parked` row is active —
+`keepsItsConversation` is what `isActiveRow` reads — and it satisfies neither
+bound the sentence names. It does not count against `MAX_LIVE_SESSIONS`, because
+`liveSessionCount` counts `!terminal` and a parked session is terminal; and the
+boot pass neither restores it nor gives up on it, because `autoResumable` answers
+`parked` on a prompt alone. Nothing else moves it: `markInterrupted` returns early
+on an existing exit record, `shutdown` iterates the live ones, and only a person
+pressing Stop or a sign-out relabels it (`RELABELS_PARKED`). **So the active class
+is unbounded again, by a different door than D27's.**
+
+What made the old shape self-limiting was the thing parking removed on purpose: an
+abandoned conversation used to hold ~400 MB and a slot, so a machine ran out of
+ceiling long before it ran out of disk. A parked row costs neither, so nothing
+pushes back. Measured on the development machine 2026-09-10, hours after the
+feature landed: 5 parked rows of 12. Second-order, and the sharper half — `active`
+counts parked rows into the floor (`if (active + rank <= options.minSessions)`),
+so a machine holding fifty parked conversations has spent the whole 50-row floor
+on rows that were never at risk, and it stops protecting the inactive ones it was
+written for.
+
+**Deliberately not bounded yet, and that is the decision rather than an
+oversight.** A parked conversation is one somebody is *expected* to return to,
+which makes it the last row a prune should take — an age bound here is Q2.222
+pointed at the quietest sessions instead of the busiest, and there is no
+measurement behind whatever number it would pick. At ~8 MB a session the runway is
+years. What is owed is this paragraph, so the next person to read "the file holds
+at most the cap" does not believe it, and a look at real numbers before a bound is
+chosen. If one is wanted, the shape to weigh first is excluding parked rows from
+the floor's arithmetic — it loses nothing recent and restores what `minSessions`
+was for. At ~8 MB a session
 the cap is ~1.6 GB of transcripts nobody is coming back to, and the floor's
 ~0.4 GB is the part of that which may sit there however stale. And `reclaim()`,
 on bytes, whose condition is independent of what the prune removed and says so in
@@ -5849,6 +6367,391 @@ proven red against the old statement, against the first cut's store, or under a
 one-line mutation.
 
 **Status.** Fixed, 2026-09-05.
+
+### Q2.223 — "this machine already has 6 live sessions", on a daemon that may well have had eight
+
+**Question.** The owner hit the live-session cap on a provisioned cloud box and
+asked the fair question: *"почему у нас существует какой то лимит сессий? его не
+должно быть, либо обоснуй понятным языком, зачем он нужен"*. Two things had to be
+answered — where the 6 came from, and whether the bound should exist at all.
+
+**Where 6 came from.** Not from this repository. `MAX_LIVE_SESSIONS` is 64;
+`services/premium/cloud-init/provision.sh` writes `REEMOAT_MAX_LIVE_SESSIONS='6'`
+into `~/.reemoat/daemon.env` once, at provision, with its own arithmetic above it:
+*"The default is 64 and this machine has 8 GiB, so 64 is not a bound — it is a
+promise of an out-of-memory kill. Six is arithmetic… Revise it against a real
+box."* Nothing in `deploy/` ever rewrites that file, so an update never touches it,
+and `maxLiveSessions` is on no route and in no snapshot — **the refusal string is
+the only place in the product this number is visible.** Which is why the number
+could not be found from the phone that hit it.
+
+**Decision on the bound.** It stays, and it is not one bound but two — Q2.100's
+pair. Of the four reasons behind it, exactly one still applies to a single-owner
+machine, and it is the decisive one: **memory**. Agents are spawned `detached`, a
+new process *group* and not a new cgroup, so they live in the daemon's own cgroup
+and no cgroup arrangement protects the daemon from them; the premium box runs
+`earlyoom` with `node` among its preferred victims and the daemon is itself a
+`node` process. Removing the ceiling trades a refusal that names its remedy for an
+OOM kill of an agent mid-turn, on a phone, with nothing on screen explaining why.
+The honest fix is a bigger box or `SessionRuntime`, both of which are somewhere
+else.
+
+The other three are weaker than the docblock reads, and saying so is the point of
+this entry. The prune taking somebody's transcripts is largely defused by Q2.222's
+floor and rules, and was never the live cap's job anyway — the *burst* is that
+half, and it survives independently. The shared-machine case needs a grantee. And
+the multi-tenant container case does not exist in this product any more.
+
+**What changed instead.** The sentence. It interpolated `maxLiveSessions` — the
+*limit* — inside a clause claiming a *count*, and the two coincide only at the
+boundary: **resume is deliberately outside the bound**, so a restart that brings
+eight conversations back leaves a daemon truthfully holding eight while the
+refusal insists on six. It now states the limit as a limit and names
+`REEMOAT_MAX_LIVE_SESSIONS`, because a number visible in exactly one string should
+say what to search for.
+
+**Not done, and each for a reason.** Removing the live cap: it is the last named
+bound on a plugin whose `session.created` handler calls `ctx.sessions.create`, and
+three separate docblocks quote it as the worst case they escaped. Raising the
+default from 64: a no-op for the machine that reported this, which reads the env
+var. Making it settable from the UI: *the daemon's config is env only*, and there
+is no per-machine settings table or route to put it in.
+
+**Status.** Active
+
+### Q2.224 — A session nobody had touched in two days was still holding 476 MB
+
+**Question.** What bounds the memory a machine spends on agents, and how long may
+a conversation nobody is using keep one?
+
+**Measured, 2026-09-09, the development machine (darwin 24.6.0, Apple silicon),
+against the live daemon `i_b71a1ed2` and its own event log.** Nothing here had ever
+been measured; there is no memory harness in this repository and never has been.
+
+macOS `phys_footprint` — the honest figure, excluding shared framework pages and
+including compressed memory. Five live sessions:
+
+| Session | Idle for | Processes | footprint | peak |
+|---|---:|---|---:|---:|
+| `s_e3cc64` claude | 1.5 h | acp bridge 80 MB + `claude` 261 MB | 341 MB | 396 MB |
+| `s_5d26f9` claude | 6.4 h | acp bridge 82 MB + `claude` 177 MB | 259 MB | 403 MB |
+| `s_a55fb1` opencode | 48.7 h | one process | 476 MB | 760 MB |
+| `s_1bf6a1` opencode | 48.7 h | one process | 447 MB | 674 MB |
+| `s_1fa7f6` opencode | 48.7 h | one process | 461 MB | 736 MB |
+
+**1 984 MB for five conversations, of which 1 384 MB — 70% — belonged to three
+nobody had touched in 48.7 hours.** All three were `idle`: no turn, no unanswered
+permission, no question. Sampled again twelve minutes later they had moved by under
+2%, so an idle agent does not give the memory back on its own. The daemon itself was
+105 MB and its plugin child 31 MB.
+
+The other half, from the same log: `status:interrupted` → the next `agent_config` on
+that session is exactly a spawn, an ACP `initialize`, a `session/resume` and the
+config arriving. 120 real reattaches:
+
+| Agent | n | p50 | p90 | min | max |
+|---|---:|---:|---:|---:|---:|
+| claude, resuming alone | 28 | **1 292 ms** | 2 376 ms | 487 ms | 5 619 ms |
+| kimi, resuming alone | 21 | 2 806 ms | 2 861 ms | 713 ms | 12 945 ms |
+| opencode (only ever in 3-way boot storms) | 44 | 3 298 ms | 26 929 ms | 1 442 ms | 52 843 ms |
+| claude, in a 3-way boot storm | 27 | — | — | 541 ms | 90 182 ms |
+
+A cold `session/new` is 695 ms mean for claude and 1 065 ms for opencode, so a
+resume is about twice a fresh start and most of both is process startup. **The trade
+is therefore ~397 MB against ~1.3 s.** The boot-storm rows are the second finding:
+resumes contend badly, and three at once turned a 1.3 s reattach into 90 s.
+
+**Root.** `MAX_LIVE_SESSIONS` was checked in exactly one place, `create()`. Nothing
+ever released an agent, so the ceiling bounded how many conversations somebody could
+*open* and never how many agents a machine ends up holding. Its own docblock had
+conceded the point for a year — *"a machine running 64 agents at once has run out of
+memory long before it runs out of slots"* — and then done nothing about it.
+
+**Decision. Release the agent, keep the conversation.** A session idle for
+`REEMOAT_IDLE_PARK_MINUTES` (30, `0` off, **on by default**) is stopped with a new
+`ExitReason`, `parked`. The process goes; the transcript, the `agent_session_id`,
+the worktree, the branch and the title do not. The next message starts an agent and
+carries on over the same `session/resume` the daemon already performs after each of
+its own restarts.
+
+Almost none of this is new machinery, which is the argument for doing it this way.
+`terminal` is `exitRecord !== null`, so a stopped session already holds no process,
+is already skipped by `liveSessionCount`, already keeps its conversation and already
+comes back through `resume()`. Parking is `stop("parked")` plus a rule about when it
+returns.
+
+1. **The preconditions are one comparison: `status === "idle"`.** The three states
+   parking must never interrupt — a turn in flight, an unanswered permission, an
+   unanswered question — are exactly the ones the derivation reports as something
+   else, along with the two where there is nothing to release yet or already. A
+   hand-written list would fall out of step with `status` the day a fourth waiting
+   state is added; this cannot. Plus `agentSessionId !== null`, or parking is a
+   one-way door.
+2. **`parked` is deliberately not in `DAEMON_EXIT_REASONS`.** That list means "the
+   daemon owes this back **by itself**", and it drives the boot pass. Un-parking
+   everything at the next restart would hand back all the memory at once, in the
+   contention the measurement above found. So `autoResumable` answers `true` on a
+   prompt and `false` at boot, and `markInterrupted`'s existing `if (this.exitRecord)
+   return;` leaves a parked row parked across a restart with no new code.
+3. **It derives its own `SessionStatus`, and the reason is a defect avoided rather
+   than a preference.** `ManagedSession.status` reads `endedWithDaemon` and then
+   falls through a `switch` whose `default:` answers `exited` — the word for a
+   conversation somebody ended. A reason outside that list lands there silently and
+   compiles clean, because unlike `autoResumable` this switch has a default. The
+   client had the identical hazard one layer up: `statusTone`'s own `default:`
+   answers `idle`, which would have drawn a live dot over a machine running nothing.
+4. **The ceiling releases a slot rather than refusing**, which is what turns it
+   into a memory budget — see Q2.100. Least recently active first, one slot, on
+   **both** ends: a wake that would cross it, and a `create`. They differ only in
+   the last resort: a wake goes one over on purpose, because somebody typing into a
+   conversation they already have must never be told it is unavailable; a `create`
+   refuses, because new load is exactly what a ceiling has to be able to say no to.
+
+   ⚠ **The threshold does not apply at the ceiling, and that is a correction.**
+   Both paths first measured candidates against the full 30 minutes, so six
+   sessions that had finished five minutes ago blocked a seventh for the rest of
+   the half-hour — and the refusal told the person to *stop* one, which ends the
+   conversation and files it under Ended. The daemon was asking somebody to do
+   destructively, by hand, what it could do losslessly one line earlier. **The
+   sweep releases by age, because nobody asked; a ceiling releases by need, because
+   somebody is asking for capacity now.** What stays untouchable is what must be —
+   `parkCandidates` takes only sessions whose derived status is exactly `idle`, so
+   a turn, an unanswered permission and an unanswered question are safe at any
+   ceiling — and a machine whose owner set `REEMOAT_IDLE_PARK_MINUTES=0` is refused
+   rather than having an agent taken anyway.
+5. **A message is the only way back, and nothing on screen says so.** No Resume
+   control is drawn — an active exclusion, since `canResume` is `isTerminal &&
+   isResumable` and a parked session satisfies both. The composer is unconditional
+   (Q7.103), so the affordance already exists; a button offering to undo
+   housekeeping invites somebody to sit on a session list waking agents one at a
+   time.
+6. **It is drawn as an ordinary quiet session — same dot, no notice.** `statusTone`
+   answers `idle` for it, explicitly rather than by fallthrough (the fallthrough
+   answers `ended`), and `sessionNotice` returns `null` before the catch-all that
+   would otherwise draw `exitText` in the shape of a conversation that ended.
+   Whether a process is resident is not a fact about the conversation, and not
+   something a reader can act on. What it is *not* drawn as is equally deliberate:
+   not `ended`, because nobody ended it, and not counted in the machine's live
+   count, because nothing is running. The dot answers what the *conversation* is
+   doing; the count answers what the *machine* is doing, and parking is the case
+   that separates them.
+
+7. **Its controls stay live, and a tap is a choice rather than a wake.** Every
+   other stop clears `agentConfigState`, which is right — the options describe a
+   process that is gone. Parking keeps them, because the process is coming back to
+   the same conversation, and clearing them made the strip fall to the client's own
+   memory, where it is drawn faint and refuses a tap: a session you could re-model
+   at 29 minutes and not at 31, with nothing on screen saying why, since parking
+   deliberately shows nothing. So the options stay, `setConfigOption` and `setMode`
+   **record** against them instead of sending, and `doResume` puts the choice to
+   the fresh agent through `restoreConfig` — which sends only what differs and only
+   what the returning agent still offers. The owner's rule, and both halves are
+   load-bearing: recording without applying is a control that lies, and applying by
+   waking would spend ~400 MB on a glance at a settings row and give the feature a
+   second way back when its whole answer is *send a message*. In memory, so a
+   daemon restart drops a pending choice and the strip reads faint again — the
+   honest state for a daemon that no longer knows what that agent offered.
+   Validation is the live path's, run against the remembered options, so a value no
+   agent offers is refused without one rather than recorded and silently dropped at
+   the wake.
+
+**The trap, and it is the one worth remembering.** `isActiveRow` — the prune's
+predicate — ended `reason === null || endedWithDaemon({ reason })`. Since `parked` is
+deliberately outside that list, adding the reason made **every parked session
+inactive**: swept by age, ranked under the cap. That is Q2.222's incident exactly,
+re-aimed at the quietest and most-likely-to-be-returned-to conversations on the
+machine. `events.ts` now exports `keepsItsConversation`, one member wider, and the
+store reads that; `endedWithDaemon` is untouched, because the boot pass and the
+client's warn tone still want the narrow question. Nothing in the type system would
+have caught this — the function has no `switch` — and what did catch it is the
+`Record<ExitReason, "swept" | "kept">` Q2.222 left behind in `daemoncheck`, which
+refused to compile until the new reason was placed.
+
+**What the wake actually costs, measured 2026-09-09, and why none of it is
+recoverable.** Spawning the ACP bridge and completing `initialize` is **197 ms**,
+timed directly against `claude-agent-acp` with no session opened. `session/new` on
+top of that is ~500 ms — the `claude` CLI's own start — and `session/resume` ~1 100
+ms, so re-reading the conversation is the remaining ~600 ms. Two thirds of the wake
+is inside the agent's own binary.
+
+⚠ **The transcript this daemon holds cannot shorten any of it, and the protocol is
+where that is settled rather than the implementation.** `ResumeSessionRequest` is
+`{sessionId, cwd, …}` and `LoadSessionRequest` is `{mcpServers, cwd, …}` — neither
+carries history, so there is no verb for handing an agent a conversation. What
+`sessions.events` holds is what the *browser* draws; the agent's context has to come
+from the agent's own file, which for claude is `~/.claude/projects/<cwd>/<uuid>.jsonl`
+(Q2.1). The daemon's resume *is* the CLI's own: the live fleet shows
+`claude … --resume=<uuid>` on the command line.
+
+**And that is also the answer to "what do claude and codex do about this".** They
+have no resident process at all — a CLI session lives exactly as long as its
+terminal, and coming back is `--resume=<uuid>` re-reading the transcript, at the
+same ~1.3 s. **The daemon was the deviation**, holding processes indefinitely
+because it had no notion of the person having closed the terminal. Parking is what
+makes it behave like the tools it wraps.
+
+**Alternatives taken out.**
+
+- *A warm spare process.* It cannot help with the expensive part: the CLI is bound
+  to a conversation at spawn (`--resume=<uuid>` is a launch argument), so a spare
+  cannot be pre-pointed at one. Only the *bridge* could be kept warm, saving the
+  197 ms — about 15% of the wake — for a resident process per spare. Paying memory
+  to buy back latency is the trade this whole entry exists to make in the other
+  direction.
+- *A mark and a sentence of its own.* Built first: a dashed dot, a screen-reader
+  label, and a quiet notice saying the agent had been released and a message would
+  bring it back. All of it removed. The person cannot act on any of it, the wait it
+  would have explained is already covered by the composer's spinner, and a state
+  with a name is a state somebody has to interpret. See point 6.
+- *Adding `parked` to `DAEMON_EXIT_REASONS`.* It fixes the prune in one word, and
+  then the boot pass un-parks everything and clients draw the warn tone
+  `interrupted` carries. Two wrong answers to buy one right one.
+- *Refusing a wake at the ceiling, the way `create` used to.* It is the same 429
+  and a completely different sentence: one says "you have too many sessions open",
+  the other says "the conversation you are typing into is unavailable". Releasing a
+  slot is refusing something nobody is watching instead.
+- *Keeping the full idle threshold at the ceiling.* Argued for a round, on the
+  ground that a machine with nothing idle for half an hour is genuinely that busy.
+  It was wrong about who is asking: at a ceiling somebody is asking for capacity
+  now, and what would be taken is an agent doing nothing. Q2.223's complaint
+  survived the whole of Q2.224 because of it.
+- *Waking on opening a session.* Asked for, and declined by the owner: it hides the
+  1.3 s behind reading the transcript, and it means tapping through five rows spawns
+  five agents. Typing is the signal that somebody actually wants the agent.
+- *Scaling the sweep interval to the threshold.* Somebody who sets five minutes
+  would silently get a coarser sweep than somebody who sets an hour. A minute of
+  slack on any threshold is noise; the interval is a constant.
+- *A `resume_gave_up` precondition as a live gate.* It is written, and it cannot
+  fire: `onResumed` clears the verdict on the resume that succeeded, so a session
+  live enough to be idle has just proved it can be brought back. Established by a
+  driver fixture built to exercise it, which parked anyway. Kept as a statement of
+  intent, with the reason recorded at the site and both halves pinned.
+
+**Driven.** `daemoncheck.restart-and-resume.ts`: the `autoResumable` row on both
+triggers; `statusOf("parked")` against `"parked"` *and* against `"exited"`, since
+the failure is two states collapsing into one; a real open turn the sweep must not
+take, against a rig that never answers the prompt; the four facts "released" means;
+a restart that finds it still parked and a boot pass that leaves it alone; a wake
+through the real HTTP route, on the same `agentSessionId`; eviction at the ceiling,
+least-recently-used first, from both ends: a wake taking a slot and proceeding
+anyway when there is none, and a `create` taking one — losslessly, the session
+ending up `parked` rather than ended — and still refusing before it touches the
+filesystem when every live session is mid-turn; and the schedule itself through an
+injected clock, including that it re-arms.
+`daemoncheck.store-and-worktrees.ts`: `parked` placed as `"kept"`, driven under both
+sweeps. And the deferred controls, against a rig that publishes an option and
+accepts `session/set_config_option`: that a released session still offers it, that
+choosing is accepted, that the choice is on the session at once and **no process
+was started for it**, that a value the agent does not offer is still refused, that
+the wake sends exactly what was chosen — and the negative that keeps the arm
+narrow, a session somebody *stopped* keeping no controls and answering `terminal`.
+⚠ The rig was written in this daemon's own `kind`/`value`/`choices` shape rather
+than ACP's `type`/`currentValue`/`options`, so `toConfigOptions` produced an option
+with no kind and no choices, both validation guards were skipped, and a model no
+agent offers was accepted and then sent. The driver caught it; nothing else would
+have. `webcheck`: the three-way exit-reason partition with `parked` its own part;
+that `endedWithDaemon` is *not* exact about it and `isParked` is what runs first;
+the four-way presentation partition over the whole matrix; its own tone, asserted as
+distinct from `ended`, `idle` and `waiting`; its dot read off disk and asserted
+different from the ended one, because a `Record` cannot catch a copied string; that
+it lands in Active and not in the machine's live count; and the absence of the
+Resume control. Every one was proven red under a one-line mutation.
+
+**Status.** Fixed, 2026-09-09.
+
+### Q2.225 — The first daemon setting with a control on a screen
+
+**Question.** How long a conversation keeps its agent (Q2.224) is one person's
+trade between memory on their own machine and a ~1.3 s wait. It shipped as
+`REEMOAT_IDLE_PARK_MINUTES` — an env var, edited over SSH. Should it be on the
+settings screen, and if so what happens to *"the daemon's config is env only"*?
+
+**Decision.** It gets a control, and the rule does not move. `REEMOAT_*` is still
+read only in `scripts/daemon.ts`, nothing in `src/` touches `process.env`, and an
+operator provisioning a fleet still writes an env file. What is new is a **narrower
+class** with a different owner: settings whose subject is the person *using* the
+machine rather than the one who deployed it. `agent_strip` — which agents the New
+session row offers, and in what order — has been in that class since it was built
+and only escaped the question because one preference needed no general home.
+
+- **`machine_settings`, a key/value table**, and a new *table* so `SCHEMA_VERSION`
+  stays 6 for the reason `uploads` and `plugins` already give. Keys are enumerated
+  in `MACHINE_SETTING_KEYS`, a `Record<…, true>` exhaustive in both directions, so
+  a row this build cannot name is left alone rather than half-understood — the
+  stance `isExitReason` takes on a different column. A column per setting would
+  have made that a migration.
+- **`GET /settings` and `PATCH /settings`.** `PATCH` and not `PUT`, which is the
+  opposite call from `/agent-strip` one route above: that body is a whole list and
+  replacing it wholesale is the only coherent write, while this is a table of
+  independent settings where a client sending the keys it happens to know would
+  silently reset the ones it does not. An older client must be able to write this.
+- **A stored value overrides the env var**, which is therefore the default for a
+  machine nobody has set rather than a policy anything has to explain itself
+  against. `0` is a stored answer of "never".
+- **Applied to the running daemon before the route answers**, not at the next
+  restart, so the value a caller reads back is one already in force.
+- **A store-less daemon still answers `GET` and refuses `PATCH`.** The number is a
+  fact about the machine either way; what a person cannot do is change it, and a
+  `503` says so where an empty form would say nothing.
+
+⚠ **The provenance line was built, shipped into review and cut, and the reasoning
+that put it there is worth keeping because it looked correct.** The screen first
+drew a line under the field saying whether the number was set here or came from
+this machine's configuration, with a link back to the latter — on this
+repository's own rule that a control must not show a value a configuration has
+silently answered, which is why the agent settings screen reads
+`~/.claude/settings.json` and says so. The owner cut it on sight, and the rule was
+being misapplied: it is about an operator and a user disagreeing, and here there is
+no operator. This is one person's machine and one person's preference, so the line
+was a sentence about env files on a screen that mentions none. What went with it is
+the whole apparatus it justified — `source` on the wire, `null` on the route,
+`clear` on the store — because the only thing any of them could express was "go back
+to the configuration", and with no line there was no reader. An unread field is the
+state this repository deletes rather than keeps. The way back to the default is
+typing the number.
+
+**The copy, and it is a decision rather than a detail.** One sentence — *"A
+conversation left untouched this long has its agent shut down to free memory, and
+your next message starts it again exactly where you left off"* — and the word
+**park** appears nowhere a reader can see it. That is the owner's call and it is
+right: the daemon calls this state `parked`, every docblock does, and that is
+exactly how the word leaks onto a screen — it is the name everybody working on it
+uses. On a settings row it would name a mechanism the reader cannot see and cannot
+act on, turning housekeeping into a term to learn. `webcheck` asserts the
+prohibition over the whole comment-stripped screen rather than over the sentence,
+because read off the sentence it passes vacuously the moment somebody rewords it —
+which is precisely when they are most likely to reach for the word. The other half
+is asserted too: the sentence must still say that the agent is shut down and that
+nothing is lost, or "no jargon" is satisfied by saying nothing.
+
+**Alternatives taken out.**
+
+- *Leaving it env-only, per Q2.223.* That entry refused a UI for
+  `REEMOAT_MAX_LIVE_SESSIONS` on this exact rule, and the refusal stands **for that
+  setting**: a ceiling on concurrent agents is a machine's operator's business.
+  This one is not — it is a latency preference, and the person meeting the latency
+  is the person holding the phone.
+- *A column on the singleton `daemon` table.* That table is the running instance —
+  `instance_id`, `pid`, `started_at` — and is rewritten at every boot. A persisted
+  preference in it would be a preference that looks like state.
+- *A general settings framework.* One key today, and the table is the general part;
+  what is deliberately absent is a schema, a types-per-key registry and a
+  migration story for a surface with one member.
+
+**Driven.** `daemoncheck.restart-and-resume.ts`: the configuration in force with
+nothing stored; a save that answers with what is now in force **and is already
+being used by the running daemon**, which is the half a caller cannot check for
+itself; a session released on the saved five minutes that the configured
+forty-five would have kept; `0` surviving the round trip as a choice rather than
+being read as unset, and `null` no longer being a way to ask for the configuration
+back; an unknown key, a negative, a fraction and a value past the ceiling all
+refused without changing what is stored;
+and a store-less daemon answering `GET` and refusing `PATCH`. `webcheck`: the
+sentence, the prohibition over the whole screen, and that no heading on it names
+the mechanism either.
+
+**Status.** Current
+
 
 ## The web client
 
@@ -6793,13 +7696,45 @@ so the next reader knows the sweep happened and stopped on purpose.
 transcript, the composer and the card.
 
 **Why.** All three were full-bleed, so on a desktop a one-line reply ran the whole
-width of a 1600px window. It is one constant rather than three copies of
-`max-w-3xl`, because they have to be the *same* width or the card and the composer
+width of a 1600px window. It is one constant rather than a copy per surface,
+because they have to be the *same* width or the card and the composer
 stop lining up with the text they belong to, which is visible immediately. It is
 deliberately **not** on the scroll box: the scrollbar belongs at the window's
 edge, which is what `scroll-stable` is reserving a gutter for. The composer's
 rule, background and drop target stay full width, because they are chrome and a
 centred rule with gaps either side reads as a card.
+
+⚠ **The value was the stock 3xl step — 48rem — and is `45rem`, fitted to a
+reference by proportion.** 48 read too wide, `× 0.85` took it to 40.8, `+7%`
+brought it back to 43.66, and then the shape wanted was named by pointing at a
+screenshot of another product's conversation. In that screenshot the text column
+fills **56.9% of the pane beside the rail**; 45rem puts this one at 57.0%.
+
+⚠ **The pass before that matched the screenshot's *pixels*, and it is recorded
+here because the failure is the reusable part.** Its measure was read as 927px,
+the capture inferred as 1:1 from its line spacing, and the column set to 60rem —
+landing within a pixel of that figure and looking nothing like the reference,
+because the two captures were at different zoom. Measured on the result, the
+column filled 76% of its pane against the reference's 56.9%. **A pixel count off a
+screenshot carries the capture's scale with it; the fraction of the pane and the
+ratios inside it do not.** Fit those, and verify by re-measuring the result the
+same way rather than by trusting the number.
+
+⚠ **`Bubble`'s cap is not a fraction of this, and the decoupling is the part worth
+knowing.** For one pass both moved by a single factor, so the cap held at exactly
+three quarters of the column and two docblocks leaned on that ratio as though it
+were a rule. It was arithmetic. The cap is 26rem now, fitted to the same
+screenshot's message-to-measure ratio (60.6%) rather than to the column. **Neither
+number derives from the other**, nothing in the build or the drivers relates them,
+and `Bubble`'s own docblock is the single place the pair and its pixel arithmetic
+are written down together. ⚠ The reference message was `w-fit` on one line, so that
+ratio is a lower bound on what the product caps at rather than its cap.
+
+⚠ **A step name is written here without its utility prefix on purpose**, the same
+rule `bits.tsx` states at the constant: Tailwind's scanner reads a file as text and
+cannot tell a comment from a class attribute, so naming a retired utility in prose
+emits a dead rule for it. It bit twice in one edit — once in the docblock, once in
+the sentence explaining the docblock.
 
 **Status.** Current
 
@@ -6916,7 +7851,8 @@ glance, and the exact figure is something to go and look at. Removing it also
 removed the last moving part in that row, since a ring is one width at every
 percentage where `9% → 10%` and `99% → 100%` each pushed the chips beside it.
 
-**Status.** Current
+**Status.** Superseded — Q3.558: the readout is deleted from the browser client,
+and the daemon still carries the field.
 
 #### Q3.49 — Should the context ring look like a readout or like a button?
 
@@ -6928,7 +7864,12 @@ does not survive contact with the strip: it is the one thing there that opens
 something when pressed while looking like it does not, and hover is not a state a
 phone has.
 
-**Status.** Reversed an earlier decision
+**What survived it.** The half about hover, which outlived the control: every
+borderless chip in the composer takes `active:bg-raised`, because a press is the
+state a phone does have. Q3.556.
+
+**Status.** Superseded — Q3.558: the readout is deleted from the browser client,
+and the daemon still carries the field.
 
 #### Q3.50 — What does the ring show when nothing has been measured?
 
@@ -6944,7 +7885,8 @@ empty track is not left to be read as nought percent, and it is the ordinary gly
 for "no reading". It is drawn rather than taken from the icon set because `Gauge`
 is already the effort chip two controls to the left in the same strip.
 
-**Status.** Reversed an earlier decision
+**Status.** Superseded — Q3.558: the readout is deleted from the browser client,
+and the daemon still carries the field.
 
 #### Q3.51 — Where does the client say the agent is working?
 
@@ -8400,7 +9342,10 @@ kimi with no context reporting — or on any restored session, which has no live
 agent to publish controls — the whole bar and the paperclip with it would have
 disappeared while claude was fine.
 
-**Status.** Current
+**Status.** Superseded — Q3.557. Both clauses of the decision are gone: there is
+no context readout, and the paperclip is the composer's own control rather than
+the strip's, so the failure this guarded cannot happen and the predicate that
+guarded it is deleted rather than narrowed.
 
 #### Q3.84 — Where does attachment-chip state live?
 
@@ -8866,7 +9811,11 @@ growth move nothing at all, one line and no reserved space. It was refused becau
 to solve a width problem trades a fixed layout question for a permanent
 readability one.
 
-**Status.** Current
+**Status.** Superseded in both halves, and by two entries. The caption half is
+Q3.559: `mode` was the only category this entry kept a name for and it draws none
+now, so "which chips say their own name" has one answer and no exceptions. The
+width half is Q3.564: there is no reserve, per category or otherwise, and the
+movement this entry measured is back by decision rather than by accident.
 
 #### Q3.418 — The composer's controls vanish during a restart, and flicker on every change. Why, and what fixed it?
 
@@ -8938,16 +9887,12 @@ before *and* after emptying the config, so an emptied `stopping` frame is
 ordinary and treating it as an answer would discard the memory on the one path
 this exists for.
 
-**Not held: the context readout.** "A dead agent's window occupancy is not a fact
-about anything." `contextPercent` already answers `null` and the ring already
-draws `unknown`, so it keeps its slot and says "cannot tell", which is true.
-
 **The flicker is a different cause.** One tap set a single `busy` for the whole
 bar and every control took `disabled={disabled || busy !== null}` with
 `disabled:opacity-40`. `.tap`'s transition list is three properties and
 deliberately excludes `opacity` — so the entire row snapped to 40% and snapped
-back, uneased, around a round trip often under a second, while the paperclip and
-the ring (which take no such flag) stayed bright. The serialization is worth
+back, uneased, around a round trip often under a second, while the two controls
+beside them that took no such flag stayed bright. The serialization is worth
 keeping — setting a model rebuilds the mode list, so two concurrent changes really
 do race — so the fix splits the prop rather than removing the lock: `disabled` is
 semantic and dimmed, `locked` is transient and inert but undimmed. What is left is
@@ -10307,7 +11252,10 @@ It got the answer exactly backwards at both ends: the caption vanished on a phon
 for the control that needed it, and came back on a desktop for the ones that did
 not.
 
-**Status.** Reversed an earlier decision
+**Status.** Superseded — Q3.559. The rejection above stands and outlived the rule
+it was written for: the breakpoint came back for one release and is gone again,
+this time by dropping `mode`'s caption outright rather than by hiding it at one
+width. `showsCaption` is now the icon and nothing else.
 
 #### Q3.402 — Should a chip reserve the width of what *this* agent published?
 
@@ -10329,7 +11277,9 @@ it to move.
 revision, which is a *shorter* name from the same family — proof that this list is a
 measurement rather than a first look.
 
-**Status.** Current
+**Status.** Superseded — Q3.564. The answer to the question in the heading is still
+"no", and it is now moot: there is no reserve at all. The chips hug their content
+under one cap, and what this entry measured is what that gave up.
 
 #### Q3.403 — Why are the width sizers `hidden sm:block`?
 
@@ -10342,7 +11292,8 @@ and no width depends on what anything says.
 **Measured.** All three reservations at once are ~510px of strip against a 390px
 phone.
 
-**Status.** Current
+**Status.** Superseded — Q3.564. The sizers are gone at every width, which is what
+this entry's own measurement was the strongest argument for.
 
 #### Q3.404 — How does a control that the agent stopped offering keep its slot?
 
@@ -10372,9 +11323,6 @@ existence. That is once per deploy, on every open session. The live agent always
 wins **including when it publishes nothing**, which is the arm that does the work:
 without `hasLiveAgent` telling an agent with no controls from a session with no
 agent, a dead set of chips would be pinned to a running session for ever.
-
-**Why the context ring is not held.** A dead agent's window occupancy is not a fact
-about anything, and the ring already says "cannot tell".
 
 **Status.** Current
 
@@ -10485,9 +11433,9 @@ that fades.
 
 **Why.** One tap used to disable every control in the row, and `opacity` is
 deliberately absent from `.tap`'s transition list, so the whole strip snapped to 40%
-and snapped back around a round trip that is often under a second — while the
-paperclip and the context ring, which take no such flag, stayed at full strength,
-making the row read as broken rather than busy. The exclusion itself is worth
+and snapped back around a round trip that is often under a second — while the two
+controls beside them, which take no such flag, stayed at full strength, making the
+row read as broken rather than busy. The exclusion itself is worth
 keeping: setting a model rebuilds the mode list, so two changes at once really do
 race, and the daemon refuses a config change mid-restart on purpose. The cost is a
 second or two in which a tap on another chip does nothing at all, taken
@@ -11599,7 +12547,18 @@ one of the branching, and the comment there says so.
 reaching only the newest, an unknown event passing through untouched, and an old
 client asked for nothing at all rather than asked and ignored.
 
-**Status.** Current
+⚠ **Both halves of this were wrong in a way nothing on screen said, and each was
+reported months later from a phone.** The back button was never once asked for past
+the launch screen, because the version it gates on is read out of a fragment
+`navigate` destroys — Q3.596. And the inset was keyed on *being* in Telegram rather
+than on how Telegram is presenting the page, so the measured overlay clearance was
+also spent on a client that draws its header as a bar and reserves its own space —
+Q3.597, which replaces the literal with Telegram's own number and demotes 3.25rem to
+the pre-8.0 fallback. **The floor-not-an-addition rule stated here is untouched** and
+still governs that line; the one addition is between Telegram's two reported insets,
+which are nested rather than describing the same strip.
+
+**Status.** **Current in its rules, superseded in both mechanisms by Q3.596 and Q3.597**
 
 #### Q3.444 — Two screens' text at once, and a sheet that left its contents behind
 
@@ -11954,7 +12913,7 @@ differently loses nothing at all.
 is **outside** every existing rule: it is the only `allow_once` in the request,
 i.e. *"yes, but keep asking me about every edit"*, and after this the narrowest
 grant the card offers is `acceptEdits`. That trade was asked for explicitly; the
-reversal is one entry in `PLAN_ORDER`.
+reversal is one entry in that shape's `order`.
 
 **And the primary reverses what the filled button means.** `bg-fg` on this card is
 *the reversible option*, which is why `permissionButtons` gives it to `allow_once`.
@@ -11969,12 +12928,14 @@ of these does, the id is already what identified them, and four of claude's own
 labels wrap into a block on a 390px phone, on the one row whose meaning is carried
 by position. The agent's wording rides `AskOption.hint` as the `title`.
 
-**Status.** Current
+**Status.** Superseded by Q3.585, which keeps every narrowing above and makes the
+single shape a list — `PLAN_SHAPES`, because the one measured here stopped being a
+shape any pinned adapter sends.
 
 #### Q3.454 — ACP cannot attach a sentence to a refusal. Where does "what to change" get written?
 
 **Rule.** In the message box. While a plan is on screen the composer takes over:
-its placeholder reads *"say what to change…"*, the **Stop** control becomes
+its placeholder reads *"Say what to change…"*, the **Stop** control becomes
 **Send**, and a message written there **cancels the turn and then sends** — which
 settles the plan and says why in one gesture. There is no Revise button.
 
@@ -11993,6 +12954,24 @@ an extra act invented here; it is the one they were already performing, and
 `POST /sessions/:id/cancel` answers only once the turn has settled, which is what
 lets the prompt behind it land. It settles the permission as `cancelled` /
 `by: turn_cancelled` — the same record their own Stop wrote.
+
+⚠ **That measurement was taken on claude-agent-acp 0.63.0 and the pinned 0.73.0
+behaves differently — the *conclusion* survives, the *reason* does not.** 0.73.0's
+`applyExitPlanModeSelection` answers `reject` with `deny(context, "User chose to
+keep planning", true)`, and its own comment says what the third argument is for:
+*"Interrupt stops this ACP turn; the adapter maps Claude's internal diagnostic for
+that intentional stop back to cancellation."* 0.63.0's `deny` took no such argument.
+So a refused plan **does** end the turn on the pinned adapter, and the sentence
+above is history rather than current behaviour.
+
+Nothing about the composer changes, and that is worth being explicit about rather
+than leaving to be re-derived: this path never presses reject. It sends while the
+permission is still parked and the turn is still in flight, so `cancelTurn` is
+required for the reason it always was — a prompt sent inside a turn is
+`409 turn_in_flight`. What expired is the anecdote about the operator pressing Stop,
+not the ordering it justified. Kept rather than deleted because it is the record of
+an adapter bump changing behaviour under a decision, which is the same failure
+Q3.585 records for `PLAN_SHAPES` and is why that one is a list.
 
 **Three flags move together and none has a pure function behind it**, so all three
 are pinned as source text: `sendRefused` lifts rather than gates, `stoppable`
@@ -12879,7 +13858,16 @@ had been, and that `drawableOptions` had therefore been justified partly by a
 fallback nobody built. The correction stays written where it is; the function now
 exists under the name it was promised.
 
-**Status.** Reversed an earlier decision
+⚠ **One card is now an exception, and it is named rather than left to be found.**
+The plan-mode card draws two of the four options claude sends — Q3.594 — on the
+owner's instruction, after four labelled buttons wrapped into the room the plan
+itself needed on a 390px phone. The rule here still governs everything else, and the
+exception is the narrow kind this entry could live with: curation on a **measured
+shape** matched by exact set equality, dropping two ids named in the driver, with
+`null` still meaning the agent's own card — not a length rule reaching for whatever
+does not fit.
+
+**Status.** **Reversed an earlier decision; itself narrowed by Q3.594**
 
 #### Q3.471 — Seven call sites asked for `items-center` and none of them got it
 
@@ -16557,6 +17545,2426 @@ plus padding: two numbers that agree by arithmetic nobody will re-run.
 **Status.** Applied. `webcheck` asserts the row string and that no cell of the
 row carries a `py-` class.
 
+#### Q3.555 — Why is the composer one bordered box rather than a field with a strip under it?
+
+**Decision.** One `rounded-xl` container bounded at `edge-strong` holds the
+attachment chips, the textarea and one control row. The textarea has no border, no
+radius and no fill of its own; the box is its boundary.
+
+**Why.** Reported from a phone, and it is a count rather than a taste. The bottom
+of a 390px screen carried a bordered textarea, a bordered 44px send button beside
+it, and below that a separate strip with a bordered paperclip, a bordered mode
+pill, bordered model and effort pills, a bordered overflow button and a bordered
+context ring — seven-plus outlines in two rows, none of which said anything the
+others did not. Every mobile chat client draws the same controls as one object,
+and the reason it works is that a container drawn once removes six lines without
+removing a control.
+
+**The box was a `<div>` wrapping a smaller `<form>`, and that half is spent.**
+`Select`, `Absent`, `Toggle` and the choice rows are hand-rolled `<button>`, and a
+button inside a form defaults to `type="submit"` — so the container being a
+`<div>` was what stopped a tap on the model chip sending the draft, with the
+explicit `type="button"` on each and `webcheck`'s sweep as the second line. Q3.563
+moved Send onto the control row, a submit button has to be inside the form it
+submits, and the box is the `<form>` now: the sweep is the only guard left, which
+is why it reads every `<button` in both files rather than the four that were
+wrong. `CommandMenu` already carried the attribute, having been inside the form
+all along, which is what makes this a hazard the codebase has met rather than one
+imagined for this entry.
+
+**Two things the box may never take.** `overflow-hidden`, because `CommandMenu`,
+all three chip menus, `Absent`'s panel and the `…` popover are `bottom-full`
+children of it — the regression a rounded container invites. And any
+`focus-within` treatment: Q3.414 is about this box now, and a caret is a text
+control's own focus indicator.
+
+**Measured.** Resting height on a 390×844 phone goes 105px → 112px, seven pixels,
+taken out of the chrome above and the strip's own padding and spent on the box.
+Send stays 44px and stays beside the text it sends — see the alternative below.
+
+**Alternative taken out and then taken back in — Send in the control row.** It is
+what the reference screenshots show, it is what this was first drawn as, and it
+was refused here on the arithmetic: below `sm` a chip is 51px of chrome plus its
+value, so mode (91) + model (90) + effort (100) + paperclip (32) + three gaps (18)
+is 331px against 352px of box interior, and adding Send and its gap makes it 381,
+at which point all three chips truncate. The owner asked for it anyway, having
+been shown that number. Q3.563 is the decision and carries what it costs; this
+paragraph stays because the measurement did not stop being true.
+
+**Alternative taken out — keeping the rule above the composer.** `border-t
+border-edge` is 1.31:1 and sat eight pixels above a box border at 4.40:1, which is
+two hairlines saying one thing. `bg-surface/95 backdrop-blur` went with it, and
+that half is a measurement rather than a preference: `SessionView` makes the
+composer a **sibling** of the conversation region — the ask card's frame ends
+where the composer begins for exactly that reason — and `AppShell`'s pane does not
+scroll, every route owning its own scroller. Nothing has ever passed under this
+element, so the filter was re-rasterising a static white backdrop on every frame
+to blur nothing. `sticky bottom-0` stays as the guard for the day `<main>`'s
+`overflow-y-auto` backstop fires.
+
+**Status.** Current
+
+#### Q3.556 — What identifies a control once it is inside a bounded box?
+
+**Decision.** Its own **action glyph**, and nothing else. Every chip in the
+composer's row is borderless — `border` stays in `CHIP` and only the colour moves
+to the call sites — and what carries 3:1 is the `ChevronDown` at `text-faint`,
+6.23:1 on `surface`. **So the chevron is drawn at every width and may never take a
+breakpoint.**
+
+**Why this reverses an app-wide rule, and how far.** `web-shell.md` said every
+field and every unfilled button is bounded by `edge-strong`, full stop. The
+amended sentence keeps that for a control **on a plane of its own** and withdraws
+it for one **inside a container already bounded at `edge-strong`**: the box is the
+identification, and a second outline inside the first is the noise Q3.555 exists
+to remove. It is not a new exception so much as an unwritten one — `menuRow` draws
+no border in either state because `MENU_PANEL`'s box identifies its rows, and
+`ICON_BUTTON_TONE.ghost` is borderless and fill-less and already ships on the
+header's chevron, the browser's filter, both sheet closes and the attachment
+chip's own Remove, eight pixels from the paperclip that was until now the one
+bordered thing beside them.
+
+**What does not qualify, both measured.** Text alone: a borderless button whose
+whole content is a word is a caption, whatever its contrast. And a fill: `raised`
+on `surface` is 1.22:1, which is why `edge-strong` was written in the first place
+and why the answer here had to be a glyph.
+
+**The two bounding cases are respected rather than overruled.** `SystemsPanel`
+refuses `ghost` for an irreversible act on an open pane — a lone control, which is
+what the first sentence is for. And Q3.49 reversed the context ring *from*
+borderless *to* bordered because "hover is not a state a phone has at all", which
+is true and is answered by pressing: every borderless chip here takes
+`active:bg-raised`, since `.tap` transitions `background-color` and `.press`'s
+`scale(0.97)` is nearly invisible on a control with no edge to scale.
+
+**One chip keeps a border, and only in one state.** `Toggle` when it is **on**.
+`bg-raised` at 1.22:1 groups a chip and cannot carry a boolean's whole state, and
+with everything around it borderless an outline is available as a *meaning* rather
+than as chrome. It costs no width, because `border` never left `CHIP`. The
+duplicate `font-medium` that sat in both arms went at the same time, having
+differentiated nothing.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.557 — Who owns the composer's control row, and what did moving it retire?
+
+**Decision.** `Composer`. It lays out the paperclip, `AgentConfigBar`'s cluster
+and nothing else in one flex line inside the box; the strip takes no `leading`
+node and `configBarShows` is **deleted**.
+
+**Why.** The paperclip belongs to the component that owns `fileInput`,
+`slotsFull` and `attach`, and it was a `ReactNode` prop with a docblock explaining
+why it was a node rather than attachment props — a comment that existed only
+because of the coupling. What that coupling also produced was `configBarShows`,
+whose third clause guarded exactly one failure: no bar, so no paperclip, so no way
+to attach a file on a session with no live agent (Q3.83). With the paperclip out
+of the bar the failure is structurally impossible rather than asserted, and what
+was left of the predicate was `optionCount > 0` — an ordinary empty render and not
+a rule. A check whose subject cannot occur is not coverage.
+
+**And the strip stopped knowing an agent's name.** `agent: AgentId` was there for
+the context readout alone, by its own docblock. With that gone the file is keyed
+on ACP's `category` and on nothing else, which is the rule it always stated with
+one exception it no longer needs.
+
+**`gap-1.5` in that row is arithmetic, not taste.** `TAP_GROW_Y` grows a chip's
+target 4px upward and its docblock's "the textarea's own bottom edge is 6px above"
+*is* this gap. Tighten it and a tap aimed at the end of a draft opens a model menu.
+
+**Alternative taken out — `AgentConfigBar` keeping the row and gaining a
+`trailing` prop for Send.** It leaves `configBarShows` alive as a guard that is
+now always true, which is worse than deleting it; and it puts Send, Stop and both
+spinner branches — and therefore Q3.222 and Q7.103, which are `Composer`'s rules —
+a file away from the `send` and `cancelTurn` code they constrain, inside a
+component whose stated subject is ACP categories.
+
+**Status.** Current
+
+#### Q3.558 — Why is the context readout deleted from the browser rather than moved or hidden?
+
+**Decision.** Deleted. The ring component, its two paint tables, and the five pure
+functions behind it — the percentage, the label, the thresholds, the agent-specific
+"why is this empty" sentence and the short token count — are gone from
+`packages/web`, along with twenty-one `webcheck` assertions and the `usage` and
+`agent` props that fed them. They are named in prose rather than cited, because a
+name in backticks in this file has to grep to something and these no longer do.
+
+**Why.** The owner's call, and the reason is what it reported rather than where it
+sat. It was blank for the whole life of every kimi session — `usage_update`
+appears in kimi's bundle exactly once, inside the vendored schema for the
+protocol, a shape it can parse and never one it sends (Q7.26) — and blank on any
+session waiting for its agent, since a dead agent publishes no usage. A control
+that is empty on most agents most of the time is not worth a slot in a row whose
+every other member *sets* something.
+
+**Hiding it was already the answer and it had run out.** It was `hidden sm:flex`,
+so it had not been on a phone since that decision; what was left was a desk-only
+readout carrying two paint tables, a popover, an `overlay.ts` layer and an
+agent-name prop through the whole file.
+
+**What stays, and why that is not an oversight.** Everything on the daemon:
+`ContextUsage` in `src/events.ts`, `Session.contextUsage`, `usageWorthAnnouncing`
+and the snapshot mirror in `registry.ts`. Two non-browser clients read it —
+`scripts/client.ts` prints `ctx N%` and `scripts/harness.ts` prints a
+`context_usage` line — and `contextUsage` stays declared on `wire.ts`'s
+`SessionSnapshot`, which is the hand-mirrored copy Q3.406 requires. ⚠ **With
+nothing in `packages/web` reading that field, `webcheck.plugin-protocol.ts` is
+the only thing holding it there**, and it is worth knowing that before the next
+tidy-up: the assertion is about the mirror being complete, not about a consumer.
+
+**Alternative taken out — moving it into `…`.** The overflow popover is built
+from `slots`, a partition over the *agent's own* controls with an assertion
+counting every member. Putting a readout there means either lying to that
+partition or teaching it about a control no agent publishes.
+
+**Alternative taken out — keeping the pure functions.** They are cheap and they
+were asserted, which is the argument for keeping anything in this repository. But
+an asserted function with no caller is a rule about nothing, and Q7.9's own text
+says that list has to name functions that exist.
+
+**What is lost.** The one honest thing the popover did: on claude and codex it
+answered "how much room is left" without spending a turn. Anybody who wants it
+back has the field on the wire and `pnpm client` printing it today, and Q7.132
+records what a second attempt would owe.
+
+**Status.** Current
+
+#### Q3.559 — Why does the mode chip no longer say "Mode"?
+
+**Decision.** `showsCaption` is false for every category `CATEGORY_ICON` has an
+entry for. A chip draws its own name **exactly where no glyph does**, and then at
+every width; the caption's `hidden sm:inline` is deleted with the exception that
+needed it.
+
+**Why.** The owner's call, from a screenshot of the reference clients: theirs read
+"Default" where ours read "Mode Manual". The argument for keeping it — "Manual"
+alone leaves nothing saying what is on manual (Q3.401, Q3.417) — undercounted what
+else was already saying it. The chip draws `SlidersHorizontal`, sits in the fixed
+leftmost slot the mode control has had since the row existed, and answers "Mode" to
+a screen reader through an unconditional `aria-label`. The word was the third copy,
+and it was the third copy on the narrowest strip in the app, next to the value it
+was pushing into a truncation.
+
+**What falls out, and both halves are simplifications.** The row is one word
+shorter on every agent — about 38px at `sm` and above, where the caption was still
+drawn. And the breakpoint goes: a caption now belongs only to a chip with no glyph
+to hide behind, so there is no width at which hiding it is right. That is Q3.401's
+own rejection arriving a second time from the other end — it refused
+`hidden sm:inline` as a width question answered by a breakpoint, and the fix that
+replaced it grew one back.
+
+**⚠ The cost, stated because it is a real one.** `CAPTION_SILENT` is now the key
+list of `CATEGORY_ICON`, written out twice in two files. It cannot be one list:
+the icon table holds React components, so it lives in the `.tsx`, and importing it
+into `agentConfig.ts` would drag `ComponentType` and lucide into the one module
+`webcheck` evaluates with no DOM. Two lists that must agree is a defect unless
+something checks them, so `webcheck` reads the icon table off disk and asserts
+that nothing in it draws a caption. `model_config` is in the set for that reason
+alone — it has a glyph and is never drawn, being in the `hidden` slot — because a
+set that is *almost* the icon table is the version that rots.
+
+**Alternative taken out — dropping the caption below `sm` only**, which is what
+shipped and is what this replaces. It made the chip correct on a phone and left
+"Mode Manual" on every desktop, which is the same word saying the same nothing on
+the screen with the most room to notice it.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.560 — Why is the send control a circle with an arrow in it?
+
+**Decision.** A filled circle holding `ArrowUp`, through a `shape` prop on
+`IconButton` rather than a class. Stop and both spinner boxes take the same
+circle, and all four are `size="chip"` — 32px of ink, 44px of target through
+`TAP_GROW_Y`, the same box the chips beside them draw.
+
+**Why, on the glyph.** The paper plane is a *mail* metaphor and this is not mail:
+nothing is addressed, nothing is filed, and the reply lands in the same column a
+moment later. An arrow says "up, into the conversation above", which is what
+happens.
+
+**Why, on the shape, and this is the half that was actually wrong.** A filled,
+hard-cornered 44px square holding an icon is the shape a **Stop** control has —
+and Stop genuinely appears in that exact slot a second after a turn starts. The
+composer was drawing the two states in one shape and distinguishing them by a
+glyph inside it. A circle for the affirmative action and a square only for the
+one that halts is the distinction every phone chat client draws, and it costs
+nothing here because the slot's four occupants can all take it.
+
+**Why 32px and not 44.** Asked for: 44px of filled black was the loudest object in
+the composer. `ICON_BUTTON_SIZE.lg`'s docblock said "the composer's send button,
+and nothing smaller", and that sentence is amended rather than ignored — what it
+was protecting is the 44px *target*, which `chip` reaches the same way the
+paperclip does, and what it was warning against was the deleted `md`, which
+reached 36px and stopped there. A middle size was tried and taken back out:
+`h-9 w-9` with a growth mechanism clears the floor honestly, but
+`webcheck.decision-surfaces.ts` bans 36px in that table **under any name**, on the
+argument that the number reappearing is the old defect with its evidence removed.
+Editing that assertion to admit one call site is the move it exists to prevent, so
+the row is one height end to end instead.
+
+**⚠ It is the second exception to the app's one-radius rule**, after `tabPill`,
+and it is named in `bits.tsx` beside the rule rather than left to be discovered.
+The exception is bounded by being a **prop with one call site** rather than a
+class anybody can pass — which is also why it is a prop at all: Tailwind emits
+every utility at one specificity inside one layer, so a `rounded-full` handed in
+through `className` would beat or lose to the primitive's `rounded-md` by emission
+order rather than by intent, which is the trap `ICON_BUTTON_SIZE` already carries
+a ⚠ about.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.561 — How loud is a control below the message field, and how far from its neighbour?
+
+**Decision.** A live chip rests at `text-muted` and takes `text-fg` only under a
+pointer; the filled send control is the one dark thing in the box. The row has two
+gaps — wider between the paperclip and the agent's cluster, narrower inside it —
+and `CHIP`'s own gap was `gap-1`, four pixels between a chip's glyph, its value and
+its chevron rather than six. A chip is one control read as one word; at six the
+three parts read as three things, and it was 8px a chip on the row with the least
+width in the app. ⚠ **That half is reversed and is `gap-1.5` again** — measured on a
+phone it is the other failure: the glyph and the value *touch*, and a control whose
+whole identification is its glyph cannot afford it read as part of the word beside
+it. The width is affordable for the reason the row's own gap is, the model chip
+having folded away below `sm`, so it pays two chips rather than three.
+
+**Why the tone.** Requested against the reference clients, and the count is the
+argument: they draw one pill below the field and we draw three. Three near-black
+values read as three things asking for attention, none of which is the action.
+`text-muted` is 7.75:1 — well over the 4.5:1 floor for 12px — so nothing is
+harder to read; what changes is that the eye lands on Send first.
+
+**And it gave the refused state something to be.** With the live chip at
+`text-fg`, `text-faint` was an eleven-point drop; at `text-muted` it is one and a
+half, which is not a signal. What carries it instead is **flatness**: a live chip
+is two-tone — a `text-muted` value between `text-faint` glyphs — and a refused one
+is uniformly faint with no hover and no press fill anywhere on it. `stale` moves
+every chip in the row at once, so it reads as the row being away rather than as
+one dead control.
+
+**Why two gaps rather than one.** The paperclip acts on the *message*; the chips
+describe the *turn*. A single gap draws them as one undifferentiated run of five
+controls, which is what "spread them out so they divide logically" was about. 12px
+where the kind of control changes and 8px inside a group is the smallest pair that
+reads as two groups.
+
+**Measured.** Both clear the 6px `TAP_GROW_Y` was measured against, so neither
+tightens a tap target; both stay far under the 20px a symmetric grow would need,
+which is why that growth is still vertical-only. At 390px the row was 32 + 12 + 91
++ 8 + 90 + 8 + 100 = 341px of 352px of box interior, against 331 before — eleven
+pixels of slack where there were twenty-one, and the same truncation behaviour
+under pressure that was always the below-`sm` rule.
+
+**Status.** Current, with the numbers superseded by Q3.563: Send joined this row
+and the gaps took a breakpoint, `gap-2 sm:gap-3` and `gap-1.5 sm:gap-2`. The
+grouping is unchanged and so is the reason for it; what changed is that above `sm`
+it gets its full width and below `sm` it pays four pixels a gap to a row that no
+longer fits.
+
+#### Q3.562 — What does the empty composer say?
+
+**Decision.** `Type / for commands` — and `Message…`, which is what it always
+said, on any session where `/` would open nothing. (Both sentence-cased since
+Q3.593; the fallback was `message…` here.)
+
+**With no "message" in front of it**, which is the owner's correction to the first
+version of this line. An empty box already reads as somewhere to write; that is
+what an empty box *is*. The word was the half a placeholder does not have to
+carry, and the key is the half nothing else on screen says.
+
+**Why.** `/` is the only affordance in the composer that nothing on screen
+advertises. The strip below the box shows the settings; the attachment chips show
+what is staged; Send shows itself. The command menu — the agent's own published
+commands **and** the three controls it does not publish — was discoverable by
+typing a character and seeing what happened, which is discoverable by people who
+already know.
+
+**⚠ Why it is conditional, and why that is the whole reason this is not a string
+in the JSX.** A session whose agent is away publishes no commands, and
+`buildCommands` synthesizes `/model`, `/effort` and `/mode` from an `agentConfig`
+that is absent on exactly the same sessions — so the menu is empty there, and an
+unconditional hint would be the box promising a key that does nothing. That is
+common rather than rare: it is every restored session, for the whole window before
+the agent comes back. `composerPlaceholder` takes `hasCommands` and `webcheck`
+asserts the pair, because a hint and its condition are one rule and asserting only
+the hint is how the condition goes.
+
+**The caller passes the unfiltered list.** `entries` and not `matches`: the
+promise is that the key opens something *on this session*, which is true or false
+before anything has been typed into the box.
+
+**Status.** Current
+
+#### Q3.563 — Why is Send on the control row, given the arithmetic that refused it?
+
+**Decision.** On the row, `ml-auto`, after the agent's cluster. The box is the
+`<form>` again, since a submit button has to be inside what it submits.
+
+**Why.** Asked for, twice, against the measurement in Q3.555 — which is the record
+of it having been refused and is left standing there. The reference clients put
+the attach control, the model pill and Send on one line under the text, and the
+composer reads as one object rather than as a field with a toolbar when they are.
+That is a judgement about how the box reads, and it is the owner's to make.
+
+**What it costs, measured, because it is a real cost and not a rounding error.**
+A 390px screen gives the box 352px of interior. The row wants the paperclip (32),
+three chips at 51px of chrome plus their values — mode "Default" 46, model
+"Opus 5" 39, effort "Adaptive" 49 — a 44px filled Send, and four gaps: **399px**.
+The values are what give, since `min-w-0` and `truncate` are already how this row
+behaves below `sm`, and there is no width at which three pills and two icon
+buttons fit a phone. Above `sm` there is no contest: the same row with the width
+reserves on is 465px of 602.
+
+**Two things bought a little of it back and neither is a fix.** The gaps took a
+breakpoint — `gap-2 sm:gap-3` on the row, `gap-1.5 sm:gap-2` inside the cluster,
+about 8px — which is a *space* question answered by a breakpoint, the one thing a
+breakpoint is honestly for. And the mode caption had already gone (Q3.559), though
+that bought nothing at this width: it was `hidden sm:inline` and was never drawn
+on a phone.
+
+**Rejected — shrinking Send to 32px.** `ICON_BUTTON_SIZE.lg`'s docblock says "the
+composer's send button, and nothing smaller", and the deleted `md` is the entry
+that says why a size that misses 44px is the one a careless call site gets. Eight
+pixels is not worth reopening it.
+
+**Rejected — dropping a chip below `sm`.** "A control never leaves the strip" is
+Q3.404 and Q3.405, and it is the rule this row is built around: a button that
+vanishes moves everything beside it and explains nothing.
+
+**⚠ The structural consequence, which is the part to remember.** The box was a
+`<div>` wrapping a smaller `<form>`, and that arrangement was what kept the
+strip's hand-rolled `<button>`s — `Select`, `Absent`, `Toggle`, the choice rows —
+from inheriting `type="submit"` and sending the draft when a chip is tapped. Send
+inside the row means the row inside the form, so the structure is spent and the
+explicit `type="button"` on each is the whole of the guard. `webcheck` sweeps
+every `<button` in `AgentConfigBar.tsx` **and** in `Composer.tsx`,
+comment-stripped, and asserts the sweep found some — an emptiness that passes
+because nothing matched is the failure mode of every assertion in this style.
+
+**Status.** Current
+
+
+#### Q3.564 — Why do the chips size to their content again?
+
+**Decision.** No reserve. A chip is as wide as what it says, bounded above by
+`CHIP_MAX` (128px) and clipped with `truncate`. `chipReserve`, `CATEGORY_RESERVE`
+and `ChipParts.reserve` are deleted, and with them the invisible sizer spans and
+the `sm:absolute` value that made a reserve a width rather than a floor.
+
+**Why.** Asked for, looking at the row: a chip sized for `Ultracode` while saying
+`Max` is mostly empty box, and there were three of them side by side in the
+narrowest row in the app. The reserve was a correct answer to a question about
+*movement* and it was paying for that answer in permanent blank space, at every
+width, on every session.
+
+**⚠ What it costs, and none of it is new — it is Q3.402 and Q3.417 read backwards.**
+The right-hand cluster is right-aligned, so a chip that grows drags everything to
+its left: `Adaptive` → `Max` moves the model chip. Two sessions on two agents draw
+two shapes, so switching between them moves every button. And an unavailable slot
+saying `—` is now *narrower* than the control it stands for, which is the second
+half of Q3.404 — the first half, that it must not draw a **name** the live chip
+does not, is structural and survives.
+
+**What is left holding it together.** `chipParts` still returns a caption that does
+not depend on availability, so a withdrawn control changes one string and not the
+shape of the chip. `CHIP_MAX` stops a pathological value taking the row. And
+`webcheck` asserts the sizers are **gone** as well as the cap being present — a
+revert would bring the empty box back with them, so the absence is the assertion.
+
+**Measured.** 128px is about eighteen characters at `text-2xs`, which clears every
+ordinary value the four agents publish — `Accept Edits` (68px), `GPT-5.6-Luna`
+(75px), `Ultracode` (53px) — and clips the rare long one. The full text is in the
+menu and in the chip's `title` either way, which is what happened below `sm` all
+along: the sizers were `hidden sm:block`, so **this is what a phone has always
+drawn**, and what changed is that the desktop stopped being the exception.
+
+**One thing that went with it and did not need to.** `CATEGORY_RESERVE` was the
+client's reason for hand-mirroring the daemon's `Ultracode` *name*. The pin in
+`webcheck.stream-and-http.ts` stays, because the name is still what the chip
+draws — it is now asserted against `chipValue` rather than against a column it had
+to fit inside.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.565 — How does a config picker become a bottom sheet on a phone without a breakpoint in JavaScript?
+
+**Decision.** It draws **twice**. `Select` renders the anchored panel it always
+had, `hidden … sm:block`, and a portalled bottom sheet, `sm:hidden`, from one
+`open` state and one `useDismissible("menu")`. Below `sm` the model chip leaves
+the row — `hidden sm:contents` — and its choices fold into the mode picker as a
+third list, `narrow`, beside `nested`.
+
+**Why twice.** Asked for: a sheet on a phone, and the shell's rule that a
+breakpoint is known in CSS kept deliberately after being shown what it protects.
+Those two together leave one shape — render both, let `display` choose — because
+a window dragged across the breakpoint must not be able to draw a picker that is
+not there. That is `AppShell`'s own argument reaching one control further in.
+
+**⚠ Why it is not `Sheet`, which is the part worth reading before changing this.**
+`Sheet` is the app's bottom-sheet-on-a-phone, centred-card-above-`sm` component
+and it looks like exactly the right answer. It cannot be used here, for three
+reasons and the first is structural. It sets `inert` on `#root`, takes focus and
+registers a `"sheet"` layer **the moment it mounts** — side effects a `display`
+class cannot gate — so a `Sheet` rendered here would lock the whole app behind an
+*invisible* panel every time somebody opened a popover on a desktop. It is
+route-backed, and a route for this would be one the app's single `OverlaySheet`
+does not draw, which `nav.ts`'s five sheet predicates would all have to answer for
+anyway. And its panel is `sm:h-[min(44rem,88dvh)] sm:max-w-2xl`: a 704px card for
+a four-row list. What is borrowed is the shape and the scrim; what is not is the
+machinery that assumes a sheet is the only thing on screen.
+
+**So Back does not close it, and that is the cost.** Escape does, through the one
+registration both presentations share; so does the scrim, and so does choosing a
+row. That is exactly the posture the popover it replaces already had, so nothing
+regressed — but it is not the posture every *other* pop-up in this app has, and
+somebody will reasonably expect Back to work. `overlay.ts` counts only a `"sheet"`
+layer when it decides whether to inert, which is why registering as a `"menu"`
+leaves the desktop app reachable behind its own popover.
+
+**⚠ `narrow` is a rendering and not a slot.** `splitOptions` puts `model` in
+`right` at every width and the partition assertion is untouched — one option, one
+slot, drawn in two places. Making it a slot would have meant a member counted
+twice in the one sum that says nothing is lost, which is the assertion's whole
+job. `foldedBelowSm` reads `slots.right` and keys on the category like everything
+else in the file, so a session publishing no model control folds nothing.
+
+**⚠ And it folds only where there is somewhere to fold into.** The mode control
+is not guaranteed: an agent can publish none, and one this client draws from memory
+arrives in `unavailable`, where `Absent` draws a chip with one row and no nested
+sections at all. Either way a model chip hidden below `sm` would put its choices
+nowhere — a control unreachable on a phone, silently, which is what "a control
+never leaves the strip" is written against. `splitOptions` already makes exactly
+this test before it lets anything into `nested`; this is that rule applied to the
+same host. It is a question about what the agent published rather than about a
+width, so JavaScript is the right place to ask it.
+
+**`contents` and not `flex` on the chip's wrapper**, measured rather than
+guessed: at `sm` and up the wrapper has to leave the layout entirely, or the chip
+becomes a flex item inside a flex item and stops taking the row's own `gap`.
+
+**⚠ And a portal breaks the outside-press listener silently.** The sheet is
+rendered into `document.body`, so it is outside the anchored panel's `boxRef` by
+construction. Tested against that alone — which is what the first version of this
+did — every tap *inside* the sheet, a row included, was an outside press: it closed
+the picker on `pointerdown`, the sheet unmounted, and the `click` that would have
+chosen the value landed on nothing. The control did nothing at all on a phone and
+said nothing, which is the failure this listener is a `pointerdown` rather than a
+`blur` in order to avoid, arriving through the one door that shape does not cover.
+Two refs, and the scrim is deliberately outside the second so a press on it still
+closes.
+
+**What two copies of one list cost.** Ids. `ChoiceSection` takes `where` and
+namespaces every id it generates, because an id must be unique in the *document*
+and both presentations are in it: without that, a refusal line carries the same id
+twice and every `aria-describedby` pointing at it resolves to whichever copy the
+browser reaches first — on a phone, the one that is `display: none`.
+
+**Status.** Current
+
+#### Q3.566 — What does a picker sheet owe beyond appearing?
+
+**Decision.** Four things, all reported from a phone against the first version of
+it. It **leaves** the way it arrived rather than vanishing. Its section headings
+carry the same glyph the chip that opened them draws. Its check mark is 14px at
+`stroke-[2.5]` and centred on the row's own line box. And the composer's control
+row spends more of its width separating the icons from the settings —
+`gap-3 sm:gap-4` where it was `gap-2 sm:gap-3`.
+
+⚠ **Two of the four did not survive the next screenshot, and one of them never
+worked at all.** The exit *was* written and did not play — Q3.567 has the
+measurement, and the keyframes named here are the defect. The wider gap was
+reversed on the owner's word one round later: 12px stopped drawing the paperclip
+as one of the row's own controls and started drawing it as something parked to the
+left of them, and Send, which adds `pl-1` on top, sat 16px off the last chip in a
+352px row with none to spare. It is `gap-2 sm:gap-3` again, which is what Q3.561
+measured, and the two-gap *grouping* both entries argue for is untouched. The
+heading glyph reached only `Absent`'s panel and not `ChoiceSection`, so the
+sections a reader actually sees drew none until Q3.568.
+
+**The exit, and why it could not be borrowed.** `sheet-close` in `index.css`
+takes a leaving panel off the screen through a view transition, and it can do that
+only because `router.ts` wraps the navigation that unmounts it — the old frame
+still exists to animate. This picker has no route (Q3.565), so nothing holds a
+snapshot of it. It keeps **itself** mounted instead: `dismiss` sets `leaving`,
+`--animate-sheet-out` plays the arrival keyframe in reverse, and a timer unmounts
+it `SHEET_EXIT_MS` later.
+
+⚠ **That is one duration written in two files**, so `webcheck` reads `index.css`
+and asserts the two agree. A timer shorter than the animation cuts the slide off
+mid-travel; a longer one leaves a finished panel sitting on the screen. Neither is
+visible to a compiler, and the CSS half is a custom property Tailwind emits no
+error for. The keyframes were **reversed rather than written out again**, which is
+what the routed sheet's own close rule does and for the same reason: two
+descriptions of one movement drift the first time either is tuned. ⚠ That is the
+half that was wrong; Q3.567.
+
+**And only one of the two presentations lingers.** `open && !leaving` draws the
+anchored panel and `open` alone draws the sheet, because a popover on a desktop
+has to go *now* and a sheet on a phone has to be seen going. Re-entrancy is keyed
+on the timer's ref rather than on `leaving`, since `dismiss` is captured by an
+effect whose dependencies do not include it — reading the state there would be
+reading whatever it was when that effect last ran, and a second tap on the scrim
+would restart the clock.
+
+**The check mark was the lightest thing in the panel and the only one that says
+which row is the answer.** It was an 11px glyph at the default weight in a 12px
+box with `mt-0.5` — two pixels of guess against a 20px line, which put it above
+the cap height of the name beside it and visibly out of line on a two-line row.
+`menuRow("start")` aligns to the top, so the fix is to make the box **be** the
+line: `flex h-5 items-center` puts the glyph in the middle of the type's own line
+box rather than near it. The box is drawn whether or not it holds anything, or
+every unselected row would sit four pixels left of the selected one.
+
+**The heading glyph is `label`, which is the chip's own lookup**, so a heading and
+the chip that opened it cannot come to disagree about what a control looks like.
+It answers `null` for a category `CATEGORY_ICON` has never heard of — which is
+exactly the case where the heading is the only thing naming the control at all,
+and where a missing glyph therefore costs nothing.
+
+**The row's gap is affordable again**, which is why this is a refinement rather
+than a reversal of Q3.561. Below `sm` the model chip folds into the mode picker,
+so a 390px row carries the paperclip, two chips and a 32px Send against 352px of
+box interior — where the four-control row it replaced was overflowing by more than
+forty pixels.
+
+**Status.** Current for the check mark and for the exit *timer*. The exit's
+keyframes are superseded by Q3.567 and the row's gap is back at Q3.561's numbers,
+both as recorded above. The heading glyph is current and reaches both panels as of
+Q3.568.
+
+#### Q3.567 — Why does a sheet's exit need keyframes of its own rather than the arrival's, reversed?
+
+**Decision.** `--animate-sheet-out` and `--animate-scrim-out` name `sheet-out` and
+`scrim-out`, which are their own two-line `@keyframes` blocks. They were `sheet`
+and `scrim` with `reverse` on the end, sharing one definition with the arrival, and
+**that never played**. `webcheck` now asserts that neither exit names the keyframes
+its arrival does, and that the keyframes it does name exist.
+
+**Why the tidy version is a no-op.** CSS Animations restarts an animation when the
+element's `animation-name` list changes and **only** then. Every other property —
+duration, easing, direction, fill — updates the animation that is already there. So
+swapping `animate-sheet` for `animate-sheet-out` on the same node, which is what a
+class flip on a mounted panel is, edited an animation that had finished 260ms
+earlier instead of starting one. It stayed in its after phase, and `both` then held
+what reversal had made its final frame: the 0% keyframe, `translateY(100%)`, off
+the bottom of the screen. The sheet was on screen in one frame and gone in the
+next, which is precisely the complaint it was written to answer.
+
+**Why nothing caught it.** Every layer said yes. `typecheck` has no opinion about
+CSS. Tailwind emitted the utility — the custom property was well-formed and the
+keyframes it named existed — so the built stylesheet held `animate-sheet-out{
+animation:var(--animate-sheet-out)}` and grepping for the class, which is this
+repository's standing remedy for Tailwind's silent failure on unknown tokens, found
+it. `webcheck` asserted the two durations agreed, which they did. The defect was
+entirely in *when* the browser considers an animation to be a new one, and that is
+visible only on a screen. It was reported by the owner on a phone.
+
+**The cost of the fix, stated plainly.** The numbers are now written twice, which
+is what the reversal existed to avoid and what the routed `sheet-close` rules still
+do. What holds the two halves together instead is that the exit's easing is the
+arrival's curve **mirrored** — `cubic-bezier(1 - x2, 1 - y2, 1 - x1, 1 - y1)` —
+rather than a curve picked again, so tuning one and not the other is visible as an
+asymmetry rather than as nothing.
+
+**Status.** Current. Supersedes the exit half of Q3.566.
+
+#### Q3.568 — What does a picker sheet owe once its rows are taller than it is?
+
+**Decision.** Two detents and a pinned head. The sheet rests at 60dvh — which is
+`.config-sheet`'s own `--sheet-max` **default**, so a picker whose rows already fit
+is laid out by its content — with those rows **not scrolling**, and the gesture
+that would have scrolled them takes it to `SHEET_FULL` (92dvh), where they do. The
+grab bar is a `<button>` carrying `aria-expanded`, and it is a flex sibling of the
+scroller rather than its first child. A drag on it, or on the list at rest, moves
+the panel under the finger and settles onto the nearer detent when it lifts;
+downward past `SHEET_DISMISS_PX` below rest, it dismisses. Every section heading now
+draws the chip's own glyph, in both presentations.
+
+**The geometry is four custom properties on the panel, and the only React state in
+this gesture is which detent the *list* is drawn for.** `.config-sheet` declares
+`--sheet-h`, `--sheet-min`, `--sheet-max` and `--sheet-y` with defaults that **are**
+the resting sheet, and `paint` writes over them straight onto the node — so "at rest" is the absence of every write and cannot drift from what
+the stylesheet says rest is. This is `AppShell`'s `--rail-w` decision applied one
+control further in, and for a worse list: a pointer moves sixty times a second, a
+render here is every row of the open picker — 362 of them on opencode, each a
+`<button>` — and the panel would arrive where the finger had been. React therefore
+sets **no** `style` on the panel, which also keeps a single writer on those
+properties; two would settle by emission order, the trap `FIELD` records.
+
+**What was reported.** Three things, from a phone, against Q3.565's first sheet:
+the grab bar *"rides up with the window instead of being fixed"*, it *"is not
+functional"*, and the options *"scroll down by default — it should go full screen
+first"*. All three are one structure. The panel was a single `overflow-y-auto` box
+with the bar as its first child, so on the one control where scrolling happens at
+all — a model list, which on opencode is 362 rows — the bar scrolled away with the
+first screenful. It was `aria-hidden`, it had no handler, and it advertised a
+gesture that did nothing.
+
+**Why two detents rather than a taller sheet.** A picker that always covered 92% of
+the screen would hide the message somebody is choosing a model *for*, which is the
+whole reason this is a sheet over the conversation rather than a route. 60dvh is
+unmistakably a panel over something; 92 is `SHEET_PANEL`'s own phone height, so the
+two kinds of sheet in this app agree about what *full* means.
+
+⚠ **The full detent was `max-height` alone, and that made the gesture work on one
+chip and not the next.** The argument for it was that a cap leaves a short picker
+at its content height, so a three-row mode menu could not open as a 60dvh box with
+50dvh of white in it — and the cost was named at the time as *"expanding a sheet
+whose rows already fit does nothing at all"*. That cost was not a corner: the
+effort control is four rows on every agent and never comes near 60dvh, so it was
+simply immovable while the model control beside it obeyed the same drag. Two chips
+on one row answering one gesture differently is a defect, and the empty space under
+four rows in a sheet somebody deliberately pulled open is not — it is what every
+phone client draws. `SHEET_FULL` sets `min-height` **and** `max-height` now.
+Reported as *"effort should stretch too, and currently cannot"*.
+
+**Why the gesture follows the finger.** ⚠ **It did not for one round, and the
+reason given was wrong twice over.** The panel changed detent when a drag passed
+`SHEET_DRAG_STEP` and then animated there by itself — a button worked by swiping,
+moving a distance with no relation to the distance dragged, and ignoring the hand
+on it while it did. Reported as *"the menu does not follow the finger — it just
+changes state"*. The argument against following was that it needs the panel's own
+height in JavaScript, *"which is the measurement `AppShell`'s CSS-only rule keeps
+out of this app"*. That rule is about **which layout to draw**, and reading where a
+panel is against where a finger is decides no layout at all: the picker's two
+presentations are still chosen by `display`, and a resized window still cannot
+produce one that is not there. The second half — *"a rubber band nobody asked for"*
+— answered a feature nobody built.
+
+**How it follows.** The panel's height is measured once at `pointerdown` and every
+move is one subtraction against it: `from.height - travelled` is where the top edge
+wants to be. Above the resting height that *is* the height, capped at the full
+detent. Below it the height stops and a `transform` slides the panel instead —
+shortening past the rows would eat them from the bottom while the box stayed
+anchored, which reads as the content being consumed rather than as the panel
+leaving. Both arms come off one `wanted`, so the hand-off between them has no step
+in it. `SHEET_DRAG_STEP` survives as the slop that separates a drag from a tap on a
+row rather than as the whole decision, and the release picks the nearer detent —
+or dismisses, if the panel was pulled more than `SHEET_DISMISS_PX` below rest, in
+which case the offset is **kept**: `sheet-out` has no `from` of its own and takes
+the element's current transform as one, so clearing it would snap the panel back up
+before sliding it down.
+
+**Two numbers that are one number, and one that is in two files.** A drag has to
+compare a pixel height against the full detent and CSS will not hand one over, so
+92 is written as `92dvh` in `SHEET_FULL` and as `SHEET_FULL_SHARE = 0.92` beside
+it; `webcheck` reads both and asserts they agree, because drift there is invisible
+— the sheet settles a little short of the height it then snaps to when the inline
+height clears. And the settle's duration is in `AgentConfigBar.tsx` and in
+`.sheet-settle` in `index.css`, pinned equal for the reason `SHEET_EXIT_MS` is: the
+timer is what hands the height back to the detent classes, so a short one cuts the
+settle off and a long one leaves a pixel height pinning a sheet that has stopped
+moving.
+
+**Where the handlers sit.** `pointerdown` on the panel, `pointermove` and the
+release on the **scrim** — which is the whole viewport, so a finger that leaves the
+panel keeps moving it — and the panel takes `setPointerCapture` the moment the drag
+engages. ⚠ **Capture is not belt-and-braces here.** A finger dragged past the top of
+the viewport and lifted there delivers its `pointerup` to nothing this component
+renders, and the gesture would never end: the panel would sit pinned to its last
+pixel height with the transition switched off. And ⚠ **it is taken at engage rather
+than at `pointerdown`**, which is the whole of what made it usable. Capture
+retargets the compatibility `click` to the capture target, so capturing on every
+press would send a tap on a model row to the panel and the row would never be
+chosen. Taken after the slop, it only ever retargets a click a *drag* produced —
+which is the click the panel's capture-phase guard is already there to swallow.
+
+⚠ **A drag leaves a click behind, and it would have chosen a model.** A touch that
+ends without the browser having scrolled anything still fires `click` on whatever
+was under it, and at rest every row is a button — so dragging the sheet shut would
+also have switched the model, silently, on the way out. One capture-phase handler
+on the panel swallows that click, which is one guard for both sections rather than
+a flag each row has to remember to read.
+
+**And the heading glyph finally arrives.** Q3.566 put `label` on a heading and put
+it on `Absent`'s panel — the one drawn for a control the agent has *withdrawn*,
+which is the rarest thing here — while `ChoiceSection`, which draws every section
+of every live picker, was left as it was. So the change shipped and was invisible.
+It is asserted by count now, both call sites, rather than by presence.
+
+⚠ **The settle's last write may not animate, and that was a bounce at the end of
+every gesture.** When the timer hands the height back to the defaults it is moving
+`min-height` and `max-height`, both animated properties, from the gesture's free
+bounds to the detent's. Settling a long list to rest sent `--sheet-max` from 92dvh
+to the 60dvh default *over 300ms* while `--sheet-h` was cleared to `auto` in the
+same frame, so the panel sprang to full height and shrank back; opening a short
+picker was the mirror of it, `--sheet-min` climbing 0 → 92dvh while the height fell
+to its content. Neither is a movement anybody asked for — by then the panel is
+already exactly where it belongs and the write only says so. Reported as *"it goes
+back to where it started and then winds round again"*, against a drag that was
+otherwise following the finger correctly. `paintNow` is that write: the transition
+off, the properties set, and the transition back a frame later.
+
+**And the transition is a literal switched off *inline*.** It was a fifth custom
+property substituted into `.config-sheet`'s `transition` shorthand and set to `0s`
+for the length of a gesture. A `var()` inside a shorthand makes every longhand it
+expands to a pending-substitution value resolved after the cascade — a thin place in
+more than one engine, and harder to reason about than a number, on the one property
+whose whole job is to *not* apply at the moment it matters. `settling()` writes
+`style.transition` instead, one inline longhand that cannot lose to anything, and
+React writes no `style` on this element so there is nothing for it to lose to.
+
+**The head is 32px reaching 44px, not 44px of padding.** `min-h-11` put twenty
+pixels of nothing between the sheet's top edge and a four-pixel bar, which was
+reported as too much room above the grabber. It carries `TAP_GROW_Y` now — the
+chips' own arrangement, 4px up and 8px down from a 32px box — so the target is
+unchanged and the head is twelve pixels shorter. The growth reaches down over the
+first section's *heading*, which is text rather than a control, so nothing
+pressable sits under it.
+
+**Status.** Current. The `max-height`-only full detent and the discrete gesture
+are superseded above, both by measurement from the same phone that reported them;
+so are the `--sheet-settle` property, the flat 44px head, and Q3.561's `gap-1`.
+
+#### Q3.569 — Whose order is the session rail in, and where does it live?
+
+**Decision.** The reader's, and on the daemon: one nullable `sessions.rank`,
+written through `POST /sessions/:id/meta` beside `title` and `pinned`.
+
+**Both sorts the rail had are gone.** Blocked rows went to the top of their folder
+and everything else ordered by its most recent event, so a list somebody was
+reading rearranged itself under their thumb on the four-second poll. Each was
+defensible on its own and both were the app having an opinion about a list of
+somebody else's conversations. A row moves when somebody moves it.
+
+**The key is a position clock rather than an index**, and that is what makes the
+merge a comparison instead of a special case. Unit: one millisecond. Unset means
+`createdAt`. A drop writes a synthetic instant between two that have already
+passed. Three things fall out, and the third is the one an index cannot give:
+
+- A session nobody has touched has an **honest place** with nothing stored.
+- A **new** session is at the top of its folder, because its `createdAt` is now and
+  every dragged rank is a bisection of the past. `RANK_STEP` is one millisecond
+  precisely so a dragged row stays *below* sessions that do not exist yet; any
+  larger step would be this client deciding something nobody said.
+- A drop is **one write**, not a renumbering of its neighbours.
+
+**⭐ The `orderStrip` clause is right one module over and wrong here**, and the
+difference is the key rather than the taste. *Stored first in rank order, then
+everything the store has never heard of at the end* works for the agent strip
+because its membership changes when somebody installs a harness. This list gains a
+member on the commonest act in the product, so "at the end" buries the conversation
+somebody just started — and worse, it **inverts the default**: the first drag
+anybody performed would push every other row in that folder below the one they
+moved. What this list has that the strip does not is a natural key comparable with
+the stored one; `createdAt` and a rank are the same kind of number.
+
+**The comparator is total, and that is correctness.** Two sessions can share a
+millisecond and the *input* array is re-derived on every poll, so
+`Array.prototype.sort`'s stability guarantees nothing — a comparator answering 0
+for such a pair is two rows that swap on a timer, which is the exact behaviour
+being removed. It falls through to `createdAt` and then to the row key.
+
+**Running out of room is a real answer, not a `never`.** At a `createdAt` around
+1.77e12 a double's ulp is about 0.0005, so one millisecond admits **twelve**
+bisections before the midpoint *is* an endpoint — measured by the driver rather
+than reasoned about. Nobody reaches it by accident; what makes it worth detecting
+is that the failure is silent, two equal ranks with the tie-break deciding and a
+row that appears not to have moved. `rankBetween` answers `null` and the caller
+re-spaces a window.
+
+**A column on `sessions`, not a table beside it**, which is the opposite call from
+`agent_strip` (Q3.529) and for reasons that are all about *this* subject. Dropping
+a row into Pinned writes `pinned` **and** `rank`, and two statements into two
+stores half-apply into a session pinned with no position. `prune()` and `DELETE
+/sessions/:id` take a column with the row, where a side table would owe a
+hand-written cascade in both. And a position is the same category as a pin: a
+mutable preference on a row that already exists, written by the same route, read
+off the same snapshot. ⚠ **Two arguments for the side table were checked and were
+false**: `migrate()` has added nine columns to this table without moving
+`SCHEMA_VERSION`, and the "only `title` and `pinned` are in the `DO UPDATE`" rule
+had already been false since `ultracode` — the property it was standing in for is
+that *identity* is absent.
+
+**`rank === undefined` is how an old daemon is known**, never a version — rule 1 of
+`compatibility.md`. A daemon that can store an order always emits the field, `null`
+included, so an absent one names a daemon that cannot and freezes the gesture on
+that machine's rows alone. The degradation is not a blank list: `effectiveRank`
+reads absent and `null` alike as `createdAt`, so an old machine draws a *stable*
+creation-ordered list rather than the recency shuffle it drew before.
+
+**And `listRank` gains a tier**, between the pin and liveness. It is the pin's own
+argument word for word — a preference expressed once — and without it a terminal
+session somebody deliberately placed can be dropped by the 60-per-machine cut and
+vanish from where they put it, which is the promise this whole entry makes.
+
+⚠ **The tier was taken back out at the review before it landed on `main`, on the
+owner's word (D1, 2026-09-08): a position is display order and buys no retention.**
+The argument above is the pin's word for word and that is exactly what is wrong
+with it — a pin is a rare, deliberate, per-row act and a position is not. Two
+measurements:
+
+- **It outranked liveness against a sixty-row window.** `SESSION_LIST_LIMIT` is 60
+  per machine, so sixty positioned *terminal* rows hid every running session on
+  that machine from the rail. A person cannot pin their way to sixty rows by hand;
+  `resolveDrop`'s re-space writes a `rank` to a whole folder in one drop.
+- **So the entry's own rule about the reader's order was false of the row.** The
+  `listRank` docblock permits deriving nothing from a position beyond "they said
+  something about this row", and after a re-space the daemon holds one for rows
+  nobody touched.
+
+**And the durability half was never there to begin with**, which is what settled
+it: `SqliteSessionStore.prune` classifies inactive rows on `pinned` and never reads
+`rank` — it does not even `SELECT` it — so a positioned terminal session was
+protected from the recoverable `?limit=` cut and deleted, with its transcript, by
+the seven-day sweep. Keeping the tier meant teaching the prune as well; the two
+have to move together or the route promises a durability the sweep does not honour.
+`listRank` is back to `blocked, pinned, live, terminal`, and
+`daemoncheck.containment-and-session-routes.ts` pins the refusal on the row the cut
+already drops.
+
+**What it costs, stated rather than discovered.** Terminal rows interleave with
+live ones under the `all` filter, because one order per list admits no second rule
+and a rule pushing them down would silently undo a drop onto one; it is invisible
+under the default `active` filter. The All tab changes meaning from `lastActivity`
+to the same key, because an order that depended on which tab a conversation is read
+from is worse than either rule alone. And one rank serves both Pinned and the
+folder, so a drag *inside* Pinned also moves the row relative to folder-mates it is
+not on screen with — the price of pin-then-unpin being an identity round trip for a
+row nobody has dragged.
+
+**Superseding.** Q3.13's "blocked rows sort first inside their own section" is
+reversed: the badge on the header was always the mechanism and the hoist was
+redundancy, and redundancy that moves rows under a thumb costs more than it buys.
+Q3.224 stands for tabs and folders, which are still ordered by name. Q3.11 and
+Q3.12 stand: pinning still moves, `blockedCount` is still counted off what `place`
+returned, and a drag into Pinned is that same move performed by a finger.
+
+**Status.** Built.
+
+#### Q3.570 — Why may the session rail not carry `touch-none`, when the agent strip must?
+
+**Decision.** Because the row *is* the scroller. A long press arms the drag; a
+non-passive `touchmove` listener on the rail's own scroll box is what holds it.
+
+**This is the exact inversion of Q3.533**, which is worth stating plainly because
+that entry calls `touch-none` the load-bearing fix and it was: on the agent strip
+the handle is a 44px square inside a sheet, so taking every gesture on it costs
+nothing. Here `touch-action: none` on a row would make a phone unable to scroll its
+own session list from nine tenths of the rail — to buy a gesture that arms only
+after 400ms of stillness.
+
+**What makes the listener sufficient on its own is the arming.** `PRESS_MS` is
+400 — a tap is 60–150ms, UIKit's own long press is 500, and this is shorter because
+the surface underneath is a list you also scroll. `PRESS_SLOP` is 8px **in any
+direction**, which is below the ~10px at which engines commit a pan: the timer is
+dead before the scroller could have taken the touch, so on the first move after
+arming `event.cancelable` is still true and `preventDefault` owns the gesture.
+Horizontal counts because an edge swipe is the platform's own Back.
+
+**Still registered for the component's life rather than the gesture's**, which is
+Q3.533's finding unchanged: React attaches `onTouchMove` passively, so this can
+only be an `addEventListener`, and some engines decide at `touchstart` from whether
+such a listener *exists* — a decision already made by the time a gesture could add
+one.
+
+**No handle, and that is a rule about rows rather than a preference.** A permanent
+handle takes a fixed slot from the title on the list that is the whole phone
+screen, and the trailing slot is the kebab's. So the row is the surface — which
+costs the two things a handle gave for free, and both are paid: the `click` a drag
+leaves behind is eaten by an `onClickCapture` guard cleared on the next
+`pointerdown`, and the keyboard path is `Move up`/`Move down` in the kebab every
+row already carries. **A pointer gesture that is the only way to reorder is a
+control a keyboard cannot reach at all** — Q3.533's sentence, discharged
+differently.
+
+**And `dropIndex` could not be reused.** It divides travel by one measured row
+height, which is exact on a strip of uniform rows and meaningless on a rail that
+interleaves 36px section headers with 44–56px rows. Every slot is measured once
+when the drag arms, in the scroller's **content coordinates** — which also deletes
+the strip's `startY` fixup during auto-scroll, since a content coordinate does not
+move when the box under it does.
+
+**Two zones, never a third.** A folder is `git.repoRoot ?? requestedCwd`, a fact
+about where the work is — so a row may be dropped in Pinned or in its own folder,
+and every other folder is inert under the finger. That is what keeps the drop model
+small enough to be correct.
+
+⚠ **Reported as "the rows do not move at all, completely", and there were two
+causes stacked on one another.** The first was operational and the second was a
+design fault, and the second is the one that made the first invisible.
+
+**The daemon had not been restarted**, so `migrate()` had not run and `sessions`
+had no `rank` column — measured on the real database: `PRAGMA table_info` said no,
+and the process had been up since before the change. Every row therefore answered
+`rank === undefined`, which is exactly "this daemon cannot store an order", and the
+gesture was correctly refused on all of them. Verified the other way too, which is
+what makes it a diagnosis rather than a guess: opening a *copy* of that same
+twelve-session database with the new code adds the column, puts `rank` on every
+row, and leaves `user_version` at 6.
+
+**And the refusal said nothing.** The press did nothing and the kebab simply had
+two fewer rows, so there was no way to tell "this daemon cannot" from "this is
+broken" — the wrong half of the agent strip's `frozen`, which disables its controls
+**and** names the remedy. The sentence is **deferred to a press that travelled**
+rather than drawn at rest: a press is not yet a question, and a banner on every row
+about a capability nobody has asked for is noise on the fleets that do not need it.
+Twelve pixels — past a click's jitter and past `MOUSE_SLOP` — and one sentence per
+gesture.
+
+⚠ **The second cause would have survived the restart, and it is the deeper one: a
+mouse was being asked to long-press.** Reported the second time as *"I want to grab
+a chat with the mouse and drag it"*, which is the correct expectation and was
+simply not implemented — one arming rule was written, the touch one, and a pointer
+was made to obey it.
+
+**The hold is a touch idiom and exists for a reason a mouse does not have.** A
+finger's other verb on this surface is *scroll the rail*, and the two have to be
+separated before either commits; hence 400ms of stillness, and hence 8px of slop
+that hands the gesture back to the scroller. A pointer has a **button**. Pressing
+it already says which row — there is no second thing it could have meant — and the
+movement after it already says where. So there was nothing to disambiguate and
+nothing to wait for, and waiting put a 400ms window in front of the gesture in
+which the natural response *cancelled* it. `MOUSE_SLOP` is 4px, past a click's
+jitter and nothing more.
+
+**One `arm()`, reached two ways**, and that shape is the fix rather than a tidying:
+the decision and everything after it had been one block inside the timer, so there
+was nowhere for a second way in to *go*.
+
+⚠ **And a mouse takes the pointer at the press where a finger may not.** Before
+capture a `pointermove` goes to whatever is under the cursor, so a press that left
+the rail before travelling its 4px armed nothing — and a fast drag is the one that
+leaves soonest. Capture at `pointerdown` makes every move come back whatever it is
+over, which is what a native drag does and why one feels reliable. A finger may not
+have that: capturing at `touchstart` takes the gesture off the scroller *before*
+anybody has said whether they meant to scroll, which is the one thing the hold
+exists to decide.
+
+**The press is visible while it is being counted, on the path that counts.** The
+row takes `bg-raised` the moment a finger lands — this palette's own word for
+state, one step up from the half-strength hover already reaches. `pressing` is
+separate state from `dragging` because they answer different questions: *I heard
+you, keep holding* against *this row is moving*. A mouse needs none of it, arming
+in 4px.
+
+⚠ **And the zone travelled through the DOM as a NUL.** A `FolderId` is
+`${machineId}\u0000${path}` — the byte a POSIX path cannot hold, which is what
+makes it collision-proof — and `data-zone` is an attribute, where U+0000 is not a
+character that reliably survives: the HTML parser replaces it with U+FFFD, and
+whether one set through `setAttribute` reads back identically is an engine's
+business. It is `encodeURIComponent`d now. This one was found by reading rather
+than by report, and it would have failed as *the drop doing nothing* while the row
+still lifted — which is a different symptom from the one above and would have been
+diagnosed as the same thing.
+
+⭐ **The neighbours move; nothing draws a line.** The first build marked the drop
+with a 2px rule, which tells a reader *where* but not *what* — the list under it
+stays visibly unchanged until the drop, so the gesture reads as aiming rather than
+as moving, and reported as "some sort of line gets drawn". The agent strip's answer
+is the right one and is taken whole: every row between where the dragged one left
+and where it is going shifts by exactly one row, in the direction that opens the
+gap, and the drop then changes nothing anybody can see. The transition is on only
+while a drag is live and never on the row under the pointer — both Q3.533's
+measurements, unchanged.
+
+**Generalising it to two groups is one sentence twice.** Within a group it is
+`shiftFor` verbatim. Across two, the group being left closes its gap and the group
+being joined opens one, which is what makes a row crossing into Pinned read as two
+lists trading a row rather than as one list glitching.
+
+**Leaving Pinned unpins even where the folder is not drawn.** A collapsed folder,
+or one the filter is hiding, is still where that session lives — so the drop writes
+`pinned: false` and leaves the position alone, rather than refusing because it
+cannot see a list to place the row in. That is the `null` zone in `pickTarget`.
+
+⚠ **And a drop is never refused for arithmetic.** It answered *"there is no room
+between those two rows. Move a neighbour first."* — a sentence that hands the
+reader a problem they did not cause, cannot see and have no way to act on, in
+response to a gesture that plainly succeeded. The gap is this module's business:
+`resolveDrop` re-spaces the group and the drop happens. What changes is how many
+rows are written, which is a fact about the request rather than about the gesture.
+Re-spacing walks the group **up** from its own top rather than spreading it between
+its own extremes — those are exactly the values that ran out — so no pair can tie,
+at a cost of at most `n` milliseconds of drift against other folders, which only
+the All tab compares it with.
+
+⚠ **`rankBetween`'s two `null` arms were inverted, and the case that covered them
+agreed.** Nothing above means the row is going to the **top**, and the order is
+descending — so its position has to be *greater* than the row it will sit over, and
+the code returned *smaller*. Every drop at the top of a group therefore sent the row
+to the bottom. It survived because the assertion had been written from the
+implementation instead of from the intent: `check("a drop at the top is one step
+above what is there", rankBetween(null, 8), 8 - RANK_STEP)` reads like a claim and
+is a restatement. Found by writing the next case from what a drop *means* — which
+is the only reason to write one at all.
+
+**`Move up` and `Move down` are gone from the kebab**, asked for directly:
+reordering is a drag, and a menu row is a worse version of it for everybody who can
+use one. Q3.533's rule does not go with them — a pointer gesture that is the only
+way to reorder is a control a keyboard cannot reach at all — so the row itself
+takes `Alt`+arrows. Held with a modifier because the bare ones belong to the list,
+and `j`/`k` already walk it; `Alt` is unclaimed here and is the platform's own idiom
+for *move the thing* rather than *move among the things*. It costs no pixels, which
+is what the menu rows were really being charged for.
+
+⚠ **Four faults reported from one build, and three share a cause: a drag is not a
+translate.** Moving rows aside with `translateY` says where a row will go and
+changes nothing about the space it needs. So a row carried from a folder into
+Pinned made that group a row taller with no room for it, and the shifted rows
+painted over whatever followed — Pinned "riding on top of" the sessions beneath.
+The group being joined reserves the height and the group being left gives it back;
+the document does not change height, and nothing past either group moves.
+
+⚠ **The last place in Pinned was unreachable, and the boundary was why.** Its last
+slot means putting the pointer below the last row's middle, and with the group's
+own edge as the limit that band was half a row tall with *unpinning* on the far
+side. Overshoot it and the row silently left the group. `UNPIN_MARGIN` is 48px and
+is **asymmetric on purpose**: a row already in Pinned holds on past the edge, a row
+arriving from a folder is not leaving anything and needs no such grace. It also
+buys the right thing on its own terms — unpinning is the only outcome of this
+gesture that carrying the row back does not undo, so it is the one that should cost
+a deliberate movement.
+
+**And the one that does not undo is the one that says so first.** A chip reading
+*Release to unpin* follows the pointer while a pinned row is out of its group. It
+carries `text-danger`, this palette's only non-monochrome ink and otherwise
+reserved for acts nothing brings back: the deviation is narrow and deliberate —
+this is not destruction, it is the single irreversible branch of a gesture whose
+every other outcome is one more drag away, and it is on screen only while the
+pointer is out there. Its position is written to the DOM as one transform rather
+than held in state, for the reason the dragged row's own offset is.
+
+⚠ **The row's kebab stopped opening, and taking the pointer at the press is why.**
+A mouse captures at `pointerdown` so that a fast drag cannot escape the rail before
+it arms — and capture retargets everything after it, the `click` the menu needs
+included. The row is the drag surface **except where it already carries a
+control**: `data-no-drag` marks that on the markup rather than being tested by tag,
+so the next control added to that end of the row inherits it.
+
+⚠ **And a long press on a phone was being taken by the platform.** iOS opens its
+own selection callout on a long press and Android its context menu, and either
+fires `pointercancel` before a 400ms timer can run — a press that does nothing,
+with nothing on screen saying why. The callout and the selection are switched off
+for the length of a press, on the node rather than on the list, and `contextmenu`
+is refused for the whole press rather than only once armed: Android's own long
+press is about 500ms against this one's 400, which is close enough to race.
+
+⚠ **The last place in Pinned was fixed twice, and the first fix is the instructive
+one.** It widened the boundary by `UNPIN_MARGIN` *only for rows already pinned* —
+which is the right asymmetry for the consequence and the wrong shape for the
+geometry, so the identical bug came back for a row arriving from a folder and was
+reported a second time in the same words. An edge is the wrong instrument: the last
+slot of any group means "below the last row's middle", so against an edge it is
+always a band half a row tall with somewhere else on the far side. **Distance
+answers every case at once** — inside a group is zero, and the header gap between
+two groups splits down the middle, so nothing has an edge to fall off. The margin
+survives as what it always should have been: a *bias*, not a boundary, because
+leaving Pinned is the one outcome a drag cannot take back.
+
+⚠ **And the row jumped when it crossed, because its offset was measured from where
+it had been rather than from where it was.** Carrying a row up into Pinned makes
+that group a row taller, which pushes the folder it came from — and the row itself
+— down by exactly one row. The transform, anchored to an arm-time origin, knew
+nothing about it, so the row leapt a row's height at the crossing and leapt back on
+the way out. Recovering the base each frame costs one rect read and is
+self-correcting against *any* layout change: the reserved space animating in, an
+auto-scroll, a poll adding a row above. `roll` re-runs it every frame, so a still
+pointer over a moving layout stays glued. **And the room a group makes animates on
+the same clock the rows do** — the rows slid under `transition-transform` while the
+height they were sliding into appeared in one jump, which is the whole of "it
+jerks".
+
+⭐ **A finger's gesture runs on the touch stream, and that is the third attempt at
+"it still does not work on a phone".** The first two treated `pointercancel` as an
+ending, because for a mouse it is one. On a touch screen it is not an ending at
+all: it is the browser saying *I have decided this gesture is mine*, which it does
+the moment it commits to a scroll, off movement far smaller than a 400ms hold
+tolerates. The pointer stream stops there. **The touch stream does not** —
+`touchmove` keeps arriving for the same finger, and a non-passive listener can
+still refuse the default and take the gesture back. So the press and the drag are
+driven from `touchmove`/`touchend` for the life of one gesture, on the **document**
+rather than on the scroller, because a listener that has to be found in the event
+path is one more candidate for "nothing happened". `pointercancel` and
+`lostpointercapture` end a mouse drag and are ignored for a finger.
+
+**What this cost to find is worth writing down**: three rounds, each fixing a real
+thing that was not the cause — the callout, the context menu, the arming rule. The
+question that would have split them in one round is *does the row respond to the
+press at all*, and it went unasked while three plausible causes were fixed in the
+dark.
+
+**Two limits, stated rather than found.** The Pinned section is drawn only when
+something is pinned, so the **first** pin on a machine is a menu act — there is no
+zone to drag into yet. And the All tab has no folders at all, so its rows carry no
+gesture: a rank is a per-machine order, a cross-machine drop would mean nothing,
+and defining one against same-machine neighbours only would land the row somewhere
+other than where the finger pointed — "the list resisting", which Q3.533 already
+names. `Pin` and the two `Move` items stay in the kebab on every tab.
+
+**Status.** Built.
+
+#### Q3.571 — The way out of every pop-up was 24px of ink. What changed?
+
+**Decision.** A fourth `ICON_BUTTON_SIZE`, `nav`: a 32px box growing
+**symmetrically** by 6px to 44px. The three pane chevrons and the sheet's ✕ take
+it; `Header`'s pair stays `lg`.
+
+**The complaint was that they are hard to see, and the target was never the
+problem** — `sm` has reached 44px through `after:-inset-2.5` all along. What was
+small was the *visible* control: a 12px glyph in 24px of ink, on the thing a phone
+uses to leave every screen.
+
+**⚠ The reason `sm` was chosen has been on record and was measurably false.** Both
+`Sheet.tsx` and `webcheck` said 44px "would have made this row taller than the
+title beside it". `SHEET_HEAD` is `min-h-14` — 56px, with no vertical padding — so
+44px of ink does not reach that row's floor, let alone raise it. The real objection
+to `lg` is **weight**: the way out of a screen should not be the largest object in
+its head. 32px is also `WaitingHere`'s own height in that same row, so the head is
+one size end to end.
+
+**Neither existing entry could serve.** Redefining `sm` drags seventeen call sites
+that sit *on rows*, where `sm`'s own docblock argues a menu button must not
+outweigh the row under it. And `chip` is 32px already but grows **vertically
+only** — deliberately, because a symmetric inset would put its target on the mode
+chip's face — so moving a ✕ onto it would take that control's horizontal target
+from 44px down to 32px. A control can grow visually and shrink as a target, and
+that is the trap.
+
+**The glyph ternary became a table in the same change.** It was `size === "sm" ? 12
+: size === "chip" ? 14 : 16`, so the new entry took its 16 by falling off the end
+rather than by anybody choosing it. Here 16 was right; the next size added is the
+one where a silent default is a 16px glyph in a 24px box. It is keyed on the size
+table, so an entry with no glyph is a compile error, and `webcheck` additionally
+holds every glyph to 4px of ink margin a side — a fact about CSS no type can carry.
+
+**The settings and plugins panes grow 8px**, which the sentence claiming the move
+"buys no vertical chrome" no longer covers and now says so. The sheet head grows by
+nothing, having a 56px floor.
+
+**Status.** Built.
+
+#### Q3.572 — Escape closed Import code and took New session with it. Whose fault was the arbiter's?
+
+**Decision.** Not the arbiter's. `Sheet` gains an optional `onClose`, and the one
+pop-up with no route of its own says what its dismissals mean.
+
+**The file said the opposite in as many words**, and so did `code-import.md`:
+*"`Sheet` registers with `useDismissible`, and `overlay.ts` gives the key to the
+most recently opened layer, so this closes and the form behind it stays."* Every
+clause about the arbitration was true. The layer's own handler was not: `Sheet`'s
+`close` is `navigate(under, true)`, and `under` is the screen the **New session**
+overlay was drawn over. So Escape, the ✕ and a tap on the scrim each destroyed the
+whole flow and discarded the machine, the agent and the folder somebody had walked
+to — which is precisely the cost `ImportCode` not being a route was supposed to
+avoid.
+
+**It stood for four releases because prose was standing in for a check.** Nothing
+in `webcheck` read this file for dismissal behaviour. Four assertions do now, and
+one of them is on `Sheet` rather than the caller — `const close = onClose ??` — so
+the default cannot be quietly inverted for the four pop-ups the URL *does* name.
+
+**A ◀ as well, and it was simply absent.** The only way back was a footer button
+labelled `Done`, which reads as "finish" rather than "go back" and which is
+replaced by `Cancel` for the length of an upload. This does not disturb the rule
+that a head chevron belongs to the agent builder alone: `sheetUpLabel` answers for
+**routes**, and this pop-up is not one.
+
+**And the unmount now aborts the upload**, which the close having become cheap is
+what makes necessary. `POST /fs/import` is one at a time per machine (`409
+import_busy`), so an abandoned stream holds the lock and the next attempt is
+refused with a sentence about a request the reader believes they cancelled. Nobody
+pressed ✕ mid-upload while it cost them the whole flow.
+
+**Android's Back still takes both layers down.** That was already the accepted cost
+of not giving this step a route, and it is unchanged — the difference is that Back
+and Escape now differ on purpose rather than by accident.
+
+**Status.** Built.
+
+#### Q3.573 — The directory picker printed `/Users/rends` in full. Why, when nothing else does?
+
+**Decision.** `pathCrumbs` in `paths.ts`, sharing `displayCwd`'s own rule, so the
+first crumb reads `~` — and the separators became tight.
+
+**Two defects and only one of them was visible.** The bar built its crumbs inline,
+against `roots[0]` and with `path.startsWith(root)`. So a second, nested root drew
+**no crumbs at all** and the picker could not be walked; and `/Users/re` passed as
+a root of `/Users/rends/x`, after which every crumb addressed a directory that does
+not exist — the separator hole `relativeTo`'s docblock spends a paragraph on, one
+function away. Both are answers `displayCwd` had already.
+
+**The spacing was the reported half.** `gap-x-1` on the bar plus `gap-1` on a
+wrapper plus `px-1` on each button put about 8px on each side of the separators
+*between* crumbs, while the separators *inside* the first crumb were tight — two
+spacings for one character on one line. The separator moved **inside** the button
+before it, and every horizontal gap came off: the run reads as one string, each
+non-leaf crumb gains the slash's width as tap area (which is what rescues a `~`
+seven pixels wide), and a wrapped line starts with a segment while the line above
+ends with `/`.
+
+**⚠ The 44px target is kept vertically and may not be a pseudo-element here.** A
+`text-2xs` crumb is an 18px line box, so reaching 44px symmetrically needs 13px a
+side — 5px past this bar's border and onto the first folder row below it, a live
+target. `-my-2 min-h-11` costs nothing because the bar's own padding absorbs it;
+only the *horizontal* padding was ever the defect.
+
+**Then the footer line went entirely.** Cut against the roots it read `in ~/thing`
+— the folder the picker is standing in, named three inches under a bar whose whole
+subject is that path. Fixing the rendering made it a *tidy* second copy of one
+fact rather than an untidy one, and the right number of copies is one. The region
+stays mounted with an empty string, which is the arrangement its own docblock
+argues is the one reliably announced.
+
+**And the bar gained a way up.** ⚠ **Not an `IconButton` wearing a `ChevronLeft`,
+and the distinction is the reason it exists as its own control**: that glyph in
+this app always leaves a *screen*, for a fixed destination taken from the URL, and
+`Header`'s docblock spends a paragraph on never letting it become a history button.
+This walks a **filesystem** on a machine that is not this one and changes nothing
+about where you are in the app. One glyph for both and they become one thing in the
+reader's head — after which the day one of them goes back a screen from inside the
+picker is a bug nobody can describe. `CornerLeftUp` says *up a level*.
+
+**Drawn always and `disabled` at the top**, never conditionally rendered: a control
+that materialises moves its neighbours under a finger already travelling toward
+them, and at the root — the first thing this picker draws — it would be missing
+exactly while somebody is learning where the controls are. Its destination is the
+crumb before the last, so the button and the bar are one list read twice and cannot
+disagree about what "up" means. The crumbs stay tappable; this is the second way to
+do the commonest of the walks they offer.
+
+**Two neighbours went with it**, being the same inconsistency: New session's footer
+and the session header's `WorkspaceLine` both printed the raw absolute path. The
+header's was Q3.441's defect resurfaced — for an unnamed session `sessionLabel`
+already draws `~/thing` one line above `mac · /Users/rends/thing`. The footer takes
+the picker's roots through a prop rather than `store.rootsByMachine`, and that is
+not fussiness: `store.fetchRoots` swallows a refusal into `[]` by design, so its
+copy cannot tell "no roots" from "could not ask" — while the picker draws "could
+not be read" and a retry off exactly that distinction.
+
+**Status.** Built.
+
+#### Q3.574 — The same slot was still unreachable after its boundary was fixed. What was left?
+
+**Decision.** Only `target.index === origin.index` means "it did not move". The
+drop's early return also treated `origin.index + 1` as a no-op, and the two indices
+are counted in different lists.
+
+**The two coordinate systems, written down here because writing them down is the
+fix.** `origin.index` is the dragged row's place among the zone's rows *including
+itself*, taken from the DOM when the drag arms. `target.index` is a slot among the
+zone's other rows, the dragged one removed — which is what `resolveDrop` and
+`rankForMove` both take, and correctly. For a row at `i` in a list of `n`, dropping
+at slot `i` puts it back where it was; dropping at slot `i + 1` puts it one place
+*below*. So `i + 1` was a real move, refused in silence, and the refusal was
+invisible: no toast, no snap-back, the row simply returned to where it started
+because that is what the rest of the drag draws when nothing is written.
+
+**Which is why one report read as two.** "I cannot put anything in the last place
+in Pinned, I can only carry the last one higher" and "moving the second-to-last
+session into the last place does not go through" are the same sentence. The last
+slot of a group is reachable from the row immediately above it by a one-place move
+and by nothing else — every other row reaches it by two or more, which passed. The
+boundary work in Q3.567 was a real fix for a real second bug at the same slot, and
+fixing it uncovered this one rather than causing it.
+
+**⚠ And it was found by driving a browser, which is what should have happened three
+rounds earlier.** A harness page mounting the real `useRowDrag` against a fabricated
+six-row rail, driven through the Chrome DevTools Protocol with
+`Input.dispatchTouchEvent` and `Input.dispatchMouseEvent`, reproduces a drop in
+about a second. Under it the penultimate-to-last drop wrote nothing while a
+two-place drop wrote a rank — the same list, the same gesture, one slot apart,
+which is a difference no amount of reading the file had produced in two attempts.
+The positive control matters as much as the failure: without the two-place drop
+passing beside it, "no write" is equally consistent with the harness being wrong.
+
+**Status.** Built.
+
+#### Q3.575 — Three phone fixes, three real bugs, none of them the cause. What did all three assume?
+
+**Decision.** A finger's gesture begins on `touchstart` — not on `pointerdown` —
+and lives entirely on the touch stream. `bind`'s pointer handlers are a mouse's and
+say so in their own text.
+
+**The three that came before, each correct and each beside the point.** iOS's
+selection callout was being raised over a row about to move; Android's context menu
+races a 400ms hold at about 500ms; a mouse was being asked to long-press, which is a
+touch idiom. Then the drag itself moved onto `touchmove`, on the correct argument
+that `pointercancel` means *the gesture is over* for a pointer and *I have decided
+this gesture is mine* for a finger — the browser says the second the moment it
+commits to a scroll, and the pointer stream stops there while the touch stream does
+not.
+
+**What none of them questioned.** All four left the **setup** in `onPointerDown` —
+which row, the hold's timer, the listeners, the `-webkit-touch-callout` that stops
+iOS raising its own menu. That is a bet that `pointerdown` is dispatched before the
+engine has decided what the touch is for. Blink dispatches it first; nothing in the
+Pointer Events specification requires it, and on an engine that dispatches
+`touchstart` first, every one of those fixes was one event too late, every time, on
+that engine only. Which is exactly the shape of a bug that works on every desktop
+and has never once worked on a phone.
+
+**So the bet is gone rather than re-taken.** `touchstart` decides which row, finding
+it with `closest("[data-row-key][data-zone]")` from the event rather than from a
+closure, because these listeners belong to the scroller and outlive every row in it.
+They go on in the ref callback rather than in an effect: they have to exist before
+the first `touchstart` the node can receive, and only the callback answers the node
+being *replaced* by a route change. On the scroller and not on `document`, because a
+touch's target is latched at `touchstart` — so the scroller is in the path of every
+event of the gesture, including those delivered after the finger has left it — and
+because an ordinary element is clear of the passive-by-default treatment `window`,
+`document` and `body` receive.
+
+**⚠ What is still not proved.** Nine scenarios through the CDP harness pass, mouse
+and touch, including a realistic 60Hz thumb jitter through the hold, a re-render
+landing mid-hold, and a press-and-drag with no hold at all correctly handed back to
+the scroller. All nine ran in Blink, which is the engine this was never broken on.
+The reasoning above is about an engine the harness cannot reach. If the report comes
+back a fifth time, the question that splits it in one round is whether the row
+darkens and the phone buzzes under the hold: that separates *the press never
+arrives* from *the press arrives and the gesture is taken away*, and it went unasked
+for three rounds while three plausible causes were fixed in the dark.
+
+**And the hold now says so in the one channel a thumb does not cover.** A shadow
+rather than a change of tone — `bg-raised` on `ink` is 1.15:1, which under a thumb
+on a phone is nothing — plus `navigator.vibrate(12)` at the moment the row comes off
+the list, which is what both phone platforms use for exactly this moment in exactly
+this gesture. A shadow and never a `scale`, because `measure` reads the row's own
+height as it arms and a transformed rect reports the wrong one.
+
+**Status.** Built.
+
+#### Q3.576 — Taking the pointer at the press stopped a click from opening a session
+
+**Decision.** `setPointerCapture` moved from `onPointerDown` to `arm`. A press
+captures nothing.
+
+**A regression that shipped with the mouse drag and that nobody reported.** A
+captured pointer retargets everything that follows to the capturing element,
+including the `click` the browser synthesises from the press. The rail's row is a
+`<div>` holding a navigating `<button>` — the arrangement Q3.224 argues for, since a
+button inside a button is invalid and browsers resolve it by breaking the outer one
+— so the click was delivered to the wrapper and the button was never in its path.
+Its `onClick` never ran. Clicking a chat in the rail with a mouse did nothing, from
+the day the mouse drag landed.
+
+**Measured, with its own control.** Driving Chrome through the debugging protocol:
+`mousedown` targets the row's own label, `mouseup` and `click` target the wrapper.
+The control is the kebab, whose press returns before capturing anything — the same
+click there reaches its own button. That pair is the whole mechanism, and no reading
+of the file had produced it.
+
+**What capture at the press was buying, and why it was free to give back.** The four
+pixels before the drag arms: an uncaptured `pointermove` goes to whatever is under
+the cursor. Four pixels do not leave a 44px row; every row in the rail shares one
+handler set, so even a cursor that has crossed onto a neighbour is still calling the
+same code; and the document now carries the same two rules for the cursor that
+leaves the list entirely. Deliberately the same two rules rather than a second
+opinion about them.
+
+**Status.** Built.
+
+#### Q3.577 — Why did pinned rows have a ⋮ and the others not?
+
+**Decision.** Every row in the rail draws its menu. The class string on the kebab is
+a constant, which is what the check asserts.
+
+**The rule was defensible and wrong.** Reveal on hover, always present on a coarse
+pointer, keyed on a *pointer* query in CSS and never a width read in JavaScript —
+that half is right and is the house rule. Pinned rows were exempt on the reasoning
+that they are rows you return to. The result on screen is two rows a few pixels
+apart, alike in every other way, one of them carrying a control: reported as a
+rendering fault rather than as a rule, which is what a rule looks like when its
+reason is not visible from the outside.
+
+**And the reveal costs more than it saves.** A row's only menu, hidden until the
+pointer is already on the row, is undiscoverable — and a list spends almost all of
+its time being *read* rather than aimed at. The ink was already being spent in any
+case: pinned rows have drawn it unconditionally all along, so the row's width, its
+truncation point and the tap pad's reach past the scroller (Q3.529's measurement,
+which keeps a permanent horizontal scrollbar off the bottom of the rail) are exactly
+as they were.
+
+**⚠ The folder header's `+` keeps the reveal**, and the difference is which control
+is the only way in. The kebab is a row's sole route to rename, pin and stop; the `+`
+is an *addition* to a header that is already a button, and starting a session in
+that folder is reachable from New session in any case. Cited here because that
+control's docblock used to justify itself by pointing at the kebab, and now points
+at this.
+
+**Status.** Built.
+
+#### Q3.578 — `Alt`+`↓` on a pin looked like it did nothing, and sometimes moved another machine's rows
+
+**Decision.** `siblingsOf` cuts Pinned to the selected machine through `pinnedHere`,
+the same function the drawn list goes through.
+
+**Two lists, one of them not on screen.** The rail draws Pinned through `pinnedFor`,
+cut to the selected tab (Q3.550: a section drawn identically on every tab reads as
+the pins having been copied to each machine). `siblingsOf`, which is what the
+keyboard move walks, answered `groups.pinned` — every pin in the fleet. So under a
+tab drawing one pin, `Alt`+`↓` computed a position between two pins on *another*
+machine and wrote it: a real request, a real answer, and nothing on screen changed.
+The re-spacing path is worse, because it writes `also` — fresh positions for rows on
+a machine the reader is not looking at, with no visible cause anywhere.
+
+**⚠ The filter is still ignored, and that is not the same kind of hiding.** The
+docblock's original argument survives intact for its own case: a row the Ended
+filter is withholding is one the reader chose to hide, and stepping past it keeps
+one press meaning one place however that control happens to be set. A pin on another
+machine is not hidden by a choice about these rows — it is on a list this tab
+structurally cannot draw. The distinction is now written where the code makes it.
+
+**Found by a fleet of readers rather than by reading.** Five independent passes over
+the drag, each with its own lens, then every candidate handed to a fresh agent whose
+only instruction was to refute it; thirty-eight candidates, three survivors. The
+other two survivors were that nothing in `webcheck` or the doctrine had ever stated
+the kebab rule either way, which is why Q3.577 ships with both.
+
+**And the fixture could not have caught it, which is the more useful half.** The
+`what is actually on screen` block held exactly one pinned row, so every list of
+pins in it was the same list and "cut to the selected machine" was unfalsifiable
+there. A second pin, on the other machine, is what makes the assertion an assertion
+— the same shape as the note one fixture over about `createdAt`s that were all
+equal, and about an `ended` list that held nothing.
+
+**Status.** Built.
+
+#### Q3.579 — The rule about which strings are monospace existed only in people's heads
+
+**Question.** Is this app monospace? It reads as a terminal, and the question was
+asked as a design one — should it lean further in, or back out?
+
+**Decision.** Neither: it is a system sans with mono reserved for one class of
+string, and the rule is now written down at `.claude/rules/web-typography.md`.
+**A machine-written string a person may retype or compare character by character
+is drawn in mono; a machine-written string that is prose is drawn in sans.**
+
+**Measured**, 2026-09-08, over 122 files of `packages/web/src`: the whole front end
+declares **two** `font-family` rules, both tokens — `body` at `--font-sans`
+(`index.css:618`) and `pre, code, kbd` at `--font-mono` (`index.css:773`). Every
+other mono is one of 38 explicit `font-mono` classes at a call site. There is no web
+font at all: `@font-face`, `googleapis`, `gstatic` and `.woff` are zero matches,
+which is policy (`--font-sans`'s own docblock: YaHei and Segoe UI are Microsoft's
+and cannot be shipped, and a free CJK substitute is 2–4 MB of woff2 to a phone on
+LTE) and was held by nothing.
+
+**Why it mattered.** The rule was real and followed from memory, so it had already
+been missed in four places — the same workspace path drawn in mono by the directory
+picker and in sans by the session header, the browser subline and the import sheet.
+`DirectoryPicker` even states the distinction in its own comment — *"that family is
+here because those are paths, and this is a sentence about one there is no path
+for"* — which is the rule, written once, at one of the places that got it right.
+That is the whole finding: not too little mono, but a rule with no home.
+
+**A session's *name* is a name, even when it falls back to a path**, and that is the
+one carve-out. `sessionLabel` answers a human-typed title or, failing that,
+`displayCwd`; its two renderers stay sans. Drawing half a list in each family reads
+as broken, and mono averages ~0.6em against sans's ~0.5em — about a fifth of the
+characters in the rail slot that is already tightest.
+
+**⚠ Changing the family changes the apparent size, and the first cut of this got
+that wrong.** Mono reads *larger* than sans at an equal nominal size — SF Mono's
+x-height and advance against SF Pro's. The session row's subpath was made mono and
+left to inherit its subline's `text-xs`, which put it level with the row's own
+`text-sm` title; reported within the hour as *"the folder name is the size of the
+session name"*. **A mono run inside a sans line states a size a step below it
+rather than inheriting one**, and `text-2xs` is the floor for every path in the app
+— which is what `DiffView`'s header and the picker's crumbs already did, and what
+the two inheriting sites get from lines that are `text-2xs` anyway. Pinned at all
+five places a path is drawn, including the two inheritors as pairs, since a span
+with no size of its own passes a size assertion trivially.
+
+**And then the row rejected mono outright, which is the more useful result.** At
+`text-2xs` the path no longer competed with the title and was still too wide to
+read — *"too few characters fit"* — because mono's advance is a fixed 0.6em where
+sans averages about 0.5em, and a row is the tightest slot in the app. So the
+session list is now sans throughout, title and subline, at one size. That is not an
+exception to the rule; it is the carve-out the rule already made for `sessionLabel`
+one paragraph up, applied to the whole row for the same reason: **a row exists to be
+scanned, so characters are the whole of what it has to spend.** Mono stays where a
+path is read *as* a path and there is room — the session header, the picker's
+crumbs, a diff, the import sheet.
+
+Both corrections arrived from a person looking at one row, within an hour of each
+other. The useful half is that neither was a font bug: every size was on the scale
+and every family was a token throughout. They were a hierarchy failure and then a
+density failure, produced by correct-looking one-word changes — and nothing in a
+type system, and nothing in the other seven drivers, could have had an opinion about
+either. What the driver can hold is the *outcome*, so it does: the row's subline is
+pinned sans, at one size, with the path still on it, as one assertion whose halves
+cannot go quiet separately.
+
+**Rejected: making the whole app monospace.** One line, `body { font-family:
+var(--font-mono) }`, and it is not a one-line change: every `truncate` and every
+fixed slot is re-measured, and it contradicts `--font-mono`'s own docblock, whose
+CJK tail (`Sarasa Mono SC`) exists to hold the grid *inside a code fence* rather
+than to be the interface face. Reconsider only under a brand requirement, and then
+as a measured pass over each truncation rather than as a refactor.
+
+**Status.** Current
+
+#### Q3.580 — The import sheet named the folder differently from the picker drawing it
+
+**Question.** `ImportCode`'s footer said `Unpacks into app`. The breadcrumb bar three
+inches above it said `~/reemoat-prod/app`. Both are the same folder. Which is right?
+
+**Decision.** The bar. `ImportCode` takes a `roots` prop from the picker that draws
+it and goes through `displayCwd`, in mono; the private last-segment helper beside it
+is deleted. (Deliberately not named here: it no longer exists, and this file's own
+rule is that a cited symbol greps to something.)
+
+**Why it mattered.** That helper's one-line docblock read *"the folder an import
+lands in, named the way the picker names it"* — and it returned the bare last path
+segment, which is not what the picker does at all. The comment was the specification
+and the code had never matched it. It is also the cheapest possible collision: a
+private helper duplicating a shared one badly, in a file that imported neither
+`displayCwd` nor `pathCrumbs`, so nothing pointed at the disagreement.
+
+`roots` is required rather than defaulted. An empty array is a real answer here —
+`displayCwd` falls to `shortPath` — and making the prop required is what stops a
+second caller quietly re-introducing a bare-segment label.
+
+**Status.** Current
+
+#### Q3.581 — A rail row spent its first two characters on the root every row shares
+
+**Question.** A row with no folder header above it — Pinned, All, the waiting floor,
+the orphans — named its directory with `displayCwd`, so it read
+`claude · ~/2026-07-taskmanager`. Every session on a machine is under the same root
+in the ordinary case. What is that `~/` buying?
+
+**Decision.** Nothing there, and it goes: those rows draw `folderLabel`, which is
+`displayCwd` with the root marker cut off — `2026-07-taskmanager`. The cut itself is
+unchanged, so a session three levels inside a root still keeps all three
+(`work/api/packages/web`); only the marker goes. `displayCwd` keeps it everywhere a
+path is drawn *as a path* and there is room to read it: the session header's
+subtitle, the picker's crumbs, the import sheet.
+
+**Why it mattered.** The prefix is two characters of pure agreement repeated down
+the rail, and they are the two nearest the reader's eye — ahead of the word being
+scanned for, in the narrowest line in the app.
+
+**⚠ Rejected, and it was built first: withholding the folder itself.** The report
+said the folder a session is launched from should not be on the row, and the obvious
+reading was that a pinned row should be cut against its own folder the way a row
+inside a folder section is — `folderPath={folderPathOf(row)}`. That is wrong in a
+way worth recording: `rowSubpath` answers `null` when a session sits at its folder's
+root, which is most sessions, so the folder did not get shorter, **it disappeared**.
+Reported back in one line: *"now the folders just disappeared. The folder should be
+there."* The complaint was never that a row named a directory. It was about the
+prefix on the front of it, and the two readings differ by exactly the `~/`.
+
+**And a name is not a path, which is the coupling that made this more than a
+one-line change.** `sessionLabel` falls back to the directory for a session nobody
+has named, and `SessionLine` suppresses the subline when it would repeat the title
+**by comparing the two strings** (Q3.441). Changing one side alone would have made a
+title reading `~/thing` sit above a subline reading `thing` — one folder drawn
+twice, the exact defect that comparison exists to prevent. So `sessionLabel` takes
+`folderLabel` too, and with it the rename box's placeholder, which is documented as
+being the same string the header shows. The split that falls out is the honest one:
+**a folder named as a name loses the marker; a path drawn as a path keeps it.**
+
+**Status.** Current
+
+#### Q3.582 — After a `/clear` the screen still offered to undo it, and the divider described rows nobody was drawing
+
+**Question.** `buildTail` cuts at the newest `context_cleared` and `loadAll` does
+not fetch below it, so a cleared conversation genuinely starts at the marker. Above
+that marker sat a full-width button — *"Show the conversation from before /clear"* —
+and on the marker itself, the sentence *"context cleared — the agent has forgotten
+everything above"*. What is above it?
+
+**Decision.** Nothing, and both are gone. The reveal control, `revealBeforeClear`
+and the `revealedBeforeClear` flag behind it are deleted; `loadStop` stops at
+`clearedAt` unconditionally and `nextCut` answers one number rather than a pair.
+The marker row now draws the whole of what happened: the `/clear` as a `UserBubble`,
+and under it a hairline rule reading **Context cleared**.
+
+**Why the command is drawn from the marker rather than from the log.**
+`registry.clearContext` appends the `prompt` and *then* the marker, so the message
+somebody sent is by construction one seq below the cut and goes with the
+conversation it ended — deliberate, and Q3.23. Drawing it from the marker is exact
+rather than invented: `server.ts` carries out `/clear` only on the trimmed string
+matching exactly and only with no attachments, and `clearContext` is the one thing
+that appends a `context_cleared`. So the marker *is* that message, and the bubble is
+the row the reader sent.
+
+**What is given up, said plainly.** The conversation above a cut is no longer
+reachable from this client at all. It is still in the daemon's log — the log is the
+daemon's rather than the agent's memory, which is the sentence the old divider was
+reaching for — and `pnpm client` still prints it. That trade was the owner's: what
+the agent has been told to forget is not something the screen offers to re-read.
+
+**And `transcriptNotice` keeps its exemption for a better reason than before.** It
+answers `null` under a cut, which used to be justified by the reveal button being
+the thing to read there. The marker row is that thing now, and it says more: a
+sentence counting the unfetched events above a cut would name a number with no
+control behind it.
+
+**Status.** Current
+
+#### Q3.583 — A parked card sat on the last rows of the conversation, folded or not
+
+**Question.** `AskCard` is `absolute inset-0` over the conversation region and out
+of flow — which is what "it moves nothing behind it" means, and is why
+`SessionView`'s `ResizeObserver` never sees it. The consequence, reported from a
+phone: the end of the transcript is painted over with no way to bring it out.
+Collapsing does not help, the bar being 44px of the same problem on the one control
+whose whole purpose (Q3.39) is reading what is underneath.
+
+**Decision.** The card measures itself and the transcript reserves the room.
+`AskCard` reports `offsetHeight` through `onHeight`, `SessionView` holds it as
+`askHeight`, and the scroller takes it as trailing `paddingBottom` — plus the card
+frame's own 8px, so the last row clears the shadow rather than touching it.
+
+**Why padding rather than putting the card in flow.** Padding grows `scrollHeight`
+and leaves `clientHeight` exactly where it is, so nothing already drawn moves and
+the card still displaces nothing. What changes is only that the bottom of the
+conversation *can* be scrolled clear of it. Moving the card into flow would have
+taken the transcript's height on the agent's schedule, which is the thing that
+observer exists to absorb.
+
+**⚠ The padding went on the wrong box first, and Q3.587 is the correction.** It was
+a `paddingBottom` on the scroll box, over a column that already ends in 48px of its
+own; the two added up to a 56px hole under the last row. It is one number inside
+that column now.
+
+**⚠ The one height change no resize reports.** Because `clientHeight` is untouched,
+the `ResizeObserver` fires for none of this — so there is a second effect keyed on
+`askHeight` that chases the tail, and only when the reader is parked at the bottom.
+Somebody reading history keeps their `scrollTop`, for the reason the observer
+already gives: adjusting by the delta is what would move the ground under them.
+
+**Status.** Current
+
+#### Q3.584 — Cancelling was a labelled button in the footer, and the footer is where a plan needed the room
+
+**Question.** The ✕ that ends a request lived in the card's header once, 4px from
+the control that folds the card away, with its meaning only in `title` and
+`aria-label` — two identical 44px squares, one harmless and one not. It was moved to
+the footer as a button with its words on its face. On a plan card that button is a
+wrap row at 390px, and a plan card is exactly where height is short.
+
+**Decision.** It is a ✕ at the top right again, on the owner's word — and the 4px is
+what changed rather than the idea. It takes its own group behind a hairline
+(`border-l border-edge/60 pl-1 ml-1`), so the header's right edge reads *fold*, then
+across a rule, *leave*. `IconButton size="lg"` keeps 44px of real box; a grown
+target is still refused there, since it would reach onto the neighbour's face.
+
+**What answers the original objection, and what does not.** The words are the
+`title` and the `label`, and a thumb sees neither — that half of the objection
+stands. What buys it back is grouping: the ✕ is now the only control on the card
+that is not an answer, in a group of its own, on a card where everything else is
+one. It is drawn on the **open card only**; the collapsed bar still cannot cancel,
+which is the same act Escape gave up for the same reason.
+
+**And the footer stopped being unconditional with it.** It was unconditional
+*because* it held the cancel — a permission drawn as `rows` has nothing else to put
+there, so without that it is an empty bordered strip. It is now drawn only where
+there are answers to draw, and the obligation the unconditional footer discharged
+has moved rather than evaporated: a request the agent offered no options for is
+answered by the ✕, and `PermissionCard`'s sentence above the answers points there.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.585 — The curated plan card had been dead for a release, and every check was green
+
+**Question.** Q3.453 recognises claude's plan-mode request by `optionId`, against a
+shape measured under claude-agent-acp **0.63.0**. `package.json` pins **0.73.0**.
+What does `planControls` answer?
+
+**Decision.** `null`, on every plan request, since the bump. 0.73.0's
+`buildExitPlanModePermissionOptions` renamed every id and dropped one: it picks one
+elevated mode out of the session's own available modes and builds four options
+around it — `exit-plan-clear-auto`, `exit-plan-auto`, `exit-plan-default`, `reject`,
+or the `bypass`/`accept-edits` spellings of the same four. Exact set equality
+therefore failed, the card fell back to the agent's own 17-to-46-character labels,
+`permissionLayout` saw those and switched to `rows`, and four full-width 44px rows
+plus a footer took the room the plan was supposed to have. The one shape and the one
+order table become **`PLAN_SHAPES`**, a list of measured shapes, each with its own
+order, labels and primary; first exact match wins.
+
+**Every narrowing Q3.453 argued survives.** Structure before ids; exact set equality
+*within* a shape; `null` meaning today's card. What changes is that a second
+measured request is one entry rather than a loosened rule — and a shape borrowing
+ids from two variants matches none of them, which is what keeps the equality from
+quietly becoming a membership test.
+
+**Nothing is dropped from a 0.73.0 request**, which retires half of what Q3.453 had
+to argue: there is no third `allow_always` to leave out, and `exit-plan-default` —
+*"yes, but keep asking me about every edit"* — is on the card. The 0.63.0 entry is
+kept, because a machine can lag the pin, and the two options its order leaves out
+are still the ones Q3.453 argues for dropping.
+
+**The order is the owner's and it is not the agent's.** Refusal first (**Keep
+planning**), then the narrowest grant (**Approve each edit**), then the elevation,
+then the option that clears the context as the filled primary — so the two ends of
+the row are the two things somebody actually chooses between. The labels are ours
+for the reason Q3.453 gives, and here they also buy the layout: four short words fit
+the button footer, so the plan's own box takes everything the header and footer do
+not.
+
+**⚠ Why nothing caught it.** `webcheck`'s fixture *was* the 0.63.0 request, so the
+driver asserted a curation nobody could reach, in detail, and passed. The three
+0.73.0 shapes are asserted beside it now, read off the adapter's own builder — which
+is the only reading of that file this repository can do offline, and the reason the
+adapter version is named in both places.
+
+**Status.** Supersedes Q3.453
+
+#### Q3.586 — A question you could answer three times looked exactly like one the first tap would submit
+
+**Question.** `AskOption.chosen` says which answers have been picked. Nothing said
+how many *may* be — so a multi-select and a select drew identically until a tap had
+already made the difference, which is the wrong order for a control that writes into
+the model's context.
+
+**Decision.** `AskOption.mark` — `"one"` or `"many"` — drawn by `ChoiceMark` as a
+circle or a box on the row's trailing edge, in a reserved slot so becoming the
+answer moves nothing beside it. `ElicitationCard` sets it on the leader's rows and
+on the hand-rolled rows a form with two selects in a row draws, so one form cannot
+draw two idioms.
+
+**Absent draws nothing, which is every permission.** ACP hands back exactly one
+`optionId` and a tap dispatches it, so there is no pending selection an indicator
+could be about; a circle there would promise a choice the tap is not going to leave
+room for.
+
+**Built out of a `ring`, for `CHOSEN`'s own reason.** A ring is a box-shadow, so it
+costs no layout and cannot move the row at any width — the same argument that took
+`font-medium` out of the picked state. And it is a `<button>` rather than a native
+input, which cannot be grown by padding of its own to 44px.
+
+**The role is claimed only where it is kept.** `many` is `role="checkbox"`, which
+promises Space and Enter and nothing else — a button does that by itself. `one`
+takes `aria-pressed`, the idiom `ChoiceRow` already uses, and deliberately **not**
+`role="radio"`, which would promise arrow-key roving this card does not implement.
+That is the defect recorded against the two popups that drew `role="menu"` and
+`role="listbox"` without keeping either.
+
+**Status.** Current
+
+#### Q3.587 — Three things wrong with a card the moment it appeared: a blue ring, an overhang, and a hole under it
+
+**Question.** Reported together off one screenshot, and they share a cause worth
+naming: each is a place where the card's geometry was argued in a comment and never
+compared against the thing it floats over.
+
+**A blue ring around the card.** The panel is a `role="dialog"` with
+`tabIndex={-1}` that takes the caret when a request parks — deliberate, and the
+reason a screen reader lands on the question. It matches nothing in `index.css`'s
+focus rule, so what it drew was the **browser's** default outline, in the browser's
+own colour, on a card whose entire palette is warm grey. Both panels carry
+`outline-none`. `.no-focus-ring` is documented there as the only way to opt out and
+is **not** the instrument here: it opts out of *that* rule, which never fired on
+this element, and a layered utility beats a UA default without help. Nothing is
+lost — the panel is not reachable by Tab, and every control inside it still draws
+the app's own ring.
+
+**The card was wider than the conversation.** `COLUMN` was on the panel with `px-3`
+on the frame outside it; the transcript's rows are that same constant with `px-4`
+*inside* it. So the card overhung the text by 16px on each side at every width past
+the cap — while `EventList`'s own comment said the two "line up by sharing one
+constant". They do now: `COLUMN` and `px-4` move to the frame and the panel is
+`w-full` in it. `mx-auto` under `inset-0` is exactly the case `margin: auto` is
+defined for, and the height still comes from `inset-0`, so `BOX_MAX`'s `100%` is
+untouched.
+
+**And a 56px hole between the last row and the card.** Q3.583 reserved the card's
+height as `paddingBottom` on the scroll box — above a column that already ends in
+48px of its own, so the two added up. The reserve moves *into* that column and the
+two become one number: `max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE)`. With no
+card it is the 48 it always was; with one, the gap the reader sees is
+`ASK_CLEARANCE` less the card frame's own `pb-2` — 12px of air rather than a band,
+which on a plan card is also height the document gets back. **The `max` is the
+point**: a sum is how two paddings that each look right produce a third number
+nobody chose.
+
+**Status.** Current
+
+#### Q3.588 — The checkbox and the radio were the same shape, and Submit sent an empty answer
+
+**Two reports, one card, and each is a control saying something that is not true.**
+
+**`rounded-sm` is not a square.** It is `.375rem` in this theme — 6px of radius on a
+16px box — so beside a circle of the same size the two read as one shape at arm's
+length, and the whole difference Q3.586 exists to draw was lost. The radius is spent
+all the way (`rounded-none`), and the filled states differ by shape as well as by
+outline: a tick in the box, a dot in the circle. Two axes rather than one, because at
+16px a radius alone is not a signal.
+
+**Submit was enabled on a form nobody had filled in.** Measured on
+claude-agent-acp 0.73.0: `askUserQuestionsToCreateRequest` marks **no** field
+`required`, explicitly — *"so the user can also just skip"* — so an untouched draft
+raised no problem, `canSubmit` said `true`, and pressing it sent `{}`. That is Skip
+with a primary-coloured button in front of it: `decline` and an accepted empty form
+both run the tool with no answers, so two controls sat side by side doing the same
+thing and one of them looked like the affirmative one. An empty answer went out by
+accident.
+
+**Decision.** `canSubmit` is *no problems* **and** a non-empty body. Deliberately
+**not** done by inventing `required`: that would be this client overriding a schema
+the agent wrote, and it would refuse a form somebody answered in part. One non-empty
+field is enough — below that there is nothing being said that Skip does not already
+say.
+
+**⚠ The exemption is a form with no fields**, and it is why this is not simply
+"content is non-empty". A confirmation — no properties, message *"Proceed?"* — has
+nothing to fill in, so accepting it *is* the answer; without the clause the one form
+whose only control is Submit would have had Submit disabled for ever. `webcheck`
+asserts the pair, because either half alone is the bug.
+
+**Status.** Current
+
+#### Q3.589 — The message box was 8px wider than everything above it, and a comment said it was not
+
+**Question.** The transcript's rows, the ask card floating over them and the box
+you type in all carry `COLUMN`, and `Composer.tsx` says that makes the three "line
+up at every width". Do they?
+
+**Decision.** No, and now they do: one gutter, `px-4`, for the whole conversation
+column. It was `px-3` on the composer against `px-4` on the transcript's own
+column — so the box you type in overhung every row above it by 8px, and the ask
+card, which shares the transcript's gutter, met it with a visible step. Reported
+off a screenshot of exactly that seam.
+
+**Why `px-4` rather than `px-3`.** Two of the three were already at it, and the one
+that moves is one box rather than every row of every conversation. The alternative
+was widening the transcript, the diffs and the tool cards to settle an 8px
+disagreement at the bottom of the screen.
+
+**⚠ And it is asserted across three files, because nothing else can.** Three
+literals in three components agreeing is precisely the claim a comment cannot keep
+— this one made it and was wrong for as long as it existed. `webcheck` reads the
+inset out of each file and compares; the floor is that all three were found, since
+a regex matching nothing agrees with itself. Proved by drift: putting `px-3` back
+fails the check.
+
+**Status.** Current
+
+#### Q3.590 — Next was live on a question nobody had answered
+
+**Question.** Q3.588 stopped Submit sending an empty body. On a form with several
+questions that is not enough: Next was gated only on *this step's problems*, and
+`askUserQuestionsToCreateRequest` marks nothing `required`, so a blank question
+raises no problem. Four taps walked a three-question form to the end, and Submit
+was then satisfied by one answer given anywhere in it.
+
+**Decision.** `stepAnswered` — pure, in `elicitation.ts`, so `webcheck` can reach
+it. Every step owes an answer before you may leave it; the last one additionally
+owes `canSubmit`, which is the statement about the whole form. The two rules are
+kept apart deliberately: one asks whether *this question* says anything, the other
+whether the *body* does, and collapsing them is how the three-question case came to
+pass on the strength of the third answer.
+
+**It reads the whole step, not its leading field.** A step is a question plus the
+adapter's own optional "Other" box, and typing your own answer instead of picking a
+row is an answer — a rule reading only the leader would have kept Next dead for
+somebody who had just written a sentence into the box the adapter put there for it.
+
+**A step with no fields answers itself**, which is the field-less confirmation
+again — the same exemption `canSubmit` makes one function over, asserted in both
+places because either could be tightened alone.
+
+**Nothing here forces an answer.** Skip is untouched and is still the way to decline
+the whole form; what is forced is that the button *claiming* an answer has one.
+
+**Status.** Current
+
+#### Q3.591 — The box you type your own answer into was not one of the answers
+
+**Question.** `askUserQuestionsToCreateRequest` puts an optional free-text field
+after every `AskUserQuestion` — the CLI's own per-question "Other" — and
+`groupIntoSteps` already keeps it in the same step as the question. It was drawn as
+a labelled input *under* the list of choices: a different kind of object from the
+rows it belongs with, with no indicator, at a different weight. On a multi-select,
+typing your own answer is picking one.
+
+**Decision.** It is a row in the list. Same shell, same 44px, same `ChoiceMark` —
+square where the question is a multi-select, circle where it is a select — filled
+when the box has something in it. The whole row is a `<label>`, so a tap anywhere on
+it lands in the box, which is the affordance the option rows get for free from being
+buttons.
+
+**One treatment, not two that match.** `askRowTone` is exported from `AskCard` and
+both the option rows and this one go through it, so `CHOSEN`'s three signals are
+stated once. A class list here spelling the same thing is exactly the drift this
+repository keeps finding, and it is what the assertion guards.
+
+**It takes no visible heading**, however the caller labelled it. The rows above
+carry their names inside them, so a word over this one makes it a section rather
+than a member — the same argument `groupIntoSteps` already makes when it drops the
+adapter's sentence about this box. The name survives as the `sr-only` copy
+`aria-labelledby` resolves to.
+
+**⚠ Superseded in one paragraph by Q3.592, and the paragraph is kept because the
+reasoning was right and the survey was not.** It read:
+
+> **The mark says "there is an answer in here", and deliberately not "this one
+> wins".** Measured on claude-agent-acp 0.73.0: `applyAskElicitationResponse` takes
+> a non-empty custom answer **instead of** the selection — for a multi-select as
+> well as a single one. So a card showing three ticked boxes and a filled Other is
+> showing four answers where one is sent, and modelling that properly would mean
+> *knowing* this field is a custom-answer box. The only two ways to know are both
+> closed: the key suffix, which Q6.54 forbids by name, and `_meta`, which the daemon
+> drops at ingest.
+
+The first door really is shut and stays shut. The second was not: **both** agents
+declare the relation inside `_meta`, and the daemon dropping the blob is a rule
+about carrying it, not about reading one named key out of it — which
+`acp/subagents.ts` was already doing next door. "Two ways, both closed" was a survey
+of one of them. Q3.592 reads the declaration; no suffix is parsed, and `webcheck`
+still asserts that none is.
+
+**Status.** Superseded in part by Q3.592
+
+#### Q3.592 — Two answers were marked on a question that takes one, and the agent was quietly keeping one of them
+
+**Question.** Q3.591 gave the free-text box under a question the same mark as the
+rows above it. On a single-choice question that made a pre-existing state visible:
+an option filled *and* the typed box filled — two circles on a `oneOf`. Reported as
+*"I picked two options where two cannot be picked"*.
+
+**And it was not only a drawing problem.** Measured 2026-09-09: claude-agent-acp
+0.73.0's `applyAskElicitationResponse` reads the custom answer and **returns** — the
+selection is never looked at — for a multi-select as well as a single one, and
+codex-acp 1.8.0's `convertUserInputResponse` does the same with a `??`. So the card
+was drawing two answers, sending two, and the agent was discarding one without
+saying which.
+
+**Decision, in the reader's own words: *one answer is one answer, several answers
+are several answers, and your own answer is one of the options*.** A **select**
+holds one answer and a **multi-select** holds as many as you give it.
+
+**⚠ And nothing anybody typed is ever erased — the first version of this displaced
+both ways and was wrong.** Picking an option emptied the box, and the report is the
+obvious objection: *"the user may tap by accident and then change their mind; they
+simply chose another option, the field is not zeroed."* A pick is one tap to redo; a
+sentence is not. So `displacedBy` runs in **one** direction — writing your own
+answer clears the *selection*, which is how you switch to it — and what makes the
+card honest the other way is `elicitationAnswer`, which stops *sending* an
+alternative while the question it answers holds a value. The box keeps every
+character, loses its mark, and gets it back the moment the selection goes.
+
+**The mark beside a typed answer is a control, and that was asked for too**: on a
+multi-select you must be able to switch your own answer off from that square having
+already written it. Off is `ask.ts`'s `excluded` — beside the draft, because there
+is no spelling of *present but not an answer* in a `DraftValue` — and never an empty
+box. Turning one back on releases the question it answers, which matters only on a
+select, where the suppression would otherwise undo the tap in the same frame.
+⚠ Making that square a `<button>` is why the row stopped being a `<label>`: a label
+forwards its activation to the field it names, so the square would have focused the
+input instead of toggling. What that costs is the row-wide tap; the input is
+`flex-1` and is most of the row. `ElicitationField.alternativeTo`, projected by
+the daemon out of the agent's own `_meta`, is what makes the pairing exact;
+`questionOf` falls back to the step where a daemon has not sent it, so the rule
+behaves identically on both.
+
+**The multi-select half disagrees with both adapters, deliberately.** They use the
+typed text *instead of* the selection there too. But somebody who ticked two boxes
+and then wrote a third answer meant three, and taking their ticks away to match the
+adapter would be this card editing an answer they gave. What the agent then keeps is
+the agent's — which is Q3.591's position, correct for the case it turns out to
+cover.
+
+**Both agents declare it, under their own names**, which is the third difference
+`toElicitationForm` projects away rather than choosing between: claude sends
+`_askUserQuestionCustomAnswer: {questionId, isCustomAnswer}`, codex sends
+`codex: {questionId, isOtherAnswer, isSecret}`. `customAnswerFor` reads both, strictly
+— the marker exactly `true`, beside a string — and codex's block on the *question*
+carries `isOther` and no `questionId`, so it correctly says nothing.
+
+**⚠ `_meta` is dropped at ingest, and this is the exception**, which is why it is
+one named key projected to one scalar: the same shape `acp/subagents.ts` already
+uses for `_meta.claudeCode`. The alternative was the key's spelling, and Q6.54
+refuses that by name — codex suffixes `__other` where claude suffixes `_custom`, and
+a client keyed on either renders one agent's question and refuses the other's. A
+declaration is the agent saying so; a suffix is us guessing.
+
+**⚠ It is derived from the step as well, and gating on the declaration alone was
+wrong twice over.** This entry originally refused the step, on the grounds that
+`ElicitationForm.steps` accepts its grouping *because* it is presentational —
+*"the worst a wrong grouping does is put two questions on one card together"* — so
+clearing a value on it could destroy an answer. Both halves of that were then
+applied to the **mark**, which destroys nothing: against any daemon not yet sending
+`alternativeTo` the free-text box lost its indicator altogether, which is every
+daemon until its owner restarts one. A layout may not wait on a wire field, and
+that shipped as a regression on the very report it was answering.
+
+So the two are separated. `questionOf` reads the declaration where it is there and
+the step where it is not; `answerMark` uses it unconditionally, which is the
+presentational reading that grouping is licensed for. The displacement uses it too,
+and **that half does carry the cost the refusal named**: an MCP form of `{select,
+notes}`, where `notes` is a second question the heuristic fused, loses one when the
+other is answered. It is narrow — a non-required text field directly after a choice
+— it is the price of the circle being true, and both agents that ask questions
+declare the pairing exactly, so it is not reached on either of them.
+
+**A pointer resolves or it goes.** A `questionId` naming no field on the form, or
+naming its own field, is dropped in `toElicitationForm` after every key is known —
+otherwise it reaches the client as a control that clears nothing, or itself.
+
+**The mark rides the same gate**, and its *shape* comes from the question rather
+than the box: a circle where that question is a select, a box where it is a
+multi-select. A mark is a promise about what picking means, so it is drawn only
+where the card also knows to displace — an agent that declares nothing gets the
+plain field it always had rather than a circle two of which could fill.
+
+**Compatibility.** Optional on the client mirror, and absent means the same thing an
+undeclaring agent means, so an older daemon needs no arm of its own: `?? null` is
+the whole migration. Q3.591 is amended rather than reversed — its closing paragraph
+said this could not be modelled, and named the two doors it thought were shut. One
+of them was open.
+
+**Status.** Current
+
+#### Q3.593 — Five of the six placeholders in the message box were lowercase, on a rule nobody could see
+
+**Question.** `composerPlaceholder` had a register split: a string that *instructs*
+took a capital (`Type / for commands`), a string that *describes the state the box
+is in* stayed a lowercase fragment (`message…`, `agent is working…`, `reconnecting
+the agent…`, `answer the request above first`, `say what to change…`). It was
+argued, written down, and asserted in both directions. Is it visible?
+
+**Decision.** No, and it is withdrawn on the owner's word: all six are
+sentence-cased.
+
+**Why the rule was expensive rather than merely wrong.** The six never appear
+together. They replace each other one at a time, seconds apart, in the same few
+pixels of one box — so a reader meets them as a *sequence*, not as the table the
+split was designed on. In a sequence a register difference is not a distinction, it
+is five strings somebody forgot to capitalise. A rule whose only evidence is a
+listing nobody sees is a rule that costs attention every time it is read and pays it
+back nowhere.
+
+**The assertion moved with it, and got stronger.** It pinned two samples on each
+side of the split; it now enumerates **every** state the function can be in — 32
+combinations, six distinct strings — and asserts the capital on all of them. A
+seventh placeholder has to declare itself there rather than arriving lowercase and
+looking like it belongs.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.594 — Four buttons on a plan card, in the room the plan was supposed to be read in
+
+**Question.** `PLAN_SHAPES` curates claude's `ExitPlanMode` request into our own
+short labels, and Q3.585 had just made every option the adapter sends reachable:
+**Keep planning**, **Approve each edit**, the elevation, and the elevation with the
+context cleared. Reported from a phone with a screenshot — *"на телефоне кнопки в
+предложении плана выглядят отвратительно"*. Four labelled buttons wrap at 390px, and
+the footer they wrap into is height the `flex-1` markdown box does not get. Is
+drawing everything the agent sent the right rule for *this* card?
+
+**Decision.** No. Every shape's `order` is now **two**: the elevated grant the
+adapter picked, then that same grant with the context cleared, filled. `reject` and
+`exit-plan-default` are dropped, on the owner's instruction and by name.
+
+**This reverses Q3.470 for one card, and the shape of the reversal is what makes it
+survivable.** Q3.470 is flat — *"Nothing is deleted"* — and Q3.92 is kept as the
+evidence for it: deleting options by a length rule made a scoped `allow_always`
+unreachable from a phone and dropped two of four model-written answers silently.
+None of that applies here. This is curation on a **measured shape**, matched by
+exact set equality, with `null` still meaning the agent's own card — so an adapter
+that words plan mode differently loses nothing at all. And `shape` still names the
+whole request: the two that go are removed from `order`, in one place, per shape, so
+the driver can assert *which* two by name rather than merely counting to two.
+
+**Nothing is given up as a capability, which is the argument the reversal rests
+on.** Per-edit approval is a session *mode*, republished by the agent as an
+`agent_config` control, so the composer's own strip walks a broader grant back after
+the fact. And declining has two routes already on screen: the ✕ in the header, and
+the message box, which takes over while a plan is up and sends a correction that
+cancels the turn first — Q3.454, and the owner named it in the same sentence
+(*"ну или ввести внизу правку и отправить"*).
+
+⚠ **The ✕ and the button are not the same message to the model, and this is written
+down rather than glossed.** Read out of the pinned adapter rather than guessed:
+`applyExitPlanModeSelection` answers `reject` with `deny(context, "User chose to
+keep planning", true)`, while `parseClaudePermissionSelection` throws `new
+Error("Tool use aborted")` for any outcome that is not `selected`. So the composer
+is the good decline and the ✕ is the abrupt one.
+
+**And the curated card is not the only card, which is what keeps this honest.**
+`planControls` needs the `tool_call` for its `switch_mode` gate, so before the
+window pages in the request is drawn as the agent sent it — refusal and all. Q3.595
+has the measurement. The two curated buttons are what somebody sees once the
+transcript has landed, which is the common case and not the only one.
+
+**What the left group is now.** Empty. `leading` is still computed as
+`kind.startsWith("reject")` rather than dropped to `false`: no shape carries a
+refusal today, and a measured shape that does one day must not land it on the right,
+beside the filled primary. A rule costing one comparison is cheaper than that.
+
+**The 0.63.0 entry looks inconsistent and is not.** It keeps `acceptEdits` beside
+`auto` where the 0.73.0 shapes keep only the pair — because 0.63.0 emits no
+clear-context row at all, so its two are the two grants it can offer and there is
+nothing to pair them with. It drops three of five now rather than two.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.595 — The plan was on screen and the box under it said to go and answer something
+
+**Question.** `awaitingPlan` in `SessionView` gated on `pendingAsk !== null && events
+!== undefined`. `PermissionCard`, rendered four lines below it, reads
+`transcript?.events ?? []` and carries a long comment about why: `openSession`
+returns *without* creating a transcript when the machine has no connection, so a
+session the rail draws as WAITING ON YOU opens to a card with no context. Two reads
+of the same condition, on the same screen, disagreeing. Which is right?
+
+**Decision.** The ungated one. `awaitingPlan` reads `events ?? []` too.
+
+⚠ **The first version of this entry said the gate left a ✕ as the only way out, and
+that is false — corrected here rather than rewritten away, because the mistake is
+the useful part.** `planControls` demands `kind === "switch_mode"` before it
+consults `PLAN_SHAPES`, and the kind rides the `tool_call`. With an empty window
+there is no call, so the curation answers `null`, the two-button card is **never
+drawn**, and `permissionButtons` puts every option the agent sent on screen —
+refusal included — as rows. Driven in `webcheck` now rather than reasoned about:
+the same request one event later is `["Auto mode", "Clear + auto"]`, and one
+`tool_call` is the whole difference.
+
+**Which makes the gate worse than a dead end, in the way that is easy to miss.** On
+exactly the screen where the card is at its *least* readable — four full-width rows
+in the agent's own 46-character wording, the layout Q3.585 and Q3.594 both exist to
+avoid — the one control that lets somebody decline *with a reason* was switched off,
+and the placeholder told them to go and answer something. That is the argument for
+`?? []`, and it never needed the false one.
+
+**How it got written.** The reasoning ran "the card now draws two grants, therefore
+the only other exit is a ✕", which is true of the card and not of *this* state, and
+nothing checked it: `docscheck` holds sizes, citations and counts, not whether a
+sentence is true. It reached a docblock, a driver comment, a rule file and two
+entries here before an adversarial pass ran the function. CLAUDE.md names this exact
+failure — an invariant stated in prose that the code quietly stopped holding — and
+the remedy it names is the one applied: an assertion, at the claim.
+
+**The plan is not in the window.** It arrives on the pending permission's own
+`rawInput`, which is the snapshot the list poll already delivered; the transcript is
+where `permissionContext` looks for a *clipped* plan to recover. So an empty window
+costs the markdown in the rare clamped case and never the state — the same sentence
+`PermissionCard`'s comment already makes about its own context.
+
+**Status.** Active
+
+
+#### Q3.596 — The mini app drew ✕ Close at every depth, and the back button had never once been asked for
+
+**Question.** Q3.443 built the Telegram back button: `upFrom` answers where up goes,
+`null` at the root, and `setTelegramBack` posts `web_app_setup_back_button` — one
+control, so hiding it is what draws ✕ Close. Reported from a phone months later:
+*"в ТМА при переходе в диалог все еще кнопка закрыть… иначе юзеру каждый раз
+приходится перезаходить в тма"*. `upFrom` returns `"/"` for a conversation, the
+version gate is 6.1 against a client well past 8.0, and the control never appeared.
+Why?
+
+**Decision.** Because the launch fragment does not survive a navigation, and the
+version was read out of it on every call. `router.ts`'s `navigate` calls
+`history.pushState(state, "", path)` with a path-only URL, which replaces the
+**whole** URL — proven against the same WHATWG parser the browser uses:
+`new URL("/m/x/s/y", "https://cp/#tgWebAppVersion=8.0")` is `https://cp/m/x/s/y`.
+So `telegramVersion()` answered `null` from the first tap onward, `versionAtLeast`
+read that as *too old* by its own deliberate fail-closed rule, and `setTelegramBack`
+returned before posting anything.
+
+**The one call that survived was the one that hides the control.** At the root
+`upFrom` is `null`, the hash is still intact, and the app posts
+`is_visible: false` — so the app successfully asked Telegram for ✕ Close, once, and
+then never spoke again.
+
+**The fix is a latch, at the one moment that means launch.** `telegramReady` runs
+from `main.tsx`'s module body, before `createRoot` and therefore before any effect
+can navigate. It is mirrored into `sessionStorage` because a *reload* loses the
+fragment too — this app assigns `window.location.href = "/"` on sign-out and offers
+the same from the error boundary. Telegram's own SDK does exactly this and their
+docs say why: *"If the application uses hash routing, it may lose the initial hash
+after some time."* Only the **version** is kept, never `tgWebAppData` — that is a
+signed credential naming a Telegram account, this app has never read it, and a copy
+in `sessionStorage` would be one this origin stores for no reason.
+
+⚠ **`webcheck` was green over it for the whole time, and the reason generalises.**
+The driver writes `location.hash` immediately before each `setTelegramBack` call, so
+the read always succeeded — the one condition the real app never satisfies. The
+assertion now drives the actual sequence: latch at launch, wipe the fragment the way
+a navigation does, then ask. Reverting the fix fails it twice.
+
+**What was not the cause**, checked before the fix: `upFrom`'s `session` arm
+(returns `"/"`), the 6.1 gate (the client is 8.x), and the transport not being
+injected (`data-telegram` is stamped off the same test, and the header inset it
+controls was visibly applied in the screenshot).
+
+**Status.** Active
+
+#### Q3.597 — 52px of empty screen under a header bar that had already reserved its own space
+
+**Question.** Q3.443 also set a Telegram header inset: `:root[data-telegram]
+.pt-safe { padding-top: max(3.25rem, env(safe-area-inset-top)) }`, a **floor** and
+never an addition, measured against a screenshot where the client's floating pill sat
+on the session title. Reported from a phone with a second screenshot: *"в тма почему
+то страница отрисовывается с огромным отступом сверху"*. Telegram drew its header as
+an opaque bar and then there was a band of nothing before ours. Is the floor wrong?
+
+**Decision.** The floor is not wrong; keying it on `[data-telegram]` is. Being in
+Telegram says nothing about how Telegram is presenting us, and there are **three**
+states: chrome floated over the page (spend the room), chrome drawn as a bar above
+the webview (overlaps nothing, the honest inset is 0), and a client too old to say
+which. So the number is asked for — `web_app_request_safe_area` and
+`web_app_request_content_safe_area`, answered as events, written onto the root as
+`--tg-chrome-top` / `--tg-chrome-bottom`.
+
+⚠ **`env()` reads 0 inside a mini-app webview whatever the device** (Telegram-iOS
+#1377, open), so the `max()` had exactly one live term and it was the literal. That
+is the sentence that stops the next reader deleting `--tg-chrome-top` as redundant,
+and it is why the page cannot see the notch either.
+
+**3.25rem is now the fallback's value rather than a floor under the answer**, which
+is what bounds the change: a client too old to be asked keeps precisely the header
+it had. `0.5rem` leads the `max()` so an answer of `0` falls back to the ordinary
+`.pt-safe` floor rather than to nothing.
+
+**The two numbers are added, and that is the one thing here read from documents
+rather than measured.** `safeAreaInset` is the space to avoid at the top of the
+*screen*; `contentSafeAreaInset` the space to avoid at the top of the *content
+area*, i.e. of what the first leaves. Nested, therefore additive — and Telegram's
+SDK writes four CSS properties per object and combines nothing, so every page doing
+this adds them. **It is the direction to be wrong in**: over-adding costs a band of
+empty space, while taking the larger of the two would put the header back under the
+pill, which is the failure Q3.443 was written to fix. One screenshot in fullscreen
+mode settles it; in the ordinary presentation both are 0, which is the reported case.
+
+**Q3.443's rule survives verbatim at the line it was about.** That line is still a
+`max()` and still never an addition to `env()`. The one addition is between
+Telegram's own two numbers, in `telegramInsets`, where both are in scope and neither
+is a literal.
+
+**The bottom edge had the same defect and nobody reported it**, because nothing under
+the approve buttons *looks* wrong — `.pb-safe` resolved to its own 0.75rem floor
+inside Telegram, i.e. 12px where the home indicator wanted 34, which is exactly what
+`viewport-fit=cover` was supposed to buy. Fixed symmetrically, with a `0px` fallback
+so a client that cannot answer keeps today's screen.
+
+⚠ **Neither may ever be written as a Tailwind `pt-*`/`pb-*` utility beside these
+classes.** `.pt-safe`/`.pb-safe` are unlayered while Tailwind emits utilities inside
+`@layer utilities`, and an unlayered rule beats a layered one regardless of
+specificity — `Composer.tsx` records the same trap and names the casualties.
+
+**And `telegram.ts` got a rule file.** It was globbed by none, so the knowledge above
+arrived in no session that opened it, which is how two of these shipped twice.
+`telegram-mini-app.md` holds it; `web-shell.md`, at 25 characters of headroom, keeps
+one sentence and a pointer.
+
+**Status.** Active
+
+#### Q3.598 — Three documents that had to be readable with no account
+
+**Decision.** `/terms`, `/acceptable-use` and `/privacy` are a top-level `Route`
+arm of their own, `{ name: "legal"; doc: LegalDoc }`, with every rule about the
+URLs in `packages/web/src/legal.ts` and the screen in `ui/legal/LegalScreen.tsx`.
+Drawn in `App.tsx` above `signed_out` and above `loading`, beside the gate's
+branch, because answering with no credential is the point rather than an accident
+of a token.
+
+**Why not three more `GateScreen`s**, which is the cheaper shape by every count —
+no `router.ts` edit, no `nav.ts` arm, a parser and an `App` branch already
+written. It breaks four things that are written down. `gate.ts` defines that
+family as *"the screens somebody reaches before there is a credential"*, and a
+policy is read before **and** after. `depthOf`'s gate arm argues those screens are
+*"the sign-in form with different fields"*, which a policy is not. `GateCard` is
+`max-w-sm`, a measure for four fields, where a document wants `COLUMN` — the app's
+only reading measure. And `BackToSignIn` replaces *always*, justified by a token
+in the fragment that a document does not carry.
+
+**Measured cost of the arm chosen:** four compile errors, all wanted — `depthOf`,
+`sheetKind`, `sheetTitle` and `screenOf` are exhaustive switches with no
+`default`. **Three more sites take a new arm in silence**, and they are the half
+the compiler cannot hold: `isSheet` is an `||` chain, `isOverlayPath` a list of
+string literals, and `sheetUpLabel` an early return on one route name. The case
+table in `webcheck.plugin-reach-and-mirror.ts` is what covers all three, and it
+gained two rows rather than one assertion.
+
+**⚠ It also closed a predicate that nothing read.** `App.tsx` claimed
+*"`gateOutranksSession` lives inside `Gate`, where `webcheck` can import it"* —
+and `Gate` asked `!gateNeedsToken(screen)` directly, so mutating that function's
+body changed no screen, and the driver's equality over the two passed because
+both were the same sentence written twice. It is asked properly now. This was
+found by designing the cheap shape, not by looking for it: adding documents to
+`GateScreen` would have made the predicate answer `false` about screens the app
+in fact draws over a live session, with every driver still green.
+
+**Measured**, 2026-09-10, and it caught a regression no driver could. The rules
+module is imported by `router.ts` to parse every URL this app opens, so whatever
+it imports rides the entry chunk — and the prose table living beside the parsers
+put three whole policies there: entry **365.21 kB (112.01 kB gzipped)** against
+**308.82 kB (95.68 kB)** with the table moved to `legal/text.ts`, the documents
+landing in a `LegalScreen` chunk of 32.57 kB (11.14 kB) that is fetched only when
+somebody opens one. `typecheck` is blind to it, every assertion was green over it,
+and it showed up in `pnpm web:build` output alone. Pinned now by one line asserting
+that `legal.ts` imports no prose.
+
+**Rejected: a `SettingsLeaf`**, which is *"a screen one tap under a section that
+is a **form**"* and sits behind `visibleSections`, i.e. behind the credential
+these pages must not need. **Rejected: static files under `packages/web/public/`**,
+which is cheaper still and really does work — the static handler appends
+`index.html` to a directory — and buys a second hand-written copy of both font
+stacks and five scale steps *inside this repository*, plus prose outside every
+driver, on a route `navigate` cannot reach. That is Q7.133's failure with the
+excuse removed.
+
+**Status.** Current
+
+#### Q3.599 — Consent is a box under the button, and the tombstone above it had to be rewritten
+
+**Decision.** One checkbox inside `Register`'s `<form>`, immediately **before**
+the submit button, whose label is generated from `LEGAL_DOCS` and named by
+`legalTitle`. It gates `ready` and sends `acceptedTerms`, which
+`POST /v1/register` refuses without — and **stores nothing**: no column, no
+timestamp, no version pinned to an account.
+
+**The route states the requirement rather than proving it.** A caller that sends
+`true` is indistinguishable from a person who ticked a box, so what the field buys
+is that the browser stops being the only thing that knows an account may not be
+created without agreeing — a `curl` that skips the form now gets a `400
+terms_not_accepted` instead of an account. It was client-only first; that was
+raised as a question rather than found in review, and the answer was that a
+requirement no server knows about is a requirement in one bundle.
+
+**Why a box rather than a sentence.** A sentence under the button is the commoner
+shape and would have been enough — the button is already the act. The tick is
+what a reviewer looks for, and it was the owner's call. What it does **not** buy
+is a record: on the mail path there is no `users` row at sign-up at all, only
+`pending_registrations`, so anything "recorded on the account" has no account to
+be recorded on until the link is opened. This instance cannot prove what anybody
+agreed to, and says so rather than implying otherwise. Q7.134.
+
+**⚠ It was under the button first, and that was wrong.** The argument for it was
+that a term of an act belongs beneath the control that performs it, and a control
+above a submit reads as a label for it. On the running screen the opposite decides:
+the box gates `ready`, so the button sat **disabled** with its own precondition
+below it — a press did nothing and the reason was further down the page. A
+precondition that follows the act it gates is a dead end whatever the prose says.
+Caught by the owner looking at the screen, not in review, which is worth recording
+because nothing in the driver could have seen it: the assertion asserted the wrong
+order confidently. It is still **not** in `GateCard`'s `footer`, which is
+documented as the one place each screen keeps for the way back — chrome about the
+page rather than a term of the thing being done.
+
+**⚠ Q3.440 is neither reversed nor untouched.** That entry deleted `SourceNotice`
+and ends *"the offer now lives in `LICENSE`, in `README.md` and in the image's OCI
+label, and in no rendered page."* All of that stands: no screen draws the source
+URL, the version or the licence name, and `source` on the wire still has no
+reader. What is superseded is one sentence's **reach** — §13 is an obligation the
+*licence* places on the operator toward anybody who interacts over a network, and
+Q3.440 decided it is discharged in artefacts. Consent runs the other way: it is a
+term of an act, at the moment of the act, and nothing in a tarball can carry it.
+A page can discharge the second and cannot discharge the first. `GateCard.tsx`'s
+tombstone says so now and cites both numbers, which also fixed a *"see
+`docs/DECISIONS.md`"* with no number in it — a citation `docscheck` could not
+resolve because there was nothing to resolve.
+
+**The links open a new tab, and that is the one place this app does so
+same-origin.** Four fields are filled in by then, two of them passwords, and the
+tick is state on the component; `navigate` from there unmounts all five, and the
+state cannot go in the address because the state is a password. A click targeted
+at interactive content inside a `<label>` does not activate the labelled control,
+so the links do not tick the box on the way past.
+
+**Measured, and unverifiable without a phone:** whether a same-origin `_blank`
+survives Telegram's webview. The idiom is already exercised there off-origin by
+`MarketEntry` and `AgentsPanel`, and `inTelegram` is the seam if it turns out not
+to be.
+
+**Status.** Current
+
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -17244,12 +20652,12 @@ direction would turn a layering rule into a runtime dependency.
 | `packages/web/src/keys.ts` | Enter-to-send, the command menu's keys, and the bare-letter shortcut guards, as pure functions so `webcheck` can assert them with no DOM. Enter is claimed by two of them, and `composerKey` is where that collision is resolved — here rather than in a JSX prop, because the resolution is the part worth asserting |
 | `packages/web/src/ui/AppShell.tsx` | The adaptive layout. Rail beside content at `lg`, single column below, decided in CSS |
 | `packages/web/src/ui/Markdown.tsx` | Agent output rendered as markdown; code blocks with a lazily-loaded highlighter |
-| `packages/web/src/ui/Composer.tsx` | Where a prompt is written: Enter to send, auto-grow, optimistic echo, per-session draft, and the `/` menu. Takes the caret when the session changes under it — except on a coarse pointer, and except after `j`/`k` |
+| `packages/web/src/ui/Composer.tsx` | Where a prompt is written, and the **box** everything else at the bottom of the screen is inside: Enter to send, auto-grow, optimistic echo, per-session draft, the `/` menu, the attachment chips, the paperclip and the control row. Takes the caret when the session changes under it — except on a coarse pointer, and except after `j`/`k` |
 | `packages/web/src/ui/composing.ts` | What the empty composer says and who gets the caret, as pure functions. Holds the two captions that were deleted for moving the box somebody was typing in, the `j`/`k` one-shot flag that stops autofocus eating the next keystroke, and `focusWorthKeeping` — which focus is worth *not* taking, the clause whose first version made the whole feature dead on Chromium |
 | `packages/web/src/ui/commands.ts` | What a `/` in the composer means, as pure functions: where the token starts and ends, which entries exist and which of the two sources each came from, and how a query ranks them |
 | `packages/web/src/ui/CommandMenu.tsx` | The menu itself: the agent's own commands and the controls it does *not* publish as commands, in one list, in two stages. Never takes focus — the caret stays in the textarea, so rows are not tab stops and the highlight is an index that has to be scrolled into view by hand |
-| `packages/web/src/ui/AgentConfigBar.tsx` | The composer's control strip: mode left, model/effort/context right, everything else behind `…`. Drawn from ACP's `category`, never from an id. One height and one radius for everything in it, the paperclip included; the context readout is a ring you press for the numbers, and it holds its slot whether or not there is anything to report |
-| `packages/web/src/ui/agentConfig.ts` | Its rules as pure functions — slotting, labelling (`labelFor` for two agents' words for one *control*, `choiceOverride` for two agents' words for one *choice*, plus the two values named `Default` that no agent explains), the context readout (the percentage, what the popover says in words, and the thresholds the ring changes colour at), and the prose the snapshot strips — so `webcheck` can assert them with no DOM |
+| `packages/web/src/ui/AgentConfigBar.tsx` | The agent's own controls, as a cluster inside the composer's control row: mode left, model/effort right, everything else behind `…`. Drawn from ACP's `category`, never from an id — and, since the context readout went, from no agent's name either. One height and one radius for every chip; none of them draws a border, because the box around them does |
+| `packages/web/src/ui/agentConfig.ts` | Its rules as pure functions — slotting, labelling (`labelFor` for two agents' words for one *control*, `choiceOverride` for two agents' words for one *choice*, plus the two values named `Default` that no agent explains), and the prose the snapshot strips — so `webcheck` can assert them with no DOM |
 | `packages/web/src/ui/Bubble.tsx` | The user's own messages, right-aligned and hugging their content. One component, three call sites, so they cannot diverge again |
 | `packages/web/src/ui/settings/` | Settings as a list and a detail, since it stopped being one flat scroll: `SettingsNav` (the rail at `lg`, the whole screen below it, and the blocked count it owes the list it replaces), and one file per section — Account, Machines, Server settings and Users. `AgentsPanel` is what `ui/Settings.tsx` became: the wizard that drives an agent's own login under a pty, plus a paste box for a token minted elsewhere. Signing in is **not** a section of its own any more — it is a property of a machine, so `MachineSystemsSection` and `SystemsPanel` hang two depths down inside one, and `AgentsPanel`'s wizard is mounted from there and from the New session strip alike |
 | `packages/web/src/ui/SessionBrowser.tsx` | The fleet: a Pinned group above one collapsible section per machine, at two densities. A pinned row is in both — pinning is a second way to reach a session, not a relocation. Blocked rows say so on their own status dot and are counted on their machine's header — where the count replaces the live count rather than mounting beside it — so a closed section cannot hide one. No search box, and the comment where it was says why one must not come back as component state |
@@ -20564,6 +23972,48 @@ its own coverage with a change to the product that nobody needs.
 **Status.** Current
 
 
+#### Q5.115 — One caps heading, fifteen copies, three constants that already owned it
+
+**Rule.** The letter-spaced small-caps heading is `SETTINGS_HEADING`,
+`MENU_HEADING` or `FIELD_LABEL`, and **which one is a colour decision, never a size
+decision**. A call site composes layout onto it and never restates the type.
+
+**Measured**, 2026-09-08: `uppercase` + `tracking-wider` + `font-semibold` appears
+**15 times in 13 files**, in two sizes and four colours, while all three constants
+that own it already existed and **nine** of those sites used none of them. Two files
+— `gate/Gate.tsx` and `ForcedPasswordChange.tsx` — carried byte-identical local
+`const label` declarations, and `SignIn.tsx` is the third member of that family and
+did not even name it.
+
+**Why it mattered.** `SETTINGS_HEADING`'s own docblock records that the string was
+written out **fourteen times across five files** before the constant was extracted.
+The count did not fall afterwards — it moved. That is the useful half: extracting a
+constant does not retire an idiom, and nothing here had ever swept for the idiom, so
+the second wave was invisible until somebody counted.
+
+`FIELD_LABEL` is the one people re-typed rather than imported, and its 13px step is
+deliberate and argued in three separate docblocks: a section heading is scanned, a
+field's name is read off a form somebody is filling in from a phone.
+
+**Three sites stay outside the constants and each now says why**, so the next sweep
+does not "fix" them: `SessionBrowser`'s waiting-elsewhere band (`text-fg` — louder
+than the rows under it, on purpose), `MachineSection`'s `RETIRE_HEADING`
+(`text-danger`), and `MachineOffer`'s `or` (no `font-semibold`, because it is the
+word between two doors rather than a heading). ⚠ `RETIRE_HEADING` is spelled out
+rather than composed for a real reason: `` `${SETTINGS_HEADING} text-danger` `` is a
+**silent no-op**, two colours of one family resolved by Tailwind's alphabetical
+emission rather than by the line — the same trap Q3 records for `items-center`
+appended to `MENU_ROW`.
+
+**Rejected: renaming `SETTINGS_HEADING`.** It now heads a gate field, a sign-in
+field, a plugin's column and a key table, so the name is narrower than the reach.
+The rename would break this file's own citation of the symbol, which `docscheck`
+asserts, and buy nothing the widened docblock does not. `MENU_HEADING` had no
+docblock at all and has one now.
+
+**Status.** Current
+
+
 ## Measured behaviour of the agents and the tools
 
 ### Q6.1 — Why did `session_started` land in the log *after* the first `prompt` event?
@@ -21972,7 +25422,7 @@ deal more screen.
 
 **Position.** By pushing rules *out* of the JSX and into pure functions, which is
 the only form `webcheck` can reach. `readInput`, `slotFor`, `chipValue`,
-`contextPercent`, `configProse`, `labelFor`, `sessionGroups`, `visibleRows`,
+`configProse`, `labelFor`, `sessionGroups`, `visibleRows`,
 `sessionLabel`, `buildTail`, `placeNodes`, `mergeUpdates`, `resolveTool`,
 `stripFence`, `toolSummary`, `slashQuery`, `buildCommands`, `filterCommands`,
 `completion`, `configChoices`, `typeableName`, `commandScope`, `completionKey`,
@@ -21980,20 +25430,21 @@ the only form `webcheck` can reach. `readInput`, `slotFor`, `chipValue`,
 `admitFiles`, `sendableAttachments`, `canSend`, `pastedName`, `relativeTo`,
 `filenameFor`, `endedWithDaemon`, `waitingForDaemon`, `resumeStalled`,
 `showsAsEnded`, `countsAsLive`, `statusTone`, `sessionNotice`,
-`resumeFailureText`, `resumeRetryable`, `slowRoute`, `configBarShows`,
+`resumeFailureText`, `resumeRetryable`, `slowRoute`,
 `showsInTranscript`, `latestWorkspaceWarnings`, `showsWorking`,
-`composerPlaceholder`, `shouldFocusComposer`, `focusWorthKeeping`, `pieLabel`,
+`composerPlaceholder`, `shouldFocusComposer`, `focusWorthKeeping`,
 `elicitationForm`, `elicitationAnswer`, `fieldValue`, `humanRequests`,
 `needsHuman`, `waitingCount`, `oldestWait`, `elicitationOutcome`,
 `answerAlreadyLanded`, `essentialContext`, `detailContext`, `withheldDetail`,
-`pieTone`, `contextHint`, `permissionDecisions`, `refused`, `machineSubline`,
+`permissionDecisions`, `refused`, `machineSubline`,
 `sublineWarns`, `choiceOverride`, `sameNode` and `optionShortcut` are all shaped
 that way deliberately.
 
 **Why not yet.** The list is an inventory rather than a gesture, so it has to
 name functions that exist: `toolDetail` was on it until the redesign folded it
 into `readInput` and `EventList`, and a name that greps to nothing turns the
-sentence after it into a claim nobody can check.
+sentence after it into a claim nobody can check. Five more came off with the
+context readout — Q3.558 — for the same reason and not for a different one.
 
 **What it would take.** Existing is the floor and not the bar — the extraction
 commit listed four of these while `webcheck` imported three, and `placeNodes`,
@@ -22061,8 +25512,10 @@ release.
 
 ### Q7.13 — What did the polish pass add, and who found it?
 
-**Position.** Thirteen functions, five of them added by the review of the other
-eight — which is the argument for the list rather than an aside.
+**Position.** Eleven functions, five of them added by the review of the other
+six — which is the argument for the list rather than an aside. It was thirteen
+until the context readout took its two label-and-threshold halves with it; those
+are deleted rather than moved, and Q3.558 is why.
 `permissionDecisions` and `refused`, because a merged permission row drew a
 refusal as an approval and nothing could have caught it; `focusWorthKeeping`,
 because the clause it replaces was browser-dependent and therefore invisible to
@@ -22071,8 +25524,7 @@ deciding whether a waiting session can be hidden was a four-arm ternary in JSX.
 
 **Why not yet.** `showsInTranscript` is a rule about what a person reads, so
 getting it wrong is invisible to a compiler and obvious to everybody else;
-`pieLabel` and `pieTone` are the two halves of a readout whose own width used to
-move its neighbours; `showsWorking` is a three-clause derivation of "the agent is
+`showsWorking` is a three-clause derivation of "the agent is
 busy" that a two-clause one gets wrong in the two states that matter, mid-turn
 permission and death mid-turn; and `shouldFocusComposer` holds the `j`/`k`
 collision, which works perfectly for whoever wrote it and breaks for the first
@@ -22082,11 +25534,12 @@ person who navigates with the keyboard.
 
 ### Q7.14 — What did the restart work add?
 
-**Position.** Eleven functions, three of them extractions. `slowRoute` is the
+**Position.** Ten functions, three of them extractions. `slowRoute` is the
 table `machine.ts` spends a page describing and nothing checked, whose failure
-mode is a *healthy* machine rendered unreachable. `configBarShows` guards the
-clause that would have failed on exactly one agent — and the case it fails on
-stopped being rare the moment the composer began surviving a restart.
+mode is a *healthy* machine rendered unreachable. It was eleven: `configBarShows`
+guarded a clause that would have failed on exactly one agent, and it is deleted
+rather than superseded, because the paperclip moving out of the control strip
+made the failure it guarded structurally impossible. Q3.557.
 
 **Why not yet.** The five restart predicates are asserted as a **partition**
 rather than case by case, because the way that set breaks is a new state falling
@@ -22284,14 +25737,20 @@ sends — while `claude-agent-acp` 0.63.0 constructs it in three places.
 **Why not yet.** On kimi the readout is empty for the life of every session, and
 saying "the agent has not said" reads as *yet*, as though a number were coming.
 
-**What it would take.** The popover names the agent instead and points at
+**What it would take.** The popover named the agent instead and pointed at
 `/usage`, which kimi publishes as a builtin (`availability: "always"`, described
 in its own registry as "Show session tokens + context window + plan quotas" — so
-it answers the question this readout cannot, plan quotas included).
+it answers the question this readout could not, plan quotas included).
 
-**Measured.** 2026-08-06 against kimi 0.29.2.
+**Measured.** 2026-08-06 against kimi 0.29.2. **The measurement is the part of
+this entry that outlives it**, and is why a future readout may not promise a
+number on kimi: the shape appears in kimi's bundle exactly once, inside the
+vendored zod schema for the protocol — a thing it can parse and never one it
+sends.
 
-**Status.** Known limitation.
+**Status.** Superseded — Q3.558. There is no readout in the browser client to be
+empty, and the answer to "why is it always blank on kimi" is now that it is blank
+on every agent because nothing draws it.
 
 ### Q7.27 — Could the daemon just ask an agent for its usage?
 
@@ -22329,7 +25788,10 @@ under the same rule that admitted that field — small, fixed-shape, and useful 
 answering *does anything anywhere need me*. A reset timestamp and a percentage
 qualify; the blob does not.
 
-**Status.** Not built.
+**Status.** Not built, and there is no longer a popover for it to be missing
+from — Q3.558. The daemon half of the argument stands: `contextUsage` is still
+on the snapshot and `_meta` is still dropped, so anything built on this starts
+where this entry left it.
 
 ### Q7.29 — What shape does a permission carrying a diff actually have?
 
@@ -22670,12 +26132,22 @@ Without that, the second person to call a machine "laptop" would be told that
 somebody else has one by that name.
 
 **What an admin can still do.** `POST /v1/admin/machines` takes an `ownerId`, and
-`cpctl admin addmachine --owner` uses it — which is what the daemon wizard needs,
-and it grants nothing new, because an admin can already mint an API key for any
-user and act as them. Without an owner it still registers an ownerless machine and
+`cpctl admin addmachine --owner` uses it — which is what the daemon wizard needs.
+Without an owner it still registers an ownerless machine and
 now says so, because that is what every machine in an existing database already is.
 
-**Status.** Current.
+⚠ **That paragraph used to end "and it grants nothing new, because an admin can
+already mint an API key for any user and act as them", and that sentence is
+false.** Q1.631 deleted every admin route touching somebody else's keys and Q7.74
+deleted the two that issued a credential for another account, leaving the property
+*no route in this service issues a credential for an account other than the
+caller's own*. So registering a machine for somebody is no longer covered by a
+larger power the admin already had: it is its own power, and what bounds it is
+that the owner's list names whoever enrolled it — `enrolledBy` on
+`GET /v1/machines`, Q1.637. `app.ts` and `deploy/install.sh` carry the same
+correction at the code it is about.
+
+**Status.** Current, amended by Q1.637.
 
 ### Q7.56 — Was the control plane's route gate ever fail-closed?
 
@@ -23556,8 +27028,8 @@ colour. What survives that?
 
 **The mechanism that made it a one-file change.** Every pure function here already
 returned a **rank**, never a colour — `statusTone`, `machineSubline`,
-`sublineWarns`, `sessionNotice`, `pieTone` — with the colour confined to paint
-tables. So the whole first half of the rework changed **no asserted signature**,
+`sublineWarns`, `sessionNotice` — with the colour confined to paint tables. A
+fifth, the context ring's own threshold function, went with the readout; Q3.558. So the whole first half of the rework changed **no asserted signature**,
 and "no existing `webcheck` assertion may need editing" was usable as the
 acceptance criterion. `sublineWarns` keeps its name deliberately: "warn" now names
 a rank, not a hue, and renaming it would cost two assertion edits on the one screen
@@ -26426,3 +29898,115 @@ purpose, so it is the second candidate, not the first.
 removed, so the day this class grows on a machine it will be visible as a
 table that never shrinks rather than as transcripts that vanished.
 
+
+### Q7.132 — What did deleting the context readout cost, and what would bring it back?
+
+**Position.** One reading is gone from the client and nothing replaced it: on
+claude and codex, "how full is this window" was answerable at a glance without
+spending the session's one turn, and now it is not. Q3.558 is the decision; this
+is the debt beside it, because the argument that carried it — blank on kimi, blank
+on any session waiting for its agent — is an argument about *most* agents rather
+than about all of them.
+
+**What is still true and still on the wire.** The daemon measures it, rate-limits
+it to a whole percent of change (`usageWorthAnnouncing`), and puts it on every
+snapshot. `pnpm client` prints `ctx N%` today. So the cost of a second attempt is
+a browser control and nothing else — no protocol work, no daemon work, and no new
+route.
+
+**What a second attempt would owe, and this is the whole reason to write it
+down.** Three things the first one got wrong or could not do.
+
+It must not promise a number on kimi. Q7.26's measurement is why: `usage_update`
+is a shape kimi parses and never sends, so "the agent has not reported this" reads
+as *yet* for the life of every session, and somebody watching it stay at zero
+reasonably concludes the client is broken.
+
+It must not cost width in the row of controls. Q3.555's arithmetic is unforgiving
+at 390px — three chips and a paperclip already spend 331px of 352 — so a readout
+belongs somewhere that is not the composer's control row at all: the session
+header, the session menu, or a screen you go to.
+
+And it should carry what Claude Code's does and this one could not: the plan
+limits. That is a daemon change rather than a layout one — the agent sends them as
+`usage_update._meta._claude/rateLimit` and the daemon drops `_meta` entirely
+rather than putting an unbounded agent-shaped blob on a snapshot that
+`GET /sessions` returns sixty at a time. Q7.25 and Q7.28 hold that half.
+
+**Status.** Known limitation, taken deliberately.
+
+### Q7.133 — The landing page's typography is a hand-copy, checked only where both repositories are on one disk
+
+**Question.** `services/landing/index.html` duplicates `--font-sans` and
+`--font-mono` character for character, and copies five of the app's six scale steps.
+Its own header says so: *"Palette, type scale and control styles lifted from
+app.reemoat.com."* Nothing compared them. Can that be checked?
+
+**Decision.** Partly, and the honest half is the skip. `webcheck.typography.ts` reads
+`../../../../services/landing/index.html`, compares both stacks whitespace-normalised
+and asserts the landing's scale keys are a **subset** of the app's — subset rather
+than equality, because the landing legitimately has no `--text-xl`. Where the file is
+absent it calls `skip()` naming the path it wanted.
+
+**Why it is only half.** `app/` is `rends-east/reemoat` and is going public;
+`services/` is the private `rends-east/reemoat-prod`, whose `.gitignore` excludes
+`/app/`. CI checks out one of them, so **the skip branch is what runs on every
+push** and the comparison only ever runs on a development box or the stand. This is
+the same shape as the plugin catalogue mirror, and it uses the same primitive for
+the same reason: `skip()` is counted and printed in `finish()`'s summary precisely
+so a run that checked nothing cannot read as a run that agreed.
+
+**Measured**, 2026-09-08: the two stacks are `IDENTICAL` on both halves today, and
+the landing carries three divergences nobody chose — `-webkit-font-smoothing:
+antialiased` (so the same face renders a shade lighter there than in the app on
+macOS), three `clamp()` display sizes, and seven negative tracking values against
+the app's zero. Those are **not** asserted: they are a different page with a
+different job, and pinning them would be inventing a rule rather than recording one.
+What is pinned is the pair of values that are meant to be one value.
+
+**Rejected: a driver on the landing's side.** `services/landing` is a static file
+and an nginx config with no `package.json`, unlike `services/plugins` and
+`services/premium`, which do carry `pnpm check`. Standing a Node package and a CI
+workflow up to compare two font stacks costs more than the drift it catches.
+
+**Status.** Known limitation, taken deliberately
+
+
+### Q7.134 — What the three documents deliberately do not do
+
+**Position.** Four things, and none of them is an oversight.
+
+**English only.** `LEGAL_LANGS` is what exists and `LegalLang` is what may; a
+second language is a second set of strings behind the same union, plus a control
+on the screen. It is deliberately **not** a localisation layer: this app has never
+had one, `ProfileMenu` says so in its own docblock, and a document is the worst
+possible place to start, because a translated one is a second binding text that
+can disagree with the first.
+
+**No acceptance record.** No column, no timestamp, no version pinned to an
+account. The register route does refuse a sign-up that carries no `acceptedTerms`,
+which states the requirement rather than evidencing anything: a caller that sends
+`true` is indistinguishable from a person who ticked a box. This instance cannot
+say what anybody agreed to and does not imply it can. Adding that is a migration
+and a version on every document, which is why `effective` is data rather than
+prose. Q3.599.
+
+**No indexable copy.** One `index.html` serves every route carrying `noindex,
+nofollow`, because this is a control surface. Making one path indexable means
+writing the meta at run time, which a crawler that runs JS reads and one that does
+not does not — half indexed, with a restore that could put the whole surface into
+an index. A public copy belongs on the landing page, in the other repository,
+**linked and never copied**: a second copy where CI cannot see it is Q7.133
+exactly.
+
+**No link from the sign-in screen, the profile menu, the settings sheet or the
+confirmation mail**, and the reasons differ per surface. `ProfileMenu`'s own
+docblock sets the test a fourth row must pass — *"it is about **you** rather than
+about what is on screen"* — and a policy is about the service. `SignIn`'s two
+doors are argued at length and its shared-link count is pinned at two. A settings
+door would work and would throw away both the sheet and the screen under it, since
+`upFrom` lands on the root. And `templates.ts` already rules that *"two links in a
+transactional message, one of which goes nowhere useful, is one link too many."*
+The named seam, so it is not invented twice, is a line in `HelpButton`'s popover.
+
+**Status.** Deliberate non-goal

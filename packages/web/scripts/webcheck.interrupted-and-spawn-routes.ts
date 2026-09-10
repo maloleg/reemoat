@@ -28,6 +28,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
     TERMINAL_STATUSES,
     countsAsLive,
     endedWithDaemon,
+    isParked,
     resumeStalled,
     showsAsEnded,
     waitingForDaemon,
@@ -46,6 +47,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
     "daemon_restarted",
     "config_changed",
     "agent_signed_out",
+    "parked",
   ] as const;
 
   /*
@@ -55,7 +57,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
    * `gapPlan` takes a `LaggedFrame["reason"]`) while the checks tie the same
    * list to the daemon's source. Neither half is worth anything alone.
    */
-  const STATUSES = ["starting", "idle", "running", "blocked", "stopping", "exited", "failed", "interrupted"] as const;
+  const STATUSES = ["starting", "idle", "running", "blocked", "stopping", "exited", "failed", "interrupted", "parked"] as const;
   const LAG_REASONS = ["evicted", "slow_consumer", "backlog"] as const;
 
   /*
@@ -108,10 +110,35 @@ process.stdout.write("\nsessions the daemon interrupted\n");
      * silently treated as ended. So the partition is asserted rather than assumed,
      * in both directions.
      */
+    /*
+     * ⚠ **Three parts now, not two, and `parked` is deliberately in neither
+     * list.**
+     *
+     * It is not a `DAEMON_EXIT_REASON` — that list drives the daemon's own boot
+     * pass, and un-parking everything at a restart would put back exactly the
+     * memory parking released. It is not `FINAL` either — it is the one reason
+     * that *is* coming back. So it is its own part, and the partition is asserted
+     * over all three rather than relaxed into "these two plus whatever".
+     *
+     * The consequence is worth stating because it is not obvious and it is load
+     * bearing: `endedWithDaemon` is `!FINAL.includes(...)`, so it answers **true**
+     * for `parked`. That is the fail-safe direction for an *unknown* reason and
+     * the wrong answer for this known one, which is why `wire.ts` tests
+     * `isParked` first in every function that would otherwise ask. Both halves are
+     * pinned below.
+     */
     check(
-      "the two exit-reason lists partition the daemon's union",
-      [...DAEMON_EXIT_REASONS, ...FINAL_EXIT_REASONS].sort(),
+      "the exit-reason lists partition the daemon's union, with parked its own part",
+      [...DAEMON_EXIT_REASONS, ...FINAL_EXIT_REASONS, "parked"].sort(),
       [...members].sort(),
+    );
+    check(
+      "parked is in neither list: not resumed at boot, and not final",
+      [
+        DAEMON_EXIT_REASONS.includes("parked" as ExitReason),
+        FINAL_EXIT_REASONS.includes("parked" as ExitReason),
+      ],
+      [false, false],
     );
     check(
       "and nothing is in both",
@@ -226,13 +253,35 @@ process.stdout.write("\nsessions the daemon interrupted\n");
    * added to the union would otherwise be classified `false` in silence. This
    * fails the driver instead.
    */
+  const sessionOf = (over: Record<string, unknown>) => ({ ...snapshot, ...over }) as never;
+
   check(
     "every reason in the union is accounted for",
     REASONS.filter((reason) => endedWithDaemon({ reason })).sort(),
-    [...DAEMON_EXIT_REASONS].sort(),
+    [...DAEMON_EXIT_REASONS, "parked"].sort(),
+  );
+  /*
+   * ⚠ **And the one that says the line above is not a mistake.**
+   *
+   * `endedWithDaemon` answers `true` for `parked` because it asks "not final",
+   * and that is the *wrong* answer read literally — the daemon does not bring a
+   * parked session back on its own. The predicate is left alone anyway, because
+   * making it exact would mean naming known reasons and would cost the fail-safe
+   * that keeps an unknown one from taking the composer away. What makes it
+   * harmless is ordering: `isParked` is tested first everywhere the answer would
+   * matter. So both facts are pinned, together, or the next person deletes the
+   * ordering to "simplify" and gets "reconnecting after a restart" on a machine
+   * that is doing nothing.
+   */
+  check(
+    "endedWithDaemon is not exact about parked, and isParked is what runs first",
+    [
+      endedWithDaemon({ reason: "parked" as ExitReason }),
+      waitingForDaemon(sessionOf({ status: "parked", exit: { reason: "parked" }, agentSessionId: "a_1" })),
+    ],
+    [true, false],
   );
 
-  const sessionOf = (over: Record<string, unknown>) => ({ ...snapshot, ...over }) as never;
 
   /*
    * The partition. Three predicates decide what a terminal row looks like, and
@@ -243,7 +292,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
    * and in Ended, which no individual case would catch.
    */
   const matrix: Record<string, unknown>[] = [];
-  for (const status of ["running", "idle", "exited", "failed", "interrupted"]) {
+  for (const status of ["running", "idle", "exited", "failed", "interrupted", "parked"]) {
     for (const reason of REASONS) {
       for (const agentSessionId of ["a_1", null]) {
         for (const state of [undefined, "waiting", "running", "failed"]) {
@@ -259,7 +308,12 @@ process.stdout.write("\nsessions the daemon interrupted\n");
   }
   const broken = matrix.filter((over) => {
     const session = sessionOf(over);
-    const hits = [waitingForDaemon(session), resumeStalled(session), showsAsEnded(session)].filter(Boolean).length;
+    const hits = [
+      isParked(session),
+      waitingForDaemon(session),
+      resumeStalled(session),
+      showsAsEnded(session),
+    ].filter(Boolean).length;
     return (over["status"] === "running" || over["status"] === "idle") ? hits !== 0 : hits !== 1;
   });
   check("exactly one presentation holds for every terminal session", broken.length, 0);
@@ -338,7 +392,7 @@ process.stdout.write("\nsessions the daemon interrupted\n");
 process.stdout.write("\nwhat an interrupted session says\n");
 {
   const { resumeFailureText, resumeRetryable, sessionNotice, statusTone } = await import("../src/ui/bits.js");
-  const { resumeStalled, waitingForDaemon } = await import("../src/wire.js");
+  const { countsAsLive, resumeStalled, showsAsEnded, waitingForDaemon } = await import("../src/wire.js");
   const sessionOf = (over: Record<string, unknown>) => ({ ...snapshot, ...over }) as never;
 
   const stopped = sessionOf({
@@ -530,6 +584,83 @@ process.stdout.write("\nwhat an interrupted session says\n");
   check("and a starting one has its own, which is neither", statusTone(sessionOf({ status: "starting", exit: null })), "starting");
 
   /*
+   * A released agent is drawn as an ordinary quiet session, and the three
+   * assertions below are one decision read from three sides.
+   *
+   * ⚠ **`idle` is the *chosen* answer, not the leftover one**, and the pins are
+   * written so that both ways of getting it wrong are red. Fall through to the
+   * terminal arm and it reads `ended` — the one word it may not carry, since
+   * nobody ended it. Give it a mark of its own — which it had for a draft — and an
+   * implementation detail becomes a state somebody has to interpret, explaining
+   * only a 1.3s wait the composer's spinner already covers. So: equal to what an
+   * ordinary idle session draws, and not equal to `ended` or `waiting`.
+   */
+  const parked = sessionOf({ status: "parked", exit: { reason: "parked" }, agentSessionId: "a_1" });
+  const plainIdle = sessionOf({ status: "idle", exit: null });
+  check("a released agent is drawn exactly as a quiet one", statusTone(parked), statusTone(plainIdle));
+  check(
+    "and never as ended, which is what somebody deciding looks like",
+    [statusTone(parked) === "ended", statusTone(parked) === "waiting"],
+    [false, false],
+  );
+  /*
+   * ⚠ **And it says nothing.** Removing the notice does not remove it — every
+   * path in `sessionNotice` falls through to a catch-all that draws
+   * `exitText(reason)`, so without an explicit `return null` a parked session
+   * announces itself in the shape of a conversation that ended. Asserted as an
+   * absence beside a live session's, which is the only comparison that says
+   * "the same amount of nothing".
+   */
+  check(
+    "and says nothing at all, exactly as a live session does",
+    [sessionNotice(parked, "claude", "box"), sessionNotice(plainIdle, "claude", "box")],
+    [null, null],
+  );
+  /*
+   * What is *not* the same as idle, and must not be: nothing is running on this
+   * machine, so it may not inflate a count drawn beside a green dot — and nobody
+   * ended it, so it is not filed under Ended either. The dot answers "what is this
+   * conversation doing"; the count answers "what is this machine doing". Two
+   * questions, and parking is the case that separates them.
+   */
+  check(
+    "it is not live, and not ended",
+    [countsAsLive(parked), showsAsEnded(parked)],
+    [false, false],
+  );
+  /*
+   * ⚠ **A released conversation and one somebody stopped are never the same thing
+   * to a reader, and this is the pin that says so.**
+   *
+   * The requirement is the brief's first: nobody stopped a parked session, so it
+   * may not read as stopped. What carries it is not the mark — `idle` and `ended`
+   * share a dot, and always did — but `showsAsEnded`, which decides the bucket in
+   * `sessionLists` *and* the Active/Ended filter in the browser, whose default is
+   * `active`. So in the ordinary view a released session is present and a stopped
+   * one is not, and the two never appear on one screen unless somebody asks for
+   * `all`.
+   *
+   * Asserted as a difference rather than as two separate facts: either value alone
+   * would stay green if both moved together, which is exactly how a bucket rule
+   * collapses.
+   */
+  const stoppedByHand = sessionOf({
+    status: "exited",
+    exit: { reason: "stopped", detail: null, agentConfirmedDead: true },
+    agentSessionId: "a_1",
+  });
+  check(
+    "a released session and a stopped one are filed apart",
+    showsAsEnded(parked) === showsAsEnded(stoppedByHand),
+    false,
+  );
+  check(
+    "and only one of them says somebody ended it",
+    [sessionNotice(parked, "claude", "box"), sessionNotice(stoppedByHand, "claude", "box")?.text],
+    [null, "you stopped this conversation"],
+  );
+
+  /*
    * The loud blink is spent exactly once, on work actually happening.
    *
    * `TONE_DOT`'s own comments say so twice, and `starting` wore it anyway — so an
@@ -577,7 +708,6 @@ process.stdout.write("\nwhat an interrupted session says\n");
 process.stdout.write("\nthe routes that spawn a process\n");
 {
   const { slowRoute } = await import("../src/machine.js");
-  const { configBarShows } = await import("../src/ui/agentConfig.js");
 
   /*
    * The table `machine.ts` spends a page describing and nothing checked. Its
@@ -725,16 +855,6 @@ process.stdout.write("\nthe routes that spawn a process\n");
   );
 
   /*
-   * The control strip's early return, extracted because its third clause is the
-   * half that fails on exactly one agent — and the case it fails on stopped
-   * being rare the moment the composer began surviving a restart.
-   */
-  check("a restored session still draws its bar, for the paperclip", configBarShows(0, null, true), true);
-  check("and without one there is nothing to draw", configBarShows(0, null, false), false);
-  check("a context readout alone is enough", configBarShows(0, 42, false), true);
-  check("and so is a single control", configBarShows(1, null, false), true);
-
-  /*
    * The controls do not blink out of existence while the agent is away.
    *
    * The daemon drops `agentConfig` the moment the agent dies — deliberately, and
@@ -873,12 +993,19 @@ process.stdout.write("\nthe routes that spawn a process\n");
   /*
    * The sequence that is the bug, walked end to end: a restart is a live frame,
    * then an emptied `interrupted` one, then an emptied `starting` one. The strip
-   * must draw the same controls at every step and must never fall to the state
-   * where `configBarShows` has only the paperclip to keep it alive.
+   * must draw the same controls at every step.
+   *
+   * ⚠ **A third field used to ride this walk, and it is gone with the predicate
+   * it called.** `configBarShows` guarded one failure — no bar, so no paperclip,
+   * so no way to attach a file on a session with no live agent — and the paperclip
+   * is the composer's own control now rather than the strip's `leading` prop, so
+   * that failure is structurally impossible instead of asserted. What was left of
+   * the predicate was `optionCount > 0`. The subject of this walk was always
+   * `ids` and `stale`.
    */
   {
     let held = holdConfig(undefined, { status: "idle", agentConfig: live });
-    const drawn: { ids: string[]; stale: boolean; shows: boolean }[] = [];
+    const drawn: { ids: string[]; stale: boolean }[] = [];
     for (const status of ["interrupted", "starting", "idle"] as const) {
       const snapshot = {
         status,
@@ -889,7 +1016,6 @@ process.stdout.write("\nthe routes that spawn a process\n");
       drawn.push({
         ids: step.options.map((option) => option.id),
         stale: step.stale,
-        shows: configBarShows(step.options.length, null, true),
       });
     }
     /*
@@ -900,9 +1026,9 @@ process.stdout.write("\nthe routes that spawn a process\n");
      * this very sequence's complaint arriving through the fix for another one.
      */
     check("across a whole restart the same controls stay on screen", drawn, [
-      { ids: ["mode", "model", ABSENT_EFFORT], stale: true, shows: true },
-      { ids: ["mode", "model", ABSENT_EFFORT], stale: true, shows: true },
-      { ids: ["mode", "model", ABSENT_EFFORT], stale: false, shows: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: true },
+      { ids: ["mode", "model", ABSENT_EFFORT], stale: false },
     ]);
   }
 
@@ -1161,10 +1287,15 @@ process.stdout.write("\nthe routes that spawn a process\n");
      * by a word and a gap and shoved the whole right-hand cluster sideways, which
      * is the one thing this strip must never do.
      *
-     * The property is structural: everything that decides a chip's width — the
-     * caption and the reserve — is the same in both states, so the only thing
-     * that changes is the string inside a box already sized for it. Over every
+     * The property is structural: the caption does not depend on availability, so
+     * the only thing that changes is the string inside the chip. Over every
      * category, because the next control to be dropped will not be this one.
+     *
+     * ⚠ **It used to say "does not change width", and it cannot any more.** The
+     * fixed reserve that made that literally true was withdrawn (Q3.564), so an
+     * unavailable chip saying `—` is narrower than the control it stands for and
+     * the cluster does move. What survives is the half that was the actual defect:
+     * the absent slot drawing a *name* the live chip does not.
      */
     const shape = {
       id: "one",
@@ -1182,39 +1313,44 @@ process.stdout.write("\nthe routes that spawn a process\n");
       const shown = chipParts(one, true);
       const gone = chipParts(one, false);
       check(`a ${category} chip keeps its caption when the agent stops offering it`, gone.caption, shown.caption);
-      check(`and reserves exactly the same width`, gone.reserve, shown.reserve);
       check(`while its value says there is nothing to choose`, gone.value, "—");
     }
-    check(
-      "and that placeholder is inside the width the chip reserved",
-      chipParts({ ...shape, category: "thought_level" } as never, false).reserve?.includes("—"),
-      true,
-    );
+    /*
+     * And nothing else rides `ChipParts`, which is the shape of the claim above:
+     * two fields, one of which is availability-independent. A third would be
+     * something a chip's rendering depends on that this loop does not compare.
+     */
+    check("a chip is a caption and a value and nothing else", Object.keys(chipParts(shape as never, true)).sort(), ["caption", "value"]);
 
     /*
-     * **The reserve is a width, not a floor**, and the only thing that says so is
-     * a class: a grid column is as wide as the widest thing in it, so while the
-     * value sat in flow beside the sizers, a value longer than all of them
-     * widened the chip. `GPT-5.6-Luna` is one character more than the string this
-     * list was measured from, and that was enough for two codex sessions to draw
-     * two different strips. Taking the value out of flow is what makes the column
-     * exactly the reserve.
+     * **A chip is bounded above and by nothing else**, and the only thing that
+     * says so is a class. The fixed reserve is gone (Q3.564), so what stops a
+     * pathological value taking the row is `CHIP_MAX` on the value span and on the
+     * caption beside it — and what stops it overflowing instead of clipping is
+     * `truncate` on the same span, with the full text in the menu and the `title`.
      *
-     * Read off disk because there is no DOM here and the rule is one word in a
-     * class string — the kind of thing a tidy-up deletes without noticing, and
-     * every pure assertion above stays green when it does.
+     * ⚠ **Asserted as an absence as well as a presence.** The sizers are what a
+     * revert would bring back, and they would bring the empty box back with them:
+     * a chip as wide as `Ultracode` while saying `Max`, three times over. Read off
+     * disk because there is no DOM here and both halves are one word in a class
+     * string — the kind of thing a tidy-up changes without noticing, and every
+     * pure assertion above stays green when it does.
      */
     const bar = readFileSync(new URL("../src/ui/AgentConfigBar.tsx", import.meta.url), "utf8");
     const inner = bar.slice(bar.indexOf("function chipInner"), bar.indexOf("function Absent"));
-    check("the sizers only hold the width open where there is room for it", inner.includes("hidden col-start-1 row-start-1 whitespace-pre sm:block"), true);
-    check("and the value cannot widen the column it sits in", inner.includes("sm:absolute sm:inset-0"), true);
+    check("the value is capped and clips rather than overflowing", /\$\{CHIP_MAX\} truncate/.test(inner), true);
+    check("the caption takes the same cap", (inner.match(/\$\{CHIP_MAX\}/g) ?? []).length, 2);
+    check("and the fixed sizers are gone rather than hidden", inner.includes("col-start-1 row-start-1"), false);
+    check("with nothing left holding a width open", /max-w-40|sm:absolute sm:inset-0/.test(inner), false);
   }
 
   /*
-   * The context readout is deliberately **not** held. "A dead agent's window
-   * occupancy is not a fact about anything" — the ring keeps its slot and says
-   * "cannot tell", which is true, and `drawnControls` has nowhere to put a usage
-   * even if somebody wanted to.
+   * `drawnControls` answers three keys and no more, which is worth pinning
+   * because a fourth is how a fact about the *agent* would get smuggled onto a
+   * memory of the agent's controls. It carried no usage even when there was a
+   * context readout to feed — "a dead agent's window occupancy is not a fact
+   * about anything" — and now there is no readout in this client at all, so the
+   * shape is the whole of the claim.
    */
   check("nothing about usage rides the controls", Object.keys(drawnFrom("interrupted", [], ["mode"])).sort(), [
     "options",

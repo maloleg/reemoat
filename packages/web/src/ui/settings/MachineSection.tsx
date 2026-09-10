@@ -1,5 +1,5 @@
 import { ChevronRight, Trash2 } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import * as cp from "../../cp";
 import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
 import { errorText } from "../../http";
@@ -9,6 +9,7 @@ import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
 import { agentStripPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
+import { enrolledByText, type MachineSettingsView } from "../../wire";
 import {
   Button,
   ChoiceRow,
@@ -45,6 +46,13 @@ import { OneTimeSecret } from "./OneTimeSecret";
  * that brings the old one back. The absolute half of that token's rule — never a
  * fill, never more than one control in a view — is untouched: the section still
  * holds exactly one destructive control.
+ */
+/*
+ * `SETTINGS_HEADING` at `text-danger`, and named rather than composed: the colour
+ * is the whole of what this heading says, so writing it as
+ * `` `${SETTINGS_HEADING} text-danger` `` would be a silent no-op — two colours of
+ * one family, decided by Tailwind's alphabetical emission and not by this line.
+ * See `.claude/rules/web-typography.md`.
  */
 const RETIRE_HEADING = "text-2xs font-semibold tracking-wider text-danger uppercase";
 
@@ -124,6 +132,12 @@ export function MachineSection({
    * reachable…" about a host the registry can already prove has never dialled in.
    */
   const setupOffered = owned && !machine.enrolled && !machine.overLimit;
+  /*
+   * The same string the list's row draws, from the same function, because two
+   * spellings of one disclosure are two disclosures and only one of them would
+   * survive the next shortening pass. See `enrolledByText`.
+   */
+  const provenance = enrolledByText(machine.enrolledBy);
   const listable = machine.enrolled && read === "readable";
 
   const mint = (): void => {
@@ -225,6 +239,32 @@ export function MachineSection({
       <p className="text-xs text-muted">
         Belongs to <code className="text-muted/80">{machine.id}</code> only. Plugins run there as you.
       </p>
+
+      {/*
+       * **Who brought this machine online, under the lede and not inside it.**
+       *
+       * ⚠ **This is not the status the docblock above bars from this screen.**
+       * That rule is about reachability — a fact about the *fleet*, carried on
+       * every row of the list one level up, and restating it here is the
+       * repetition the heading was doing when it drew the machine's name. This
+       * is provenance: it does not change on the poll, the list cannot be relied
+       * on to have been read, and it is the one fact that separates a machine
+       * somebody registered *for* you from one that has been substituted under
+       * the name you lost. It sits beside the id for that reason — both are what
+       * this machine *is* rather than how it is doing.
+       *
+       * Its own `<p>` rather than a fourth clause on the lede: that sentence is
+       * fixed, counted at nine words in its own docblock, and true of every
+       * machine, while this one is conditional and true of few. The full stop is
+       * this surface's own — `enrolledByText` returns the fragment the list
+       * draws as a subline, and the lines here are sentences.
+       *
+       * `enrolledByText` is `null` for every case that means *unknown* — you
+       * enrolled it, the machine predates the column, the control plane predates
+       * the field — so nothing is drawn rather than a line reassuring somebody
+       * it was them.
+       */}
+      {provenance !== null && <p className="mt-1 text-xs text-muted">{provenance}.</p>}
 
       {/*
        * ⚠ **A rule above it again, where this deliberately had none.** It was the
@@ -367,6 +407,16 @@ export function MachineSection({
           <section className={SETTINGS_SECTION}>
             <h2 className={SETTINGS_HEADING}>Plugins</h2>
             <MachinePluginsSection state={state} machineId={machineId} />
+          </section>
+
+          {/* Last, and the order is the screen's own: Sign-ins, Agents and Plugins
+              are all *what this machine offers*, read top to bottom by somebody
+              setting it up. This is the one row about how it behaves once it is set
+              up, which is a thing you come back to rather than something you pass
+              through. */}
+          <section className={SETTINGS_SECTION}>
+            <h2 className={SETTINGS_HEADING}>Idle sessions</h2>
+            <IdleRelease machineId={machineId} />
           </section>
         </>
       ) : (
@@ -561,5 +611,111 @@ function RenameMachine({ machine }: { machine: AppState["machines"][number] }): 
       </div>
       {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
     </form>
+  );
+}
+
+/**
+ * How long a conversation may sit before this machine shuts its agent down.
+ *
+ * ⚠ **The first daemon setting with a control on a screen, and the rule it does
+ * not break is that the daemon's *config* is env only.** What this is, is the
+ * narrower class whose owner is the person using the machine rather than the one
+ * who provisioned it: their own trade between memory on their own hardware and a
+ * ~1.3s wait the next time they type. Saving it overrides
+ * `REEMOAT_IDLE_PARK_MINUTES`, which is the default for a machine nobody has set.
+ *
+ * **A field, a button and one sentence.** It also drew a line naming which of the
+ * two values was in force and a link back to the env file's, on the argument that
+ * a control must say where its value came from — and that was wrong here, because
+ * there is no operator to inform: this is one person's machine. What it produced
+ * was a sentence about configuration on a screen that mentions none, and the owner
+ * cut it. The word for the state is absent for the same kind of reason: a name
+ * would make invisible housekeeping into something to interpret.
+ */
+function IdleRelease({ machineId }: { machineId: MachineId }): ReactNode {
+  const [settings, setSettings] = useState<MachineSettingsView | null>(null);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [unreachable, setUnreachable] = useState(false);
+
+  useEffect(() => {
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) {
+      setUnreachable(true);
+      return;
+    }
+    let cancelled = false;
+    void daemon
+      .machineSettings()
+      .then((answer) => {
+        if (cancelled) return;
+        setSettings(answer.settings);
+        setValue(String(answer.settings.idleReleaseMinutes));
+      })
+      .catch(() => {
+        if (!cancelled) setUnreachable(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [machineId]);
+
+  const save = (next: number): void => {
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) return;
+    setBusy(true);
+    setError(null);
+    void daemon
+      .saveMachineSettings({ idleReleaseMinutes: next })
+      .then((answer) => {
+        setSettings(answer.settings);
+        setValue(String(answer.settings.idleReleaseMinutes));
+      })
+      .catch((cause: unknown) => setError(errorText(cause)))
+      .finally(() => setBusy(false));
+  };
+
+  if (unreachable) return <Empty>That machine is not reachable right now.</Empty>;
+  if (settings === null) return <Empty>Reading this machine’s settings…</Empty>;
+
+  const typed = Number.parseInt(value, 10);
+  const valid = Number.isInteger(typed) && typed >= 0;
+  const changed = valid && typed !== settings.idleReleaseMinutes;
+
+  return (
+    <>
+      <form
+        className="mt-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (changed) save(typed);
+        }}
+      >
+        <div className="flex max-w-sm items-center gap-2">
+          <input
+            value={value}
+            inputMode="numeric"
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => setValue(event.target.value)}
+            aria-label="Minutes of quiet before an agent is shut down"
+            className={`w-24 shrink-0 ${FIELD}`}
+          />
+          {/* Beside the field rather than inside the label, so the number and its
+              unit read as one thing on a 390px screen. */}
+          <span className="shrink-0 text-sm text-muted">minutes</span>
+          <Button type="submit" tone="primary" disabled={busy || !changed}>
+            {busy ? <Spinner /> : "Save"}
+          </Button>
+        </div>
+      </form>
+      {/* The one sentence. It says what happens and that nothing is lost, in that
+          order, because the second is the only part anybody is worried about. */}
+      <p className="mt-2 text-sm text-muted">
+        A conversation left untouched this long has its agent shut down to free memory, and your next
+        message starts it again exactly where you left off.
+      </p>
+      {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
+    </>
   );
 }

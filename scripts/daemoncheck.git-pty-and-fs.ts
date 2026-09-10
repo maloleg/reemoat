@@ -396,6 +396,7 @@ process.stdout.write("\nwhat a form is allowed to be\n");
         type: "string",
         title: "Other",
         description: "Type your own answer instead of choosing an option above (optional).",
+        _meta: { _askUserQuestionCustomAnswer: { questionId: "question_0", isCustomAnswer: true } },
       },
     },
   } as never);
@@ -428,10 +429,16 @@ process.stdout.write("\nwhat a form is allowed to be\n");
    *
    * **Which is exactly why nothing here reads a field name.** Both projections
    * come out identical in shape — a titled single-select and a free-text box —
-   * and a client that had keyed on `_custom`, or on `_meta`, would render one
-   * agent's question and refuse the other's. `_meta` is dropped on the floor and
-   * the suffix is never parsed; the second field is a field like any other, and
-   * codex's own `isOtherAnswer` marker is left where it was sent.
+   * and a client that had keyed on `_custom` or on `__other` would render one
+   * agent's question and refuse the other's. The suffix is never parsed.
+   *
+   * ⚠ **One thing *is* read out of `_meta` now, and this comment used to say
+   * otherwise.** Both agents declare which question their free-text box answers —
+   * claude as `_askUserQuestionCustomAnswer`, codex as `codex.isOtherAnswer` — and
+   * both then use that text *instead of* the selection. `alternativeTo` is that
+   * one bit, projected to a scalar and asserted below on both shapes; the rest of
+   * `_meta` is still dropped on the floor. The difference from a suffix is the
+   * whole point: a declaration is the agent saying so.
    */
   const codexAsk = toElicitationForm({
     type: "object",
@@ -464,13 +471,77 @@ process.stdout.write("\nwhat a form is allowed to be\n");
     ],
   );
   check(
-    "its options survive with their prose, and the agent's _meta does not",
+    "its options survive with their prose, and the rest of the agent's _meta does not",
     codexAsk.fields[0]?.options,
     [
       { value: "MIT (Recommended)", label: "MIT (Recommended)", description: "A short, permissive license." },
       { value: "GPL-3.0", label: "GPL-3.0", description: null },
     ],
   );
+
+  /*
+   * ⭐ **Which question a free-text box answers, off both agents' own
+   * declarations.**
+   *
+   * The box and the question are two answers to one question and the agent keeps
+   * one — measured, claude's `applyAskElicitationResponse` returns the custom
+   * answer without ever reading the selection, and codex's
+   * `convertUserInputResponse` does the same with `?? `. A client that cannot see
+   * the relation draws both as picked and sends both, which on a single-choice
+   * question is two filled circles; that is what was reported.
+   *
+   * Asserted on **both** shapes together, because the whole value of projecting it
+   * is that a card cannot tell them apart — and separately on codex's *question*,
+   * whose own `codex` block carries `isOther` and no `questionId` and must not
+   * come out pointing at anything.
+   */
+  check(
+    "both agents' free-text boxes say which question they answer",
+    [
+      ask.fields.map((field) => field.alternativeTo),
+      codexAsk.fields.map((field) => field.alternativeTo),
+    ],
+    [
+      [null, "question_0"],
+      [null, "license_choice"],
+    ],
+  );
+  /*
+   * And a pointer resolves or it goes: a key naming no field on this form, or
+   * naming its own, would reach the client as a control that clears nothing — or
+   * clears itself.
+   */
+  const dangling = toElicitationForm({
+    type: "object",
+    properties: {
+      loose: {
+        type: "string",
+        title: "Other",
+        _meta: { _askUserQuestionCustomAnswer: { questionId: "no_such_field", isCustomAnswer: true } },
+      },
+      itself: {
+        type: "string",
+        title: "Other",
+        _meta: { codex: { questionId: "itself", isOtherAnswer: true } },
+      },
+    },
+  } as never);
+  check("a pointer to nothing is dropped, and so is one to itself", dangling.fields.map((f) => f.alternativeTo), [null, null]);
+  /*
+   * The marker is read strictly: exactly `true`, beside a string. codex puts a
+   * `codex` block on the question as well, and an agent saying something this has
+   * not measured is an agent this says `null` about.
+   */
+  const looseMarkers = toElicitationForm({
+    type: "object",
+    properties: {
+      q: { type: "string", title: "Q" },
+      a: { type: "string", title: "A", _meta: { codex: { questionId: "q", isOtherAnswer: "yes" } } },
+      b: { type: "string", title: "B", _meta: { _askUserQuestionCustomAnswer: { questionId: 7, isCustomAnswer: true } } },
+      c: { type: "string", title: "C", _meta: { _askUserQuestionCustomAnswer: { questionId: "  ", isCustomAnswer: true } } },
+    },
+  } as never);
+  check("a marker that is not exactly true, or names nothing, says nothing", looseMarkers.fields.map((f) => f.alternativeTo), [null, null, null, null]);
 
   // `enum` and `oneOf` are one shape by the time anything reads them, so a client
   // has one answer to "what is an option" and the daemon validates the reply

@@ -57,6 +57,17 @@ const USAGE = `cpctl — drive the Reemoat control plane
   setmachine <machineId> --name <n>         rename one you own
   enroll <machineId>                        mint a fresh enrollment code for one you own
   revoke <machineId>                        retire one you own
+  shares <machineId>                        who you have shared one of yours with
+  share <machineId> <userId> [--scopes a,b] share one of yours with somebody. They read
+                                            their own id off 'cpctl me' and tell you: there
+                                            is no directory an ordinary account may read,
+                                            and a name lookup here would be a way to test
+                                            whether an account exists
+  unshare <machineId> <userId>              take that back
+  leave <machineId>                         give up a share somebody made to you. The three
+                                            verbs above are the sharer's; this is the only one
+                                            the other person can run, and a share is written
+                                            without asking them
   token <machine>                           mint a short-lived token for one machine
 
   admin users                               every user
@@ -108,7 +119,10 @@ const USAGE = `cpctl — drive the Reemoat control plane
                                             required: a machine with no owner is outside
                                             the machine limit and outside the ban check
   admin setmachine <machineId> --name <n>   rename it
-  admin enroll <machineId>                  mint a single-use enrollment code
+  admin enroll <machineId>                  mint a single-use enrollment code. Refused (409) for a
+                                            machine that is enrolled and has an owner or grantees:
+                                            redeeming replaces their daemon rather than reading it,
+                                            so its owner mints their own with 'cpctl enroll' 
   admin revoke <machineId>                  revoke a machine
   admin relay                               tunnels connected, and how much each carried
   admin fleet                               what every machine is running, connected or not —
@@ -121,9 +135,12 @@ const USAGE = `cpctl — drive the Reemoat control plane
   admin retirekey <kid>                     retire an old one, once every daemon has re-enrolled
 
   admin grants [--limit N] [--offset N]     every grant, paged; says so when there are more
-  admin grant <userId> <machineId> [--scopes a,b]
-                                            grant a user access to a machine
-  admin ungrant <userId> <machineId>        remove a grant
+
+  ⚠ There is no 'admin grant' and no 'admin ungrant'. Sharing a machine is its
+    owner's act — 'cpctl share <machineId> <userId>' — because a grant is full
+    access to a machine that runs agents as its owner, and an admin writing one
+    for somebody else's machine was one request from that. The list above is
+    kept: seeing who holds what is not the power that was removed.
 
   --scopes    comma-separated; default session:read,session:write
   --json      print the raw response
@@ -717,6 +734,75 @@ async function main(): Promise<void> {
       show(body, () => out(`revoked. ${body.enrollmentCodesInvalidated} unused enrollment code(s) burned.`));
       return;
     }
+    /*
+     * Sharing, which replaces `cpctl admin grant`. The owner's own credential
+     * drives it, and a machine they do not own answers 404 rather than 403 — the
+     * same rule every other verb here follows, so that nobody can map the fleet
+     * by watching which ids answer differently.
+     *
+     * The user is named by id because there is no directory an ordinary account
+     * may read: adding a name lookup would be a way for any signed-in person to
+     * test whether an account exists. The other half of the flow is `cpctl me`,
+     * which is where the person being shared with reads their own id.
+     */
+    case "shares": {
+      const machineId = rest[0];
+      if (!machineId) fail("usage: cpctl shares <machineId>");
+      const body = await api<{ grants: { userId: string; name: string; scopes: string[] }[] }>(
+        `/v1/machines/${machineId}/grants`,
+      );
+      show(body, () => {
+        if (body.grants.length === 0) out("shared with nobody");
+        for (const grant of body.grants) out(`${grant.name}  ${grant.userId}  ${grant.scopes.join(",")}`);
+      });
+      return;
+    }
+    case "share": {
+      const [machineId, userId] = rest;
+      if (!machineId || !userId) fail("usage: cpctl share <machineId> <userId> [--scopes a,b]");
+      const scopes = (values.scopes ?? "session:read,session:write")
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+      const body = await api<unknown>(`/v1/machines/${machineId}/grants`, {
+        method: "PUT",
+        body: JSON.stringify({ userId, scopes }),
+      });
+      // Said out loud, because a grant is not a read-only thing and the default
+      // is not: `session:write` drives sessions and answers agents' questions.
+      show(body, () => out(`shared ${machineId} with ${userId}  ${scopes.join(",")}`));
+      return;
+    }
+    case "unshare": {
+      const [machineId, userId] = rest;
+      if (!machineId || !userId) fail("usage: cpctl unshare <machineId> <userId>");
+      const body = await api<{ outstandingTokensExpireWithinSeconds: number }>(
+        `/v1/machines/${machineId}/grants?userId=${encodeURIComponent(userId)}`,
+        { method: "DELETE" },
+      );
+      show(body, () =>
+        out(`revoked. Tokens already issued keep working for up to ${body.outstandingTokensExpireWithinSeconds}s.`),
+      );
+      return;
+    }
+    /*
+     * The one grant verb the *other* person can run. `unshare` above resolves
+     * through ownership and answers 404 to a grantee, so before this there was no
+     * way to refuse a share — and a share is written for any user id without
+     * asking them.
+     */
+    case "leave": {
+      const machineId = rest[0];
+      if (!machineId) fail("usage: cpctl leave <machineId>");
+      const body = await api<{ outstandingTokensExpireWithinSeconds: number }>(
+        `/v1/machines/${machineId}/grants/me`,
+        { method: "DELETE" },
+      );
+      show(body, () =>
+        out(`left. Tokens already issued keep working for up to ${body.outstandingTokensExpireWithinSeconds}s.`),
+      );
+      return;
+    }
     case "me": {
       const me = await api<{ id: string; name: string; isAdmin: boolean }>("/v1/me");
       show(me, () => out(`${me.name}  ${me.id}${me.isAdmin ? "  (admin)" : ""}`));
@@ -730,6 +816,21 @@ async function main(): Promise<void> {
           enrolled: boolean;
           scopes: string[];
           relayOnline: boolean;
+          /*
+           * Whose enrollment code this machine enrolled with, where that was not
+           * yours: a name, `a provisioning key`, `a deleted account`, or
+           * `somebody this control plane did not record` for a machine that
+           * enrolled before the column existed. `null` is your own code, or a
+           * machine that has never enrolled.
+           *
+           * Printed rather than available on `--json`, because it is the whole
+           * of what stands between an owner and a machine that is not theirs
+           * (`SECURITY.md`, "Machine substitution"), and a disclosure only a
+           * `curl` reader sees is not one. Optional so an older control plane —
+           * which does not send it — prints the row unchanged rather than
+           * `undefined`.
+           */
+          enrolledBy?: string | null;
         }[];
       }>("/v1/machines");
       show(body, () => {
@@ -743,7 +844,9 @@ async function main(): Promise<void> {
               `${machine.enrolled ? "" : "  [not enrolled]"}` +
               // Reachability outright now, not one of two paths: a machine with
               // no tunnel has no other door.
-              `${machine.relayOnline ? "  [online]" : "  [offline]"}  ${machine.scopes.join(",")}`,
+              `${machine.relayOnline ? "  [online]" : "  [offline]"}  ${machine.scopes.join(",")}` +
+              // Last, so it never pushes the columns above it out of line.
+              `${machine.enrolledBy ? `  [enrolled by ${machine.enrolledBy}]` : ""}`,
           );
         }
       });
@@ -1479,32 +1582,25 @@ async function admin(args: string[]): Promise<void> {
       });
       return;
     }
-    case "grant": {
-      const [userId, machineId] = rest;
-      if (!userId || !machineId) fail("usage: cpctl admin grant <userId> <machineId> [--scopes a,b]");
-      const scopes = (values.scopes ?? "session:read,session:write")
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter((entry) => entry.length > 0);
-      const body = await api<unknown>("/v1/admin/grants", {
-        method: "PUT",
-        body: JSON.stringify({ userId, machineId, scopes }),
-      });
-      show(body, () => out(`granted ${userId} -> ${machineId}  ${scopes.join(",")}`));
-      return;
-    }
-    case "ungrant": {
-      const [userId, machineId] = rest;
-      if (!userId || !machineId) fail("usage: cpctl admin ungrant <userId> <machineId>");
-      const body = await api<{ outstandingTokensExpireWithinSeconds: number }>(
-        `/v1/admin/grants?userId=${encodeURIComponent(userId)}&machineId=${encodeURIComponent(machineId)}`,
-        { method: "DELETE" },
+    /*
+     * `grant` and `ungrant` used to sit here and are deleted with the routes
+     * they drove. Sharing is `cpctl share` / `cpctl unshare`, run by the machine's
+     * owner — a grant is full access to a machine that runs agents as its owner
+     * with no sandbox, so an admin writing one for a machine they do not own was
+     * one request from arbitrary code execution on somebody's computer.
+     *
+     * Named in the refusal below rather than only removed, because the words are
+     * in scripts and in people's shell history: an unknown-command error that
+     * says nothing sends the reader to the usage text to guess which verb
+     * replaced it.
+     */
+    case "grant":
+    case "ungrant":
+      fail(
+        `there is no 'cpctl admin ${action}'. Sharing a machine is its owner's act: ` +
+          "'cpctl share <machineId> <userId>' and 'cpctl unshare <machineId> <userId>', " +
+          "run with that owner's credential. 'cpctl admin grants' still lists them.",
       );
-      show(body, () =>
-        out(`revoked. Tokens already issued keep working for up to ${body.outstandingTokensExpireWithinSeconds}s.`),
-      );
-      return;
-    }
     default:
       fail(`unknown admin command "${action ?? ""}"`);
   }

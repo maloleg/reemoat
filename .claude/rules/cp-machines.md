@@ -4,6 +4,8 @@ paths:
   - packages/control-plane/src/quota.ts
   - packages/web/src/quota.ts
   - packages/web/src/enrollment.ts
+  - packages/web/src/offer.ts
+  - packages/web/src/ui/MachineOffer.tsx
   - packages/web/src/ui/settings/MachinesSection.tsx
   - packages/web/src/ui/settings/MachineSection.tsx
 ---
@@ -27,19 +29,115 @@ because a legacy row has no single owner to ask about. The unique index on
 `resolveMachineRef` silently picking one and leaving the other unreachable by
 name. Q1.48.
 
-**`PUT /v1/admin/grants` is a sixth path that reaches the same state without
-naming anything, and it is knowingly open.** A grant hands somebody a machine
-already called something, so the collision arrives with no write to a label and
-no check on the way. It costs reachability rather than authority, `POST
-/v1/tokens` still checking the grant after resolving. Q1.501.
+**`PUT /v1/machines/:id/grants` is a sixth path that reaches the same state
+without naming anything, and it is knowingly open.** A grant hands somebody a
+machine already called something, so the collision arrives with no write to a
+label and no check on the way. It costs reachability rather than authority, `POST
+/v1/tokens` still checking the grant after resolving. The reasoning is unchanged
+by the move off `PUT /v1/admin/grants`: refusing would refuse a share over a
+collision only the *grantee* can see, which the sharer cannot see either. Q1.501.
 
-**Ownership is releasable and reassignable.** Revoking drops the
-`machine_owners` row in the same transaction (`releaseOwner`), giving back the
-label and one of `MAX_MACHINES_PER_USER`. `PUT /v1/admin/machines/:id/owner` is
-the way back: it writes the grant with the ownership row for
-`createOwnedMachine`'s reason, leaves the previous owner's grant alone —
-ownership and access are different verbs — and is how a **legacy** ownerless
-machine gets under the two gates below. Q1.43.
+**Sharing is the owner's verb, and the admin's two writes are deleted.** `PUT`
+and `DELETE /v1/admin/grants` upserted any `{userId, machineId}` on
+`requireAdmin` alone; a grant is full access to a machine that runs agents as its
+owner with no sandbox, so the pair was one request from an admin credential to
+code execution on somebody's computer. `PUT`/`DELETE /v1/machines/:id/grants`
+resolve through `ownedMachine`, refuse the owner's own grant on both verbs, and
+address the other person by **user id** — there is no directory an ordinary
+account may read, and a name lookup would be an account-existence oracle. `GET
+/v1/admin/grants` is kept: the read is not the power that was removed.
+**`INSERT INTO grants` appears in exactly three places**, and the invariant is
+that *no route under `/v1/admin` adds or widens a grant on a machine that already
+has an owner*.
+
+**A share is written without asking, so it has an exit.** `PUT` takes any
+`userId`, writes a permanent row and never consults the person named — and all
+three verbs above resolve through ownership, so the grantee could reach none of
+them. `DELETE /v1/machines/:id/grants/me` is theirs: their own grant only, no
+`userId` parameter (the caller *is* the subject, and a route taking an id would be
+`DELETE /v1/admin/grants` under another name), `409 grant_is_owner` on a machine
+they own, and the same `404 grant_not_found` for both "no such grant" and "no such
+machine". ⚠ **What the listing costs the recipient is why this is not cosmetic**:
+`GET /v1/machines` selects from `grants` with **no `LIMIT`** — the ceiling is over
+`machine_owners`, so nothing bounds shares *received* — the client builds a
+connection per row and mints a token for each on resume, and those tokens are
+counted against the same per-account write throttle as everything else.
+
+**Two admin guards key on state an admin can manufacture, and both are closed at
+the route that made it.** `dependants()` reads live `grants`, so deleting the last
+grantee of an ownerless enrolled machine turned it into a "genuinely orphan row" —
+adoptable with every scope. `DELETE /v1/admin/users/:id` now revokes such a machine
+rather than leaving it, scoped to rows that account was actually on. And `POST
+/v1/admin/machines/:id/enrollments` refuses `409 code_outstanding` over a live code
+somebody else minted: minting supersedes, so on an owned-but-not-yet-enrolled
+machine it silently killed the owner's in-flight install, repeatably, because
+`enrolled_at` never left NULL for the `machine_enrolled` guard to catch. The
+carve-outs are the wizard (a row with no code) and an admin re-minting their own.
+
+**Ownership is releasable and reassignable, but never away from a live owner.**
+Revoking drops the `machine_owners` row in the same transaction (`releaseOwner`),
+giving back the label and one of `MAX_MACHINES_PER_USER`. `PUT
+/v1/admin/machines/:id/owner` is the way back: it writes the grant with the
+ownership row for `createOwnedMachine`'s reason, leaves the previous owner's
+grant alone — ownership and access are different verbs — and is how a **legacy**
+ownerless machine gets under the two gates below. It now refuses `403
+machine_owned` when the machine has an owner other than the target, so what it
+adopts is an ownerless row and what it re-labels is a machine for the owner it
+already has. Adopting also **burns that machine's outstanding enrollment codes**,
+because the gate below protects minting and not redemption: a code kept from
+before an adoption otherwise still returns a tunnel key afterwards, so the machine
+acquires an owner and is then replaced under them. Q1.43.
+
+**Ownerless does not mean nobody depends on it, and both gates were keyed on the
+wrong thing.** A machine registered before ownership existed can be enrolled,
+online and carrying other people's grants — the state `nameVisibleToGrantees` is
+written for. Keyed on `ownerOf` alone, an admin could adopt such a row with every
+scope, or mint a code and re-enroll it out from under its grantees, and both
+answered 200. Both read `dependants()` now — owner **or** any grant — and adoption
+of a granted ownerless row is refused `403 machine_granted` unless the target is
+one of those grantees. That exception is not a hole: handing the row to somebody
+already on it is what regularises legacy data, and it is also the only route back
+for those grantees, since deleting the admin grant writes left them with no way to
+list, re-scope or revoke a share. An orphan row — enrolled, no owner, no grants —
+has nobody to ask and stays the operator's.
+
+**An admin may not mint an enrollment code for a machine that is enrolled *and*
+owned** (`409 machine_enrolled`). Redeeming one calls `issueTunnelKey`, which
+retires the running daemon's credential — so it does not read somebody's machine,
+it replaces it, and every grant-holder's traffic lands in the new process while
+the owner's list still reads owned and online. The owner's twin route allows
+exactly this and justifies it by *only the owner can ask*; that sentence does not
+transfer. Owned is the condition rather than enrolled alone, so `install.sh`'s
+wizard (a row created one line earlier) and a legacy row with nobody to ask both
+still work.
+
+**What no refusal closes is machine *substitution*, so it is made visible
+instead.** Revoke somebody's machine, register a new one for them under the name
+`releaseOwner` just freed, mint its first code and redeem it on your own
+hardware: their list draws the name they lost, owned and online, and it is your
+computer. Every step is a route that has to stay — revoking is the denial side,
+and registering a machine for somebody is what the installer's wizard does. Both
+obvious refusals restore a fixed bug: keeping the label on revoke brings back "a
+409 naming a machine that appears in no list", and teaching `nameVisibleTo` about
+revoked rows refuses the owner their own recreate. So `GET /v1/machines` carries
+**`enrolledBy`**, naming whoever's code brought the machine online when that was
+not the reader — drawn on the machine row and printed by `cpctl machines`, since a
+disclosure only a `curl` reader sees is not one.
+
+**It is read off `machines.enrolled_by`, written at the redemption it describes,
+and deriving it from `enrollment_codes` instead is the thing not to go back to.**
+That spelling shipped first and was wrong four ways, every one of them answering
+`null` — which the route reports as *you enrolled this yourself*. The sweep takes
+the row after seven days; `created_by` is left dangling by design when an account
+is deleted, so an inner join lost it with the account; `POST /v1/provision` writes
+a `pk_` id no user matches; and `used_at` is stamped by four burn paths as well as
+by redemption, so the owner minting a replacement code twice overwrote the name
+with their own. It also scanned the fleet's whole code history per request on a
+route polled every four seconds. ⚠ What survives all that is the field's real
+limit: the installer's wizard enrolls on an **admin's** code, so every
+wizard-installed machine names an admin and a substitution draws the same row as a
+normal install. It is a name to recognise, not an alarm; re-enrolling the machine
+yourself sets it back to you.
 
 **`created_at` on that row is when this user *acquired* the machine, and it
 decides which machine dies.** That route writes a fresh one on a transfer and
@@ -182,3 +280,20 @@ appears without a wake.
 |---|---|
 | Grants listing | 500 per page, 2000 max, with a `total` |
 | Machines per user | **Ceiling 50; the limit is `machines.per_user`**, unset resolving to 50. Plus **one live enrollment code each** — minting burns the previous, which is why "how many codes may somebody hold" is not a number. The count is `machine_owners` rows with **no revoked filter**, so a revoke has to `releaseOwner` or the slot is spent for ever; `PUT …/owner` counts rows for *other* machines, so re-labelling one you already own is never your fifty-first |
+
+**The offer to rent a machine is drawn only where a machine may still be added.**
+`REEMOAT_CP_MACHINES_OFFER_URL` is read once in `main.ts` and is unset by
+default — environment-only on purpose, see `cp-accounts.md`. It is published on
+`GET /v1/instance` as `machines.offer`, `machineOffer` reads it
+fail-closed, and `machineOfferHref` puts `me.email` in the query with
+`URLSearchParams` — never concatenation, which loses the whole query into a
+fragment on a base ending `#…`. `MachineOffer` draws it, decides for itself
+whether to draw at all, and appears in `MachinesSection`, `SessionBrowser` and
+`AppShell` only, always **inside the `mayAddMachine`/`canAdd` arm and below
+`installCommand`**. Both halves are asserted by
+`webcheck.shell-and-enrollment.ts`. In the other arm it would sell a host this
+control plane refuses at the dial — a bought machine comes back here to enroll
+and that needs a free slot — beside the very sentence saying there is none, which
+is `machineQuotaNotice`'s `null`-iff-`mayAddMachine` property read out loud.
+Below the command because the two pinned proximity windows above it end at
+`installCommand(`; an offer inserted before it lengthens them.

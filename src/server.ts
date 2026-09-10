@@ -66,7 +66,14 @@ import {
   probeRequestable,
   safeRelPath,
 } from "./changes.js";
-import { estimateBytes, oldestAvailable, type StoredEvent } from "./events.js";
+import {
+  estimateBytes,
+  keepsItsConversation,
+  oldestAvailable,
+  type StoredEvent,
+  type MachineSettingKey,
+  isMachineSettingKey,
+} from "./events.js";
 import { GitError } from "./git.js";
 import {
   bearerToken,
@@ -80,7 +87,6 @@ import {
 import { containedInResolved } from "./paths.js";
 import { inspectWorkspace, listWorktrees, removeWorkspace, WorktreeError, type RemoveRefusal } from "./worktree.js";
 import {
-  autoResumable,
   awaitingHuman,
   describeResumeFailure,
   MAX_TITLE_CHARS,
@@ -93,6 +99,8 @@ import {
   type SessionRegistry,
   type SessionSnapshot,
   type WorktreePolicy,
+  MAX_IDLE_RELEASE_MINUTES,
+  type MachineSettingsPort,
 } from "./registry.js";
 
 /**
@@ -203,6 +211,39 @@ const MAX_MODEL_CHARS = 256;
 
 /** Ceiling on what somebody calls an agent they assembled. */
 const MAX_AGENT_NAME_CHARS = 80;
+
+/**
+ * What each machine setting will accept, and the sentence it refuses with.
+ *
+ * ⚠ **A `Record` over the key union rather than one `if` inside the loop, for the
+ * reason `MACHINE_SETTING_MEMBERS` is a `Record` and not an array.** The loop used
+ * to apply *this* setting's semantics — a whole number of minutes, `0` to
+ * {@link MAX_IDLE_RELEASE_MINUTES} — to every `MachineSettingKey` there is, and
+ * interpolate the offending key's name into a sentence about minutes. Today that
+ * is right by coincidence, the union having one member; the day a second key is
+ * added it silently inherits a range it has nothing to do with and a refusal that
+ * describes the wrong thing, and nothing catches it, because the union is closed
+ * and compile-checked while the rule beside it was neither.
+ *
+ * Written this way a key added to the union is a compile error here until its rule
+ * is written — which is the whole discipline `MACHINE_SETTING_MEMBERS` exists for,
+ * applied to the half that actually varies per key.
+ *
+ * `null` means the value is acceptable; anything else is the refusal, already
+ * worded for the caller. Indexed only with a key `isMachineSettingKey` has
+ * narrowed — that guard is an `Object.hasOwn`, so a body carrying `__proto__` or
+ * `constructor` is refused as unknown before it can reach this table and read a
+ * member off `Object.prototype`.
+ */
+const MACHINE_SETTING_RULES: Record<MachineSettingKey, (value: unknown) => string | null> = {
+  idleReleaseMinutes: (value) =>
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_IDLE_RELEASE_MINUTES
+      ? null
+      : `idleReleaseMinutes must be a whole number of minutes between 0 and ${MAX_IDLE_RELEASE_MINUTES}`,
+};
 
 /**
  * Ceiling on how many positions the agent strip may remember.
@@ -369,6 +410,16 @@ export interface ServerOptions {
    */
   systems?: SystemStores;
   /**
+   * Where this machine's own preferences live, or nothing.
+   *
+   * Absent — every offline driver that builds no store — `GET /settings` answers
+   * with what is in force, and `PATCH` refuses `503`. That asymmetry is deliberate: a person on a store-less daemon
+   * can still be *told* how long a quiet conversation keeps its agent, which is a
+   * fact about the machine either way; what they cannot do is change it, and a
+   * refusal says so where an empty form would not.
+   */
+  machineSettings?: MachineSettingsPort;
+  /**
    * Where a sessionless agent question runs, or nothing.
    *
    * Needed by `GET /agents/capabilities`, which spawns an agent to read what it
@@ -423,6 +474,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const { registry, verifier, instanceId, startedAt } = options;
   const credentials = options.credentials;
   const systems = options.systems ?? null;
+  const machineSettings = options.machineSettings ?? null;
   const asks = options.asks ?? null;
   const logins = options.logins ?? null;
   const uploads = options.uploads ?? null;
@@ -1647,6 +1699,95 @@ export function createApp(options: ServerOptions): AppBundle {
    * `shownHere` is a screen.
    * ---------------------------------------------------------------- */
 
+  /**
+   * How long a conversation may sit untouched before its agent is shut down.
+   *
+   * ⚠ **The first daemon setting with a control on a screen, and the rule it does
+   * not break is that the daemon's *config* is env only.** `REEMOAT_*` is read in
+   * `scripts/daemon.ts`, nothing in `src/` touches `process.env`, and an operator
+   * provisioning a fleet still writes an env file. What this is, is the narrower
+   * class whose owner is the person *using* the machine: their own trade between
+   * memory and a 1.3s wait, on their own machine. Q2.225.
+   *
+   * A saved value **overrides** `REEMOAT_IDLE_PARK_MINUTES`, which is therefore the
+   * default for a machine nobody has set rather than a policy the screen has to
+   * explain itself against. The answer carried a `source` for one round saying
+   * which of the two was in force; it is gone with the line it fed — see the
+   * `PATCH` below and `MachineSettingsView`.
+   */
+  app.get("/settings", read, (c) => {
+    return c.json({ settings: registry.machineSettings() });
+  });
+
+  /**
+   * Change one, or give it back.
+   *
+   * `PATCH` rather than `PUT`, and the difference from `/agent-strip` one route
+   * down is the body: that one is a whole list and replacing it wholesale is the
+   * only coherent write, while this is a table of independent settings where a
+   * client sending the ones it happens to know would silently reset the ones it
+   * does not. An older client must be able to write this without erasing a key a
+   * newer daemon has.
+   *
+   * ⚠ **There is no "give it back".** This accepted `null`, which forgot the stored
+   * value so `REEMOAT_IDLE_PARK_MINUTES` applied again — and the only thing that
+   * could express it was a line on the settings screen saying which of the two was
+   * in force, which the owner removed as noise about env files on a screen that
+   * mentions none. With no reader the branch was a capability nothing could reach.
+   * The variable is the default for a machine nobody has set; the way back to it
+   * is typing the number.
+   */
+  app.patch("/settings", write, async (c) => {
+    if (machineSettings === null) {
+      return jsonError(c, 503, "settings_unavailable", "this daemon has no durable store for settings");
+    }
+    const body = await requireJson(c);
+    if (body instanceof Response) return body;
+
+    /*
+     * ⚠ **The whole body is weighed before any of it is written, and the two
+     * loops are the point rather than a tidier shape.**
+     *
+     * This was one loop that validated and wrote each key as it went, so a body
+     * whose *second* key was bad persisted the first and then answered `400` — and
+     * the early return skipped `applyMachineSettings` on the way out, so the
+     * durable table and the running daemon disagreed until the next restart. The
+     * comment below promises the exact opposite of that, and a refused request
+     * silently changing machine-wide policy at the next boot is the worst version
+     * of it: nothing on any screen would say the number had moved.
+     *
+     * Reachable today, with one key in the union, as `{idleReleaseMinutes: 5,
+     * anythingElse: 1}` — the unknown key is refused *after* the known one is
+     * written. Every refusal the drivers had was a single-key body, which is why
+     * "none of which changed what is stored" passed over it.
+     *
+     * A `PATCH` naming several settings is therefore all-or-nothing **against a
+     * refusal**, which is the only coherent reading of a route whose own docblock
+     * is written for older clients sending subsets.
+     *
+     * ⚠ **Against the store it is not, and the distinction is stated rather than
+     * implied.** `MachineSettingsPort` is two methods with no transaction seam, so
+     * a `write` that threw on the second key would still leave the first — the same
+     * drift by a different door. Unreachable while `MachineSettingKey` has one
+     * member, and the seam to close it if that changes is the port, not this loop.
+     */
+    const wanted: [MachineSettingKey, string][] = [];
+    for (const [key, value] of Object.entries(body)) {
+      if (!isMachineSettingKey(key)) {
+        return jsonError(c, 400, "unknown_setting", `this daemon has no setting called "${key}"`);
+      }
+      const refusal = MACHINE_SETTING_RULES[key](value);
+      if (refusal !== null) return jsonError(c, 400, "invalid_setting", refusal);
+      wanted.push([key, String(value)]);
+    }
+    for (const [key, value] of wanted) machineSettings.write(key, value);
+    // Applied to the running daemon before the answer, so the value the caller
+    // reads back is one that is already in force rather than one that will be at
+    // the next restart.
+    registry.applyMachineSettings();
+    return c.json({ saved: true, settings: registry.machineSettings() });
+  });
+
   app.get("/agent-strip", read, (c) => {
     if (systems === null) {
       return jsonError(c, 503, "systems_unavailable", "this daemon has no durable store for systems");
@@ -2607,9 +2748,11 @@ export function createApp(options: ServerOptions): AppBundle {
    * and it is opt-in so no existing caller changes behaviour.
    *
    * **Truncation is only safe because the order changes with it.** With a `limit`
-   * the list is returned blocked-first, then everything else still live, then the
-   * most recent terminal sessions — so dropping the tail can only ever drop the
-   * rows nobody is waiting on. Returning creation order and cutting it would let a
+   * the list is returned blocked-first, then pinned, then everything else still
+   * live, then the most recent terminal sessions — so dropping the tail can only
+   * ever drop the rows nobody is waiting on. (`pinned` was missing from this
+   * sentence for as long as it has been in `listRank`. A *position* is absent from
+   * both on purpose — see the note there.) Returning creation order and cutting it would let a
    * limit hide the one blocked session the whole product exists to surface. The
    * reorder therefore happens exactly when a cut can happen, and not otherwise.
    *
@@ -2856,23 +2999,13 @@ export function createApp(options: ServerOptions): AppBundle {
     const workspace = await workspaceReady(c, managed);
     if (workspace) return workspace;
 
-    if (
-      managed.terminal &&
-      registry.autoResumeEnabled &&
-      // The same gate the boot pass uses: an agent that has told us it no longer
-      // holds this conversation will say it again, and spawning one per typed
-      // message to hear it is worse than answering from what we already know.
-      !managed.resumeSettled &&
-      autoResumable(managed.exit, managed.agentSessionId, "prompt")
-    ) {
-      try {
-        await managed.resume();
-      } catch {
-        // Swallowed on purpose — `managed.resume()` restores the original exit,
-        // so the arm below still reports how the session actually ended rather
-        // than how this attempt to revive it did.
-      }
-    }
+    /*
+     * Wake it if it needs waking. The whole condition — including why `parked` sits
+     * outside `REEMOAT_AUTO_RESUME` — is `SessionRegistry.wakeForPrompt`, which
+     * lives there because the plugin API's `sessions.prompt` is the second caller
+     * and reached `ManagedSession.prompt` without it.
+     */
+    await registry.wakeForPrompt(managed);
 
     /*
      * `/clear` is carried out here, not forwarded.
@@ -3281,7 +3414,7 @@ export function createApp(options: ServerOptions): AppBundle {
     const body = await requireJson(c);
     if (body instanceof Response) return body;
 
-    const change: { title?: string | null; pinned?: boolean } = {};
+    const change: { title?: string | null; pinned?: boolean; rank?: number | null } = {};
 
     if ("title" in body) {
       const title = body["title"];
@@ -3303,8 +3436,26 @@ export function createApp(options: ServerOptions): AppBundle {
       change.pinned = pinned;
     }
 
-    if (change.title === undefined && change.pinned === undefined) {
-      return jsonError(c, 400, "bad_request", 'body must carry at least one of {"title"} or {"pinned"}');
+    /*
+     * Where this session sits in the list. `null` clears it back to "follows its
+     * age", exactly as `title: null` clears a name.
+     *
+     * ⚠ **`Number.isFinite`, not `typeof === "number"`.** `JSON.parse` answers
+     * `Infinity` for `1e400` and this value is compared against every other
+     * session's on every render — an infinite one pins a row to the top of its
+     * folder for ever, and `NaN` makes the comparator answer 0 for every pair,
+     * which is a total order the sort silently stops being.
+     */
+    if ("rank" in body) {
+      const rank = body["rank"];
+      if (rank !== null && !(typeof rank === "number" && Number.isFinite(rank))) {
+        return jsonError(c, 400, "bad_request", "rank must be a finite number or null");
+      }
+      change.rank = rank;
+    }
+
+    if (change.title === undefined && change.pinned === undefined && change.rank === undefined) {
+      return jsonError(c, 400, "bad_request", 'body must carry at least one of {"title"}, {"pinned"} or {"rank"}');
     }
 
     // The whole snapshot, never an echo — same reason `/config` above answers this
@@ -3620,9 +3771,32 @@ export function createApp(options: ServerOptions): AppBundle {
   }));
 
   app.delete("/sessions/:id/workspace", admin, withSession(async (c, managed) => {
-    // Checked first: removing a worktree out from under a running agent breaks it
-    // in a way that is hard to diagnose from the inside.
-    if (!managed.terminal) {
+    /*
+     * Checked first: removing a worktree out from under a running agent breaks it
+     * in a way that is hard to diagnose from the inside.
+     *
+     * ⚠ **`keepsItsConversation` rather than `!terminal`, and the widening is a
+     * repair.** `terminal` used to mean two things at once — "there is no process"
+     * and "this conversation is over" — and parking split them: a parked session
+     * is terminal with no process, and the daemon has promised to bring it back on
+     * the next message. So this guard, which is about the *second* meaning, began
+     * admitting exactly the conversations somebody is most likely to return to.
+     *
+     * Removing that worktree is unrecoverable rather than merely rude:
+     * `workspaceReady` runs **before** the resume block in `POST
+     * /sessions/:id/prompt`, so every later message answers `409
+     * workspace_missing` and the wake is never attempted; the boot probe's `false`
+     * is settled and never retried; and no route re-creates a worktree for a
+     * session that already exists. The row is `keepsItsConversation`, so the prune
+     * will not take it either — unreachable and undeletable.
+     *
+     * The same reading covers `interrupted`, which the old guard also admitted: a
+     * session the daemon is bringing back at the next boot is stranded by this in
+     * the identical way. Both are now refused with the sentence that was always
+     * the remedy — **Stop it first**, which writes a reason that keeps no
+     * conversation and makes the worktree removable.
+     */
+    if (!managed.terminal || keepsItsConversation(managed.exit)) {
       return jsonError(c, 409, "session_live", "stop this session before removing its worktree", {
         status: managed.status,
       });
@@ -4768,9 +4942,34 @@ function errnoError(c: Context, error: unknown, fallback: 400 | 404): Response |
  * outranking an unpinned live one is likewise intended — the person said to keep
  * it, and a `?limit=` cut that dropped it would make the pin a lie.
  *
+ * ⚠ **`rank` is deliberately not read here, and it was for one release.** A tier
+ * of its own sat between the pin and liveness, on the argument that dragging a row
+ * is the pin's statement made through a different gesture. Two measurements took
+ * it back out, and both are about a position not being the rare, deliberate,
+ * per-row thing a pin is:
+ *
+ * - **It outranked liveness, and the window is sixty rows.** `SESSION_LIST_LIMIT`
+ *   in `packages/web/src/store.ts` is 60 per machine, so sixty positioned
+ *   *terminal* rows hid every running session on that machine from the rail. A pin
+ *   cannot reach that count by hand; a position can, because `resolveDrop`'s
+ *   re-space writes one to a whole folder at once.
+ * - **Which also made "they said something about this row" false of the row.**
+ *   After a re-space the daemon holds a `rank` for rows nobody touched, so reading
+ *   one as an expressed preference is exactly the inference the paragraph below
+ *   forbids.
+ *
+ * **A position is the reader's display order and buys no retention.** The startup
+ * prune in `store/sqlite.ts` reads `pinned` and never `rank`, and that is the
+ * agreed answer rather than a divergence somebody should close: a pin says "keep
+ * this", a position says "show it here". Restoring the tier means teaching the
+ * prune at the same time — the two have to move together, or this route promises a
+ * durability the sweep does not honour and a transcript goes at seven days.
+ *
  * This is the daemon's *truncation* order, which is a different question from the
- * client's *display* order (`sessionLists` in `packages/web`). They are allowed to
- * differ: this decides what survives a cut, that decides what a person reads first.
+ * client's *display* order (`orderSessions` in `packages/web`). They are allowed to
+ * differ: this decides what survives a cut, that decides what a person reads first
+ * — and since the client's order is the reader's own, nothing here may be derived
+ * from it at all.
  *
  * Derived from the pending arrays rather than from `status === "blocked"` so it
  * stays right if the derived status ever gains a state that also has something

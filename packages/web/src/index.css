@@ -41,8 +41,11 @@
 /*
  * A control surface for a phone in daylight, and for a desktop browser beside it.
  *
- * **One palette, and it has no hue.** Light, warm, paper-coloured, with the whole
- * app drawn in values of a single near-black. There is no dark block any more and
+ * **One palette, and it is monochrome apart from four named exceptions.** Light,
+ * warm, paper-coloured, with the whole app drawn in values of a single
+ * near-black. The exceptions are `danger`, the diff's `add`/`del`, and `offer`;
+ * each is argued at its own declaration below, and the count is the point — a
+ * hue here is a thing somebody decided, not a thing somebody reached for. There is no dark block any more and
  * `prefers-color-scheme: dark` is deliberately ignored: everything that used to be
  * carried by colour — a waiting session, a failed one, a removed diff line, a
  * keyword in a code fence — is carried by fill, ring, weight, motion or shape
@@ -220,6 +223,46 @@
   --color-add-ink: #2c5730;
   --color-del: #f6e6e2;
   --color-del-ink: #77332a;
+
+  /*
+   * The third hue, and the first one on a **control** rather than on content.
+   *
+   * ⚠ **The paragraph above bounds hue to content and says so in as many words;
+   * this is the exception to it, and it is the owner's call of 2026-09-06 rather
+   * than a case the argument covers.** Writing that down instead of quietly
+   * widening the rule is the point: the next reader should find one named
+   * exception, not a paragraph that has stopped being true.
+   *
+   * What keeps it from being a licence is the constraint the diff tints are held
+   * to, applied unchanged: **the fill is tinted and the text is not.** The label
+   * is `text-fg` — 14.74 on this, against `add`'s 14.68 — so nothing about
+   * legibility rests on the hue, and the control says what it is without it: the
+   * word `Or` on the rule above it, a border, an external-link glyph, and a verb
+   * for a label. In greyscale it reads exactly the same.
+   *
+   * **Bounded to one control in the app**, which `webcheck` asserts by sweeping
+   * for the utility. One is what a fill this size can be: `danger`'s "never more
+   * than one in a view" is the same sentence about a different colour, and the
+   * reason both need saying is that a second tinted control turns a palette into
+   * a decoration scheme.
+   *
+   * Measured against the palette's own grades, on the same warm axis as
+   * everything else here and deliberately quiet — 1.179 from `surface`, between
+   * `add` (1.184) and a tool card (1.10). Warm sand rather than a green or a red,
+   * because those two are spoken for one paragraph up and a buyer's button that
+   * reads as an added diff line is a worse joke than a grey one.
+   *
+   * ⚠ **Measured from `ink` as well, and that is a constraint the diff tints do
+   * not carry.** They are drawn on `surface` only and their own docblock records
+   * that on `raised` they vanish (1.034, 1.010). This one is drawn on `ink` in
+   * the rail *and* on `surface` in the pane and the settings sheet, so it has to
+   * survive both: 1.110 from `ink`, which is a tool card's step and reads.
+   *
+   * `-ink` is the glyph and the border alone, never the label: 7.17 on the tint,
+   * beside `add-ink`'s 7.06 and `del-ink`'s 7.57.
+   */
+  --color-offer: #f2ecdd;
+  --color-offer-ink: #5f4a1e;
 
   /* A scale, replacing the `text-[11px]` / `text-[10px]` arbitrary values that
      were scattered through every component with no relationship between them.
@@ -453,6 +496,56 @@
     }
   }
 
+  /*
+   * The same two movements leaving, and they need **names of their own**.
+   *
+   * `sheet-close` two hundred lines down takes a leaving panel off the screen
+   * through a view transition, and it can only do that because `router.ts` wraps
+   * the navigation that unmounts it: the old frame still exists to animate.
+   * `AgentConfigBar`'s config picker has no route — see its own docblock for why
+   * it cannot be a `Sheet` — so nothing holds a snapshot of it, and it has to keep
+   * itself mounted for the length of its own exit instead.
+   *
+   * ⚠ **This was `sheet … reverse` and `scrim … reverse`, and it never played.**
+   * Reusing the arrival's keyframes and flipping the direction is the tidier
+   * description of one movement, and here it is a no-op: an element keeps its
+   * running animation for as long as the `animation-name` list is unchanged, so
+   * swapping `animate-sheet` for `animate-sheet-out` on the **same node** edits
+   * the direction and fill of an animation that finished 260ms ago rather than
+   * starting one. It stays in its after phase, and `both` then holds what
+   * reversal has made the final frame — the 0% keyframe, off the bottom of the
+   * screen. So the panel vanished in a single frame, on a phone, with every check
+   * green and the utility emitted: reported as *"it slides out but does not slide
+   * back"*. Distinct names restart it, and that is the whole of the fix.
+   *
+   * The numbers are therefore written twice after all, and what keeps the two
+   * halves one movement is that the easing is the arrival's curve **mirrored**
+   * — `cubic-bezier(1 - x2, 1 - y2, 1 - x1, 1 - y1)` — rather than a curve chosen
+   * again. `both` because the last frame has to hold, or the panel snaps back up
+   * between the animation ending and React unmounting it.
+   *
+   * ⚠ **260ms is also a number in `AgentConfigBar.tsx`**, which is what times the
+   * unmount. `webcheck` reads this file and asserts the two agree — a timer
+   * shorter than the animation cuts it off mid-slide, and a longer one leaves a
+   * finished panel sitting on the screen — and that neither exit names the
+   * keyframes its arrival does, which is the assertion the frame above cost.
+   */
+  --animate-sheet-out: sheet-out 260ms cubic-bezier(1, 0, 0.68, 0.28) both;
+
+  @keyframes sheet-out {
+    to {
+      transform: translateY(100%);
+    }
+  }
+
+  --animate-scrim-out: scrim-out 260ms ease-in both;
+
+  @keyframes scrim-out {
+    to {
+      opacity: 0;
+    }
+  }
+
   @keyframes blink {
     0%,
     100% {
@@ -552,7 +645,7 @@ body {
 }
 
 /*
- * Telegram draws its own controls **over** the page, and `env()` does not know.
+ * Telegram draws its own controls over the page, and `env()` does not know.
  *
  * ⚠ Reported with a screenshot: inside the Telegram mini app the client's
  * floating pill — ✕ Close top-left, ⌄ ⋯ top-right — sat directly on the session
@@ -561,18 +654,55 @@ body {
  * something Telegram paints inside the same viewport afterwards, so on a phone
  * with no notch the inset is 0 and the header starts underneath the buttons.
  *
- * Which is why this is a floor rather than an addition. Adding to `env()` would
- * double-count on a notched device, where the pill is drawn *below* the notch and
- * the two insets describe the same strip of screen. 3.25rem clears the pill on
- * iOS and Android; the `max()` means whichever is larger wins and neither is
- * assumed to be.
+ * ⚠ **And then the same literal cost a band of empty screen, reported with a
+ * second screenshot — because there are three states here and `[data-telegram]`
+ * distinguishes none of them.**
+ *
+ *   1. Telegram floats its chrome **over** the page. The page must spend the room.
+ *      This is the state the 3.25rem was measured against.
+ *   2. Telegram draws its header as a **bar above** the webview, which is the
+ *      ordinary presentation. It overlaps nothing, the honest inset is 0, and the
+ *      literal is 52px of nothing under a bar that already reserved its own space.
+ *   3. A client too old to say which.
+ *
+ * `env()` cannot separate them and never could: **it reads 0 inside a mini-app
+ * webview whatever the device** (Telegram-iOS #1377, open), so the `max()` had
+ * exactly one live term and it was the constant. That is the sentence that stops
+ * the next reader deleting `--tg-chrome-top` as redundant with `env()`.
+ *
+ * So the number is asked for rather than assumed — `watchTelegramInsets` posts
+ * `web_app_request_safe_area` and `web_app_request_content_safe_area` and writes
+ * the answer here. **The 3.25rem is now the value of the fallback rather than a
+ * floor under the answer**, which bounds this change to clients that actually
+ * reply: state 3 keeps precisely the header it had.
+ *
+ * Still a `max()` and still never an addition **at this line** — Q3.443's rule is
+ * untouched, and the one addition is between Telegram's own two numbers, argued at
+ * `telegramInsets` where both are in scope. `0.5rem` leads it so that an answer of
+ * `0` falls back to the ordinary `.pt-safe` floor rather than to nothing: state 2
+ * still needs a title that is not against the top edge.
  *
  * Scoped to `[data-telegram]`, written by `main.tsx` only when the bridge is
  * actually injected — so an ordinary browser, and a phone home-screen shortcut,
  * keep exactly the header they had.
  */
+:root[data-telegram] {
+  --tg-chrome-top: 3.25rem;
+  /*
+   * Zero, and that is today's behaviour rather than a guess. `.pb-safe` already
+   * resolves to its own 0.75rem floor inside Telegram — `env(safe-area-inset-
+   * bottom)` being 0 there for the reason above — so a fallback of 0 changes
+   * nothing for a client that cannot answer, and a client that can finally puts
+   * the approve buttons above the home indicator, which is the thing
+   * `viewport-fit=cover` was supposed to buy and silently did not.
+   */
+  --tg-chrome-bottom: 0px;
+}
 :root[data-telegram] .pt-safe {
-  padding-top: max(3.25rem, env(safe-area-inset-top));
+  padding-top: max(0.5rem, var(--tg-chrome-top), env(safe-area-inset-top));
+}
+:root[data-telegram] .pb-safe {
+  padding-bottom: max(0.75rem, var(--tg-chrome-bottom), env(safe-area-inset-bottom));
 }
 
 /*
@@ -641,8 +771,10 @@ body {
  * iOS Safari zooms the viewport when a text field whose font is under 16px takes
  * focus, and it does not zoom back out afterwards — the app is left panned and
  * oversized until you pinch it back by hand, on every single tap into the
- * composer. `--text-sm` is 13px and `--text-xs` is 12px, and every input,
- * textarea and select in this app is one of those, so that is every field.
+ * composer. `--text-sm` is 14px and `--text-xs` is 13px, and every input,
+ * textarea and select in this app is one of those, so that is every field —
+ * still under 16px after the scale moved up a notch, which is what keeps this
+ * rule load-bearing rather than historical.
  *
  * The other cure is `maximum-scale=1` (or `user-scalable=no`) in the viewport
  * tag, which fixes it by switching pinch zoom off for everybody — including the
@@ -1280,6 +1412,53 @@ ol.md-paren > li::marker {
 }
 
 /*
+ * The config sheet's whole geometry, as four custom properties with defaults.
+ *
+ * **A class rather than utilities, and properties rather than a `style` prop, for
+ * `AppShell`'s reason one control further in.** The rail's drag writes
+ * `--rail-w` straight onto the node instead of going through React, because a
+ * pointer moves sixty times a second and the alternative is sixty renders. This
+ * sheet is the same gesture over a worse list: opencode publishes 362 model rows
+ * and every one of them is a `<button>` this component draws, so a render per
+ * frame is a render of all of them, and the finger would arrive somewhere the
+ * panel had not.
+ *
+ * So the defaults **are** the resting sheet — content height, capped at 60dvh, no
+ * offset — and everything else is written on top of them by the gesture. React
+ * sets no `style` on this element at all, which is also what keeps the two out of
+ * each other's way: an inline property and a utility class settle by specificity
+ * and emission order, and this file's `FIELD` note is about exactly that trap.
+ *
+ * `--sheet-min` is not decoration. A `max-height` alone does nothing to a panel
+ * already shorter than it, so a four-row effort picker could not be pulled open
+ * while a model list could — one row, two chips, two behaviours.
+ *
+ * ⚠ **The duration is a literal and the *switching off* is an inline
+ * `transition: none`, which is a correction.** It was a fifth property,
+ * `--sheet-settle`, substituted into this shorthand and set to `0s` for the length
+ * of a gesture. A `var()` inside a shorthand makes every longhand it expands to a
+ * pending-substitution value, resolved after the cascade, and that is a thin place
+ * in more than one engine — it is also simply harder to reason about than a
+ * property nothing has to substitute. `AgentConfigBar` writes `style.transition`
+ * directly instead, which is one inline longhand that cannot lose to anything.
+ *
+ * 300 rather than `--animate-sheet`'s 260 because this is a settle from wherever a
+ * hand let go rather than a fixed journey, and that curve reads as abrupt over
+ * twenty pixels.
+ */
+.config-sheet {
+  height: var(--sheet-h, auto);
+  min-height: var(--sheet-min, 0);
+  max-height: var(--sheet-max, 60dvh);
+  transform: translateY(var(--sheet-y, 0));
+  transition:
+    height 300ms ease-out,
+    min-height 300ms ease-out,
+    max-height 300ms ease-out,
+    transform 300ms ease-out;
+}
+
+/*
  * Press feedback, as a second class rather than by widening `.tap`.
  *
  * `transform` deliberately stays out of the list above: `.tap` is on every row of
@@ -1321,6 +1500,14 @@ ol.md-paren > li::marker {
  * is taking on the job of showing a keyboard user where they are. The composer's
  * textarea is the one place that holds, because a text caret is a focus indicator
  * in its own right — nothing else here should use it.
+ *
+ * **A `tabindex` container is deliberately *not* in this list, and `AskCard`'s
+ * panel is the case.** It is a `role="dialog"` that takes the caret when a request
+ * parks, and what it was drawing was the **browser's** own ring, not this one — so
+ * the instrument there is a plain `outline-none` utility, which beats a UA default
+ * without needing anything from here. `.no-focus-ring` would have been a no-op on
+ * it. The line between the two is worth keeping: this rule owns every control a
+ * keyboard can reach, and a programmatically-focused container is not one.
  *
  * **`[role="separator"][tabindex]` is in the list rather than styling its own**,
  * which is this rule's whole argument applied the first time something new arrived

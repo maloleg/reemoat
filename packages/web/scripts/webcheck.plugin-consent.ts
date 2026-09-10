@@ -440,6 +440,38 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
   );
   check("a binary tar size field is refused rather than read as zero", binarySize.kind, "unreadable");
 
+  /*
+   * 6b. The *negative* octal size, which is the same field read the other way and
+   * the half of `archive.ts:912` this reader had dropped. `tarOctal` is forgiving
+   * of what somebody else wrote — `Number.parseInt` takes a leading minus, and bit
+   * 7 stays clear, so `-0000001000` never reaches the base-256 arm above and comes
+   * back as -512.
+   *
+   * On the daemon that desynchronises the block stream and every name after it is
+   * read out of somebody's file body. Here it was worse: `padded` is added to the
+   * cursor, and any size in [-1023, -512] makes it exactly 0, so the walk re-reads
+   * one header for ever.
+   *
+   * ⚠ **A regression here hangs this driver rather than failing it, and there is
+   * no way to write it that does not.** The inner `for (;;)` holds no `await`, so
+   * nothing — not a `Promise.race`, not a timer — regains the loop to report on
+   * it; in the browser that is the whole severity of the bug, a consent screen for
+   * a file somebody picked taking the tab and every live session stream in the
+   * origin with it. A CI timeout naming this file is the honest cost of pinning
+   * it at all, and it is cheaper than the freeze.
+   */
+  const negativeSize = Buffer.alloc(12);
+  negativeSize.write("-0000001000 ", 0, "latin1");
+  const negative = await peek(
+    tarWith([
+      { name: "wrap/plugin.json", body: MANIFEST },
+      { name: "wrap/server.js", body: "export {}" },
+      { name: "shrink.bin", body: EVIL, sizeField: negativeSize },
+      { name: "server.js", body: "export {}" },
+    ]),
+  );
+  check("a negative tar size field is refused rather than walked", negative.kind, "unreadable");
+
   // 7. The member named with spaces. `tarString` trimmed and an empty name ended
   //    the walk, so this stopped where `extractTgz` carried on — and everything
   //    after it was described to nobody. The end of a tar is an all-zero block.
@@ -1196,5 +1228,86 @@ process.stdout.write("\nwhat somebody is shown before a plugin is sent anywhere\
       footButtons.filter((b) => /disabled=/.test(b)).length === footButtons.length &&
       /onBusyChange=\{setSending\}/.test(stripComments(fleetSrc)),
     "every control in the foot is gated, and the busy flag is lifted from MachineInstalls",
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * A manifest key that Object.prototype answers
+ * ------------------------------------------------------------------ */
+
+/*
+ * ⭐ **The consent card looks its scopes and hooks up in a plain object literal,
+ * and a manifest chooses the key.**
+ *
+ * `readManifestText` keeps any string verbatim — deliberately, since a scope this
+ * client has not heard of must land as its own identifier rather than be dropped.
+ * So `scopes: ["__proto__"]` reached a `Record<string, string>` index, and
+ * `table["__proto__"]` is `Object.prototype`: an **object**, so the `?? scope`
+ * fall-through never fired and it went into JSX as a child. `["toString"]` is a
+ * function and does the same. One blanks the tab through `RootErrorBoundary`; the
+ * other renders an **empty bullet**, which is the worse half — an undisclosed
+ * capability on the one screen whose entire job is that there are none.
+ *
+ * Nothing has to be installed to reach it. `MarketEntry` fetches `manifestRaw`
+ * from the pinned commit and draws this card, so opening a catalogue entry is
+ * enough.
+ *
+ * Rendered rather than read, for `webcheck.settings-routing`'s reason: the defect
+ * is what reaches the DOM, and a source-text assertion would pass on any spelling
+ * of the same mistake.
+ */
+{
+  const React = await import("react");
+  (globalThis as Record<string, unknown>)["React"] = React;
+  const { createElement: h } = React;
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { PluginConsent } = await import("../src/ui/PluginConsent.js");
+
+  const preview = (scopes: string[], hooks: string[]) => ({
+    id: "p",
+    name: "P",
+    version: "1.0.0",
+    description: null,
+    scopes,
+    net: [],
+    screen: null,
+    settings: false,
+    actions: [],
+    hooks,
+    adds: [],
+  });
+
+  const drawn = (scopes: string[], hooks: string[]): string => {
+    try {
+      return renderToStaticMarkup(h(PluginConsent, { manifest: preview(scopes, hooks) as never }));
+    } catch (error) {
+      return `threw: ${String(error)}`;
+    }
+  };
+
+  const known = drawn(["sessions.read"], ["turn.ended"]);
+  check("a scope this client knows is drawn in words", known.includes("read your sessions and transcripts"), true);
+
+  const inherited = drawn(["__proto__", "toString", "constructor"], ["__proto__", "valueOf"]);
+  report(
+    "a scope named after an Object.prototype member does not reach the DOM as one",
+    !inherited.startsWith("threw:"),
+    inherited.startsWith("threw:") ? inherited.slice(0, 160) : "rendered",
+  );
+  check("and every one of them is disclosed as its own identifier", [
+    inherited.includes("__proto__"),
+    inherited.includes("toString"),
+    inherited.includes("constructor"),
+    inherited.includes("valueOf"),
+  ], [true, true, true, true]);
+  /*
+   * The empty-bullet half, asserted separately: a `<li>` with nothing in it is
+   * exactly what a function-valued lookup produced, and it reads as a capability
+   * that was never mentioned.
+   */
+  report(
+    "and none of them drew an empty row",
+    !/<li[^>]*>\s*<\/li>/.test(inherited),
+    "no empty bullet in the rendered card",
   );
 }

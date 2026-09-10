@@ -359,6 +359,106 @@ check("and an empty body is refused too", (await metaOf("s_one", "u_alice", {}))
   check("null clears the title back to unnamed", (await cleared.json() as any).session.title, null);
 }
 
+/* ---------------------------------------------------------------- *
+ * Where a session sits in the list somebody reads
+ *
+ * A third mutable preference on this route, and the one that had to ride here
+ * rather than on a route of its own: dropping a row into the pinned group is one
+ * act that writes `pinned` **and** `rank`, and two requests can half-succeed into
+ * a session that is pinned with no position or positioned without being pinned.
+ * ---------------------------------------------------------------- */
+{
+  /*
+   * ⭐ **The compatibility contract, and the most load-bearing line in this block.**
+   * A client reads the field being *absent* as "this daemon cannot store an
+   * order", and hides the gesture for that machine's rows. So a daemon that can
+   * must say `null` — the ordinary "nobody has moved this one" — rather than
+   * omitting the key, or every fresh session looks like an old daemon. Nothing on
+   * either side reads a version.
+   */
+  const listed = await app.fetch(
+    new Request("http://d/sessions", { headers: { authorization: `Bearer ${tokenFor("u_alice")}` } }),
+  );
+  const rows = (await listed.json() as any).sessions as { id: string; rank: unknown }[];
+  check(
+    "a session nobody has positioned reports null rather than omitting the field",
+    rows.map((row) => "rank" in row && row.rank === null),
+    rows.map(() => true),
+  );
+
+  const placed = await metaOf("s_one", "u_alice", { rank: 1_700_000_000_123.5 });
+  check("a position lands on the snapshot", (await placed.json() as any).session.rank, 1_700_000_000_123.5);
+  const unplaced = await metaOf("s_one", "u_alice", { rank: null });
+  check("and null clears it back to following its age", (await unplaced.json() as any).session.rank, null);
+
+  /*
+   * ⚠ **`1e400` parses to `Infinity`, not to a syntax error.** This value is
+   * compared against every other session's on every render: an infinite one holds
+   * the top of its folder for ever, and a `NaN` makes the comparator answer 0 for
+   * every pair — a sort that quietly stops being a total order, which on this list
+   * is rows swapping places on a poll.
+   */
+  check("a position that is not a number is refused", (await metaOf("s_one", "u_alice", { rank: "3" })).status, 400);
+  /*
+   * Sent as **bytes**, not through `JSON.stringify` — which is how this arrives in
+   * the first place and the only way to reach the state. `JSON.stringify` turns an
+   * `Infinity` back into `null`, i.e. into the legal "clear it" body, so building
+   * the request the convenient way tests the opposite of what it names.
+   */
+  const overflow = await app.fetch(
+    new Request("http://d/sessions/s_one/meta", {
+      method: "POST",
+      headers: { authorization: `Bearer ${tokenFor("u_alice")}`, "content-type": "application/json" },
+      body: '{"rank":1e400}',
+    }),
+  );
+  check("and one that is not finite is refused too", overflow.status, 400);
+  check("and the refusals changed nothing", (await (await metaOf("s_one", "u_alice", { title: null })).json() as any).session.rank, null);
+
+  /*
+   * The drop-into-Pinned case, which is why this rides `/meta`: one request, one
+   * row, one `put` — so there is no ordering in which it half-applies.
+   */
+  const both = await metaOf("s_one", "u_alice", { pinned: true, rank: 42 });
+  const meta = (await both.json() as any).session;
+  check("a pin and a position land in one request", [meta.pinned, meta.rank], [true, 42]);
+
+  /*
+   * ⚠ **A position decides display order and buys nothing from the cut**, and it
+   * had a tier of its own in `listRank` for one release.
+   *
+   * The argument for the tier was the pin's, word for word: somebody placed this
+   * row, so dropping it would make the position a lie. What took it back out is
+   * that a position is not the rare per-row act a pin is — `resolveDrop`'s
+   * re-space writes one to a whole folder at once, and the browser's window is
+   * sixty rows per machine, so positioned *terminal* rows could hide every running
+   * session on that machine. It went with the other half of the same answer: the
+   * startup prune reads `pinned` and never `rank`, so a durable position would
+   * have been a promise here that the sweep does not keep.
+   *
+   * ⚠ **`s_one` is put back first, and forgetting that is what makes this pin
+   * vacuous.** The assertion above leaves it `{pinned: true, rank: 42}`, and two
+   * pinned rows fill a `limit=2` under either rule — so the check would pass
+   * against the tier it exists to refuse.
+   *
+   * All three rows share a `createdAt` (`rowFor` stamps one `now`), so the
+   * tie-break is the stable sort's input order: s_one, s_two, s_three. With s_one
+   * plain and s_three carrying the machine's highest position, `limit=2`
+   * separates the two rules cleanly — old: s_two (pinned) then s_three (positioned
+   * beats terminal); new: s_two then s_one, because a position is not a tier and
+   * the two terminal rows tie back to input order.
+   */
+  await metaOf("s_one", "u_alice", { pinned: false, rank: null });
+  await metaOf("s_three", "u_alice", { rank: 1_900_000_000_000 });
+  const positioned = await get("/sessions?limit=2", "u_alice");
+  check(
+    "a position does not lift a row past the cut the way a pin does",
+    positioned.body.sessions.map((session: { id: string }) => session.id),
+    ["s_two", "s_one"],
+  );
+  await metaOf("s_three", "u_alice", { rank: null });
+}
+
 // A DELETE with `machine:admin` still cannot invent a session. The scope widens
 // what may be done to a row, never which rows exist.
 const adminDelete = await app.fetch(

@@ -63,27 +63,26 @@ export const {
   selectMachine,
   selectedMachineIn,
   setQuery,
+  siblingsOf,
   sublineWarns,
   toggleFolder,
   visibleRows,
   waitingFloor,
 } = await import("../src/ui/groups.js");
+export const { RANK_STEP, canReorder, compareRows, effectiveRank, orderSessions, rankBetween, resolveDrop } = await import(
+  "../src/sessionOrder.js"
+);
 export const { sessionLabel } = await import("../src/ui/bits.js");
+export const { displayCwd, folderLabel } = await import("../src/paths.js");
 export const { openableHref } = await import("../src/ui/links.js");
 export const {
   chipParts,
-  chipReserve,
   chipValue,
   choiceLabel,
   configProse,
   drawnChoices,
-  contextHint,
-  contextPercent,
   drawnControls,
   labelFor,
-  pieLabel,
-  pieTone,
-  shortCount,
   showsCaption,
   unavailableHint,
   restartsAgent,

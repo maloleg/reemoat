@@ -2976,6 +2976,20 @@ export function toElicitationForm(schema: acp.ElicitationSchema | null | undefin
     fields.push(toElicitationField(key, property, required.has(key)));
   }
 
+  /*
+   * A pointer resolves or it goes.
+   *
+   * `alternativeTo` names another field on this form, and a name that is not on it
+   * — or is the field's own — would reach the client as a control that clears
+   * nothing, or clears itself. Swept after the loop because the answer depends on
+   * every key, which is not knowable while they are still arriving.
+   */
+  const keys = new Set(fields.map((field) => field.key));
+  for (const field of fields) {
+    if (field.alternativeTo === null) continue;
+    if (field.alternativeTo === field.key || !keys.has(field.alternativeTo)) field.alternativeTo = null;
+  }
+
   const form: ElicitationForm = { fields };
   // The backstop the per-item caps cannot be: they bound one string, this bounds
   // a thousand of them. Measured after projecting, so it counts what would
@@ -2988,6 +3002,52 @@ export function toElicitationForm(schema: acp.ElicitationSchema | null | undefin
   return form;
 }
 
+/**
+ * The question a field is an alternative answer to, out of the agent's own `_meta`.
+ *
+ * ⚠ **`_meta` is dropped everywhere else on this path and this is the exception,
+ * so what it takes is narrow and typed on the way out**: one named key, one
+ * boolean, one string, projected to a scalar. `acp/subagents.ts` reads
+ * `_meta.claudeCode` the same way and for the same reason.
+ *
+ * **Both agents that ask questions declare it, under their own names**, and this
+ * is the third place a difference between them is projected away rather than
+ * chosen between — the same job `toElicitationOptions` does for `oneOf` against
+ * `enum`. claude sends `_askUserQuestionCustomAnswer: {questionId,
+ * isCustomAnswer}`; codex sends `codex: {questionId, isOtherAnswer, isSecret}`.
+ * Measured 2026-09-09 off `claude-agent-acp` 0.73.0's
+ * `askUserQuestionsToCreateRequest` and `codex-acp` 1.8.0's
+ * `buildUserInputRequest`, and both then resolve the answer the same way: the
+ * free text wins over the selection whenever it is non-empty.
+ *
+ * ⚠ **The key's shape is still never read**, which is the whole reason this goes
+ * through `_meta` at all — codex spells the field `<id>__other` where claude
+ * spells it `<id>_custom`, and Q6.54 refuses both by name. A declaration is the
+ * agent saying so; a suffix is us guessing.
+ *
+ * codex puts a `codex` block on the *question* too, carrying `isOther` and no
+ * `questionId` — so the marker being read is `isOtherAnswer`, exactly `true`,
+ * beside a string. Anything else answers `null`, which is the shape every agent
+ * that declares nothing already has.
+ */
+function customAnswerFor(property: acp.ElicitationPropertySchema): string | null {
+  const meta = (property as Record<string, unknown>)["_meta"];
+  if (meta === null || typeof meta !== "object") return null;
+  const claims = meta as Record<string, unknown>;
+  for (const [name, marker] of [
+    ["_askUserQuestionCustomAnswer", "isCustomAnswer"],
+    ["codex", "isOtherAnswer"],
+  ] as const) {
+    const claim = claims[name];
+    if (claim === null || typeof claim !== "object") continue;
+    const { questionId, ...rest } = claim as Record<string, unknown>;
+    if (rest[marker] !== true || typeof questionId !== "string") continue;
+    const key = questionId.trim();
+    if (key !== "") return key;
+  }
+  return null;
+}
+
 function toElicitationField(
   key: string,
   property: acp.ElicitationPropertySchema,
@@ -2998,6 +3058,7 @@ function toElicitationField(
     title: textOrNull(property.title),
     description: textOrNull(property.description),
     required,
+    alternativeTo: customAnswerFor(property),
   };
 
   // Read off the untyped view: the tag chooses the arm, and each arm reads only

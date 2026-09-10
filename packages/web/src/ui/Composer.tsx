@@ -1,4 +1,4 @@
-import { Paperclip, RefreshCw, Send, Square, X } from "lucide-react";
+import { ArrowUp, Paperclip, RefreshCw, Square, X } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -1327,19 +1327,106 @@ export function Composer({
         event.preventDefault();
         attach(files);
       }}
-      className={`pb-safe sticky bottom-0 border-t bg-surface/95 pt-2 backdrop-blur ${
-        dragging ? "border-edge-strong bg-raised ring-1 ring-edge-strong ring-inset" : "border-edge"
-      }`}
+      /*
+       * **The rule above the composer is gone, and so is the blur it sat on.**
+       *
+       * The box below carries `border-edge-strong` now, which is 4.40:1 where this
+       * `border-edge` was 1.31:1 — so what separates the composer from the
+       * conversation is a stronger line 8px lower, rather than two hairlines eight
+       * pixels apart, which is what a bordered box under a full-width rule reads
+       * as on a phone.
+       *
+       * `bg-surface/95 backdrop-blur` went with it, and that is a measurement
+       * rather than taste: `SessionView` makes this a **sibling** of the
+       * conversation region rather than a layer over it — the ask card's frame
+       * ends where the composer begins for exactly that reason — and `AppShell`'s
+       * pane does not scroll, every route owning its own scroller. So nothing ever
+       * passes under this element, and a `backdrop-filter` was re-rasterising a
+       * static white backdrop on every frame to blur nothing.
+       *
+       * `sticky bottom-0` stays. It costs nothing and it is the correct guard for
+       * the day `<main>`'s `overflow-y-auto` backstop actually fires.
+       *
+       * ⚠ The dragging fill moved to the box. It was written here as a second
+       * `background-color` utility beside `bg-surface/95` in the same class string,
+       * i.e. the equal-specificity race `FIELD` documents — two `bg-*` on one
+       * element, decided by emission order rather than by the ternary.
+       */
+      className="pb-safe sticky bottom-0 bg-surface pt-1.5"
     >
       {/*
        * The bar is full width and its contents are not.
        *
-       * The rule, the background and the drop target span the window — they are
-       * chrome, and a centred rule with gaps either side would read as a card. The
-       * box you type in shares `COLUMN` with the transcript above it and the ask
-       * card that floats between them, so all three line up at every width.
+       * The background and the drop target span the window — they are chrome, and
+       * a centred drop target with dead margins either side would be a lie about
+       * where a file may be let go. The box you type in shares `COLUMN` with the
+       * transcript above it and the ask card that floats between them, so all
+       * three line up at every width; the inset used to be written three times, on
+       * the chip list, on the form and on the control strip.
+       *
+       * ⚠ **They did not line up, and this comment said they did.** It was `px-3`
+       * here against `px-4` on the transcript's column, so the box you type in was
+       * 8px wider than every row above it and than the ask card floating between —
+       * visible as a step where the card's edge met the box's, and reported that
+       * way. `px-4` is the one gutter for the conversation column now, and
+       * `webcheck` reads the three files off disk and compares them, because
+       * nothing else can: three literals in three files agreeing is exactly the
+       * claim a comment cannot keep.
+       *
+       * ⚠ **`pb-2` is here and not on the band above, and that is a cascade fact
+       * rather than a layout one.** The box sat 12px off the bottom edge and read
+       * as pressed into it. The obvious fix — another `pb-*` beside `pb-safe` on
+       * the band — is a **silent no-op**: `.pb-safe` is declared unlayered in
+       * `index.css` while Tailwind emits every utility inside `@layer utilities`,
+       * and an unlayered rule beats a layered one regardless of specificity. That
+       * is the same trap the focus ring and `touch-none` docblocks are both about,
+       * and `Toast.tsx`'s `pb-3` and `SHEET`'s `sm:pb-0` are still losing it.
+       *
+       * On this element there is no unlayered competitor, so the 8px lands. It
+       * sits inside the band's `bg-surface`, so what grows is the painted gutter
+       * under the box rather than a transparent strip with the transcript
+       * scrolling through it — which is what `mb-*` or a non-zero `bottom-*` would
+       * have given. Total clearance is `pb-2` + `pb-safe`'s floor: 20px, or the
+       * home indicator where that is larger.
        */}
-      <div className={COLUMN}>
+      <div className={`${COLUMN} px-4 pb-2`}>
+      {/*
+       * **The box: one bordered container holding everything the composer owns.**
+       *
+       * It was a bordered textarea, a bordered send button beside it and a
+       * separate strip of bordered pills underneath — seven outlines in two rows
+       * at the bottom of a 390px screen. This is one, and the only other thing in
+       * it wearing an edge is Send's fill and Stop's border while a turn runs.
+       * What each control inside owes for its own identification once the border
+       * goes is argued at `CHIP` in `AgentConfigBar.tsx`.
+       *
+       * ⚠ **The box is the `<form>`, and every hand-rolled `<button>` under it
+       * has to name its type.** A button inside a form defaults to
+       * `type="submit"`, and `Select`, `Absent`, `Toggle` and the choice rows are
+       * all hand-rolled — so a typeless one here does not open a menu, it sends
+       * the draft. They carry explicit `type="button"` and `webcheck` scans every
+       * `<button` in `AgentConfigBar.tsx` for one, comment-stripped, because that
+       * assertion is now the **only** thing standing between a chip and a sent
+       * message. This was a `<div>` wrapping a smaller `<form>` for one release,
+       * which made the structure a second guard; Send moving into the control row
+       * spent it, since a submit button has to be inside the form it submits.
+       *
+       * ⚠ **Never `overflow-hidden` here.** `CommandMenu`, all three chip menus,
+       * `Absent`'s panel and the `…` popover are `bottom-full` children of this
+       * box, and clipping is the regression a rounded container invites.
+       *
+       * `relative` is here rather than on the textarea so `CommandMenu` spans the
+       * box's own edges. The background lives in the ternary and never in the
+       * base, which is `FIELD`'s equal-specificity rule: two `bg-*` utilities on
+       * one element are decided by emission order, not by the condition that looks
+       * like it decides them.
+       */}
+      <form
+        onSubmit={submit}
+        className={`relative rounded-xl border border-edge-strong px-1.5 pt-1 pb-1.5 ${
+          dragging ? "bg-raised ring-1 ring-edge-strong ring-inset" : "bg-surface"
+        }`}
+      >
       {/* Its own full-width row rather than a place in the control strip: chips
           wrap to two lines and need the width a phone has, and the strip is a
           single line of controls that must not reflow under them.
@@ -1353,12 +1440,24 @@ export function Composer({
           file's Remove and remove the file under it instead. 12px leaves 2px of
           clearance. It costs 6px, and only once there are enough files to wrap. */}
       {attachments.length > 0 && (
-        <ul className="flex flex-wrap gap-x-1.5 gap-y-3 px-3 pb-2">
+        <ul className="flex flex-wrap gap-x-1.5 gap-y-3 pb-2">
+          {/* A fill rather than an outline, now that these sit inside a bordered
+              box: an attachment chip is **content**, not a control — its controls
+              are the two `IconButton`s inside it — so `raised` is the "a mark on a
+              thing" tone the transcript already gives the message you wrote, and it
+              groups the chip without drawing a second line inside the first. That
+              leaves the failed chip as the only outlined attachment in the row,
+              which is the right way round: failure is the one state here that has
+              to be found rather than read past.
+
+              `border` stays in the base with `border-transparent` in the ordinary
+              arm, so a chip that fails does not *grow* by 2px — the same "nothing
+              moves" rule `chipParts` is built around. */}
           {attachments.map((item) => (
             <li
               key={item.localId}
               className={`flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-2xs ${
-                item.state === "failed" ? "border-danger/50 bg-danger/5" : "border-edge bg-surface"
+                item.state === "failed" ? "border-danger/50 bg-danger/5" : "border-transparent bg-raised"
               }`}
             >
               {/*
@@ -1431,10 +1530,10 @@ export function Composer({
         </ul>
       )}
 
-      {/* `relative` on the form and not on the textarea: the panel spans the whole
-          composer, which is the width a phone has, and anchoring it to the box
-          alone would leave it short by the send button. */}
-      <form onSubmit={submit} className="relative flex items-end gap-2 px-3">
+      {/* The text and the one control that acts on it, and nothing else. The
+          `relative` this used to carry for `CommandMenu`'s sake is on the box now,
+          so the panel spans the box's own edges rather than stopping short of its
+          padding; the inset is the wrapper's `px-3`. */}
         <input
           ref={fileInput}
           type="file"
@@ -1553,7 +1652,16 @@ export function Composer({
            * `composerKey`'s `enterSends` makes true underneath.
            */
           enterKeyHint="enter"
-          placeholder={composerPlaceholder({ blocked, reconnecting: busy && reconnecting, working, revising })}
+          // `entries` and not `matches`: the promise is that the key opens
+          // something on this session, which is true or false before anything has
+          // been typed into the box.
+          placeholder={composerPlaceholder({
+            blocked,
+            reconnecting: busy && reconnecting,
+            working,
+            revising,
+            hasCommands: entries.length > 0,
+          })}
           aria-label="Message"
           role="combobox"
           // `combobox` on a `textarea` costs the multiline semantics a screen
@@ -1601,206 +1709,268 @@ export function Composer({
            * `index.css`, which is the only place able to grant one. Nothing else
            * in this app should use it — see the note there.
            */
-          // `bg-surface`, the bar's own colour, rather than `bg-ink` — which was
-          // the rail's tone and is 1.06:1 from this ground, i.e. a fill that was
-          // doing nothing but claiming to. Same rule as every other field: match
-          // the ground, and let `edge-strong` be the identification.
-          className="no-focus-ring min-h-11 flex-1 resize-none overflow-hidden rounded-md border border-edge-strong bg-surface px-3 py-2.5 text-sm outline-none"
+          /*
+           * **No border and no fill of its own: the box is this field's boundary.**
+           *
+           * `rounded-md border border-edge-strong bg-surface` all moved outward one
+           * element. What that costs is nothing — the box is the same 4.40:1 edge
+           * one padding-width further out — and what it buys is that the text, the
+           * attachments and the controls sit inside one outline instead of three.
+           *
+           * `bg-transparent` rather than `bg-surface`, and it is load-bearing: the
+           * box goes `bg-raised` while a file is dragged over the composer, and a
+           * white field would punch a hole through that highlight.
+           *
+           * `min-h-11` **stays**. It is not the field's own identification any
+           * more, but it is still 44px of target directly above a row of chips
+           * whose `TAP_GROW_Y` reaches 4px up toward it, and the mis-tap it
+           * prevents is aiming at the end of a draft and opening a model menu.
+           */
+          className="no-focus-ring block min-h-11 w-full resize-none overflow-hidden bg-transparent px-2 py-2.5 text-sm outline-none"
         />
-        {/*
-         * **There was a `↵` button here, and it is gone rather than moved.**
-         *
-         * It existed because a soft keyboard has no Shift+Enter while Enter sent,
-         * so on touch there was no way to type a newline at all. That is answered
-         * one level down now — `composerKey`'s `enterSends` is false on a coarse
-         * pointer, so the keyboard's own Return key inserts the line break and
-         * Send is the button, which is what every phone chat client does.
-         *
-         * Two things went with it that were never right. The button appended to
-         * the **end** of the draft (`update(`${text}\n`)`) while `caret` sat one
-         * field away unread, so a newline typed in the middle of a message landed
-         * at the bottom of it; and it took 44px plus a gap out of the box you are
-         * typing in, on the narrowest screen this app runs on, to do it.
-         */}
-        {busy ? (
-          <span className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-fg text-ink">
-            <Spinner />
-          </span>
-        ) : stopping || pendingCancel ? (
-          /*
-           * A cancel has been asked for and the agent has not finished.
-           *
-           * A spinner rather than a disabled Stop, and the reason is mechanical:
-           * `IconButton` carries `disabled:pointer-events-none`, so a greyed
-           * square's `title` never appears — the explanation would exist only for
-           * a screen reader while everybody else got an unexplained dead control.
-           * The same shape the `busy` branch above uses, in `plain` rather than
-           * `accent`, because this is the way out of an action and not the
-           * affirmative one.
-           *
-           * It is drawn from `cancelInFlight` and not from the local `stopping`
-           * alone: the turn routinely outlives the request that asked for it — an
-           * agent notices a cancel when it next looks up — so a slot that re-armed
-           * the moment the answer came back would invite a second tap at every
-           * stop. If the agent never answers, the escalation is Stop in the
-           * session menu, which is a different act with a different cost.
-           */
-          <span
-            role="status"
-            aria-label="Stopping — the agent has not finished yet"
-            title="Stopping — the agent has not finished yet"
-            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-edge bg-raised text-fg"
-          >
-            <Spinner />
-          </span>
-        ) : stoppable ? (
-          /*
-           * The same slot, holding the only thing that can be done in it.
-           *
-           * Send is refused for exactly one reason — there is a turn in flight —
-           * and until now that produced a disabled arrow with a sentence in its
-           * tooltip explaining why nothing would happen. A control whose whole
-           * content is "not now" is worse than the control somebody actually
-           * wants, and every remote agent has the same answer to what that is.
-           *
-           * `tone="plain"` and not `accent`: this is not the affirmative action in
-           * the row, it is the way out of one. The colour rule is `AskCard`'s —
-           * de-emphasis lives in fill and border, never in the text — so the label
-           * stays fully legible while the button does not compete with the
-           * transcript.
-           */
-          <IconButton
-            icon={Square}
-            label="Stop the agent"
-            tone="plain"
-            size="lg"
-            type="button"
-            onClick={cancelTurn}
-          />
-        ) : (
-          <IconButton
-            icon={Send}
-            /*
-             * **It does not queue, and this said it did.** `ManagedSession.prompt`
-             * refuses while a turn is open, so that tooltip described a feature
-             * nothing implements and Send was live onto a guaranteed `409
-             * turn_in_flight` — a red toast on every message typed while the agent
-             * was working or while a question was parked. `canSend` refuses now
-             * and the placeholder says which of the two it is.
-             */
-            /*
-             * The third arm is heard rather than seen, and it is worth having
-             * anyway. `IconButton` carries `disabled:pointer-events-none`, so a
-             * disabled button never shows its `title` — the mechanical fact the
-             * `stopping` branch above is also built around — but the `aria-label`
-             * is still read, which is the difference between a dead control and one
-             * that says what it is waiting for. The *sighted* answer is on the row
-             * above: a chip in danger colours carrying the daemon's own message,
-             * with the Retry that clears this at its head. The uploading case gets no
-             * arm because it clears itself, and a spinner in a chip is already the
-             * sentence.
-             */
-            label={
-              sendRefused
-                ? "Wait for the agent — it cannot take a message yet"
-                : stalled(attachments)
-                  ? "An attachment did not upload — retry it or remove it"
-                  : "Send"
-            }
-            tone="primary"
-            size="lg"
-            type="submit"
-            // A visible refusal while an attachment is not something the prompt can
-            // name — one still going up, and now one that failed as well. Either
-            // way sending would deliver the message without the file it is about;
-            // `sendable` carries the argument, including why the failed half of it
-            // reverses what this comment used to say.
-            disabled={!sendable(text, attachments, sendRefused)}
-          />
-        )}
-      </form>
 
       {/*
-       * Below the input, not above it.
+       * **The control row, inside the box and below the text.**
        *
-       * This is where every remote control for an agent puts its controls, and
-       * the reason is that a strip above the box reads as a separate toolbar
-       * belonging to the transcript rather than to the thing you are about to
-       * send. The popovers still open upward (`bottom-full`), so nothing is ever
-       * hidden behind a soft keyboard.
+       * It is `Composer`'s rather than `AgentConfigBar`'s now, and the paperclip
+       * came back with it — to the component that owns `fileInput`, `slotsFull`
+       * and `attach`, where it stops being a `ReactNode` prop that had to explain
+       * itself. What that also retires is `configBarShows`: its third clause
+       * existed to stop one failure — no bar, so no paperclip, so no way to attach
+       * a file on a session with no live agent — and moving the paperclip out
+       * makes that failure structurally impossible rather than asserted. What was
+       * left of the predicate was `optionCount > 0`, which is an ordinary empty
+       * render and not a rule.
        *
-       * It also replaces the hint line that used to live here. "Enter to send ·
-       * Shift+Enter for a new line" is gone entirely now, and not merely made
-       * conditional: it appeared under the box on every focus, i.e. on every
-       * single message, and a keyboard hint that is still being shown after the
-       * hundredth message is no longer teaching anybody anything — it is a line
-       * of furniture between the thing you are typing and the thing you are
-       * reading. The behaviour it described is `keys.ts`.
+       * Still below the text rather than above it, for the reason that has not
+       * changed: a strip above the box reads as a toolbar belonging to the
+       * transcript rather than to the thing you are about to send. The popovers
+       * open upward (`bottom-full`), so nothing is behind a soft keyboard.
        *
-       * That last clause used to read "the newline button beside the box is what a
-       * device with no Shift+Enter needs, and that is a control rather than a
-       * caption", i.e. the caption was licensed away by a control that has since
-       * been deleted. Nothing replaces either, and nothing needs to: on a coarse
-       * pointer Return is now simply a return, which is the behaviour a soft
-       * keyboard already draws on its own key, and Send is the one filled button
-       * on the row.
+       * **`gap-1.5` is arithmetic.** Six pixels is what `TAP_GROW_Y` is measured
+       * against — a chip's target grows 4px up, and its docblock's "the textarea's
+       * own bottom edge is 6px above" is this gap. Anything under it puts a chip's
+       * target on the textarea's last pixel row, which is a tap aimed at the end of
+       * a draft opening a model menu.
        *
-       * Two more lines went the same way, and by the same argument. `agent is
-       * working — your message will queue` mounted and unmounted under this strip
-       * on **every turn**, adding and removing 16px between the box you are
-       * typing in and the transcript you are reading it against — the exact
-       * motion the paragraph above objects to, on a schedule set by the agent
-       * rather than by you. The fact it carried is not gone: `showsWorking` draws
-       * a row inside the transcript, where the agent's next sentence is going to
-       * appear anyway. The queueing itself was never described anywhere else and
-       * does not need to be — the message sends, no error comes back, and the
-       * reply arrives after the current one; Send's own label says so for anybody
-       * who hovers or listens.
-       *
-       * `reconnecting the agent — this can take a moment` had the same shape and
-       * a better excuse, since it explains a Send button that has been a spinner
-       * for up to 90 seconds. It moved into the **placeholder**, which is visible
-       * for exactly that window — `submit()` clears the draft before the request
-       * resolves — and which costs no height at all. A reserved-height slot was
-       * the other candidate and was refused: 16px of permanent blank under every
-       * composer, for ever, to avoid a shift in a state most people never reach.
+       * Three hint lines used to live in this space and none is coming back.
+       * "Enter to send · Shift+Enter for a new line" appeared under the box on
+       * every focus, i.e. on every single message, and a keyboard hint still being
+       * shown after the hundredth is furniture rather than teaching; the behaviour
+       * it described is `keys.ts`. `agent is working — your message will queue`
+       * mounted and unmounted on **every turn**, adding and removing 16px between
+       * the box you type in and the transcript you read it against, on a schedule
+       * set by the agent rather than by you — `showsWorking` draws that row inside
+       * the transcript now, where the agent's next sentence appears anyway. And
+       * `reconnecting the agent — this can take a moment` moved into the
+       * **placeholder**, which is visible for exactly the window it describes and
+       * costs no height; a reserved-height slot was refused, being 16px of
+       * permanent blank under every composer to avoid a shift most people never
+       * reach.
        */}
-      <AgentConfigBar
-        sessionRef={sessionRef}
-        agent={session.agent}
-        // The pair rather than the snapshot's own config: a restart empties that,
-        // and the strip used to go blank for the length of one. `drawnControls`
-        // decides between the live answer and the row's memory of the last one,
-        // and reports which — so nothing here has to know.
-        controls={drawnControls(session, row?.heldConfig)}
-        usage={session.contextUsage}
-        events={transcript?.events ?? EMPTY_EVENTS}
-        // The session's turn, which is what the daemon refuses a restart on — not
-        // `disabled` below, which is this tab's own prompt in flight and clears
-        // the moment the daemon accepts it.
-        turnRunning={turnRunning}
-        // Terminal is no longer named here: a session with no live agent arrives
-        // as `stale` from `drawnControls`, which is the same refusal reached
-        // through the predicate that also decides what may be drawn.
-        disabled={busy}
-        leading={
-          <IconButton
-            icon={Paperclip}
-            label="Attach a file"
-            tone="plain"
-            // 32px, so it is one of the pills rather than the only 36px thing in
-            // the row. `md` made it the tallest control in the strip and the only
-            // one that did not line up with its neighbours.
-            size="chip"
-            // Not gated on any capability: ACP requires every agent to support
-            // `resource_link`, so there is no agent for which this does nothing.
-            // Only the count limit closes it, and a terminal session does not —
-            // `resume` exists, and staging a file for one is the ordinary flow.
-            disabled={slotsFull}
-            onClick={() => fileInput.current?.click()}
-          />
-        }
-      />
+      {/* The wider gap sits where the **kind** of control changes and the narrower
+          one inside a group: the paperclip acts on the message, the chips describe
+          the turn, and Send is the action. Both are clear of the 6px `TAP_GROW_Y`
+          was measured against, so neither tightens a tap target, and both stay far
+          under the 20px a symmetric grow would need — which is why that growth is
+          still vertical-only.
+
+          ⚠ **8px and not 12: this was `gap-3 sm:gap-4` for one round and it was
+          too much.** The separation it buys is real and the amount was not: at 12px
+          the paperclip stopped reading as one of the row's own controls and started
+          reading as something parked to the left of them, and Send — which already
+          adds `pl-1` on top — sat 16px off the last chip in a 352px row that has
+          none to spend. 8 is still more than the 6 inside a group, so the two kinds
+          of boundary are still two, and it is the same step `sm:gap-3` keeps above
+          the breakpoint.
+
+          That breakpoint is the one left in this row, and it is a space question,
+          which is the one thing a breakpoint is honestly for. It is affordable: the
+          model chip folds into the mode picker below `sm`, so a 390px row carries
+          the paperclip, two chips and a 32px Send against 352px of box interior
+          rather than the four-control row that was overflowing. */}
+      <div className="mt-1.5 flex items-center gap-2 sm:gap-3">
+        <IconButton
+          icon={Paperclip}
+          label="Attach a file"
+          // `ghost` rather than `plain`: with the box carrying the boundary, an
+          // outlined paperclip would be the only bordered thing beside a row of
+          // borderless chips — and it already sat eight pixels from the
+          // attachment chips' own Remove, which has been a bare ghost glyph all
+          // along. What identifies it is the glyph, `text-muted` at 7.75:1.
+          tone="ghost"
+          // 32px, so it is one of the pills rather than the only 36px thing in
+          // the row, and the twin of the `…` at the other end.
+          size="chip"
+          // Not gated on any capability: ACP requires every agent to support
+          // `resource_link`, so there is no agent for which this does nothing.
+          // Only the count limit closes it, and a terminal session does not —
+          // `resume` exists, and staging a file for one is the ordinary flow.
+          disabled={slotsFull}
+          onClick={() => fileInput.current?.click()}
+        />
+        <AgentConfigBar
+          sessionRef={sessionRef}
+          // The pair rather than the snapshot's own config: a restart empties that,
+          // and the strip used to go blank for the length of one. `drawnControls`
+          // decides between the live answer and the row's memory of the last one,
+          // and reports which — so nothing here has to know.
+          controls={drawnControls(session, row?.heldConfig)}
+          events={transcript?.events ?? EMPTY_EVENTS}
+          // The session's turn, which is what the daemon refuses a restart on — not
+          // `disabled` below, which is this tab's own prompt in flight and clears
+          // the moment the daemon accepts it.
+          turnRunning={turnRunning}
+          // Terminal is no longer named here: a session with no live agent arrives
+          // as `stale` from `drawnControls`, which is the same refusal reached
+          // through the predicate that also decides what may be drawn.
+          disabled={busy}
+        />
+        {/* `ml-auto` is load-bearing in exactly one state and is easy to read as
+            decoration in every other: a live agent that publishes no controls
+            renders no `AgentConfigBar` at all, and without this Send would sit
+            beside the paperclip in the middle of the row. `pl-1` on top of the
+            row's own gap because this is the one mis-tap here that *sends*. */}
+        <div className="ml-auto flex shrink-0 items-center pl-1">
+          {/*
+           * **There was a `↵` button here, and it is gone rather than moved.**
+           *
+           * It existed because a soft keyboard has no Shift+Enter while Enter sent,
+           * so on touch there was no way to type a newline at all. That is answered
+           * one level down now — `composerKey`'s `enterSends` is false on a coarse
+           * pointer, so the keyboard's own Return key inserts the line break and
+           * Send is the button, which is what every phone chat client does.
+           *
+           * Two things went with it that were never right. The button appended to
+           * the **end** of the draft (`update(`${text}\n`)`) while `caret` sat one
+           * field away unread, so a newline typed in the middle of a message landed
+           * at the bottom of it; and it took 44px plus a gap out of the box you are
+           * typing in, on the narrowest screen this app runs on, to do it.
+           */}
+          {busy ? (
+            <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-fg text-ink">
+              <Spinner />
+            </span>
+          ) : stopping || pendingCancel ? (
+            /*
+             * A cancel has been asked for and the agent has not finished.
+             *
+             * A spinner rather than a disabled Stop, and the reason is mechanical:
+             * `IconButton` carries `disabled:pointer-events-none`, so a greyed
+             * square's `title` never appears — the explanation would exist only for
+             * a screen reader while everybody else got an unexplained dead control.
+             * The same shape the `busy` branch above uses, in `plain` rather than
+             * `accent`, because this is the way out of an action and not the
+             * affirmative one.
+             *
+             * It is drawn from `cancelInFlight` and not from the local `stopping`
+             * alone: the turn routinely outlives the request that asked for it — an
+             * agent notices a cancel when it next looks up — so a slot that re-armed
+             * the moment the answer came back would invite a second tap at every
+             * stop. If the agent never answers, the escalation is Stop in the
+             * session menu, which is a different act with a different cost.
+             */
+            <span
+              role="status"
+              aria-label="Stopping — the agent has not finished yet"
+              title="Stopping — the agent has not finished yet"
+              // `border-edge-strong bg-surface`, which is byte-for-byte the `plain`
+              // box the Stop button it replaces already draws — so the slot does not
+              // change shape the moment a cancel is asked for. It was
+              // `border-edge bg-raised`: 1.31:1 over 1.22:1, a 44px square that was
+              // nearly invisible on the bar and is invisible inside a white box.
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-edge-strong bg-surface text-fg"
+            >
+              <Spinner />
+            </span>
+          ) : stoppable ? (
+            /*
+             * The same slot, holding the only thing that can be done in it.
+             *
+             * Send is refused for exactly one reason — there is a turn in flight —
+             * and until now that produced a disabled arrow with a sentence in its
+             * tooltip explaining why nothing would happen. A control whose whole
+             * content is "not now" is worse than the control somebody actually
+             * wants, and every remote agent has the same answer to what that is.
+             *
+             * `tone="plain"` and not `accent`: this is not the affirmative action in
+             * the row, it is the way out of one. The colour rule is `AskCard`'s —
+             * de-emphasis lives in fill and border, never in the text — so the label
+             * stays fully legible while the button does not compete with the
+             * transcript.
+             */
+            <IconButton
+              icon={Square}
+              label="Stop the agent"
+              tone="plain"
+              size="chip"
+              // The circle Send wears, because this is the same slot: a control that
+              // changed shape when a turn started would read as a different control
+              // arriving rather than as the one control doing the other thing.
+              shape="round"
+              type="button"
+              onClick={cancelTurn}
+            />
+          ) : (
+            <IconButton
+              /*
+               * **An arrow in a circle, not a paper plane in a square.**
+               *
+               * The plane is a *mail* metaphor and this is not mail: nothing is
+               * addressed, nothing is filed, and the reply arrives in the same
+               * column a moment later. The arrow says "up, into the conversation
+               * above", which is what actually happens and what every phone chat
+               * client draws. The square was the worse half — filled, 44px and
+               * hard-cornered, it is the shape a Stop control has, sitting where
+               * Stop genuinely appears a second later.
+               *
+               * The circle is an exception to this app's radius rule and is
+               * declared as one on `IconButton`'s `shape`; the three other things
+               * that occupy this slot take it too.
+               */
+              icon={ArrowUp}
+              /*
+               * **It does not queue, and this said it did.** `ManagedSession.prompt`
+               * refuses while a turn is open, so that tooltip described a feature
+               * nothing implements and Send was live onto a guaranteed `409
+               * turn_in_flight` — a red toast on every message typed while the agent
+               * was working or while a question was parked. `canSend` refuses now
+               * and the placeholder says which of the two it is.
+               */
+              /*
+               * The third arm is heard rather than seen, and it is worth having
+               * anyway. `IconButton` carries `disabled:pointer-events-none`, so a
+               * disabled button never shows its `title` — the mechanical fact the
+               * `stopping` branch above is also built around — but the `aria-label`
+               * is still read, which is the difference between a dead control and one
+               * that says what it is waiting for. The *sighted* answer is on the row
+               * above: a chip in danger colours carrying the daemon's own message,
+               * with the Retry that clears this at its head. The uploading case gets no
+               * arm because it clears itself, and a spinner in a chip is already the
+               * sentence.
+               */
+              label={
+                sendRefused
+                  ? "Wait for the agent — it cannot take a message yet"
+                  : stalled(attachments)
+                    ? "An attachment did not upload — retry it or remove it"
+                    : "Send"
+              }
+              tone="primary"
+              size="chip"
+              shape="round"
+              type="submit"
+              // A visible refusal while an attachment is not something the prompt can
+              // name — one still going up, and now one that failed as well. Either
+              // way sending would deliver the message without the file it is about;
+              // `sendable` carries the argument, including why the failed half of it
+              // reverses what this comment used to say.
+              disabled={!sendable(text, attachments, sendRefused)}
+            />
+          )}
+        </div>
+      </div>
+      </form>
       </div>
     </div>
   );

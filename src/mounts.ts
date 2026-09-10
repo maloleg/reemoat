@@ -177,8 +177,6 @@ const MOUNTS_TTL_MS = 30_000;
 
 let cached: { at: number; entries: MountEntry[] } | null = null;
 let reading: Promise<MountEntry[]> | null = null;
-/** Bumped by {@link forgetMounts}, so an in-flight read cannot write back over it. */
-let generation = 0;
 
 /**
  * The mount table, cached.
@@ -211,38 +209,27 @@ export async function readMounts(now: number = Date.now()): Promise<MountEntry[]
   // `catch` as well as `finally`, so the promise every waiter is holding still
   // resolves — to the documented empty list, which means "behave as this daemon
   // did before this file existed" rather than "fail the request".
-  // Captured before the read starts, and compared after it: `forgetMounts` bumps
-  // it, so a read that was already in flight when somebody dropped the cache
-  // still resolves for its own waiters but does not write its now-superseded
-  // answer back over a fresher one.
-  const epoch = generation;
+  // ⚠ **There is nothing that drops this cache, so there is no epoch to guard
+  // against.** A `forgetMounts` stood here and had no caller anywhere — not in
+  // `src/`, not in `scripts/`, not in a driver, though its docblock said "for the
+  // drivers" — and with it went the generation counter both closures below
+  // compared against, which could therefore never differ. The knowledge is worth
+  // keeping even though the code was not: a forget must drop `reading` as well as
+  // `cached`, or a read already in flight writes its pre-forget answer back
+  // afterwards and it is cached for a fresh TTL — so the caller who asked to
+  // forget gets the stale table anyway. Re-adding one means re-adding the epoch.
   reading ??= loadMounts()
     .catch(() => [] as MountEntry[])
     .then((entries) => {
       // Stamped on completion, not on the first caller's arrival: a read that
       // took a second was otherwise already a second old when it was cached.
-      if (epoch === generation) cached = { at: Date.now(), entries };
+      cached = { at: Date.now(), entries };
       return entries;
     })
     .finally(() => {
-      if (epoch === generation) reading = null;
+      reading = null;
     });
   return reading;
-}
-
-/**
- * Drop the cache. For the drivers, and for a caller that knows mounts moved.
- *
- * Drops the in-flight read as well as the settled one. Clearing only `cached`
- * left a read that was already running to write its pre-forget answer back
- * afterwards — so the caller who asked to forget got the stale table anyway, and
- * it was then cached for a fresh TTL. For a driver that is a flaky assertion;
- * for the real caller it is a function that silently does nothing.
- */
-export function forgetMounts(): void {
-  generation++;
-  cached = null;
-  reading = null;
 }
 
 async function loadMounts(): Promise<MountEntry[]> {

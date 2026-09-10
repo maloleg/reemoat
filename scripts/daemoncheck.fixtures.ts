@@ -181,7 +181,7 @@ export function storeOf(rows: PersistedSession[]): SessionStore {
 export function rowFor(
   id: string,
   root: string,
-  meta: { title?: string | null; pinned?: boolean } = {},
+  meta: { title?: string | null; pinned?: boolean; rank?: number | null } = {},
 ): PersistedSession {
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, "notes.txt"), "hi\n", "utf8");
@@ -214,6 +214,9 @@ export function rowFor(
     dropped: 0,
     title: meta.title ?? null,
     pinned: meta.pinned ?? false,
+    // Wherever its age puts it, which is what every row on disk says until
+    // somebody drags one.
+    rank: meta.rank ?? null,
     // Nobody chose, which is what every row on disk says until somebody does.
     ultracode: null,
     customAgent: null,

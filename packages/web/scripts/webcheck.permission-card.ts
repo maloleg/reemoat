@@ -769,6 +769,43 @@ process.stdout.write("\nthe permission card's context\n");
     check("a plan with no tool call loaded is still a plan", permissionContext(planPending(), []).plan, planned2);
 
     /*
+     * ⭐ **And it is a plan the curation cannot touch, which is a consequence
+     * nothing asserted until a comment claimed the opposite.**
+     *
+     * `planControls` demands `kind === "switch_mode"` before it consults
+     * `PLAN_SHAPES`, and the kind rides the `tool_call`. So on a cold open the
+     * card is not the two curated buttons — it is `permissionButtons` over
+     * everything the agent sent, in the agent's own wording, as **rows**. Every
+     * word of that is drawn below rather than reasoned about, because a docblock
+     * in `SessionView` had just asserted that the same state left a ✕ as the only
+     * way out, and it is the exact opposite: the refusal is on screen there and
+     * nowhere else.
+     *
+     * Which is also the honest reason `awaitingPlan` must not wait for a window.
+     * This is the *least* readable the card ever is — the layout the curation
+     * exists to avoid — and it was the one state with the message box switched
+     * off.
+     */
+    const coldOptions = [
+      { optionId: "exit-plan-clear-auto", name: "Yes, clear context (10% used) and use auto mode", kind: "allow_always" },
+      { optionId: "exit-plan-auto", name: "Yes, and use auto mode", kind: "allow_always" },
+      { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+      { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+    ];
+    const cold = permissionContext(planPending({ options: coldOptions }), []);
+    check("but the kind has not arrived with it", cold.kind, null);
+    check("so the curation declines the request entirely", planControls(cold, coldOptions as never), null);
+    check("and the fallback draws every option, refusal included", permissionButtons(coldOptions as never).order.length, 4);
+    check("as rows, in the agent's own words", permissionLayout(coldOptions as never), "rows");
+    // The same request one `tool_call` later is the curated pair. One event is the
+    // whole difference, and it is what makes the two comments above true.
+    check(
+      "and the same request with its tool call is two of ours",
+      planControls(permissionContext(planPending({ options: coldOptions }), [planCall("switch_mode")]), coldOptions as never)?.map((c) => c.label),
+      ["Auto mode", "Clear + auto"],
+    );
+
+    /*
      * **The gate, and the only reason rendering markdown here is safe.** A
      * request that authorizes a concrete action is not a document — the same test
      * `askedQuestion` makes, and the case that would otherwise hand a shell
@@ -850,8 +887,17 @@ process.stdout.write("\nthe permission card's context\n");
   /* ---- the plan-mode decision, curated ---- */
 
   /*
-   * The measured option set. Three `allow_always`, which is the whole reason this
-   * has to read ids: ACP's own enum separates none of them.
+   * The option set measured under claude-agent-acp **0.63.0**. Three
+   * `allow_always`, which is the whole reason this has to read ids: ACP's own enum
+   * separates none of them.
+   *
+   * ⚠ **This was the only shape asserted here, and by 0.73.0 it was a shape no
+   * pinned adapter sends.** Every id was renamed and one option dropped, so
+   * `planControls` answered `null` on every real plan request while this block
+   * stayed green — the exact failure `PLAN_SHAPES`' docblock records. The three
+   * 0.73.0 shapes are asserted below, off the adapter's own
+   * `buildExitPlanModePermissionOptions`, and this one is kept because a machine
+   * can lag the pin.
    */
   const PLAN_OPTIONS = [
     { optionId: "bypassPermissions", name: "Yes, and bypass permissions", kind: "allow_always" },
@@ -864,13 +910,24 @@ process.stdout.write("\nthe permission card's context\n");
   {
     const context = permissionContext(planPending({ options: PLAN_OPTIONS }), [planCall("switch_mode")]);
     const controls = planControls(context, PLAN_OPTIONS as never);
-    check("a measured plan request draws three controls", controls?.length, 3);
-    check("in this order", controls?.map((c) => c.option.optionId), ["plan", "acceptEdits", "auto"]);
-    check("the refusal alone on the left", controls?.map((c) => c.leading), [true, false, false]);
+    check("a measured plan request draws two controls", controls?.length, 2);
+    check("in this order", controls?.map((c) => c.option.optionId), ["acceptEdits", "auto"]);
+    /*
+     * ⚠ **No refusal is drawn on any shape now, so the left group stands empty.**
+     * `leading` is still computed from the kind rather than hard-coded false — see
+     * `PlanControl` — and this asserts the consequence rather than the mechanism:
+     * nothing this card draws is a refusal, on the shape that used to carry one.
+     */
+    check("and none of them is a refusal", controls?.map((c) => c.leading), [false, false]);
     check(
       "and auto mode is the one filled button",
       controls?.filter((c) => c.primary).map((c) => c.option.optionId),
       ["auto"],
+    );
+    check(
+      "the refusal the agent sent is not among them",
+      controls?.some((c) => c.option.optionId === "plan"),
+      false,
     );
     /*
      * **Every control here is one of the agent's own options**, and nothing
@@ -904,7 +961,7 @@ process.stdout.write("\nthe permission card's context\n");
     /*
      * The structural gates, asked separately. The kind is demanded *here* and not
      * for the rendering because this is where the consequence is: drawing a
-     * document cannot approve anything, removing two of five options can.
+     * document cannot approve anything, removing three of five options can.
      */
     check(
       "an option set this shape on a tool call that is not switch_mode is not curated",
@@ -939,6 +996,110 @@ process.stdout.write("\nthe permission card's context\n");
      * option that did not fit.
      */
     check("and the fallback is still a button row, by one character", permissionLayout(PLAN_OPTIONS as never), "buttons");
+  }
+
+  /*
+   * ⭐ **claude-agent-acp 0.73.0, all three of them.**
+   *
+   * `buildExitPlanModePermissionOptions` picks one elevated mode out of the
+   * session's own `availableModes` — `auto`, else `bypassPermissions`, else
+   * `acceptEdits` — and builds the same four rows around it. The clear-context row
+   * is emitted only when the tool's `plan` argument is a non-empty string, which is
+   * exactly the condition `planControls` gates on, so all three are four options
+   * rather than sometimes three.
+   *
+   * Driven as a table because the three differ in exactly two ids and nothing
+   * else; writing them out separately is how the second one comes to disagree with
+   * the first about the order.
+   */
+  {
+    const variants: [string, string, string, string][] = [
+      // elevated mode, the clear id, the elevate id, what the elevate button says
+      ["auto", "exit-plan-clear-auto", "exit-plan-auto", "Auto mode"],
+      ["bypassPermissions", "exit-plan-clear-bypass", "exit-plan-bypass", "Bypass permissions"],
+      ["acceptEdits", "exit-plan-clear-accept-edits", "exit-plan-accept-edits", "Auto-accept edits"],
+    ];
+    for (const [mode, clearId, elevateId, elevateLabel] of variants) {
+      const options = [
+        { optionId: clearId, name: "Yes, clear context (10% used) and use auto mode", kind: "allow_always" },
+        { optionId: elevateId, name: "Yes, and use auto mode", kind: "allow_always" },
+        { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+        { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+      ];
+      const ctx = permissionContext(planPending({ options }), [planCall("switch_mode")]);
+      const controls = planControls(ctx, options as never);
+      check(`the ${mode} plan request draws two`, controls?.length, 2);
+      /*
+       * The order is the owner's: the elevated grant, then the same grant with the
+       * context cleared, filled. One axis, two buttons — reported from a phone,
+       * where four of them wrapped into the room the plan itself needed.
+       */
+      check(
+        `${mode}: the elevation, then the same elevation clearing the context`,
+        controls?.map((c) => c.option.optionId),
+        [elevateId, clearId],
+      );
+      check(`${mode}: our own short words`, controls?.map((c) => c.label), [
+        elevateLabel,
+        `Clear + ${clearId === "exit-plan-clear-auto" ? "auto" : clearId === "exit-plan-clear-bypass" ? "bypass" : "accept"}`,
+      ]);
+      check(`${mode}: neither of them is a refusal`, controls?.map((c) => c.leading), [false, false]);
+      check(
+        `${mode}: clearing the context is the filled one`,
+        controls?.filter((c) => c.primary).map((c) => c.option.optionId),
+        [clearId],
+      );
+      /*
+       * ⚠ **Two of the four are dropped, and this asserts *which* two.** The
+       * refusal, because the ✕ and the message box both decline and only one of
+       * them can say why; and `exit-plan-default`, because per-edit approval is a
+       * session mode the composer's strip sets back rather than a fork in this
+       * card. Asserted by name so that dropping a *third* — the elevation, say —
+       * cannot pass as "still two buttons".
+       */
+      check(
+        `${mode}: the refusal and the per-edit grant are the two left out`,
+        options
+          .map((o) => o.optionId)
+          .filter((id) => controls?.every((c) => c.option.optionId !== id) === true)
+          .sort(),
+        ["exit-plan-default", "reject"],
+      );
+      /*
+       * And the labels are ours for the reason the card needs them to be: the
+       * agent's own wording is past `BUTTON_LABEL_MAX` and would take this card to
+       * `rows`, which is four full-width 44px rows in the space the plan wants.
+       */
+      check(`${mode}: the agent's own words would not have been buttons`, permissionLayout(options as never), "rows");
+      check(`${mode}: and the agent's wording is kept as the tooltip`, controls?.map((c) => c.option.name).length, 2);
+
+      // One character out of place and it is the agent's card again.
+      const renamed = options.map((o) => (o.optionId === clearId ? { ...o, optionId: `${clearId}x` } : o));
+      check(
+        `${mode}: one renamed id falls back to the agent's own buttons`,
+        planControls(permissionContext(planPending({ options: renamed }), [planCall("switch_mode")]), renamed as never),
+        null,
+      );
+    }
+
+    /*
+     * ⚠ **And a shape that borrows ids from two of them matches none.** The three
+     * are alternatives rather than a menu — `availableModes` picks one — so a
+     * request pairing one variant's clear-context option with another's elevation
+     * is not something the adapter can send, and matching it would mean the set
+     * equality had quietly become a membership test.
+     */
+    const mixed = [
+      { optionId: "exit-plan-clear-auto", name: "Yes, clear context and use auto mode", kind: "allow_always" },
+      { optionId: "exit-plan-bypass", name: "Yes, and bypass permissions", kind: "allow_always" },
+      { optionId: "exit-plan-default", name: "Yes, manually approve edits", kind: "allow_once" },
+      { optionId: "reject", name: "No, keep planning", kind: "reject_once" },
+    ];
+    check(
+      "a request mixing two variants matches none of them",
+      planControls(permissionContext(planPending({ options: mixed }), [planCall("switch_mode")]), mixed as never),
+      null,
+    );
   }
 
   /* ---- a payload the snapshot was too small to carry ---- */
@@ -1093,6 +1254,80 @@ process.stdout.write("\nthe permission card's context\n");
     { ...askPending, options: [...askPending.options, { optionId: "q0_skip2", name: "Never", kind: "reject_always" }] },
     askEvents,
   ), null);
+
+  /*
+   * ⭐ **A label that names two answers names no question, and this used to
+   * resolve it silently by taking whichever came first.**
+   *
+   * The join walked the questions in order and returned the first whose labels
+   * covered the offered options, so a payload carrying several questions with
+   * shared answer labels drew question 0's wording and question 0's per-answer
+   * descriptions above buttons belonging to question 1. The measured option-id
+   * shape is `q0_opt_0` / `q0_skip` and the index in it is there precisely
+   * because a label does not identify a question — this read past it.
+   *
+   * The second case needs no multi-question payload at all: two options carrying
+   * the same label inside **one** question. `new Map` kept the last, so two
+   * distinct `optionId`s drew as identical rows with the same description, and
+   * whichever the reader tapped was a coin toss they could not see.
+   *
+   * `answeredQuestions` in `tail.ts` — the same join for the settled case —
+   * already refuses both with its `AMBIGUOUS` symbol. Falling back to plain
+   * buttons is the whole cost, and this is the surface that approves what an
+   * agent does on a machine with no sandbox.
+   */
+  const twoQuestions = {
+    questions: [
+      { question: "Should I add a caching layer?", options: [{ label: "Yes", description: "adds redis" }, { label: "No", description: "leave it" }] },
+      { question: "Should I drop the old table?", options: [{ label: "Yes", description: "irreversible" }, { label: "No", description: "keep it" }] },
+    ],
+  };
+  const sharedLabels = {
+    ...askPending,
+    options: [
+      { optionId: "q1_opt_0", name: "Yes", kind: "allow_once" },
+      { optionId: "q1_opt_1", name: "No", kind: "allow_once" },
+      { optionId: "q1_skip", name: "Skip", kind: "reject_once" },
+    ],
+  };
+  check(
+    "a label two questions share resolves to neither",
+    asking(sharedLabels, [
+      { seq: 1, at: 0, event: { type: "tool_call", toolCallId: "5:tool_rk3", title: "Asking user questions", kind: "other", status: "pending", rawInput: null, locations: [], content: [] } },
+      { seq: 2, at: 0, event: { type: "tool_call_update", toolCallId: "5:tool_rk3", title: null, status: "in_progress", rawInput: twoQuestions, locations: [], content: [] } },
+    ]),
+    null,
+  );
+  check(
+    "and a label repeated inside one question is refused too, with no second question in sight",
+    asking(
+      { ...askPending, options: [{ optionId: "a", name: "Same", kind: "allow_once" }, { optionId: "b", name: "Other", kind: "allow_once" }, { optionId: "s", name: "Skip", kind: "reject_once" }] },
+      [
+        { seq: 1, at: 0, event: { type: "tool_call", toolCallId: "5:tool_rk3", title: "Asking user questions", kind: "other", status: "pending", rawInput: null, locations: [], content: [] } },
+        { seq: 2, at: 0, event: { type: "tool_call_update", toolCallId: "5:tool_rk3", title: null, status: "in_progress", rawInput: { questions: [{ question: "Which?", options: [{ label: "Same", description: "A" }, { label: "Same", description: "B" }, { label: "Other", description: "C" }] }] }, locations: [], content: [] } },
+      ],
+    ),
+    null,
+  );
+  /*
+   * And the unambiguous multi-question case still answers, so the guard refuses
+   * the collision rather than the shape: the same two questions with distinct
+   * labels join to the one the offered options actually belong to.
+   */
+  check(
+    "distinct labels across two questions still join to the right one",
+    asking(
+      { ...askPending, options: [{ optionId: "q1_opt_0", name: "Drop it", kind: "allow_once" }, { optionId: "q1_opt_1", name: "Keep it", kind: "allow_once" }, { optionId: "q1_skip", name: "Skip", kind: "reject_once" }] },
+      [
+        { seq: 1, at: 0, event: { type: "tool_call", toolCallId: "5:tool_rk3", title: "Asking user questions", kind: "other", status: "pending", rawInput: null, locations: [], content: [] } },
+        { seq: 2, at: 0, event: { type: "tool_call_update", toolCallId: "5:tool_rk3", title: null, status: "in_progress", rawInput: { questions: [
+          { question: "Should I add a caching layer?", options: [{ label: "Add it", description: "adds redis" }, { label: "Skip caching", description: "leave it" }] },
+          { question: "Should I drop the old table?", options: [{ label: "Drop it", description: "irreversible" }, { label: "Keep it", description: "keep it" }] },
+        ] }, locations: [], content: [] } },
+      ],
+    )?.question,
+    "Should I drop the old table?",
+  );
 
   /*
    * **The hole this gate closes, driven with the payload that opens it.**

@@ -5,7 +5,6 @@ import { parseInstanceConfig } from "./instance";
 import type { ConfigField, InstanceConfig } from "./instance";
 import type {
   AdminUser,
-  CreatedMachine,
   CreatedUser,
   EnrollmentCode,
   IssuedToken,
@@ -314,6 +313,8 @@ export async function register(input: {
   name: string;
   password: string;
   email?: string;
+  /** Sent only on an instance that publishes documents to agree to. */
+  acceptedTerms?: boolean;
 }): Promise<RegisterAnswer> {
   const body = await publicPost<SessionToken & { pending: boolean; expiresAt: number }>("/v1/register", input);
   if (body.pending) return { kind: "sent", expiresAt: body.expiresAt };
@@ -550,10 +551,6 @@ export function verifyMyEmail(token: string): Promise<{ email: string; verified:
 export async function machines(): Promise<MachineRecord[]> {
   const body = await cpFetch<{ machines: MachineRecord[] }>("/v1/machines");
   return body.machines;
-}
-
-export function createMachine(name: string): Promise<CreatedMachine> {
-  return cpFetch<CreatedMachine>("/v1/machines", { method: "POST", body: JSON.stringify({ name }) });
 }
 
 /**
@@ -859,77 +856,6 @@ export function adminDeleteUser(userId: string): Promise<{
   enrollmentCodesInvalidated?: number;
 }> {
   return cpFetch(`/v1/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
-}
-
-/**
- * Every machine in the fleet, ownerless ones included.
- *
- * `GET /v1/machines` is the user's own view and joins `grants`, so a machine
- * nobody holds a grant on — which is what `machinesReleased` leaves behind — is
- * invisible there by construction. This is the only list that shows it, and
- * therefore the only place `adminSetMachineOwner` can be aimed from. Carries no
- * label and no owner: `machines.name` is the fleet-wide row name here, not
- * anybody's word for it.
- */
-export async function adminMachines(): Promise<AdminMachine[]> {
-  const body = await cpFetch<{ machines: AdminMachine[] }>("/v1/admin/machines");
-  return body.machines;
-}
-
-/** One row of `GET /v1/admin/machines` — `adminMachineProjection`, mirrored. */
-export interface AdminMachine {
-  id: string;
-  /** The row's own fleet-wide name, which nobody chose. Never anybody's label. */
-  name: string;
-  enrolled: boolean;
-  /** Revoked rows are listed. `adminSetMachineOwner` refuses one with a 403. */
-  revoked: boolean;
-  relayUrl: string | null;
-  relayOnline: boolean;
-  /** Past its owner's machine limit, so refused at the relay and at the dial. */
-  overLimit?: boolean;
-  /**
-   * Who owns it, or `null` for one nobody does.
-   *
-   * An ownerless machine is **unlimited**, because there is no owner to have a
-   * limit — every row registered before ownership existed, every one an admin
-   * created with no `ownerId`, and every one a deleted person left behind.
-   * Carried so that gap is something an admin can see and adopt out of with
-   * `adminSetMachineOwner`, rather than an unseen hole.
-   */
-  owner?: { userId: string; label: string } | null;
-}
-
-/**
- * Give an existing machine an owner — **the inverse of `machinesReleased`**.
- *
- * Ownerless used to be a one-way state: `INSERT INTO machine_owners` happened
- * only inside machine *creation*, so after `adminDeleteUser` reported
- * `machinesReleased` those machines could never be renamed, re-enrolled or
- * revoked again — every one of those resolves through `ownerOf` and answers 404
- * for the life of the row. A person leaving the fleet stranded their hardware
- * and the remedy was editing SQLite.
- *
- * `label` is what the *new owner* will call it, and it has to be free in their
- * list: `409 machine_exists` when they can already see that name, `409
- * machine_limit` at fifty, `403 machine_revoked` for a machine that has been
- * retired (revoking is what frees the label and the slot, so handing one back
- * would spend both on something nothing can reach), `404` for an unknown machine
- * or user.
- *
- * The **previous** owner's grant is deliberately left alone: ownership and
- * access are different things, and taking access away is `DELETE
- * /v1/admin/grants`, which this UI still does not have.
- */
-export function adminSetMachineOwner(
-  machineId: string,
-  userId: string,
-  label: string,
-): Promise<{ machineId: string; userId: string; label: string; scopes: string[] }> {
-  return cpFetch(`/v1/admin/machines/${encodeURIComponent(machineId)}/owner`, {
-    method: "PUT",
-    body: JSON.stringify({ userId, label }),
-  });
 }
 
 /* ------------------------------------------------------------------ *

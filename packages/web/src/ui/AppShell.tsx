@@ -5,6 +5,7 @@ import { machineQuotaNotice, mayAddMachine } from "../quota";
 import type { Route } from "../router";
 import type { AppState } from "../store";
 import { CommandLine } from "./CommandLine";
+import { MachineOffer } from "./MachineOffer";
 import { SessionBrowser } from "./SessionBrowser";
 import { useKeyboard } from "./keyboard";
 import { LAYER } from "./overlay";
@@ -244,8 +245,16 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
         {mayAddMachine(state.me) ? (
           <>
             <p className="text-xs text-muted">Run this on the machine you want to use:</p>
+            {/* ⚠ **One flex child, not two, and the column's `gap-3` is the
+                reason.** As siblings the offer inherited 12px above its own 16
+                and the `Or` rule sat visibly closer to the button than to the
+                command. Wrapped together they are one item in the gapped column
+                and the rule's two margins are the only spacing left. The rail's
+                copy of this pair is inside its own `lg:hidden`, so at every width
+                exactly one of the two is on screen. */}
             <div className="w-full max-w-lg text-left">
               <CommandLine command={installCommand(location.origin)} />
+              <MachineOffer config={state.config} me={state.me} />
             </div>
           </>
         ) : (

@@ -645,6 +645,55 @@ if (pluginCatalogueUrl !== null && !isBrowserReachable(pluginCatalogueUrl)) {
   );
 }
 
+/**
+ * Where somebody with no machine is pointed, or nothing.
+ *
+ * ⚠ **Env only, deliberately, and it is not in `SETTING_KEYS` for a different
+ * reason than `pluginCatalogueUrl` above.** That one is kept out because a
+ * database-owned value could name an origin the CSP built at construction
+ * refuses. This one is kept out because it is **not a product setting**: it
+ * points at one particular shop, run by whoever runs this deployment, and
+ * `SETTING_KEYS` is drawn on the Server settings screen of every instance — so a
+ * row there would put a commercial switch, with somebody's business behind it,
+ * in front of every admin of every fork. The operator of a deployment sets this
+ * in the environment they already own; nobody else is offered it, and on an
+ * instance that never sets it the add-a-machine screens are exactly what they
+ * were before it existed.
+ *
+ * Absent is the ordinary state and the default.
+ *
+ * ⚠ **Validated the way the catalogue is** — this value is rendered into an
+ * `href` on the origin that holds the browser's credential, and `new URL`
+ * accepts `javascript:` and `data:` without complaint, so the scheme is checked
+ * rather than inferred from the parse succeeding. Warned rather than fatal: an
+ * instance with a bad offer URL is an instance that offers nothing, which is
+ * also the default.
+ */
+const machineOfferUrl = (process.env["REEMOAT_CP_MACHINES_OFFER_URL"] ?? "").trim() || null;
+if (machineOfferUrl !== null && !isBrowserReachable(machineOfferUrl)) {
+  console.warn(
+    `REEMOAT_CP_MACHINES_OFFER_URL must be an absolute http:// or https:// URL, got "${machineOfferUrl}".\n` +
+      "  It becomes a link this app's own screens draw, so it needs a scheme a browser will follow.\n" +
+      "  Ignoring it: this instance will point nobody anywhere, which is the default.",
+  );
+}
+
+/*
+ * Whether this deployment publishes the built-in legal documents as its own.
+ *
+ * Filed here beside the offer URL because it is the same family and kept out of
+ * `SETTING_KEYS` for the same reason: those documents name one particular party,
+ * and a row on the Server settings screen of every fork would offer somebody
+ * else's contract as a switch. Off unless this says otherwise — an instance has
+ * to *claim* the documents, never inherit them.
+ *
+ * Any non-empty value other than `0`, `off`, `false` or `no` turns it on: this is
+ * a switch somebody sets once in an env file, and refusing `yes` because it is
+ * not `true` would be a refusal nobody is helped by.
+ */
+const legalRaw = (process.env["REEMOAT_CP_LEGAL_DOCUMENTS"] ?? "").trim().toLowerCase();
+const legalDocuments = legalRaw !== "" && !["0", "off", "false", "no"].includes(legalRaw);
+
 const app = createControlPlaneApp({
   db: store.db,
   issuer,
@@ -660,6 +709,10 @@ const app = createControlPlaneApp({
   // it: `originOf` there answers `null` for anything unparseable, so a warned
   // value and an absent one reach exactly the same policy.
   pluginCatalogueUrl: pluginCatalogueUrl !== null && isBrowserReachable(pluginCatalogueUrl) ? pluginCatalogueUrl : null,
+  // The same shape and the same reason: one predicate decides, and a warned
+  // value reaches the app as the absent one rather than as itself.
+  machineOfferUrl: machineOfferUrl !== null && isBrowserReachable(machineOfferUrl) ? machineOfferUrl : null,
+  legalDocuments,
 });
 
 /*

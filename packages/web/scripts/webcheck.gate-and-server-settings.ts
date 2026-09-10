@@ -210,10 +210,17 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
    * the assertion that was supposed to fail passes. The compiler is what catches
    * it here, so the field is written out rather than spread in.
    */
-  const off = { registration: "off", email: false, source: null, catalogue: null } as const;
-  const offMail = { registration: "off", email: true, source: null, catalogue: null } as const;
-  const openLocal = { registration: "open", email: false, source: null, catalogue: null } as const;
-  const openMail = { registration: "open", email: true, source: null, catalogue: null } as const;
+  /*
+   * ⚠ **`legal: false` on all four for `catalogue`'s reason, and it is the value
+   * that matters here.** None of the predicates below reads it either, and every
+   * one of them must keep not reading it: whether an instance publishes its
+   * operator's documents decides what the sign-up form *asks for*, never whether
+   * somebody may sign in or recover an account.
+   */
+  const off = { registration: "off", email: false, source: null, catalogue: null, offer: null, legal: false } as const;
+  const offMail = { registration: "off", email: true, source: null, catalogue: null, offer: null, legal: false } as const;
+  const openLocal = { registration: "open", email: false, source: null, catalogue: null, offer: null, legal: false } as const;
+  const openMail = { registration: "open", email: true, source: null, catalogue: null, offer: null, legal: false } as const;
 
   /* ---- the wire body actually becomes one of those ---- */
 
@@ -255,17 +262,22 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   const wireSource = { url: SOURCE_URL, version: VERSION };
 
   /*
-   * ⚠ **`catalogue` is a third free variable, and it has to be supplied here for
-   * the same reason the §13 constants are.** The handler closes over
-   * `pluginCatalogueUrl`, so a `new Function` that did not pass it throws a
-   * `ReferenceError` at call time rather than asserting anything — which is what
+   * ⚠ **`catalogue` and `machineOfferUrl` are free variables, and they have to be
+   * supplied here for the same reason the §13 constants are.** The handler closes
+   * over both — each is read once at construction in `main.ts` and never from the
+   * database — so a `new Function` that did not pass them throws a
+   * `ReferenceError` at call time rather than asserting anything, which is what
    * this span is *for*: a field added to that payload is a field this driver
-   * either spans or breaks on, never one it silently ignores.
+   * either spans or breaks on, never one it silently ignores. Values rather than
+   * thunks, unlike `registrationMode` and `mailConfigured`, because the handler
+   * reads them rather than calling them.
    */
   const instanceWireBody = (
     mode: { enabled: boolean; requiresEmail: boolean },
     configured: boolean,
     catalogue: string | null = null,
+    offer: string | null = null,
+    legal = false,
   ): unknown => {
     const source = appSource.split("\n");
     const open = source.findIndex((line) => line.startsWith('  app.get("/v1/instance"'));
@@ -283,6 +295,8 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       "SOURCE_URL",
       "VERSION",
       "pluginCatalogueUrl",
+      "machineOfferUrl",
+      "legalDocuments",
       "db",
       "c",
       source.slice(open + 1, close).join("\n"),
@@ -293,6 +307,8 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       SOURCE_URL,
       VERSION,
       catalogue,
+      offer,
+      legal,
       {},
       { json: (value: unknown) => value },
     ) as unknown;
@@ -338,6 +354,39 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
   check(
     "and a scheme-less one is refused rather than resolved against this origin",
     parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, "plugins.example"))?.catalogue,
+    null,
+  );
+
+  /*
+   * ⚠ **The offer, across the same span, in both states and in the two shapes a
+   * wrong one takes.** It is rendered into an `href` a person taps, so the two
+   * failures are not symmetrical with the catalogue's: a scheme-less value is a
+   * **relative** path, and the SPA fallback answers it with `index.html` — the
+   * offer would open a second copy of this app in a new tab, which is the §13
+   * link's own measured failure arriving on a link somebody was told would sell
+   * them a machine. And `new URL` parses `javascript:` without throwing, on the
+   * one origin that holds the browser's credential.
+   */
+  check(
+    "the machine offer survives the wire",
+    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "https://get.example"))
+      ?.offer,
+    "https://get.example",
+  );
+  check(
+    "and an instance that offers nothing says so rather than leaving it undefined",
+    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true))?.offer,
+    null,
+  );
+  check(
+    "a scheme-less offer is refused rather than resolved against this origin",
+    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "get.example"))?.offer,
+    null,
+  );
+  check(
+    "and a javascript: one is refused rather than parsed",
+    parseInstanceConfig(instanceWireBody({ enabled: true, requiresEmail: true }, true, null, "javascript:alert(1)"))
+      ?.offer,
     null,
   );
 

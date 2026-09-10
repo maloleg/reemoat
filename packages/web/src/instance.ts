@@ -52,6 +52,39 @@ export interface InstanceConfig {
    * browse, and installing a plugin from a file is untouched.
    */
   catalogue: string | null;
+
+  /**
+   * Where this instance points somebody who has no machine, or `null`.
+   *
+   * `catalogue`'s shape and its argument — the address rather than a flag,
+   * because this client renders it into an `href` and has no other way to learn
+   * it, and because a URL compiled into this bundle would be one project's shop
+   * appearing on every fork's screens, under a licence that hands them the
+   * build.
+   *
+   * `null` on an instance that offers nothing, on a control plane that predates
+   * the field, and on a value that could not be read as an absolute http(s) URL.
+   * All three are the same state here and are drawn the same way: nothing.
+   */
+  offer: string | null;
+
+  /**
+   * Whether this instance publishes the built-in Terms, Acceptable Use Policy
+   * and Privacy Policy.
+   *
+   * A flag rather than an address, unlike `catalogue` and `offer`, because the
+   * documents ship *inside this bundle* — what varies is whether a given
+   * deployment adopts them as its own. `OPERATOR` names one particular party, so
+   * an instance that has not said "these are mine" must not draw them, must not
+   * ask anybody to agree to them, and must not have its sign-up refused for
+   * failing to.
+   *
+   * **`false` on an instance that has not opted in, on a control plane that
+   * predates the field, and on any value that is not literally `true`.** All
+   * three are the same state and are drawn the same way: no documents, no
+   * consent box, and no requirement on the register route. Q1.638.
+   */
+  legal: boolean;
 }
 
 /**
@@ -145,11 +178,32 @@ export function parseInstanceConfig(body: unknown): InstanceConfig | null {
    * which is a state this client already draws.
    */
   const catalogue = read(read(body, "plugins"), "catalogue");
+  /*
+   * Read with `catalogue`'s leniency and through the same guard, for a reason one
+   * degree sharper: this value is not `fetch`ed, it is put in an `href` a person
+   * taps. A scheme-less `get.example.com` is a **relative** path, and the control
+   * plane's SPA fallback answers such a path with `index.html` — so the offer
+   * would open a second copy of this app in a new tab. That is the §13 offer's
+   * own measured failure, arriving on a link somebody was told would sell them a
+   * machine. `new URL` also parses `javascript:` and `data:` without throwing,
+   * which is the other half of what the guard is for on this field specifically,
+   * and the reason it is not a `startsWith("http")`.
+   */
+  const offer = read(read(body, "machines"), "offer");
+  /*
+   * Strictly `true`, unlike the two above, and the asymmetry is the point: those
+   * two fail to `null` and lose a feature, while this one decides whether a
+   * document naming a named party is put in front of somebody. Anything that is
+   * not an explicit yes is a no.
+   */
+  const legal = read(read(body, "legal"), "documents");
   return {
     registration: enabled ? "open" : "off",
     email: configured,
     source,
     catalogue: typeof catalogue === "string" && isAbsoluteHttpUrl(catalogue) ? catalogue : null,
+    offer: typeof offer === "string" && isAbsoluteHttpUrl(offer) ? offer : null,
+    legal: legal === true,
   };
 }
 
@@ -167,6 +221,26 @@ export function parseInstanceConfig(body: unknown): InstanceConfig | null {
  */
 export function catalogueUrl(config: InstanceConfig | null): string | null {
   return config?.catalogue ?? null;
+}
+
+/**
+ * Where to point somebody who has no machine, or `null`.
+ *
+ * ⚠ **Fails closed on an unknown config, beside `catalogueUrl` and against
+ * `mailUsable`, and this file's standing sentence reconciles them: fail closed
+ * where the cost is a missing screen, fail open where the cost is a locked-out
+ * person.** Nobody is locked out of anything by an offer that is not made for one
+ * render — the one-line installer is on the same screens and is the only way a
+ * machine is actually added here. Guessing an address, meanwhile, produces a link
+ * that either goes nowhere or goes to a business the operator of this instance
+ * has never heard of, carrying a signed-in person's email address in it. That is
+ * a failure with a symptom, and the symptom lands on somebody else.
+ *
+ * An accessor rather than a `config?.offer` at each screen, so the fail direction
+ * is stated once — `catalogueUrl`'s precedent exactly.
+ */
+export function machineOffer(config: InstanceConfig | null): string | null {
+  return config?.offer ?? null;
 }
 
 /**

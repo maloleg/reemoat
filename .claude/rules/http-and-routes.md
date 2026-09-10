@@ -60,6 +60,27 @@ pnpm client plugin view <id> [screen|settings]
   409 cannot show: what an un-rolled-back `BEGIN` takes out is the *next* writer on
   the shared connection. Deliberately not an `app.onError` envelope renderer — that
   is a service-wide contract change and it would mask the next unmapped throw. Q1.50.
+- **⚠ The two services answer an unrouted path differently, on purpose, and the
+  daemon's bareness is load-bearing.** The control plane registers
+  `app.notFound(… "not_found" …)`, so every path it does not serve answers the
+  envelope whatever the method — which is what lets `relaycheck` tell a *deleted*
+  route from a live one that is refusing (`vanished`, and the `PUT`/`DELETE
+  /v1/admin/grants` pins). **The daemon deliberately has none.** Nothing sends a
+  version to a daemon and nothing reads one, so a route added in a release has
+  exactly one signature on an older host: Hono's own bare 404 with no envelope,
+  which `parseBody` turns into `code: "http_404"`. Six places read that —
+  `meansRouteAbsent` in `packages/web/src/http.ts` and five sites that still
+  transcribe it (`daemon.ts`, `plugins.ts`, `ImportCode.tsx`, `NewSession.tsx`,
+  `MachineAgentsSection.tsx`) — and they need it because an absent route and a
+  refusing one want opposite screens: a sentence naming the remedy and **no**
+  retry, against the triangle and a way to ask again. So "every non-2xx answers one
+  envelope" reads as a rule about the *control plane*; applying it to `src/server.ts`
+  would turn every "this machine's daemon is too old" screen into a generic refusal
+  with a retry button that asks the same daemon the same question. No driver
+  catches it — `webcheck.plugin-protocol.ts` synthesizes the error rather than
+  observing a daemon produce it — so this paragraph is the whole of the guard. A
+  global `notFound` on the daemon is a breaking change and needs a discriminator
+  that survives it first.
 - **Not every non-2xx is an error envelope.** The daemon answers a repeated
   permission answer with `409` carrying a *success*-shaped body — `{recorded: true,
   repeat: true, outcome, session}`, no `error` key. A client reading only

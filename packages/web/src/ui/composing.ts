@@ -32,6 +32,16 @@ export function composerPlaceholder(state: {
    * to decide it. See {@link Composer}'s send path.
    */
   revising: boolean;
+  /**
+   * The `/` menu would have something in it.
+   *
+   * Only the idle line reads this, and it is a boolean rather than a count
+   * because the question is "is there anything to offer", not "how much". The
+   * caller passes `buildCommands`' whole list, unfiltered by what has been typed:
+   * what the placeholder promises is that the key does *something*, which is a
+   * property of the session rather than of the draft.
+   */
+  hasCommands: boolean;
 }): string {
   /*
    * **First, because it is the one state where `blocked` does not mean "wait".**
@@ -42,9 +52,9 @@ export function composerPlaceholder(state: {
    * is itself the answer, and the placeholder has to say so or the control is
    * invisible.
    */
-  if (state.revising) return "say what to change…";
+  if (state.revising) return "Say what to change…";
   // Blocked first: nothing typed here moves until the request above is answered.
-  if (state.blocked) return "answer the request above first";
+  if (state.blocked) return "Answer the request above first";
   /*
    * Then reconnecting, which is the rarer and the more surprising of the two —
    * and the one that explains why Send has been a spinner for thirty seconds.
@@ -53,9 +63,46 @@ export function composerPlaceholder(state: {
    * for exactly the window in which this is true, because `submit()` clears the
    * draft before the request resolves.
    */
-  if (state.reconnecting) return "reconnecting the agent…";
-  if (state.working) return "agent is working…";
-  return "message…";
+  if (state.reconnecting) return "Reconnecting the agent…";
+  if (state.working) return "Agent is working…";
+  /*
+   * **The idle line teaches the one affordance nothing else on screen does.**
+   *
+   * `/` opens a menu holding the agent's own commands and the three controls it
+   * does not publish as commands, and until now the only way to find that out was
+   * to type the character and see. The strip below the box advertises the
+   * settings; nothing advertised the commands.
+   *
+   * **It says only that, with no "message" in front of it.** An empty box already
+   * reads as somewhere to write — that is what an empty box is — so the word was
+   * the half a placeholder does not have to carry, and the key is the half nothing
+   * else on screen says.
+   *
+   * ⚠ **It is conditional, and the condition is the whole reason this is not a
+   * constant string in the JSX.** A session whose agent is away publishes no
+   * commands, and `buildCommands` synthesizes the config controls from an
+   * `agentConfig` that is then also absent — so on a restored session the menu is
+   * empty, and a placeholder promising one would be the box lying about a key.
+   * The plain line is what that falls back to, which is what it always said.
+   */
+  /*
+   * ⚠ **All six are capitalised, and the split that used to govern them is gone.**
+   *
+   * It was one: an *instruction to the reader* took a capital ("Type / for
+   * commands", and `ElicitationCard`'s "Type your own answer here"), a *caption
+   * about the state the box is in* stayed a lowercase fragment ("message…", "agent
+   * is working…"). Defensible, argued at length, and withdrawn on the owner's word
+   * — every string in this box is sentence-cased now.
+   *
+   * What is worth keeping from it is why a rule like that is expensive: it is
+   * invisible in the one place it is read. Six placeholders appear one at a time,
+   * seconds apart, in the same 4px of a phone screen — so a reader meets them as a
+   * *sequence* rather than as a table, and a register split nobody can see reads as
+   * five strings someone forgot to capitalise. `webcheck` asserts the six by value,
+   * which is what makes this a decision rather than a habit; the assertion is where
+   * a seventh has to declare itself.
+   */
+  return state.hasCommands ? "Type / for commands" : "Message…";
 }
 
 /**

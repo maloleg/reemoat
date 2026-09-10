@@ -92,6 +92,33 @@ export interface ElicitationField {
   /** An input hint. Enforced by nobody — see `validateElicitationContent`. */
   format: "email" | "uri" | "date" | "date-time" | null;
   default: string | number | boolean | string[] | null;
+  /**
+   * The key of the field this one is an *alternative* answer to, or `null`.
+   *
+   * **The one thing read out of an elicitation property's `_meta`, and it is
+   * projected to a scalar rather than carried.** `acp/subagents.ts` does the same
+   * with `_meta.claudeCode`, for the same reason: a blob an agent chose is not
+   * something to hand a browser, and a named scalar is something a client can act
+   * on.
+   *
+   * What it answers is a question the client otherwise cannot: claude puts an
+   * optional free-text box after every `AskUserQuestion` — its own "Other" — and
+   * `applyAskElicitationResponse` uses that text **instead of** the selection,
+   * for a multi-select as well as a single one. Without this the card draws two
+   * answers to one question and sends both, and the agent silently keeps one.
+   *
+   * ⚠ **Read from a declaration and never from the key's shape.** claude declares
+   * `_meta._askUserQuestionCustomAnswer` `{questionId, isCustomAnswer}`; codex
+   * declares nothing and spells the same idea by suffixing `__other` to the
+   * question's id. Q6.54 refuses to parse either suffix by name — a client keyed
+   * on one renders that agent's question and refuses the other's — so an agent
+   * that does not declare it gets `null` here and the card behaves exactly as it
+   * did. Absence is the only way to say no, one field over.
+   *
+   * Resolved before it leaves: a key naming no other field on the form, or naming
+   * itself, is dropped. A dangling pointer would be a control clearing nothing.
+   */
+  alternativeTo: string | null;
 }
 
 /** What the agent asked, as a form somebody can be shown. */
@@ -730,7 +757,26 @@ export type SessionStatus =
    * never took. {@link endedWithDaemon} is the one rule now; `exit.reason` still
    * says which of the two happened.
    */
-  | "interrupted";
+  | "interrupted"
+  /**
+   * The daemon released this session's agent because nobody was using it, and
+   * the next message brings it back.
+   *
+   * Terminal in the same sense `interrupted` is — no process, no file
+   * descriptors, the conversation whole on disk — and distinct from it for the
+   * one reason that matters to a reader: **nothing went wrong here.** An
+   * `interrupted` session is one the daemon took away and owes back on its own,
+   * at the next boot, whether or not anybody wanted it; a parked one was let go
+   * on purpose and comes back only when somebody types into it. Clients draw the
+   * first with a warn tone and must not draw this one that way.
+   *
+   * ⚠ **And it is emphatically not `exited`.** Nobody decided this conversation
+   * was over — `DELETE /sessions/:id` is that decision and writes `stopped`. A
+   * parked session that reads as stopped is the whole defect this member exists
+   * to make unsayable, and the derivation's `default:` arm is what would have
+   * done it silently. See `ManagedSession.status`.
+   */
+  | "parked";
 
 export type ExitReason =
   | "stopped"
@@ -779,7 +825,27 @@ export type ExitReason =
    * `reloadCredentials`, which resumes precisely the sessions carrying this
    * reason and leaves every hand-stopped one alone.
    */
-  | "agent_signed_out";
+  | "agent_signed_out"
+  /**
+   * Nobody had used this session for long enough that the daemon let its agent
+   * go, keeping the conversation.
+   *
+   * **Deliberately not in `DAEMON_EXIT_REASONS`**, and the exclusion is the
+   * whole design. That list means "the daemon went away and owes this back **by
+   * itself**", which drives the boot pass and the warn tone a client draws. A
+   * parked session is neither: the daemon is still running, it let the agent go
+   * on purpose, and bringing every one of them back at the next boot would
+   * refill exactly the memory parking freed — measured, five simultaneous
+   * resumes turned a 1.3s reattach into 90s. So `autoResumable` answers it
+   * `true` on a prompt and `false` at boot, and it derives its own
+   * `SessionStatus` rather than `interrupted`.
+   *
+   * What it *shares* with that list is the one thing {@link
+   * keepsItsConversation} is for: the prune may never take this row. A session
+   * the daemon released is one somebody is expected to come back to, so it is
+   * active however old it is.
+   */
+  | "parked";
 
 /**
  * The exits that mean the daemon went away rather than that anybody decided
@@ -800,6 +866,33 @@ export type ExitReason =
  * by construction — see its own note above.
  */
 export const DAEMON_EXIT_REASONS = ["daemon_restarted", "daemon_shutdown", "config_changed"] as const;
+
+/**
+ * The settings a person may change on a machine from its settings screen.
+ *
+ * **A closed list, and short on purpose.** The daemon's configuration is env only
+ * — `REEMOAT_*` is read in `scripts/daemon.ts` and nothing in `src/` touches
+ * `process.env` — and that rule is not being relaxed. What this names is the
+ * narrow class whose owner is the person *using* the machine rather than the one
+ * deploying it, which is why each entry has a control on a screen. Q2.225.
+ *
+ * A `Record<…, true>` for the reason `EXIT_REASON_MEMBERS` is one: exhaustive in
+ * both directions, so a key added to the union is a compile error until it is
+ * listed and one removed is a compile error until it is delisted. `isMachineSettingKey`
+ * is what the route validates a request against, so an unknown key is refused
+ * rather than written to a table nothing will read.
+ */
+export type MachineSettingKey = "idleReleaseMinutes";
+
+const MACHINE_SETTING_MEMBERS: Record<MachineSettingKey, true> = {
+  idleReleaseMinutes: true,
+};
+
+export const MACHINE_SETTING_KEYS = Object.keys(MACHINE_SETTING_MEMBERS) as MachineSettingKey[];
+
+export function isMachineSettingKey(value: unknown): value is MachineSettingKey {
+  return typeof value === "string" && Object.hasOwn(MACHINE_SETTING_MEMBERS, value);
+}
 
 /**
  * Whether an agent's error says it could not authenticate.
@@ -834,6 +927,32 @@ export function endedWithDaemon(exit: { reason: ExitReason } | null | undefined)
 }
 
 /**
+ * Whether this session ended still holding its conversation, and is owed a way
+ * back — by the daemon on its own, or by the person who returns to it.
+ *
+ * **Wider than {@link endedWithDaemon} by exactly one member, and the two must
+ * not be collapsed.** That one answers "does the daemon bring this back by
+ * itself", which decides the boot pass and the warn tone a client draws;
+ * `parked` is false there on purpose. This one answers "may this row be
+ * deleted", which is a different question with a different loss: a parked
+ * session is one somebody is *expected* to return to, so it is the last thing a
+ * prune should take.
+ *
+ * The one caller is `SqliteSessionStore`'s `isActiveRow`, and it lives here
+ * rather than there for the reason that file states about `isPersistedGiveUp`:
+ * the store may not carry its own copy of the registry's vocabulary, because a
+ * copy is what disagrees the day a reason is added. Q2.222 is the incident where
+ * a second copy — a SQL `CASE` — ranked a reason this build could not name as
+ * inactive and cut what the sweep kept.
+ */
+export function keepsItsConversation(
+  exit: { reason: ExitReason } | null | undefined,
+): boolean {
+  if (exit === null || exit === undefined) return false;
+  return endedWithDaemon(exit) || exit.reason === "parked";
+}
+
+/**
  * Every member of `ExitReason`, as a value, so that a string read off disk can
  * be told from one this build has never heard of.
  *
@@ -861,6 +980,7 @@ const EXIT_REASON_MEMBERS: Record<ExitReason, true> = {
   daemon_restarted: true,
   config_changed: true,
   agent_signed_out: true,
+  parked: true,
 };
 
 export function isExitReason(value: unknown): value is ExitReason {
@@ -1155,6 +1275,19 @@ export interface PersistedSession {
    * being waited on.
    */
   pinned: boolean;
+  /**
+   * Where this session sits in the list, or `null` for wherever its age puts it.
+   *
+   * **Always present, and that is the compatibility contract.** A client reads a
+   * missing field as "this daemon cannot store an order" and disables the gesture
+   * for that machine's rows; `null` is the different, ordinary answer that this
+   * daemon can and nobody has. Nothing here branches on a version.
+   *
+   * A preference like `pinned`, and read the same way — but unlike `pinned` it is
+   * comparable with the age of a row that has none, which is what lets one order
+   * cover both.
+   */
+  rank: number | null;
 }
 
 export interface SessionStore {

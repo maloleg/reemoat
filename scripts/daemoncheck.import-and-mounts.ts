@@ -102,11 +102,20 @@ process.stdout.write("\nimporting a codebase\n");
     return gzipSync(Buffer.concat(parts));
   };
 
-  /** A pax `x` header carrying `path=`, then the member it renames. */
+  /**
+   * A pax `x` header carrying `path=`, then the member it renames.
+   *
+   * ⚠ **The length prefix counts BYTES** — itself, the space, the key, the value
+   * and the newline. This computed it with `String.length`, which is UTF-16 code
+   * units and only agrees for ASCII; every fixture here was ASCII, so the helper
+   * and a reader that also walked in units agreed with each other and the whole
+   * subject went untested. Writing the record the way an archiver does is what
+   * lets the cases below say anything.
+   */
   const paxMember = (realPath: string, data: Buffer): Member[] => {
     const make = (len: number): string => `${len} path=${realPath}\n`;
-    let len = make(0).length;
-    for (let i = 0; i < 4; i += 1) len = make(len).length;
+    let len = Buffer.byteLength(make(0), "utf8");
+    for (let i = 0; i < 4; i += 1) len = Buffer.byteLength(make(len), "utf8");
     return [
       { name: "PaxHeader/x", type: "x", data: Buffer.from(make(len), "utf8") },
       { name: "short-stand-in", type: "0", data },
@@ -273,6 +282,42 @@ process.stdout.write("\nimporting a codebase\n");
     check("a pax extended header is read rather than refused", out.status, 201);
     check("and the member takes the name the pax record gave it", readFileSync(join(into, deep), "utf8"), "pax");
     check("rather than the short stand-in beside it", existsSync(join(into, "app/short-stand-in")), false);
+  }
+
+  {
+    /*
+     * ⭐ **A pax record naming a non-ASCII file, which is the commonest tarball a
+     * Mac produces and was refused whole.**
+     *
+     * bsdtar writes a `path=` record for *any* name outside ASCII, not only for a
+     * long one — so `tar -czf app.tar.gz app` over a folder holding one accented
+     * filename went through here. `paxPath` compared the byte length against
+     * UTF-16 indices, over-read the record by one unit per multi-byte character,
+     * and answered a name carrying the record's trailing newline and the next
+     * length digit. `safeMemberPath` then called that `control_char` and the
+     * route refused the **entire archive** with 400.
+     *
+     * The long name is the other half of the same defect: past the guard it
+     * answered `null` instead, and `extractTgz` fell back to the truncated
+     * 100-byte ustar field — so the file arrived under a name nobody wrote, and
+     * two such siblings collided on `EEXIST` and failed the import at 503.
+     */
+    const into = target();
+    const accented = "app/tëst.txt";
+    const long = "app/" + "ä".repeat(60) + "-datei.txt";
+    const out = await send(
+      into,
+      buildTarGz([
+        { name: "app/", dir: true },
+        ...paxMember(accented, Buffer.from("kurz", "utf8")),
+        ...paxMember(long, Buffer.from("lang", "utf8")),
+      ]),
+      "app.tar.gz",
+    );
+    check("a short non-ASCII name is imported rather than refusing the archive", out.status, 201);
+    check("and it lands under the name that was written", readFileSync(join(into, accented), "utf8"), "kurz");
+    check("a long one is not truncated to the ustar field either", readFileSync(join(into, long), "utf8"), "lang");
+    check("so neither fell back to the stand-in", existsSync(join(into, "app/short-stand-in")), false);
   }
 
   {

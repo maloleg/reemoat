@@ -11,112 +11,15 @@ import {
   chipValue,
   clipTitle,
   configProse,
-  contextHint,
-  contextPercent,
   detailWorthDrawing,
   elapsedSince,
   headlineWorthDrawing,
   mergeUpdates,
   opensToAnything,
-  pieLabel,
-  pieTone,
   resolveTool,
   restatesInput,
-  shortCount,
   supersedes,
 } from "./webcheck.modules.js";
-
-/* ------------------------------------------------------------------ *
- * The context readout
- * ------------------------------------------------------------------ */
-
-process.stdout.write("\nthe context window\n");
-{
-  /*
-   * Three answers, not two — the same discipline as `Liveness` and `loggedIn`.
-   * "Cannot tell" is a distinct answer here: kimi may never send `usage_update`
-   * and a restored session has no live agent to ask, so it is a common state.
-   * What the readout *does* with it is a separate rule — see `pieTone` below,
-   * which draws it in the quietest colour there is rather than as a hole. It used
-   * to render as nothing at all, and the hole moved the chips beside it every
-   * time an agent started or stopped reporting.
-   */
-  check("no usage at all is cannot-tell", contextPercent(null), null);
-  check("and an older daemon's absent field is the same answer", contextPercent(undefined), null);
-  // The one value nothing may divide by. The daemon stores 0 for "the agent
-  // reported occupancy but not a window", precisely so this is checkable.
-  check("a zero-size window is cannot-tell, not a division", contextPercent({ used: 0, size: 0, cost: null }), null);
-  check("a real reading is a whole percent", contextPercent({ used: 190_000, size: 200_000, cost: null }), 95);
-  check("rounded, since that is what is drawn", contextPercent({ used: 1234, size: 200_000, cost: null }), 1);
-  // Possible across a model switch that shrinks the window. An arc past its own
-  // circumference draws as garbage; reading "full" is at least true.
-  check("over-full clamps rather than overrunning the arc", contextPercent({ used: 300_000, size: 200_000, cost: null }), 100);
-  check("and a nonsense number is cannot-tell", contextPercent({ used: Number.NaN, size: 200_000, cost: null }), null);
-
-  check("token counts are short enough for a chip", [shortCount(940), shortCount(124_000), shortCount(1_250_000)], ["940", "124k", "1.3M"]);
-  /*
-   * The boundary the unit is chosen at, which was chosen from the *raw* value
-   * while the rounding happened after — so a number just under a million rounded
-   * up and out of the arm that had already been picked, printing `1000k`.
-   *
-   * Both sides asserted, because a fix that only moves the boundary would pass
-   * one of them: 999,949 must stay in `k`.
-   */
-  check(
-    "and rounding cannot carry a number out of its own unit",
-    [shortCount(999_949), shortCount(999_999), shortCount(1_000_000)],
-    ["999.9k", "1M", "1M"],
-  );
-  // The real one, since this is what a codex window is.
-  check("a codex context window reads as itself", shortCount(258_400), "258.4k");
-
-  /*
-   * The readout is a ring in the strip and a number only inside the popover it
-   * opens, so nothing here is a width rule any more — a ring is one width at
-   * every percentage. What is left is what the popover *says*.
-   */
-  check("a reading is the percent and a sign", [pieLabel(0), pieLabel(36), pieLabel(100)], ["0%", "36%", "100%"]);
-  // Decided rather than fallen into: an unmeasured window reads `0%` and is told
-  // apart by its tone and by the popover's own words, never by the glyph.
-  check("cannot-tell reads as zero", pieLabel(null), "0%");
-  check("but is not toned like a measurement", pieTone(null), "unknown");
-  /*
-   * And it says *why*, because the honest answer is agent-specific and the
-   * generic one misleads. Measured: `usage_update` is in kimi 0.29.2's bundle
-   * once, in the vendored protocol schema, with no site that sends it — so on
-   * kimi the readout is empty for the life of every session and "has not said
-   * yet" is a promise of a number that is never coming.
-   */
-  check("kimi is named, because it never reports and never will", contextHint("kimi"), "kimi does not report this — send /usage to ask it");
-  // Pointed at the command kimi actually publishes, so the advice is something
-  // the `/` menu already offers rather than something invented here.
-  check("and pointed at a command that exists", contextHint("kimi").includes("/usage"), true);
-  // Anything else gets the neutral form: claude does report, so reaching this at
-  // all means a session with no live agent, where no command would help.
-  check("every other agent gets the neutral answer", contextHint("claude"), "the agent has not reported this");
-  /*
-   * Codex belongs in that arm by measurement, not by falling off the end of a
-   * ternary.
-   *
-   * Measured 2026-08-07 against codex-acp 1.1.9: a single prompt produced two
-   * `usage_update` notifications carrying `{used: 16730, size: 258400}`. So the
-   * number does arrive, "has not reported this" really does mean *yet*, and
-   * naming codex the way kimi is named would be the misleading answer here.
-   *
-   * Asserted because the two agents that do not report and the one that does are
-   * indistinguishable from this function's shape — every one of them takes the
-   * `else`, and only kimi's is a decision.
-   */
-  check("codex is in it because it does report, not by default", contextHint("codex"), "the agent has not reported this");
-  check("a comfortable window is not a warning", [pieTone(0), pieTone(74)], ["ok", "ok"]);
-  check("three quarters is where it starts warning", pieTone(75), "warn");
-  check(
-    "ninety is where it stops warning and starts shouting",
-    [pieTone(89), pieTone(90)],
-    ["warn", "critical"],
-  );
-  check("and full is the loudest it gets", pieTone(100), "critical");
-}
 
 /* ------------------------------------------------------------------ *
  * Where "Default" gets its meaning back

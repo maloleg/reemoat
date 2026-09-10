@@ -1,4 +1,4 @@
-import { AlertTriangle, Bot, Brain, Check, ChevronDown, ChevronRight, ChevronUp, CircleSlash, Download, FilePen, FilePlus2, Globe, Loader, Minus, Pencil, Search, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { AlertTriangle, Bot, Brain, Check, ChevronDown, ChevronRight, CircleSlash, Download, FilePen, FilePlus2, Globe, Loader, Minus, Pencil, Search, Terminal, Trash2, Wrench, X } from "lucide-react";
 import {
   createContext,
   memo,
@@ -91,9 +91,29 @@ import {
  * `Markdown` was already memoised on its text, which is the expensive half.
  */
 
+/**
+ * The gap this column keeps under the conversation, in pixels — the old `pb-12`.
+ *
+ * A number rather than a class because it is now the floor of an arithmetic
+ * rather than a constant on its own: a parked ask card raises it. Everything the
+ * 48 was chosen for is argued where it is applied.
+ */
+const TRANSCRIPT_FOOT_PX = 48;
+
+/**
+ * How much room a parked card gets on top of its own height.
+ *
+ * 8 of it is the card frame's `pb-2`, which sits between the card and the bottom
+ * of this box; the remaining 12 is the gap the reader actually sees between the
+ * last row and the top of the card. Small on purpose — the card has a border and
+ * a shadow, so it does not need a band as well, and the room it does need is
+ * vertical space a plan is short of.
+ */
+const ASK_CLEARANCE = 20;
+
 export function EventList({
   transcript,
-  onReveal,
+  askHeight,
   onResized,
   files,
   working,
@@ -103,8 +123,13 @@ export function EventList({
   echo,
 }: {
   transcript: Transcript;
-  /** Show the conversation from before the last `/clear`, and go and fetch it. */
-  onReveal: () => void;
+  /**
+   * How tall the parked ask card is, or `0` for none.
+   *
+   * It becomes this column's bottom padding, which is the one place the gap under
+   * a conversation is decided. See {@link TRANSCRIPT_FOOT_PX}.
+   */
+  askHeight: number;
   /**
    * A row changed its own height — a card was opened or closed.
    *
@@ -187,9 +212,7 @@ export function EventList({
    * be collected before the `tool_call` it belongs to is reached, and the same
    * for a permission's resolution and its request.
    */
-  const cut = transcript.clearedAt !== null && !transcript.revealedBeforeClear ? transcript.clearedAt : 0;
-  /** The reveal has been asked for and its events have not all arrived yet. */
-  const fetchingEarlier = transcript.revealedBeforeClear && transcript.loadingHistory;
+  const cut = transcript.clearedAt ?? 0;
   // Why this conversation does not start at its beginning is one answer and it is
   // `transcriptNotice`, out in `store.ts` beside `loadStop` because the two decide
   // the same thing from opposite ends — see it for what each arm means and for what
@@ -201,10 +224,11 @@ export function EventList({
   // fails, and is re-driven on every poll a session list survives. The button that
   // used to be here read "N earlier events did not load — try again", which is this
   // client asking somebody to press a button because of its own bookkeeping.
-  // `hidden` is deliberately not read: it counts only the events below the cut
-  // that happen to be *loaded*, which is not the number a reader wants and is not
-  // what the control claims — see the button below. It stays on `Tail` because it
-  // is a correct statement about the walk and `webcheck` pins it there.
+  // `hidden` is deliberately not read, and there is no longer anything that could:
+  // it counts only the events below the cut that happen to be *loaded*, which on a
+  // session cleared at seq 9500 of 10000 is however many shared one page with the
+  // marker. It stays on `Tail` because it is a correct statement about the walk and
+  // `webcheck` pins it there.
   /*
    * Over the whole loaded window rather than the rendered rows, because a request can
    * sit above the fold while the answer it explains is on screen — and the answer is
@@ -230,7 +254,6 @@ export function EventList({
     loadedFrom: transcript.loadedFrom,
     daemonFirstSeq: transcript.daemonFirstSeq,
     clearedAt: transcript.clearedAt,
-    revealedBeforeClear: transcript.revealedBeforeClear,
     loadingHistory: transcript.loadingHistory,
     heldEvents: transcript.events.length,
     heldBytes: transcript.heldBytes,
@@ -280,69 +303,47 @@ export function EventList({
      * instead of by both happening to be full-bleed.
      */
     /*
-     * `pb-12` rather than `py-2`, so the conversation never sits flush against the
-     * composer.
+     * The gap under a conversation, and it is decided here for both of the things
+     * that can be below it.
      *
-     * 48px, arrived at by looking at it beside Claude Code's own gap twice: 32 first,
-     * then half again. Written as a number rather than as a ratio to that, because
-     * the ratio was a guess off a screenshot and the number is what was chosen.
+     * `TRANSCRIPT_FOOT_PX` — the old `pb-12` — is 48px, so the conversation never
+     * sits flush against the composer. Arrived at by looking at it beside Claude
+     * Code's own gap twice: 32 first, then half again. Written as a number rather
+     * than as a ratio to that, because the ratio was a guess off a screenshot and
+     * the number is what was chosen.
      *
      * Inside the scroll box rather than as a margin on the composer, which is the
      * difference between a gap and a dead band: this is scrollable content, so it
-     * only ever *ends* 32px above the composer and nothing loses the room. It also
+     * only ever *ends* 48px above the composer and nothing loses the room. It also
      * keeps the composer's own box where it was, which is what the ask card's
      * region depends on — `bottom-0` there is the top of the composer.
+     *
+     * ⚠ **A parked card raises it, and the two must not stack.** The card is out of
+     * flow over this scroller, so the room to scroll past it has to come from
+     * somewhere — and it was a second `paddingBottom` on the box outside, which put
+     * this 48 *and* the card's height between the last row and the card: a 56px
+     * hole, reported as one. One number, `max`, and the gap under a card is
+     * `ASK_CLEARANCE - 8` — the card frame's own `pb-2` is the other 8 — which is
+     * 12px of air rather than a band.
      */
-    <div className={`${COLUMN} px-4 pt-2 pb-12`}>
+    <div
+      className={`${COLUMN} px-4 pt-2`}
+      style={{ paddingBottom: Math.max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE) }}
+    >
       {/*
-       * The one control left in a transcript, and it offers something a reader
-       * can actually name: the conversation from before they cleared it.
+       * **There is no control at the head of a transcript any more.**
        *
-       * What it replaces was "N earlier — show more", where N was a count of
-       * events against a render budget — a number about this client's bookkeeping,
-       * appearing on every session over 200 events, meaning nothing to anybody.
+       * A `w-full` button reading "Show the conversation from before /clear" stood
+       * here and re-fetched everything above the agent's own cut. It is deleted on
+       * the owner's word, with `store.revealBeforeClear` and the flag behind it:
+       * what the agent has been told to forget is not something this client offers
+       * to read back, and the marker row below now says the whole of what happened
+       * — the `/clear` that was sent, and that the context was cleared.
        *
-       * `text-left` rather than the `<button>` default: it is `w-full`, so a
-       * centred label is a label whose position depends on the width of the box,
-       * which is the thing `scroll-stable` is elsewhere fixing. Two mechanisms for
-       * one property is one too many, and this one costs nothing.
+       * Said here rather than only in the rule file because this is where the next
+       * "the reader can't get to their history" report would be answered with a
+       * button.
        */}
-      {(cut > 0 || fetchingEarlier) && (
-        <button
-          onClick={onReveal}
-          disabled={fetchingEarlier}
-          /* `min-h-11` rather than a grown target: this is a bordered box, so a
-             `::after` reaching past its own edge would put the target outside the
-             thing a reader can see, and it has the room — it is alone at the head of
-             the column with `mb-2` under it and nothing above. 32px before. */
-          className="tap mb-2 flex min-h-11 w-full items-center gap-1.5 rounded-md border border-edge-strong px-3 py-2 text-left text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-50"
-        >
-          <Icon as={ChevronUp} size={12} />
-          {/* Kept mounted through the fetch, because pressing it *stops* cutting
-              the tail and the events it promised are still on the daemon — so
-              without this the button would vanish on the tap and the transcript
-              would sit unchanged for a round trip, which reads as nothing having
-              happened. */}
-          {/*
-           * **No count**, and that is a correction rather than a simplification.
-           *
-           * It read `${hidden} events from before /clear`, and `hidden` is what
-           * `buildTail` walked past — i.e. only the events *already loaded* below
-           * the cut. `loadAll` stops the moment a `context_cleared` lands in a
-           * page, so that is however many happened to share one 500-event page
-           * with the marker: on a session cleared at seq 9500 of 10000 it read
-           * "299" for 9499 real events, and when the marker landed first in its
-           * page it read **"0 events from before /clear — show them"**, which
-           * tells the reader there is nothing up there at all.
-           *
-           * The honest count is on the daemon and would cost a request to learn.
-           * Naming the thing instead costs nothing and is what this diff already
-           * argued for when it deleted "N earlier — show more": a number about
-           * this client's own bookkeeping meant nothing to anybody.
-           */}
-          {fetchingEarlier ? "Loading earlier…" : "Show the conversation from before /clear"}
-        </button>
-      )}
 
       {/*
        * The notice, all four visible arms of it, above the rows.
@@ -1328,22 +1329,35 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
       );
 
     /*
-     * A rule across the transcript, not a message.
+     * The whole of what a `/clear` leaves behind: the command, then the boundary.
      *
-     * Everything above it is still here and still readable — the log is the
-     * daemon's, not the agent's memory — so the honest shape is a boundary you
-     * scroll past rather than a bubble somebody said. Quiet on purpose: the loud
-     * treatments in this app are reserved for things that need a person.
+     * ⚠ **The sentence here used to read "the agent has forgotten everything
+     * above", and it described rows that are not drawn.** `buildTail` cuts at this
+     * marker, so there is nothing above it — and with the reveal control deleted
+     * there is no longer any state in which there could be. A line describing an
+     * absent half of the screen is worse than no line.
+     *
+     * **The command is drawn from the marker, and that is exact rather than
+     * invented.** `server.ts` carries out `/clear` only on the trimmed string
+     * matching exactly and only with no attachments, `ManagedSession.clearContext`
+     * is the one thing that appends a `context_cleared`, and the `prompt` it wrote
+     * an instant earlier is by construction one seq below the cut. So this marker
+     * *is* that message, and the `UserBubble` here is the row the reader sent —
+     * the same component, in the same place, as if the cut had spared it.
+     *
+     * The rule stays quiet: a hairline each side of a `text-2xs text-faint` word,
+     * which `ui/MachineOffer.tsx` cites by name as this file's own idiom.
      */
     case "context_cleared":
       return (
-        <div className="my-1 flex items-center gap-2">
-          <span className="h-px flex-1 bg-edge" />
-          <span className="shrink-0 text-2xs text-faint">
-            context cleared — the agent has forgotten everything above
-          </span>
-          <span className="h-px flex-1 bg-edge" />
-        </div>
+        <>
+          <UserBubble text="/clear" />
+          <div className="my-1 flex items-center gap-2">
+            <span className="h-px flex-1 bg-edge" />
+            <span className="shrink-0 text-2xs text-faint">Context cleared</span>
+            <span className="h-px flex-1 bg-edge" />
+          </div>
+        </>
       );
 
     default:

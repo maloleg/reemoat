@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { check } from "./webcheck.env.js";
 import { snapshot } from "./webcheck.ws.js";
 import { openableHref } from "./webcheck.modules.js";
+import { stripComments } from "./webcheck.source.js";
 
 /* ------------------------------------------------------------------ *
  * The question an agent asked
@@ -18,7 +19,7 @@ import { openableHref } from "./webcheck.modules.js";
 process.stdout.write("\nthe question an agent asked\n");
 {
   const { MAX_ANSWER_CHARS } = await import("../src/wire.js");
-  const { askTitle, elicitationForm, elicitationAnswer, fieldValue } = await import(
+  const { askTitle, elicitationForm, elicitationAnswer, fieldValue, stepAnswered } = await import(
     "../src/elicitation.js"
   );
   const { humanRequests, needsHuman, waitingCount, oldestWait, showsWorking } = await import(
@@ -331,6 +332,121 @@ process.stdout.write("\nthe question an agent asked\n");
   const confirm = elicitationForm(pendingOf("Proceed?", 0), []);
   const confirmed = elicitationAnswer(confirm, {});
   check("a form with no fields can still be accepted", [confirmed.canSubmit, confirmed.content], [true, {}]);
+  /*
+   * ⭐ **And it is the only form that can be submitted empty.**
+   *
+   * claude-agent-acp marks nothing `required` on an `AskUserQuestion` — deliberately,
+   * *"so the user can also just skip"* — so `problems` was empty on an untouched
+   * form and Submit sent `{}`. That is Skip with a primary-coloured button in front
+   * of it: both run the tool with no answers. Reported after an empty answer went
+   * out by accident.
+   *
+   * Asserted as a pair, because either half alone is the bug: the confirmation must
+   * stay answerable, and the question must not be.
+   */
+  // The shape claude-agent-acp actually sends for one `AskUserQuestion`: a
+  // single-select with `required: false`, and its own optional "Other" box beside it.
+  const askedFields: any[] = [
+    {
+      key: "question_0",
+      kind: "string",
+      title: "Store",
+      description: null,
+      required: false,
+      options: [
+        { value: "Postgres", label: "Postgres", description: null },
+        { value: "MongoDB", label: "MongoDB", description: null },
+      ],
+      min: null,
+      max: null,
+      format: null,
+      default: null,
+    },
+    { key: "question_0_custom", kind: "string", title: "Other", description: null, required: false, options: null, min: null, max: null, format: null, default: null },
+  ];
+  const asked = elicitationForm(pendingOf("Which store?", 2), askedFields);
+  check(
+    "a question nobody answered is not a submission, whatever it says about required",
+    [asked.fields.some((f) => f.required), elicitationAnswer(asked, {}).canSubmit],
+    [false, false],
+  );
+  check(
+    "and one answer is enough — nothing here invents a required field",
+    elicitationAnswer(asked, { question_0: "Postgres" }).canSubmit,
+    true,
+  );
+  check(
+    "an emptied answer takes it back",
+    elicitationAnswer(asked, { question_0: "" }).canSubmit,
+    false,
+  );
+
+  /*
+   * ⭐ **And `canSubmit` alone does not stop Next, which is the second half of the
+   * same report.**
+   *
+   * `canSubmit` is a statement about the *form*: it says the body is not empty. On a
+   * three-question form that lets you walk to the end with Next on blank cards and
+   * submit having answered one thing — Next was live because nothing is `required`
+   * and therefore nothing was a problem. `stepAnswered` is the per-step rule, and
+   * the two are asserted apart because they answer different questions.
+   */
+  const threeFields: any[] = [0, 1, 2].flatMap((n) => [
+    {
+      key: `question_${n}`,
+      kind: "string",
+      title: `Q${n}`,
+      description: null,
+      required: false,
+      options: [
+        { value: "yes", label: "yes", description: null },
+        { value: "no", label: "no", description: null },
+      ],
+      min: null,
+      max: null,
+      format: null,
+      default: null,
+    },
+    { key: `question_${n}_custom`, kind: "string", title: "Other", description: null, required: false, options: null, min: null, max: null, format: null, default: null },
+  ]);
+  const three = elicitationForm(pendingOf("Please answer the following questions.", 6), threeFields);
+  check("a question and its own Other box are one step", three.steps.length, 3);
+  const answeredAt = (draft: Record<string, unknown>): boolean[] =>
+    [0, 1, 2].map((i) => stepAnswered(three, i, elicitationAnswer(three, draft as never).content));
+  check("nothing answered is no step answered", answeredAt({}), [false, false, false]);
+  check("one answer answers one step", answeredAt({ question_1: "yes" }), [false, true, false]);
+  /*
+   * **The whole step, not its leading field.** Typing your own answer instead of
+   * picking a row is an answer, and it lands in the follow-up field — so a rule
+   * reading only the leader would have kept Next dead for somebody who had written
+   * a sentence into the box the adapter put there for exactly that.
+   */
+  check("and the Other box counts as one", answeredAt({ question_0_custom: "neither" }), [true, false, false]);
+  check(
+    "the whole form answered is every step answered",
+    answeredAt({ question_0: "yes", question_1: "no", question_2: "yes" }),
+    [true, true, true],
+  );
+  /*
+   * ⚠ **A step with no fields answers itself**, which is the field-less
+   * confirmation again — the same exemption `canSubmit` makes, one function over,
+   * and asserted here too because either could be tightened alone.
+   */
+  check("a form with nothing to fill in blocks nothing", stepAnswered(confirm, 0, {}), true);
+  /*
+   * And the card asks both, in that shape: every step owes an answer, the last one
+   * additionally owes a body. Read off disk — the gate is a JSX prop and `webcheck`
+   * has no DOM.
+   */
+  const cardSrc = stripComments(
+    readFileSync(new URL("../src/ui/ElicitationCard.tsx", import.meta.url), "utf8"),
+  );
+  check("Next and Submit are both gated on this step", /!stepAnswered\(form, index, answer\.content\)/.test(cardSrc), true);
+  check(
+    "and only the last one is gated on the whole form",
+    /stepBlocked \|\| \(last && !answer\.canSubmit\)/.test(cardSrc),
+    true,
+  );
 
   /*
    * **The agent chooses the field names, and one of them is a landmine.**
@@ -674,4 +790,291 @@ process.stdout.write("\nthe question an agent asked\n");
   // The anchor is still an anchor, so this cannot pass by the map having been
   // emptied — which is the failure mode a "does not contain" assertion invites.
   check("while the anchor is still drawn as one", /<a\s+href=\{target\}/.test(componentMap), true);
+}
+
+process.stdout.write("\na question says how many of its answers you may pick\n");
+{
+  /*
+   * ⭐ **`chosen` said what had been picked and nothing said what picking meant.**
+   *
+   * A four-answer question where you tick three and one where the first tap
+   * submits drew identically until you had tapped — by which point the difference
+   * has already been made for you. `AskOption.mark` is that fact, drawn by
+   * `ChoiceMark` as a box for a multi-select and a circle for a select.
+   *
+   * Read off disk, because the whole subject is a shape on a row and `webcheck`
+   * has no DOM. Each sweep carries its own floor: a regex that matches nothing
+   * passes silently, which is the failure mode of every source assertion here.
+   */
+  // Comment-stripped for the absence checks: both files argue in prose about the
+  // role they deliberately do not claim, and a sweep that reads the argument as
+  // the code would fail on the file that gets it right.
+  const askCard = readFileSync(new URL("../src/ui/AskCard.tsx", import.meta.url), "utf8");
+  const askCode = stripComments(askCard);
+  const elicitation = readFileSync(new URL("../src/ui/ElicitationCard.tsx", import.meta.url), "utf8");
+  const elicitationCode = stripComments(elicitation);
+
+  check("the card knows how many an answer may be", /mark\?: "one" \| "many" \| null;/.test(askCard), true);
+  /*
+   * ⚠ **A square box, and `rounded-sm` was not one.** That token is `.375rem` — 6px
+   * of radius on a 16px box — so against a circle of the same size the two read as
+   * the same shape, which is the whole difference this indicator exists to draw.
+   * Reported that way. The radius is spent all the way, and the filled states differ
+   * by shape as well: a tick in the box, a dot in the circle.
+   */
+  check(
+    "a box for several and a circle for one",
+    /mark === "many" \? "rounded-none" : "rounded-full"/.test(askCard),
+    true,
+  );
+  // Scoped to the indicator itself: `rounded-sm` is right elsewhere on this card
+  // (the `+N` chip wears it), and a file-wide sweep would fail on that.
+  const markBody = askCode.slice(askCode.indexOf("export function ChoiceMark"));
+  check("the scan found the indicator", markBody.length > 200, true);
+  check("and no radius creeps back onto the box", /rounded-sm/.test(markBody), false);
+  check(
+    "filled, one is a tick and the other a dot",
+    [/<Icon as=\{Check\}/.test(askCard), /h-1\.5 w-1\.5 rounded-full bg-ink/.test(askCard)],
+    [true, true],
+  );
+  /*
+   * The slot is reserved rather than conditional — `ChoiceRow`'s idiom — so a row
+   * does not move when it becomes the answer, and the fill is a `ring`, which is a
+   * box-shadow and costs no layout. `CHOSEN`'s docblock is the argument: a signal
+   * that reflows the row it is applied to is not a signal.
+   */
+  check("and it is a ring rather than a border, so nothing reflows", /ring-1 ring-inset \$\{chosen/.test(askCard), true);
+  /*
+   * ⚠ **The role is claimed only where a `<button>` keeps it.** `role="checkbox"`
+   * promises Space and Enter, which a button does by itself; `role="radio"` would
+   * promise arrow-key roving this card does not implement, and `web-shell.md`
+   * records both popups that drew a widget role without keeping one. So a
+   * single-choice row is `aria-pressed`, the idiom `ChoiceRow` already uses.
+   */
+  check(
+    "a multi-select row claims checkbox, a select row claims nothing it cannot keep",
+    [/role=\{option\.mark === "many" \? "checkbox" : undefined\}/.test(askCode), /role="radio"/.test(askCode)],
+    [true, false],
+  );
+  check(
+    "and says the state either way",
+    [/aria-checked=\{option\.mark === "many"/.test(askCard), /aria-pressed=\{option\.mark === "one"/.test(askCard)],
+    [true, true],
+  );
+  /*
+   * **Absent draws nothing, which is every permission.** ACP hands back exactly
+   * one `optionId` and a tap dispatches it, so there is no pending selection an
+   * indicator could be about — a circle there would promise a choice the tap is
+   * not going to leave you room to make.
+   */
+  const permissionCard = readFileSync(new URL("../src/ui/PermissionCard.tsx", import.meta.url), "utf8");
+  check("a permission's options carry no mark at all", /\bmark:/.test(permissionCard), false);
+  /*
+   * **Both halves of one form draw the same shape.** The card's numbered rows hold
+   * only the step's *leader*; a form with two selects in a row draws the second by
+   * hand, and that second copy is exactly where one form comes to draw two idioms.
+   */
+  check("the leader's rows say which kind they are", /mark: multi \? "many" : "one",/.test(elicitation), true);
+  /*
+   * ⭐ **The box you type your own answer into is one of the answers.**
+   *
+   * The adapter puts an optional free-text field after every `AskUserQuestion` —
+   * its own "Other" — and it was drawn as a labelled input *under* the list, which
+   * reads as a different kind of thing from the rows it sits with. On a
+   * multi-select, typing your own answer is picking one. Reported that way.
+   *
+   * Asserted as **one treatment rather than two that match**: the row goes through
+   * `askRowTone`, the same function the option rows use, so `CHOSEN`'s three
+   * signals are stated once. A class list here that happened to spell the same
+   * thing is the failure this is guarding.
+   */
+  check("the typed answer is painted by the rows' own function", /askRowTone\(counted\)/.test(elicitationCode), true);
+  check("and the option rows go through it too", /askRowTone\(option\.chosen === true\)/.test(askCode), true);
+  check("it carries the step's own mark", /<ChoiceMark mark=\{mark\} chosen=\{counted\} \/>/.test(elicitationCode), true);
+  /*
+   * ⚠ **Picked here means *counted*, never "the box has text in it".** A suppressed
+   * or switched-off answer keeps every character somebody typed and loses only its
+   * mark, so the row must read the body rather than the draft — asserted as the
+   * absence of the value test it used to make.
+   */
+  check("and it reads the body rather than the box", /chosen=\{typeof value === "string"/.test(elicitationCode), false);
+  check("the mark comes from one rule", /mark=\{answerMark\(form, field\)\}/.test(elicitationCode), true);
+  check("and a field on a form still draws as a field", /min-h-11 w-full rounded-md border border-edge bg-raised/.test(elicitationCode), true);
+  /*
+   * ⚠ **The mark says "there is an answer in here" and deliberately not "this one
+   * wins".** Measured on claude-agent-acp 0.73.0: `applyAskElicitationResponse`
+   * takes a non-empty custom answer *instead of* the selection, on a multi-select
+   * as well as a single one. Modelling that would mean knowing this field is a
+   * custom-answer box, and the only two ways to know are the key suffix — which
+   * `acp-agents.md` forbids by name, codex spelling it `__other` where claude
+   * spells it `_custom` — and `_meta`, which the daemon drops at ingest. So no
+   * suffix is read here, and the assertion is that none is.
+   */
+  check("nothing keys on the custom field's name", /_custom|__other/.test(elicitationCode), false);
+  /*
+   * ⭐ **The mark is a control, asked for directly**: on a multi-select you must be
+   * able to switch your own answer off from that square having already written it.
+   *
+   * ⚠ **Which is why the row is not a `<label>` any anymore.** It was one, so a tap
+   * anywhere landed in the box — and a label forwards its activation to the field it
+   * names, so a nested button would have focused the input instead of toggling.
+   * Pinned as an absence, because the label is what a later reader restores to get
+   * the row-wide tap back.
+   */
+  check("the mark is a button", /<button\n\s+type="button"\n\s+onClick=\{\(\) => onToggle\(!counted\)\}/.test(elicitationCode), true);
+  check("and the row is no longer a label", /<label className=\{`tap flex min-h-11/.test(elicitationCode), false);
+  check("it keeps the roles the option rows use", [
+    /role=\{mark === "many" \? "checkbox" : undefined\}/.test(elicitationCode),
+    /aria-pressed=\{mark === "one" \? counted : undefined\}/.test(elicitationCode),
+  ], [true, true]);
+
+  const { elicitationForm, elicitationAnswer, displacedBy, answerMark } = await import("../src/elicitation.js");
+  const pendingOf = (message: string, fieldCount: number): any => ({
+    elicitationId: "elic-1-abc",
+    toolCallId: "tc_1",
+    message,
+    fieldCount,
+    raisedAt: 1_000,
+  });
+
+  /*
+   * ⭐ **Two answers to one question, of which the agent keeps one.**
+   *
+   * Measured on claude-agent-acp 0.73.0: `applyAskElicitationResponse` reads the
+   * custom answer and returns — the selection is never looked at — for a
+   * multi-select as well as a single one. Left alone the card drew both as picked
+   * and sent both, which on a single-choice question is two filled circles.
+   * Reported as *"I picked two options where two cannot be picked"*.
+   *
+   * The relation is the **agent's own** `alternativeTo`, projected out of `_meta`
+   * by the daemon. It runs both ways, one hop, and it is deliberately **not**
+   * derived from `steps` — that grouping is accepted precisely because it is
+   * presentational, so clearing a value on it would let a wrong grouping destroy
+   * an answer.
+   */
+  const pairFields: any[] = [
+    {
+      key: "question_0",
+      kind: "string",
+      title: "Store",
+      description: null,
+      required: false,
+      options: [
+        { value: "Postgres", label: "Postgres", description: null },
+        { value: "MongoDB", label: "MongoDB", description: null },
+      ],
+      min: null,
+      max: null,
+      format: null,
+      default: null,
+      alternativeTo: null,
+    },
+    { key: "question_0_custom", kind: "string", title: "Other", description: null, required: false, options: null, min: null, max: null, format: null, default: null, alternativeTo: "question_0" },
+  ];
+  const pair = elicitationForm(pendingOf("Which store?", 2), pairFields);
+  /*
+   * ⭐ **Exactly one direction, and that is the correction.**
+   *
+   * It ran both ways for a release: picking an option emptied the box. Reported —
+   * *"the user may tap by accident and then change their mind; they simply chose
+   * another option, the field is not zeroed"* — and it is obviously right, a pick
+   * being one tap to redo where a sentence is not.
+   *
+   * So writing your own answer clears the *selection*, which is how you switch to
+   * it, and picking clears **nothing**. What keeps the card honest instead is
+   * `elicitationAnswer`, which stops sending an alternative while the question it
+   * answers holds a value — asserted below on the body rather than on the draft.
+   */
+  check("typing your own answer displaces the selection", displacedBy(pair, "question_0_custom"), ["question_0"]);
+  check("and picking one displaces nothing", displacedBy(pair, "question_0"), []);
+  check("it is one hop, never a walk", displacedBy(pair, "question_0_custom").flatMap((k) => displacedBy(pair, k)), []);
+  /*
+   * ⭐ **The text survives every one of those, which is the whole point.** Driven
+   * over the sequence that was reported: write your own answer, then pick an option.
+   * The box still holds every character; only the mark moves.
+   */
+  const kept: Record<string, unknown> = {};
+  kept["question_0_custom"] = "мой ответ";
+  kept["question_0"] = "Postgres";
+  check("a pick takes the answer without taking the text", [
+    kept["question_0_custom"],
+    Object.keys(elicitationAnswer(pair, kept as never).content).sort(),
+  ], ["мой ответ", ["question_0"]]);
+  check("and releasing the pick gives the answer back", [
+    kept["question_0_custom"],
+    Object.keys(elicitationAnswer(pair, { ...kept, question_0: "" } as never).content).sort(),
+  ], ["мой ответ", ["question_0_custom"]]);
+  /*
+   * ⭐ **And the square switches it off by hand, text intact.** `excluded` is
+   * `ask.ts`'s, passed in rather than derived, because there is no spelling of
+   * "present but not an answer" in a `DraftValue`.
+   */
+  check("switching it off keeps the text and drops the answer", [
+    Object.keys(elicitationAnswer(pair, { question_0_custom: "мой ответ" } as never, new Set(["question_0_custom"])).content),
+    Object.keys(elicitationAnswer(pair, { question_0_custom: "мой ответ" } as never).content),
+  ], [[], ["question_0_custom"]]);
+  /*
+   * ⚠ **The same pair with nothing declared behaves the same**, and that is the
+   * correction: an earlier version gated both the mark and the displacement on
+   * `alternativeTo`, so against any daemon that did not yet send it the free-text
+   * box lost its indicator altogether — which is every daemon until its owner
+   * restarts one. The declaration makes the pairing *exact*; the step already makes
+   * it **known**, and `groupIntoSteps` grouping these two is precisely the
+   * presentational reading `ElicitationForm.steps` is licensed for.
+   */
+  const undeclared = elicitationForm(pendingOf("Which store?", 2), [
+    { ...pairFields[0] },
+    { ...pairFields[1], key: "question_0__other", alternativeTo: null },
+  ] as never);
+  check("an undeclared pair displaces the same way", [
+    displacedBy(undeclared, "question_0"),
+    displacedBy(undeclared, "question_0__other"),
+  ], [[], ["question_0"]]);
+  /*
+   * The mark's *shape* comes from the question and never from the box, and it is
+   * drawn whether or not anything was declared — a layout may not wait on a wire
+   * field.
+   */
+  check(
+    "the box wears the question's own mark, declared or not",
+    [
+      answerMark(pair, pair.fields[1]!),
+      answerMark(undeclared, undeclared.fields[1]!),
+      answerMark(pair, pair.fields[0]!),
+    ],
+    ["one", "one", null],
+  );
+  /*
+   * ⭐ **And several answers stay several.** A multi-select is what "more than one"
+   * means, so nothing displaces there — deliberately disagreeing with both adapters,
+   * which use the typed text *instead of* the selection. Somebody who ticked two
+   * boxes and then wrote a third answer meant three, and taking their ticks away to
+   * match the adapter would be this card editing an answer they gave.
+   */
+  const multiPair = elicitationForm(pendingOf("Which stores?", 2), [
+    { ...pairFields[0], kind: "multi_select" },
+    { ...pairFields[1] },
+  ] as never);
+  check("a multi-select's box is a box", answerMark(multiPair, multiPair.fields[1]!), "many");
+  check("and nothing displaces anything on one", [
+    displacedBy(multiPair, "question_0"),
+    displacedBy(multiPair, "question_0_custom"),
+  ], [[], []]);
+  /*
+   * A multi-select suppresses nothing either — several is what it means — so ticks
+   * and a typed answer are all sent, and the square is the only way to drop one.
+   */
+  const both = { question_0: ["Postgres"], question_0_custom: "мой ответ" };
+  check("ticks and a typed answer are all sent", Object.keys(elicitationAnswer(multiPair, both as never).content).sort(), ["question_0", "question_0_custom"]);
+  check("until the square switches one off", Object.keys(elicitationAnswer(multiPair, both as never, new Set(["question_0_custom"])).content), ["question_0"]);
+  // The card writes through it, both ways, and only for a value — clearing must not
+  // cascade, or emptying the box would take the selection with it a second time.
+  check("the card writes through the rule", /for \(const other of displacedBy\(form, field\)\) set\(other, ""\);/.test(elicitationCode), true);
+  check("and a cleared value displaces nothing", /if \(empty\) return;/.test(elicitationCode), true);
+  check("and the hand-rolled rows draw the same component", /<ChoiceMark mark=\{multi \? "many" : "one"\}/.test(elicitation), true);
+  check(
+    "with the same roles on the same terms",
+    [/role=\{multi \? "checkbox" : undefined\}/.test(elicitationCode), /role="radio"/.test(elicitationCode)],
+    [true, false],
+  );
 }

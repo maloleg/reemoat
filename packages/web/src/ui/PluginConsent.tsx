@@ -1,7 +1,47 @@
 import type { ReactNode } from "react";
 import type { ManifestPreview } from "../pluginArchive";
 import { Disclosure } from "./bits";
-import { PLUGIN_SCOPE_TEXT } from "../wire";
+import { PLUGIN_SCOPE_TEXT, type PluginHook } from "../wire";
+
+/**
+ * What a hook is told, in words.
+ *
+ * Hoisted out of the row below so it goes through {@link said} like the scope
+ * table, which is the whole of why it moved — an object literal rebuilt per item
+ * is not the problem, an unguarded lookup is.
+ */
+const PLUGIN_HOOK_TEXT: Record<PluginHook, string> = {
+  "session.created": "a session starts",
+  "turn.ended": "a turn ends",
+  "session.ended": "a session ends",
+  "permission.requested": "an agent asks permission",
+  "permission.resolved": "a permission is answered",
+};
+
+/**
+ * A table lookup that `Object.prototype` cannot answer.
+ *
+ * ⚠ **Both tables above are read with a key a manifest wrote, and a plain object
+ * literal answers for keys nobody put in it.** `readManifestText` keeps any
+ * string verbatim, so `scopes: ["__proto__"]` reaches this: `table["__proto__"]`
+ * is `Object.prototype` — an *object*, so the old `?? scope` never fired — and
+ * `["toString"]` is a function. Both then went straight into JSX. The object
+ * child takes the whole app down through `RootErrorBoundary`, and the function
+ * child renders an **empty bullet**, which is the worse of the two: an
+ * undisclosed capability on the one screen whose entire job is that there are
+ * none.
+ *
+ * It costs nothing to reach. `MarketEntry` fetches `manifestRaw` from the pinned
+ * commit and draws this card, so *opening a catalogue entry* is enough — no file
+ * picked, nothing installed, nothing consented to.
+ *
+ * The fall-through itself is unchanged and still deliberate: a scope or hook this
+ * client has not heard of lands as its own identifier rather than being dropped.
+ * `Object.hasOwn` only decides whether the table really said something.
+ */
+function said(table: Record<string, string>, key: string): string {
+  return Object.hasOwn(table, key) ? (table[key] ?? key) : key;
+}
 
 /**
  * What a plugin says about itself, drawn before anything is installed.
@@ -65,25 +105,16 @@ export function PluginConsent({
       // over `PluginScope` so that adding a scope is a compile error, but what
       // arrives here is whatever a manifest wrote. A scope this client has not
       // heard of falls through to its raw identifier — an undisclosed capability
-      // is the one thing this screen exists to prevent.
-      items: manifest.scopes.map((scope) => (PLUGIN_SCOPE_TEXT as Record<string, string>)[scope] ?? scope),
+      // is the one thing this screen exists to prevent. `said` is what makes the
+      // fall-through actually reachable for a key `Object.prototype` answers.
+      items: manifest.scopes.map((scope) => said(PLUGIN_SCOPE_TEXT as Record<string, string>, scope)),
     },
     {
       title: "It is told when",
       asks: true,
-      items: manifest.hooks.map(
-        (hook) =>
-          ({
-            "session.created": "a session starts",
-            "turn.ended": "a turn ends",
-            "session.ended": "a session ends",
-            "permission.requested": "an agent asks permission",
-            "permission.resolved": "a permission is answered",
-            // A hook this client has not heard of falls through to its identifier
-            // rather than being dropped: an undisclosed hook is the one thing this
-            // screen exists to prevent.
-          })[hook] ?? hook,
-      ),
+      // A hook this client has not heard of falls through to its identifier
+      // rather than being dropped, for the scope row's reason.
+      items: manifest.hooks.map((hook) => said(PLUGIN_HOOK_TEXT as Record<string, string>, hook)),
     },
     { title: "It reaches", asks: true, items: manifest.net },
     {

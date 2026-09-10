@@ -206,7 +206,37 @@ const ADDRESS = /\.\d+$/;
  */
 const LOCAL_HOST = /(^|\.)(localhost|local|internal|localdomain)$/;
 
-export function parseManifest(text: string): ManifestOutcome {
+export function parseManifest(text: string, options: { presenting?: boolean } = {}): ManifestOutcome {
+  /*
+   * ⚠ **Strict when a person is about to agree to this, looser when a row already
+   * on disk is being loaded — and the split exists because this function is not
+   * only an install-time validator.**
+   *
+   * `SqlitePluginRecordStore.toRecord` re-parses `manifest_json` on **every read**,
+   * and a row this build cannot validate is skipped: `list` omits it, `get`
+   * answers `null`. So every refusal added here is applied *retroactively* to
+   * plugins that are already installed, and a manifest that was legal the day it
+   * was installed makes the plugin silently vanish on the next daemon start,
+   * taking its contributed agents and providers with it. Measured on the refusals
+   * added with the contributed-agent work: `CONTROL_CHARS` is `\p{Cc}\p{Cf}`, and
+   * U+200D is `Cf` — so a harness named "👨‍💻 Dev Helper", an ordinary emoji ZWJ
+   * sequence, stops loading.
+   *
+   * **What `presenting: false` relaxes is exactly the refusals that protect a
+   * screen, because at read time no screen is being drawn.** The install-approval
+   * card is where a name carrying U+202E does its damage; a row being loaded is
+   * past that. Two authoring-hygiene checks go with them for the same reason —
+   * they describe a manifest that is badly written rather than one that is unsafe
+   * to run.
+   *
+   * **What stays strict in both is everything that bounds what the plugin can
+   * *do*:** `RESERVED_ENV_LOADERS`, `STRUCTURAL_HEADERS`, the metadata-service
+   * hosts, the single-label host and the scheme. At read the question is not
+   * "would this be accepted today" but "is it safe to load", and for those the
+   * honest answer is still no — a plugin refused on one of them reaches
+   * `onDegraded` with the reason, which is the only channel `openStores` has.
+   */
+  const presenting = options.presenting ?? true;
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -232,6 +262,20 @@ export function parseManifest(text: string): ManifestOutcome {
   const name = source["name"];
   if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_NAME_CHARS) {
     return invalid(`name must be 1–${MAX_NAME_CHARS} characters`);
+  }
+  /*
+   * ⚠ **The heading of the install-approval card, and it was the one field
+   * {@link CONTROL_CHARS} did not guard.** That constant's own docblock says
+   * "every field this guards is drawn on the install-approval card" and gives
+   * U+202E hiding the rest of a line as the reason — and then the two most
+   * prominent things on that card, `PluginConsent`'s `manifest.name` heading and
+   * the `manifest.description` under it, went unguarded while the contributed
+   * harness names below them were checked. A harness may not be *called* `claude`
+   * (`RESERVED_COMMANDS`) and that is worth little while the plugin above it can
+   * be `Claude Code` followed by an override.
+   */
+  if (presenting && CONTROL_CHARS.test(name)) {
+    return invalid("name may not carry control or formatting characters");
   }
 
   const version = source["version"];
@@ -267,6 +311,11 @@ export function parseManifest(text: string): ManifestOutcome {
   ) {
     return invalid(`description must be a string of at most ${MAX_DESCRIPTION_CHARS} characters`);
   }
+  // The subtitle on the same card, for the same reason — and with 200 characters
+  // to work in, an invented second line is the cheaper of the two spoofs.
+  if (presenting && typeof description === "string" && CONTROL_CHARS.test(description)) {
+    return invalid("description may not carry control or formatting characters");
+  }
 
   const scopes = readScopes(source["scopes"]);
   if (typeof scopes === "string") return invalid(scopes);
@@ -274,7 +323,7 @@ export function parseManifest(text: string): ManifestOutcome {
   const net = readNet(source["net"], scopes);
   if (typeof net === "string") return invalid(net);
 
-  const contributes = readContributions(source["contributes"], api, scopes);
+  const contributes = readContributions(source["contributes"], api, scopes, presenting);
   if (typeof contributes === "string") return invalid(contributes);
 
   return {
@@ -362,6 +411,7 @@ function readContributions(
   raw: unknown,
   api: number,
   scopes: readonly PluginScope[],
+  presenting: boolean,
 ): PluginContributions | string {
   if (raw === undefined || raw === null) {
     // Absence is the one thing repaired rather than refused, per this file's
@@ -418,10 +468,10 @@ function readContributions(
     return `contributes.harnesses and contributes.systems need plugin API ${CONTRIBUTION_API}; this manifest declares ${api}`;
   }
 
-  const harnesses = readHarnesses(source["harnesses"], scopes);
+  const harnesses = readHarnesses(source["harnesses"], scopes, presenting);
   if (typeof harnesses === "string") return harnesses;
 
-  const systems = readSystems(source["systems"], scopes, harnesses);
+  const systems = readSystems(source["systems"], scopes, harnesses, presenting);
   if (typeof systems === "string") return systems;
 
   return { screen, settings, actions, hooks, harnesses, systems };
@@ -510,13 +560,6 @@ export function contributedId(pluginId: string, localId: string): string {
   return `${pluginId}:${localId}`;
 }
 
-/** The `<pluginId>` half, or `null` for anything that is not a contributed id. */
-export function pluginOfContributedId(id: string): string | null {
-  const cut = id.indexOf(":");
-  if (cut <= 0) return null;
-  return isContributedId(id) ? id.slice(0, cut) : null;
-}
-
 /**
  * Whether this *could* be an id a plugin contributed — a shape test, never a
  * membership test.
@@ -549,6 +592,96 @@ const HEADER_NAME = /^[a-z][a-z0-9-]{0,63}$/;
 
 /** What may precede a secret in a header value, with at most one trailing space. */
 const HEADER_PREFIX = /^[A-Za-z0-9._~+/-]{0,32} ?$/;
+
+/**
+ * Field names that decide how a request is *framed* rather than who is asking.
+ *
+ * ⚠ **{@link HEADER_NAME} is a well-formedness test, and well-formed is not the
+ * question here.** The daemon builds `{[name]: prefix + secret}` and hands the
+ * pair straight to the routing call, so this field's whole meaning is "how this
+ * system's key is sent". A manifest naming `content-length` or `transfer-encoding`
+ * is not naming a credential header at all — it is deciding the framing of a
+ * request whose body it does not control, out of a value the operator pasted.
+ *
+ * `fetch` treats most of these as forbidden and drops them, which is why this is
+ * belt rather than the only lock — but which adapter the daemon uses is not a
+ * fact this file can see, and "the client we happen to use ignores it" is a
+ * thinner guarantee than not accepting it.
+ */
+const STRUCTURAL_HEADERS: readonly string[] = [
+  "host",
+  "content-length",
+  "transfer-encoding",
+  "connection",
+  "upgrade",
+  "te",
+  "trailer",
+  "expect",
+  "keep-alive",
+  "proxy-authorization",
+  "cookie",
+];
+
+/**
+ * Characters that change what a string *looks like* rather than what it says.
+ *
+ * ⚠ **Every field this guards is drawn on the install-approval card**, which is
+ * the one screen whose whole job is "here is what you are agreeing to". U+202E
+ * reverses the rendering of everything after it; a newline invents a second line
+ * the manifest never claimed; ESC opens an ANSI sequence in `pluginctl`'s output.
+ * A harness may not be *named* `claude` — {@link RESERVED_COMMANDS} — and that
+ * rule is worth little while the `name` beside it can be `Claude Code` followed
+ * by a control character that hides the rest.
+ *
+ * `\p{Cc}\p{Cf}` and not `\p{C}`, matching `premium/src/email.ts`'s choice for the
+ * same reason: `\p{C}` also matches `Cn`, unassigned, and would refuse a name
+ * containing a codepoint this Node's tables do not know yet.
+ *
+ * NUL earns its place twice over: `manifest` is a `jsonb` column and PostgreSQL
+ * cannot represent `U+0000` in one, so a name carrying it passes every validator
+ * here and then fails at `INSERT` as an unmapped 500.
+ */
+const CONTROL_CHARS = /[\p{Cc}\p{Cf}]/u;
+
+/**
+ * Variables that decide which code runs, rather than which service answers.
+ *
+ * ⚠ **This list is about *shape*, not about ownership, and that distinction is
+ * why there is no companion list of vendor credentials.** A slot named `PATH` or
+ * `LD_PRELOAD` is not a credential at all: nothing a person could paste into it
+ * is a secret, and what it changes is which binary the spawn resolves. That is
+ * true of every plugin, so it can be refused outright.
+ *
+ * ⚠ **A vendor's credential name cannot be refused the same way, and trying was a
+ * mistake worth recording.** `GEMINI_API_KEY` on a contributed harness is either
+ * a plugin adding real Gemini support — the *primary* use of this whole feature,
+ * and the daemon's own fixture — or a plugin phishing for a Gemini key, and the
+ * variable name is identical in both. Nothing here can tell them apart. What
+ * separates them is whether the operator sees the slot before approving it,
+ * which is `pluginctl`'s job and not this function's.
+ *
+ * {@link RESERVED_ENV_NAMES} stays narrow for the same reason: it names the
+ * credentials of agents this daemon *already ships*, where a claim collides with
+ * a secret the machine already holds.
+ */
+const RESERVED_ENV_LOADERS: readonly string[] = [
+  "PATH",
+  "HOME",
+  "SHELL",
+  "IFS",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "NODE_OPTIONS",
+  "NODE_EXTRA_CA_CERTS",
+  "BASH_ENV",
+  "ENV",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PERL5LIB",
+  "RUBYOPT",
+];
 
 /**
  * Programs a contributed harness may not name.
@@ -631,13 +764,14 @@ function readEnvNames(raw: unknown, what: string, cap: number): string[] | strin
     }
     if (entry.startsWith(DAEMON_ENV_PREFIX)) return `${what} may not name ${JSON.stringify(entry)}: ${DAEMON_ENV_PREFIX}* belongs to this daemon`;
     if (RESERVED_ENV_NAMES.includes(entry)) return `${what} may not name ${JSON.stringify(entry)}: another agent on this machine reads it`;
+    if (RESERVED_ENV_LOADERS.includes(entry)) return `${what} may not name ${JSON.stringify(entry)}: that variable decides which code runs, not which service answers`;
     if (out.includes(entry)) return `${what} names ${JSON.stringify(entry)} twice`;
     out.push(entry);
   }
   return out;
 }
 
-function readHarnesses(raw: unknown, scopes: readonly PluginScope[]): HarnessContribution[] | string {
+function readHarnesses(raw: unknown, scopes: readonly PluginScope[], presenting: boolean): HarnessContribution[] | string {
   if (raw === undefined || raw === null) {
     return scopes.includes("harness") ? SCOPE_NEEDS_BLOCK[0]!.sentence : [];
   }
@@ -660,6 +794,9 @@ function readHarnesses(raw: unknown, scopes: readonly PluginScope[]): HarnessCon
     const name = one["name"];
     if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_CONTRIBUTED_NAME_CHARS) {
       return `harness ${JSON.stringify(id)} needs a name of 1–${MAX_CONTRIBUTED_NAME_CHARS} characters`;
+    }
+    if (presenting && CONTROL_CHARS.test(name)) {
+      return `harness ${JSON.stringify(id)} name may not carry control or formatting characters`;
     }
 
     const command = one["command"];
@@ -710,6 +847,14 @@ function readHarnesses(raw: unknown, scopes: readonly PluginScope[]): HarnessCon
     );
     if (typeof routedModelEnv === "string") return routedModelEnv;
 
+    // Authoring hygiene rather than a bound on what the plugin may do: the model
+    // id overwriting the key is the plugin's own breakage, so a row already on disk
+    // is loaded and left to it. See `parseManifest`'s note on the two modes.
+    const collision = presenting ? routedModelEnv.find((name) => envNames.includes(name)) : undefined;
+    if (collision !== undefined) {
+      return `harness ${JSON.stringify(id)} names ${JSON.stringify(collision)} as both a credential slot and a routed-model variable, and the model id would overwrite the key`;
+    }
+
     const authHint = one["authHint"];
     if (
       authHint !== undefined &&
@@ -717,6 +862,9 @@ function readHarnesses(raw: unknown, scopes: readonly PluginScope[]): HarnessCon
       (typeof authHint !== "string" || authHint.length > MAX_AUTH_HINT_CHARS)
     ) {
       return `harness ${JSON.stringify(id)} authHint must be a string of at most ${MAX_AUTH_HINT_CHARS} characters`;
+    }
+    if (presenting && typeof authHint === "string" && CONTROL_CHARS.test(authHint)) {
+      return `harness ${JSON.stringify(id)} authHint may not carry control or formatting characters`;
     }
 
     out.push({
@@ -744,7 +892,15 @@ function readHarnesses(raw: unknown, scopes: readonly PluginScope[]): HarnessCon
  */
 function isMetadataHost(host: string): boolean {
   const four = ipv4(host);
-  if (four !== null) return four[0] === 169 && four[1] === 254;
+  if (four !== null) {
+    if (four[0] === 169 && four[1] === 254) return true;
+    // ⚠ **The two clouds that did not use link-local.** Alibaba answers metadata
+    // on 100.100.100.200 and Oracle on 192.0.0.192 — both routable addresses, so
+    // neither is caught by the 169.254/16 arm above and neither is private.
+    if (four[0] === 100 && four[1] === 100 && four[2] === 100 && four[3] === 200) return true;
+    if (four[0] === 192 && four[1] === 0 && four[2] === 0 && four[3] === 192) return true;
+    return false;
+  }
   /*
    * ⚠ **By name as well, and the names are the arm that was missing.** GCP's
    * metadata service is `metadata.google.internal`, which resolves to
@@ -840,7 +996,7 @@ function isPrivateHost(host: string): boolean {
  * is not a trade anybody can consent to from a phone. The consent screen draws that
  * case on its own line.
  */
-function readBaseUrl(raw: unknown, what: string): string | null | string[] {
+function readBaseUrl(raw: unknown, what: string, presenting: boolean): string | null | string[] {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_BASE_URL_CHARS) {
     return [`${what} baseUrl must be a URL of at most ${MAX_BASE_URL_CHARS} characters`];
@@ -853,25 +1009,57 @@ function readBaseUrl(raw: unknown, what: string): string | null | string[] {
   }
   if (url.username !== "" || url.password !== "") return [`${what} baseUrl may not carry a user name or a password`];
   if (url.hash !== "" || url.search !== "") return [`${what} baseUrl may not carry a query or a fragment`];
-  const host = url.hostname.toLowerCase();
+  /*
+   * ⚠ **The root label comes off before anything looks at the name.** `URL` strips
+   * a trailing dot from a dotted quad but keeps it on a named host — measured:
+   * `new URL("https://metadata.google.internal./").hostname` keeps the dot. Both
+   * predicates below test the name by equality or by suffix, so one character
+   * defeated the whole name arm of `isMetadataHost` and, in the other direction,
+   * made `ollama.internal.` fail to register as private.
+   */
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
+  // The scheme first, so a `file:` or a `ws:` is refused for what it is rather than
+  // for having no host — those URLs parse to an empty authority.
+  if (url.protocol !== "http:" && url.protocol !== "https:") return [`${what} baseUrl must be https`];
   if (isMetadataHost(host)) return [`${what} baseUrl names this host's own metadata service`];
-  if (url.protocol === "http:") {
-    if (!isPrivateHost(host)) {
-      return [`${what} baseUrl must be https, unless it names this machine or your own network`];
-    }
-  } else if (url.protocol !== "https:") {
-    return [`${what} baseUrl must be https`];
+  /*
+   * ⚠ **A name with no dot in it is not a public host, whatever the scheme.**
+   * `readNet` already refuses one for a plugin's *own* requests through `HOST`;
+   * this field is where the operator's pasted key is sent, and it was the looser
+   * of the two. A single label resolves through whatever search domain this host
+   * carries. `isPrivateHost` is the exemption, so `localhost`, an address literal
+   * and `.local`/`.internal` — the shapes Ollama, vLLM and LM Studio use — stay.
+   */
+  if (!host.includes(".") && !isPrivateHost(host)) {
+    return [`${what} baseUrl must name a host with a dot in it, or this machine`];
+  }
+  if (url.protocol === "http:" && !isPrivateHost(host)) {
+    return [`${what} baseUrl must be https, unless it names this machine or your own network`];
   }
   // Normalised here rather than at every reader: what is compared by `consentGap`
   // and what is stored have to be the same string, or the alarm cries wolf on a
   // trailing slash.
-  return url.origin + url.pathname.replace(/\/+$/, "");
+  const normalised = url.origin + url.pathname.replace(/\/+$/, "");
+  /*
+   * ⚠ **Bounded again, because normalising can make it longer.** The test at the
+   * top reads the raw string; percent-encoding expands one non-ASCII codepoint into
+   * as many as nine characters, so a 168-character accented path was accepted and
+   * stored at 343 — then refused on the next read of the stored manifest.
+   */
+  // Authoring hygiene, not a fence — the address is already bounded raw at the top
+  // of this function, and this catches the expansion. A row on disk that grew past
+  // it when it was stored is loaded rather than made to vanish.
+  if (presenting && normalised.length > MAX_BASE_URL_CHARS) {
+    return [`${what} baseUrl is longer than ${MAX_BASE_URL_CHARS} characters once normalised`];
+  }
+  return normalised;
 }
 
 function readSystems(
   raw: unknown,
   scopes: readonly PluginScope[],
   harnesses: readonly HarnessContribution[],
+  presenting: boolean,
 ): SystemContribution[] | string {
   if (raw === undefined || raw === null) {
     return scopes.includes("system") ? SCOPE_NEEDS_BLOCK[1]!.sentence : [];
@@ -898,6 +1086,7 @@ function readSystems(
     if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_CONTRIBUTED_NAME_CHARS) {
       return `${what} needs a name of 1–${MAX_CONTRIBUTED_NAME_CHARS} characters`;
     }
+    if (presenting && CONTROL_CHARS.test(name)) return `${what} name may not carry control or formatting characters`;
 
     /*
      * ⚠ **The closed pair, never ACP's open union.** `SystemApiType` is documented
@@ -910,7 +1099,7 @@ function readSystems(
       return `${what} apiType must be "anthropic" or "openai"`;
     }
 
-    const baseUrlRead = readBaseUrl(one["baseUrl"], what);
+    const baseUrlRead = readBaseUrl(one["baseUrl"], what, presenting);
     if (Array.isArray(baseUrlRead)) return baseUrlRead[0]!;
     const baseUrl = baseUrlRead;
 
@@ -934,6 +1123,9 @@ function readSystems(
       if (typeof headerName !== "string" || !HEADER_NAME.test(headerName)) {
         return `${what} authHeader.name must be a lower-case header name, like authorization`;
       }
+      if (STRUCTURAL_HEADERS.includes(headerName)) {
+        return `${what} authHeader.name may not be ${JSON.stringify(headerName)}: that field frames the request rather than naming who is asking`;
+      }
       const prefix = header["prefix"];
       if (prefix !== undefined && prefix !== null && (typeof prefix !== "string" || !HEADER_PREFIX.test(prefix))) {
         return `${what} authHeader.prefix must be a short word, like "Bearer "`;
@@ -941,7 +1133,7 @@ function readSystems(
       authHeader = { name: headerName, prefix: typeof prefix === "string" ? prefix : "" };
     }
 
-    const models = readSystemModels(one["models"], what);
+    const models = readSystemModels(one["models"], what, presenting);
     if (typeof models === "string") return models;
 
     const nativeModelPrefix = one["nativeModelPrefix"];
@@ -951,6 +1143,9 @@ function readSystems(
       (typeof nativeModelPrefix !== "string" || nativeModelPrefix.length === 0 || nativeModelPrefix.length > 32)
     ) {
       return `${what} nativeModelPrefix must be a short string, like "acme/"`;
+    }
+    if (presenting && typeof nativeModelPrefix === "string" && CONTROL_CHARS.test(nativeModelPrefix)) {
+      return `${what} nativeModelPrefix may not carry control or formatting characters`;
     }
 
     const keyEnvRead = readEnvNames(one["keyEnv"] === undefined || one["keyEnv"] === null ? [] : [one["keyEnv"]], `${what} keyEnv`, 1);
@@ -1030,7 +1225,7 @@ function readOwnHarness(raw: unknown, own: readonly string[], what: string): str
   return raw;
 }
 
-function readSystemModels(raw: unknown, what: string): { id: string; name: string }[] | string {
+function readSystemModels(raw: unknown, what: string, presenting: boolean): { id: string; name: string }[] | string {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) return `${what} models must be an array`;
   if (raw.length > MAX_SYSTEM_MODELS) return `${what} may name at most ${MAX_SYSTEM_MODELS} models`;
@@ -1042,9 +1237,13 @@ function readSystemModels(raw: unknown, what: string): { id: string; name: strin
     if (typeof id !== "string" || id.length === 0 || id.length > MAX_SYSTEM_MODEL_ID_CHARS) {
       return `${what} has a model with no id, or one longer than ${MAX_SYSTEM_MODEL_ID_CHARS} characters`;
     }
+    if (presenting && CONTROL_CHARS.test(id)) return `${what} has a model id carrying control or formatting characters`;
     const name = model["name"];
     if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_SYSTEM_MODEL_NAME_CHARS) {
       return `${what} model ${JSON.stringify(id)} needs a name of 1–${MAX_SYSTEM_MODEL_NAME_CHARS} characters`;
+    }
+    if (presenting && CONTROL_CHARS.test(name)) {
+      return `${what} model ${JSON.stringify(id)} name may not carry control or formatting characters`;
     }
     if (out.some((seen) => seen.id === id)) return `${what} names model ${JSON.stringify(id)} twice`;
     out.push({ id, name: name.trim() });

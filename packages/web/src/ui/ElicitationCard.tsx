@@ -2,8 +2,11 @@ import { useEffect, useId, useMemo, useState, useSyncExternalStore, type ReactNo
 import {
   askTitle,
   elicitationAnswer,
+  answerMark,
+  displacedBy,
   elicitationForm,
   fieldValue,
+  stepAnswered,
   type ElicitationForm,
   type RenderField,
 } from "../elicitation";
@@ -11,9 +14,11 @@ import {
   asksVersion,
   draftFor,
   dropAsk,
+  excludedFor,
   isCollapsed,
   setCollapsed,
   setDraftField,
+  setExcluded,
   setStep,
   stepFor,
   subscribeAsks,
@@ -23,7 +28,7 @@ import { keyOf, type SessionRef } from "../ids";
 import { store } from "../store";
 import { toast } from "./Toast";
 import type { ElicitationField, PendingElicitationSnapshot } from "../wire";
-import { AskAction, AskCard, type AskOption } from "./AskCard";
+import { AskAction, AskCard, askRowTone, ChoiceMark, type AskOption } from "./AskCard";
 import { Icon, Skeleton } from "./bits";
 import { ChevronLeft } from "lucide-react";
 
@@ -57,11 +62,18 @@ export function ElicitationCard({
   sessionRef,
   pending,
   more,
+  onHeight,
 }: {
   sessionRef: SessionRef;
   pending: PendingElicitationSnapshot;
   /** Other requests waiting behind this one. Drawn by the card, not counted here. */
   more: number;
+  /**
+   * Passed straight to {@link AskCard.onHeight} — how tall this card is, so the
+   * transcript can reserve the room and be scrolled clear of it. Nothing here
+   * reads it; the card is out of flow and `SessionView` is what draws behind it.
+   */
+  onHeight?: (px: number) => void;
 }): ReactNode {
   const [fields, setFields] = useState<ElicitationField[] | null>(null);
   const [busy, setBusy] = useState<"accept" | "decline" | "cancel" | null>(null);
@@ -104,7 +116,8 @@ export function ElicitationCard({
     () => elicitationForm(pending, fields ?? []),
     [pending, fields],
   );
-  const answer = useMemo(() => elicitationAnswer(form, draft), [form, draft]);
+  const excluded = excludedFor(sessionKey, pending.elicitationId);
+  const answer = useMemo(() => elicitationAnswer(form, draft, excluded), [form, draft, excluded]);
 
   const respond = (action: "accept" | "decline" | "cancel"): void => {
     if (busy !== null) return;
@@ -144,15 +157,76 @@ export function ElicitationCard({
     setDraftField(sessionKey, pending.elicitationId, field, value);
   };
 
+  /*
+   * A write, and whatever it displaces.
+   *
+   * ⚠ **Nothing anybody typed is erased here, and the asymmetry is the rule rather
+   * than an accident of it.** Writing your own answer clears the question's
+   * *selection*, which is one tap to redo and is how you switch to it. Picking an
+   * option clears **nothing** — the text stays in its box and stops being sent,
+   * which `elicitationAnswer` does without touching it. See `displacedBy`.
+   *
+   * `""` and not a delete, for the reason the option rows already give: deleting
+   * puts a field back to *untouched*, and an untouched field answers with the
+   * agent's `default`. Only a value displaces, so emptying the box releases the
+   * selection rather than clearing it a second time.
+   *
+   * Writing also switches the field back **on**: typing into a box you had turned
+   * off is unambiguous about wanting it, and leaving it off would be the card
+   * ignoring what somebody is in the middle of writing.
+   */
+  const write = (field: string, value: Parameters<typeof setDraftField>[3]): void => {
+    set(field, value);
+    const empty = value === "" || (Array.isArray(value) && value.length === 0);
+    if (empty) return;
+    setExcluded(sessionKey, pending.elicitationId, field, false);
+    for (const other of displacedBy(form, field)) set(other, "");
+  };
+
+  /*
+   * The mark beside a typed answer is a control, which the rows above it are too.
+   *
+   * ⚠ **Asked for directly: on a multi-select you must be able to switch your own
+   * answer off from that square, having already written it.** Off is `ask.ts`'s
+   * `excluded`, never an empty box.
+   *
+   * Turning one **on** also releases the question it answers, and only there does
+   * that matter: a single-select suppresses its alternative while it holds a value,
+   * so without this the tap would be undone in the same frame by the rule that
+   * drew the mark empty in the first place.
+   */
+  const toggleAnswer = (field: RenderField, on: boolean): void => {
+    setExcluded(sessionKey, pending.elicitationId, field.key, !on);
+    if (!on) return;
+    for (const other of displacedBy(form, field.key)) set(other, "");
+  };
+
   const stepCount = Math.max(1, form.steps.length);
   const index = Math.min(stepFor(sessionKey, pending.elicitationId), stepCount - 1);
   const step = form.steps[index];
   const last = index >= stepCount - 1;
-  // Only this question's problems gate Next. Submit still validates the whole
-  // form, so a required field skipped earlier cannot be sent — it just does not
-  // stop you moving on before you have reached it.
+  /*
+   * What has to be true before you may leave this question.
+   *
+   * Two halves. **Its own problems** — a value this step carries that the form
+   * rejects; the rest of the form's problems are not this button's business, and
+   * Submit validates the lot at the end anyway.
+   *
+   * ⚠ **And that it has been answered at all**, which is new and is the fix for a
+   * report. `askUserQuestionsToCreateRequest` marks nothing `required`, so an
+   * untouched question raised no problem and Next was live on a blank card — you
+   * could walk a three-question form to the end with four taps and submit it having
+   * said one thing. `stepAnswered` is the rule, pure and in `elicitation.ts` so
+   * `webcheck` can reach it, and it reads the whole step: typing into the adapter's
+   * own "Other" box instead of picking a row is an answer.
+   *
+   * **Skip is still there and is the honest way out.** Nothing here forces an
+   * answer; it forces the *button that claims one* to have one.
+   */
   const stepKeys = new Set((step?.fields ?? []).map((field) => field.key));
-  const stepBlocked = answer.problems.some((problem) => stepKeys.has(problem.key));
+  const stepBlocked =
+    answer.problems.some((problem) => stepKeys.has(problem.key)) ||
+    !stepAnswered(form, index, answer.content);
 
   /*
    * Which of this step's fields is the *choices*, and which are everything else.
@@ -193,6 +267,12 @@ export function ElicitationCard({
             description: option.description,
             chosen,
             /*
+             * How many of these may be picked, which is the one fact these rows
+             * did not carry. Ticking three and choosing one drew identically until
+             * a tap had already made the difference — see `AskOption.mark`.
+             */
+            mark: multi ? "many" : "one",
+            /*
              * Tapping the chosen row again clears it, which is how an optional
              * select goes back to unanswered.
              *
@@ -208,13 +288,13 @@ export function ElicitationCard({
              */
             onPick: () =>
               multi
-                ? set(
+                ? write(
                     choice.field.key,
                     chosen
                       ? current.filter((entry) => entry !== option.value)
                       : [...current, option.value],
                   )
-                : set(choice.field.key, chosen ? "" : option.value),
+                : write(choice.field.key, chosen ? "" : option.value),
           } satisfies AskOption;
         });
 
@@ -224,6 +304,7 @@ export function ElicitationCard({
 
   return (
     <AskCard
+      onHeight={onHeight}
       title={title}
       detail={
         stepCount > 1 ? (
@@ -266,9 +347,34 @@ export function ElicitationCard({
                 // the row the reference draws under the choices.
                 heading={field.label === title ? null : field.label}
                 hint={field.hint === title ? null : field.hint}
+                /*
+                 * ⚠ **The box under a question is one of its answers, so it wears
+                 * the same mark as the rows above it.** The adapter puts an
+                 * optional free-text field after every `AskUserQuestion` — its own
+                 * "Other" — and it was drawn as a labelled input under the list,
+                 * which reads as a different *kind* of thing from the answers it
+                 * sits with. Reported as exactly that: on a multi-select, typing
+                 * your own answer is picking one.
+                 *
+                 * The gate is `answerMark`, i.e. the agent's own `alternativeTo` —
+                 * **not** the step this field landed in. The two agreed on claude
+                 * and the difference is the point: a mark promises what picking
+                 * means, and this card can only keep that promise where it also
+                 * knows to displace the other answer. See {@link displacedBy}.
+                 */
+                mark={answerMark(form, field)}
+                /*
+                 * Whether this field is *an answer*, which is not the same as
+                 * whether its box has anything in it — see `elicitationAnswer`. A
+                 * question that takes one answer suppresses its alternative while
+                 * it holds a value, and the mark can be switched off by hand; both
+                 * come out here, so the row draws what will be sent.
+                 */
+                counted={Object.prototype.hasOwnProperty.call(answer.content, field.key)}
+                onToggle={(on) => toggleAnswer(field, on)}
                 value={fieldValue(field, draft)}
                 problem={problemOf(field.key)}
-                onChange={(value) => set(field.key, value)}
+                onChange={(value) => write(field.key, value)}
               />
             ))}
           </div>
@@ -296,7 +402,10 @@ export function ElicitationCard({
             onClick={() =>
               last ? respond("accept") : setStep(sessionKey, pending.elicitationId, index + 1)
             }
-            disabled={busy !== null || fields === null || (last ? !answer.canSubmit : stepBlocked)}
+            /* Every step owes an answer; the last one additionally owes a body the
+               route will take. `canSubmit` is the second half and is asked only
+               there, because it is a statement about the whole form. */
+            disabled={busy !== null || fields === null || stepBlocked || (last && !answer.canSubmit)}
             busy={busy === "accept"}
           >
             {last ? "Submit" : "Next"}
@@ -320,6 +429,9 @@ function Field({
   hint,
   value,
   problem,
+  mark,
+  counted,
+  onToggle,
   onChange,
 }: {
   field: RenderField;
@@ -328,6 +440,31 @@ function Field({
   hint: string | null;
   value: ReturnType<typeof fieldValue>;
   problem: string | null;
+  /**
+   * `"one"` or `"many"` where this field is an answer to the question above it,
+   * `null` where it is a field on a form.
+   *
+   * See the call site for the gate. It draws this box as a row in the list of
+   * answers rather than as a control under it — same shell, same 44px, same
+   * indicator — because that is what it is.
+   *
+   * ⚠ **It says "there is an answer in here", and deliberately not "this one wins".**
+   * Measured on claude-agent-acp 0.73.0: `applyAskElicitationResponse` takes a
+   * non-empty custom answer *instead of* the selection, for a multi-select as well
+   * as a single one — so a card showing three ticked boxes and a filled Other is
+   * showing four answers where one is sent. Modelling that would mean knowing this
+   * box is a custom-answer field, and the only two ways to know are the key suffix
+   * and `_meta`: `acp-agents.md` forbids the first by name (codex spells it
+   * `__other` where claude spells it `_custom`, and a client keyed on either
+   * renders one agent's question and refuses the other's) and the daemon drops the
+   * second at ingest. So the mark states what is true here — this field has a value
+   * — and what the agent does with two of them is the agent's.
+   */
+  mark: AskOption["mark"];
+  /** Whether this field is in the body — see the call site. Meaningless without a `mark`. */
+  counted: boolean;
+  /** Switch this answer on or off without touching what it holds. */
+  onToggle: (on: boolean) => void;
   onChange: (value: string | boolean | string[]) => void;
 }): ReactNode {
   /*
@@ -360,7 +497,15 @@ function Field({
     undefined;
   return (
     <div>
-      {heading !== null ? (
+      {/*
+       * ⚠ **A field drawn as an answer takes no heading**, however the caller
+       * labelled it. The rows above carry their names inside them, so a word over
+       * this one would make it a section rather than a member of the list — which
+       * is the same argument `groupIntoSteps` already makes when it drops the
+       * adapter's sentence about this box. The name is not lost: it becomes the
+       * `sr-only` copy below, which is what `aria-labelledby` resolves to.
+       */}
+      {heading !== null && (mark === null || mark === undefined) ? (
         <p id={nameId} className="mb-1 text-xs font-medium wrap-anywhere">
           {heading}
         </p>
@@ -380,7 +525,60 @@ function Field({
       )}
 
       {field.kind.k === "text" &&
-        (field.kind.multiline ? (
+        (mark !== null && mark !== undefined ? (
+          /*
+           * An answer somebody types, drawn as one of the answers.
+           *
+           * The shell is `askRowTone` — the option rows' own function rather than a
+           * class list that resembles theirs — so "picked" is the same three signals
+           * here as one row up. Picked here means *counted*, never "the box has
+           * something in it": a suppressed or switched-off answer keeps its text and
+           * loses its mark.
+           *
+           * ⚠ **The mark is a `<button>`, so this row is not a `<label>` any more.**
+           * It was, which put a tap anywhere in the row into the box — and that is
+           * exactly what a nested control cannot survive: a label forwards its
+           * activation to the field it names, so the square would have focused the
+           * input instead of switching the answer off. The input is `flex-1` and is
+           * most of the row, so what is lost is the padding either side of it.
+           *
+           * The input carries no border, no radius and no fill of its own — the row
+           * is its boundary, which is `Composer`'s rule for the same shape. It is
+           * still `text-xs` and still 44px, because the row is.
+           */
+          <div className={`flex min-h-11 w-full items-center rounded-md border ${askRowTone(counted)}`}>
+            <input
+              type="text"
+              value={typeof value === "string" ? value : ""}
+              onChange={(event) => onChange(event.target.value)}
+              placeholder="Type your own answer here"
+              aria-labelledby={nameId}
+              aria-describedby={describedBy}
+              className="min-w-0 flex-1 border-none bg-transparent px-3 py-0 text-xs outline-none"
+            />
+            {/*
+             * 44px of target for a 16px mark, and the growth is the box rather than
+             * a `::after`: this sits at the row's own edge, so a target reaching
+             * past it would hang outside the thing anybody can see. `pr-3` keeps the
+             * mark where a row's trailing slot is while the button owns the width.
+             */}
+            <button
+              type="button"
+              onClick={() => onToggle(!counted)}
+              role={mark === "many" ? "checkbox" : undefined}
+              aria-checked={mark === "many" ? counted : undefined}
+              aria-pressed={mark === "one" ? counted : undefined}
+              aria-labelledby={nameId}
+              // `min-w-11` as well as `h-11`: `pl-2` + a 16px mark + `pr-3` is 36px
+              // across, so the box had grown on one axis only and the 44px this
+              // comment claims held for height alone. `justify-end` keeps the mark
+              // in the row's trailing slot while the button owns the wider target.
+              className="tap flex h-11 min-w-11 shrink-0 items-center justify-end pr-3 pl-2"
+            >
+              <ChoiceMark mark={mark} chosen={counted} />
+            </button>
+          </div>
+        ) : field.kind.multiline ? (
           <textarea
             value={typeof value === "string" ? value : ""}
             onChange={(event) => onChange(event.target.value)}
@@ -462,6 +660,13 @@ function Field({
                       )
                     : onChange(option.value)
                 }
+                /* The same shape the card's own rows draw, from the same
+                   component: a box for a multi-select and a circle for a select,
+                   with the role claimed only where a `<button>` keeps it. See
+                   `ChoiceMark`. */
+                role={multi ? "checkbox" : undefined}
+                aria-checked={multi ? chosen : undefined}
+                aria-pressed={multi ? undefined : chosen}
                 /* Picked is a thicker edge and not a heavier face, for the reason
                    `AskCard`'s `CHOSEN` gives at length: the label below is
                    `wrap-anywhere` with no truncate, so `font-medium` here grew the
@@ -474,6 +679,7 @@ function Field({
                 }`}
               >
                 <span className="min-w-0 flex-1 wrap-anywhere">{option.label}</span>
+                <ChoiceMark mark={multi ? "many" : "one"} chosen={chosen} />
               </button>
             );
           })}

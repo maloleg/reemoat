@@ -5,7 +5,7 @@ import { closeWss } from "./webcheck.ws.js";
 /**
  * The regression driver for the browser client.
  *
- * This file is the running order and nothing else: twenty-eight subject modules
+ * This file is the running order and nothing else: thirty subject modules
  * beside it hold the assertions, and five `webcheck.env`/`modules`/`ws`/`source`/
  * `rows` modules hold what they share. It was one 29 751-line file until it was
  * past the point of being openable, and the cut is a pure move — the emitted
@@ -58,7 +58,7 @@ await import("./webcheck.permission-card.js");
 await import("./webcheck.composer-and-config-bar.js");
 await import("./webcheck.decision-surfaces.js");
 await import("./webcheck.command-menu-and-browser.js");
-await import("./webcheck.context-chips-and-tail.js");
+await import("./webcheck.chips-and-tail.js");
 await import("./webcheck.tail-subagents-and-runs.js");
 await import("./webcheck.transcript-refusals-and-composer.js");
 await import("./webcheck.interrupted-and-spawn-routes.js");
@@ -69,6 +69,7 @@ await import("./webcheck.agent-card.js");
 await import("./webcheck.settings-routing.js");
 await import("./webcheck.shell-and-enrollment.js");
 await import("./webcheck.gate-and-server-settings.js");
+await import("./webcheck.legal-and-consent.js");
 await import("./webcheck.machine-limit-and-probe.js");
 await import("./webcheck.navigation-and-telegram.js");
 closeWss();
@@ -82,5 +83,6 @@ await import("./webcheck.strip-order-and-hidden.js");
 await import("./webcheck.refusing-controls.js");
 await import("./webcheck.harness-and-systems.js");
 await import("./webcheck.model-list.js");
+await import("./webcheck.typography.js");
 
 finish();

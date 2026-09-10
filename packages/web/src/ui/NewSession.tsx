@@ -1,5 +1,6 @@
 import {
   ChevronRight,
+  CornerLeftUp,
   FileArchive,
   Folder,
   FolderPlus,
@@ -12,6 +13,7 @@ import { ApiError, errorText } from "../http";
 import { forgetPick, heldPick, keepPick, takePick, takeRemoval } from "../agentPick";
 import { refOf, sessionId, type MachineId } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
+import { pathCrumbs } from "../paths";
 import { agentStripPath, settingsPath } from "../settings";
 import { navigate, newPath, sessionPath, type Route } from "../router";
 import { store, type AppState } from "../store";
@@ -29,6 +31,7 @@ import {
   Empty,
   Icon,
   SHEET_FOOT,
+  SETTINGS_HEADING,
   SHEET_SCREEN,
   Spinner,
   reachText,
@@ -1011,7 +1014,17 @@ function NewSession({
           ) : agents !== null && picked === null ? (
             "choose an agent"
           ) : cwd !== null ? (
-            <>in <span className="font-mono text-fg">{cwd}</span></>
+            /*
+             * Nothing, once a folder is chosen. It read `in ~/thing`, which is the
+             * folder the picker is standing in — drawn in full three inches above
+             * this line, in a bar whose whole subject is that path. A second copy
+             * of one fact, and the quieter of the two.
+             *
+             * The empty string rather than a dropped arm: this region is mounted
+             * unconditionally and only its text swaps, which is the arrangement
+             * the docblock above argues is the one reliably announced.
+             */
+            ""
           ) : (
             "choosing a folder…"
           )}
@@ -2212,7 +2225,7 @@ function MachineLine({
 
 function FieldLabel({ children }: { children: ReactNode }): ReactNode {
   return (
-    <h2 className="pb-1.5 text-2xs font-semibold tracking-wider text-muted uppercase">{children}</h2>
+    <h2 className={`pb-1.5 ${SETTINGS_HEADING}`}>{children}</h2>
   );
 }
 
@@ -2263,7 +2276,7 @@ function DirectoryPicker({
   /** Lifted so the footer can render the chosen path the same way this does. */
   onPick: (path: string | null) => void;
 }): ReactNode {
-  const [root, setRoot] = useState<string | null>(null);
+  const [roots, setRoots] = useState<readonly string[]>([]);
   const [path, setPath] = useState<string | null>(initial);
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -2309,12 +2322,17 @@ function DirectoryPicker({
       .then((result) => {
         if (cancelled) return;
         const first = result.roots[0] ?? null;
-        setRoot(first);
+        // **All of them, not the first.** `pathCrumbs` weighs every root and takes
+        // the longest match, the same rule `displayCwd` has always applied to a
+        // row — so a machine configured with `~` *and* `~/work` draws crumbs under
+        // both. Holding `roots[0]` alone drew none at all under the second one,
+        // which is a picker that cannot be walked on a fleet this wire supports.
+        setRoots(result.roots);
         // `result.recent` is read by nothing now — see the note where the strip
         // it fed used to be drawn.
-        // Start at the top of their own tree rather than at nothing. There is
-        // exactly one root — a tenant's own directory — so a "pick a root" step
-        // would be a list of one.
+        // Start at the top of their own tree rather than at nothing. With one
+        // root — a tenant's own directory — a "pick a root" step would be a list
+        // of one, and with several the first is still where to begin.
         setPath((current) => current ?? first);
       })
       .catch((cause: unknown) => {
@@ -2379,33 +2397,99 @@ function DirectoryPicker({
   };
 
   /**
-   * The path as clickable segments.
+   * The path as clickable segments, cut against the daemon's own roots.
    *
-   * Built from the *host* path against the root, then labelled with the agent's
-   * name for it, so a click navigates somewhere real while the text reads like
-   * the machine the person thinks they are on.
+   * ⚠ **This was built inline here and the copy was wrong twice** — it tested
+   * `startsWith`, so `/Users/re` passed as a root of `/Users/rends/x` and the
+   * crumbs then addressed `/Users/re/nds`; and it weighed only `roots[0]`, so a
+   * path under a second root drew nothing. `pathCrumbs` is `displayCwd`'s own
+   * rule, which had both answers already. Q3.441.
    */
-  const crumbs: { label: string; path: string }[] = [];
-  if (root !== null && path !== null && path.startsWith(root)) {
-    crumbs.push({ label: root, path: root });
-    const rest = path.slice(root.length).split("/").filter((part) => part.length > 0);
-    let walked = root;
-    for (const part of rest) {
-      walked = `${walked}/${part}`;
-      crumbs.push({ label: part, path: walked });
-    }
-  }
+  const crumbs = pathCrumbs(path ?? "", roots);
+  /**
+   * Where "up" goes, or `null` when there is nowhere above.
+   *
+   * The crumb before the last, so the button and the bar are one list read twice
+   * — and `null` at the root, under no root at all, and while the roots read is
+   * still in flight, which are the three states the bar itself draws nothing for.
+   */
+  const parent = crumbs.length >= 2 ? (crumbs[crumbs.length - 2]?.path ?? null) : null;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-edge-strong bg-surface">
-      <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5 border-b border-edge bg-raised px-2.5 py-2">
-        <span className="text-faint">
+      {/*
+       * **The path reads as one string, and the only gap on the line is after the
+       * folder glyph.**
+       *
+       * It was `gap-x-1` here, `gap-1` on a wrapper around every crumb and `px-1`
+       * on every button — about 8px of air on each side of the separators
+       * *between* crumbs, while the separators *inside* the first crumb were
+       * tight, because that crumb was one unsplit string. Two spacings for one
+       * character on one line, which is what "it looks bad" was about.
+       *
+       * So the separator moved inside the button that precedes it, and every
+       * horizontal gap came off. It buys three things at once: the run is
+       * continuous; each non-leaf crumb gains the slash's width as tap area, which
+       * is what rescues a `~` seven pixels wide; and a wrapped line begins with a
+       * segment while the line above it ends with a `/`, which is how a path wraps.
+       */}
+      <div className="flex flex-wrap items-center gap-y-0.5 border-b border-edge bg-raised px-2.5 py-2">
+        {/*
+         * **Up one folder — and it is not this app's back control.**
+         *
+         * ⚠ The two look alike and mean different things, which is exactly why
+         * this may not be an `IconButton` wearing a `ChevronLeft`. That control
+         * leaves a *screen*, always to a fixed destination taken from the URL, and
+         * `Header`'s docblock spends a paragraph on never letting it become a
+         * history button. This one walks a **filesystem**, on a machine that is
+         * not this one, and changes nothing about where you are in the app. Same
+         * glyph and they become one thing in the reader's head, and then the day
+         * one of them goes back a screen from inside the picker is a bug nobody
+         * can describe. `CornerLeftUp` is the file-manager idiom and says *up a
+         * level* rather than *back*.
+         *
+         * **Drawn always and `disabled` at the root**, rather than appearing when
+         * it becomes usable: a control that materialises is one whose neighbours
+         * move under a finger already travelling toward them, and at the root —
+         * the first thing this picker shows — it would be absent exactly when
+         * somebody is learning where the controls are.
+         *
+         * The destination is the crumb before the last, so this button and the bar
+         * beside it cannot disagree about what "up" is: one list, read twice.
+         */}
+        <button
+          type="button"
+          onClick={() => {
+            if (parent !== null) setPath(parent);
+          }}
+          disabled={parent === null}
+          aria-label="Up one folder"
+          title={parent === null ? "Already at the top" : `Up to ${crumbs[crumbs.length - 2]?.label ?? ""}`}
+          /*
+           * **A 44px square with a ground of its own, not a glyph tucked against
+           * the path.** It was 13px of ink in a strip as wide as its own icon,
+           * sharing a line with crumbs that are `text-2xs` — findable with a
+           * mouse and a poor target for a thumb, which is the pointer that
+           * actually walks a directory tree on this screen.
+           *
+           * `min-w-11` beside `min-h-11` is what makes it square: the height was
+           * already there and the width was `px-1`, so the target was 44px tall
+           * and about 21px wide — the axis a thumb misses on a row of small text.
+           * `mr-2` and a `border-r` separate it from the path rather than letting
+           * it read as the first crumb; `rounded-md` and a hover ground say it is
+           * a control, which the crumbs deliberately do not.
+           */
+          className="tap -my-2 mr-2 inline-flex min-h-11 min-w-11 items-center justify-center rounded-md border-r border-edge text-muted hover:bg-surface hover:text-fg disabled:pointer-events-none disabled:border-transparent disabled:text-faint"
+        >
+          <Icon as={CornerLeftUp} size={17} />
+        </button>
+        <span className="mr-1.5 text-faint">
           <Icon as={Folder} size={12} />
         </span>
         {crumbs.length === 0 ? (
           /*
            * ⚠ **A read that failed used to sit here reading `loading…` for ever.**
-           * `crumbs` is empty until `root` lands, `root` is written only in the
+           * `crumbs` is empty until the roots land, they are written only in the
            * roots read's `.then`, and nothing re-requested — so a refusal left this
            * bar making a claim about a request that had already ended, on the one
            * control this screen exists to drive. Every state below it agrees
@@ -2426,25 +2510,41 @@ function DirectoryPicker({
             <span className="text-2xs text-muted">could not be read</span>
           )
         ) : (
-          crumbs.map((crumb, index) => (
-            <span key={crumb.path} className="flex items-center gap-1">
-              {index > 0 && <span className="text-faint">/</span>}
+          crumbs.map((crumb, index) => {
+            const leaf = index === crumbs.length - 1;
+            return (
               <button
+                key={crumb.path}
                 onClick={() => setPath(crumb.path)}
-                disabled={index === crumbs.length - 1}
+                disabled={leaf}
+                /* The absolute path is one hover away, on every crumb, because
+                   `~` is a name for a directory whose address it does not give —
+                   and a label you cannot check is worse than a long one. */
+                title={crumb.path}
                 /* An 11px glyph with no vertical padding was a 16px target, and
                    this is the *only* way back up the tree — rows in the list below
                    only ever descend. `-my-2` keeps the bar from growing by the full
                    difference: the crumbs occupy 28px of layout and the remaining
-                   8px above and below is hit area over the bar's own padding. */
-                className={`tap -my-2 inline-flex min-h-11 items-center px-1 font-mono text-2xs ${
-                  index === crumbs.length - 1 ? "text-fg font-medium" : "text-muted hover:underline"
+                   8px above and below is hit area over the bar's own padding.
+                   ⚠ Not a pseudo-element the way `IconButton` reaches 44px: an
+                   18px line box would need 13px a side, which is 5px past this
+                   bar's border and onto the first folder row below it — a live
+                   target. The vertical growth costs nothing because the bar's own
+                   padding absorbs it; horizontal growth has somewhere to land. */
+                className={`tap -my-2 inline-flex min-h-11 items-center font-mono text-2xs ${
+                  leaf ? "text-fg" : "text-muted hover:text-fg"
                 }`}
               >
                 {crumb.label}
+                {/* Owned by the crumb before it rather than drawn between two, so
+                    there is no box between two boxes to put air in. `hover:text-fg`
+                    rather than an underline: an underline under a path segment
+                    reads as a link out of the app, and it would now run under a
+                    separator this button only borrows. */}
+                {!leaf && <span className="text-faint">/</span>}
               </button>
-            </span>
-          ))
+            );
+          })
         )}
       </div>
 
@@ -2582,6 +2682,9 @@ function DirectoryPicker({
         <ImportCode
           machineId={id}
           into={path}
+          /* The same roots the crumbs above are cut against, so the sheet's footer
+             and the bar behind it name one folder one way. */
+          roots={roots}
           onClose={() => setImporting(false)}
           /* Straight into it, for the reason creating a folder walks into the one
              it just made: the folder somebody imported is the folder they meant to

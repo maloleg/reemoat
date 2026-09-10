@@ -1877,6 +1877,21 @@ function Field({
  * is the one place on this screen where the pairing rules are visible at all, and
  * hiding the rows would answer "where did Kimi K2 go" with silence.
  */
+/*
+ * The provider heading over a group whose rows are **all** hidden, one tone below
+ * the heading over a group that still has rows.
+ *
+ * ⚠ **Written out rather than `` `${SETTINGS_HEADING} text-faint` ``, and it was
+ * that until now.** `SETTINGS_HEADING` carries `text-muted`, so appending a second
+ * colour of the same family leaves which one wins to Tailwind's emission order
+ * rather than to this line — and `text-faint` lost. The heading has been rendering
+ * `text-muted` since it was written: identical to its loud twin below, and
+ * *louder* than the "N models hidden" caption directly under it, which is the one
+ * relationship it exists to express. `MachineSection`'s `RETIRE_HEADING` is spelled
+ * out for exactly this reason. See `.claude/rules/web-typography.md`.
+ */
+const HIDDEN_PROVIDER_HEADING = "text-2xs font-semibold tracking-wider text-faint uppercase";
+
 function ModelPicker({
   nameOf,
   harnesses,
@@ -2250,7 +2265,7 @@ function ModelPicker({
                       itself does not skip (the name is an `h2` and a field's label
                       an `h3`), which is what made this one look deliberate. */}
                   {groups.length > 1 && (
-                    <h2 className={`${SETTINGS_HEADING} mb-1.5 text-faint`}>{group.system.displayName}</h2>
+                    <h2 className={`${HIDDEN_PROVIDER_HEADING} mb-1.5`}>{group.system.displayName}</h2>
                   )}
                   {/* The count, because the rows are gone and their absence would
                       otherwise read as a provider with nothing in it — which is the

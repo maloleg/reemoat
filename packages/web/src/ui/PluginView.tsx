@@ -1,7 +1,7 @@
 import { memo, useState, type ReactNode } from "react";
 import { seedForm } from "../plugins";
 import type { PluginBlock, PluginField, PluginOpen, PluginRow, PluginView as PluginViewShape } from "../wire";
-import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, Spinner } from "./bits";
+import { Button, DangerButton, Dot, Dropdown, Empty, FIELD, SETTINGS_HEADING, Spinner } from "./bits";
 import { Trash2 } from "lucide-react";
 
 /**
@@ -128,7 +128,7 @@ export const PluginBlockView = memo(function PluginBlockView({
              * fit exactly; past that it scrolls, which is the honest answer.
              */
             <section key={index} className="min-w-0 flex-1 sm:min-w-40">
-              <h3 className="mb-1.5 text-2xs font-semibold tracking-wider text-muted uppercase">{column.title}</h3>
+              <h3 className={`mb-1.5 ${SETTINGS_HEADING}`}>{column.title}</h3>
               {column.rows.length === 0 ? (
                 <p className="text-sm text-muted">—</p>
               ) : (
@@ -377,7 +377,19 @@ function Form({
       }}
     >
       {block.fields.map((field) => (
-        <Field key={field.key} field={field} value={values[field.key] ?? ""} onChange={(value) => set(field.key, value)} />
+        <Field
+          key={field.key}
+          field={field}
+          /*
+           * `Object.hasOwn`, never a bare read — `PluginConsent`'s `said` for the
+           * same reason. The key is a plugin's own string that `clampField` only
+           * clips, and `set` above spreads into an object literal, so a field
+           * keyed `__proto__` would otherwise read back `Object.prototype`: an
+           * object, which `?? ""` lets through and React refuses as a child.
+           */
+          value={Object.hasOwn(values, field.key) ? (values[field.key] ?? "") : ""}
+          onChange={(value) => set(field.key, value)}
+        />
       ))}
       <div>
         {/*
@@ -514,10 +526,15 @@ function Field({
  * notice. That is why it is the same shape as `sameNode` in `tail.ts` rather than
  * a deep-equality helper: the list is meant to be read beside the type.
  *
- * Exported so a driver can reach it, for `sameNode`'s reason — a comparator that
- * wrongly answers `true` shows a stale row and nothing anywhere would say so.
+ * ⚠ **It was exported "so a driver can reach it", for `sameNode`'s reason, and
+ * no driver ever did** — nothing in `packages/web/scripts` imports either
+ * comparator, so the totality both docblocks call load-bearing was asserted by
+ * nobody. Local again rather than exported-and-unused: the claim to be enforced
+ * is a real gap, and an export that pretends it is covered hides it. Reaching
+ * for the enforcement means exporting these *and* sweeping them the way
+ * `sameNode` is.
  */
-export function samePluginRow(a: PluginRow, b: PluginRow): boolean {
+function samePluginRow(a: PluginRow, b: PluginRow): boolean {
   if (a === b) return true;
   return (
     a.id === b.id &&
@@ -545,14 +562,16 @@ export function samePluginRow(a: PluginRow, b: PluginRow): boolean {
  *
  * ⚠ **Total over the five, and `type` is compared first** — the switch above has
  * an arm for each, so a block that changed shape must never compare equal to the
- * one it replaced. Exported with {@link samePluginRow} and for its reason.
+ * one it replaced. Local with {@link samePluginRow} and for its reason: both were
+ * exported "so a driver can reach it" and no driver ever did, and an export that
+ * pretends the claim is covered hides the gap.
  *
  * A `form`'s `value`s are compared even though {@link Form} reads them only once
  * per mount: what is being answered here is whether the *block* changed, and
  * deciding that from a subset of it is how the next field added to `PluginField`
  * becomes invisible.
  */
-export function samePluginBlock(a: PluginBlock, b: PluginBlock): boolean {
+function samePluginBlock(a: PluginBlock, b: PluginBlock): boolean {
   if (a === b) return true;
   if (a.type !== b.type) return false;
   switch (a.type) {

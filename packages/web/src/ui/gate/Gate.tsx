@@ -4,15 +4,17 @@ import * as cp from "../../cp";
 import {
   gateNeedsSession,
   gateNeedsToken,
+  gateOutranksSession,
   gateUsable,
   incompleteLinkRemedy,
   readGateToken,
   signupScreen,
   type GateScreen,
 } from "../../gate";
+import { LEGAL_DOCS, legalPath, legalTitle, legalPublishable } from "../../legal";
 import { navigate } from "../../router";
 import { store, type AppState } from "../../store";
-import { Button, FIELD, Spinner } from "../bits";
+import { Button, FIELD, LINK, SETTINGS_HEADING, Spinner } from "../bits";
 import { SignIn } from "../SignIn";
 import { BackToSignIn, GateCard } from "./GateCard";
 
@@ -46,7 +48,7 @@ import { BackToSignIn, GateCard } from "./GateCard";
  */
 
 const field = `mt-1 w-full ${FIELD}`;
-const label = "mt-3 block text-2xs font-semibold tracking-wider text-muted uppercase";
+const label = `mt-3 block ${SETTINGS_HEADING}`;
 
 /**
  * A field's name, and whether it has to be filled in.
@@ -148,7 +150,14 @@ export function Gate({ screen, state }: { screen: GateScreen; state: AppState })
    * `/register` in the address bar over the session list, and a reload would do
    * the whole thing again.
    */
-  if (!gateNeedsToken(screen) && state.phase === "ready" && state.me !== null) {
+  /*
+   * ⚠ **`gateOutranksSession`, not `gateNeedsToken`.** This read the token rule
+   * directly, which made the predicate that *names* this decision a function
+   * nothing called: mutating its body changed no screen, and the driver's
+   * equality check over the two passed because both were the same sentence
+   * written twice. Q3.598.
+   */
+  if (!gateOutranksSession(screen) && state.phase === "ready" && state.me !== null) {
     return (
       <GateCard title={`You are signed in as ${state.me.name}.`}>
         <Button tone="plain" className="mt-4 w-full" onClick={() => navigate("/", true)}>
@@ -187,6 +196,7 @@ function Register({ state }: { state: AppState }): ReactNode {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [sentTo, setSentTo] = useState<string | null>(null);
+  const [accepted, setAccepted] = useState(false);
   /*
    * **How this screen tells "the answer is coming" from "there is no answer".**
    *
@@ -317,13 +327,34 @@ function Register({ state }: { state: AppState }): ReactNode {
   }
 
   const wantsEmail = screen === "open_verified";
+  /*
+   * ⚠ **Whether this instance asks anybody to agree to anything.** The documents
+   * ship in this bundle but name one particular party, so a deployment that has
+   * not claimed them draws no box, sends no field and is refused nothing. Read
+   * from the wire rather than compiled in — `legal` is `false` on an instance
+   * that never opted in, on a control plane older than the field, and on any
+   * value that is not literally `true`. Q1.638.
+   */
+  /*
+   * ⚠ **And that the documents are finished, which is the other half.** A
+   * required `OPERATOR` field still holding `TODO` renders verbatim into the
+   * prose this box links to — the mail provider is named there as a data
+   * processor — so an unfinished document must not be linked, and agreement to
+   * it must not be collected. Both halves drop the box and the field, and `App`
+   * draws no page under the same test — but **only the first half also relaxes the
+   * register route**, which is gated on `legalDocuments` alone. The two disagreeing
+   * is a misconfiguration this screen now draws rather than submits into; see the
+   * guard above `return`.
+   */
+  const wantsConsent = state.config?.legal === true && legalPublishable();
   const problem = password.length > 0 || confirm.length > 0 ? passwordProblem("", password, confirm) : null;
   const ready =
     !busy &&
     signInReady(name, password) &&
     confirm.length > 0 &&
     problem === null &&
-    (!wantsEmail || email.trim().length > 0);
+    (!wantsEmail || email.trim().length > 0) &&
+    (!wantsConsent || accepted);
 
   const submit = (event: FormEvent): void => {
     event.preventDefault();
@@ -331,7 +362,14 @@ function Register({ state }: { state: AppState }): ReactNode {
     setBusy(true);
     setError(null);
     void cp
-      .register({ name: name.trim(), password, ...(wantsEmail ? { email: email.trim() } : {}) })
+      .register({
+        name: name.trim(),
+        password,
+        ...(wantsEmail ? { email: email.trim() } : {}),
+        // Sent only where it was asked for, so an instance that publishes no
+        // documents never receives a claim about agreeing to them.
+        ...(wantsConsent ? { acceptedTerms: true } : {}),
+      })
       .then(async (answer) => {
         if (answer.kind === "sent") {
           setSentTo(email.trim());
@@ -345,6 +383,47 @@ function Register({ state }: { state: AppState }): ReactNode {
       .catch((cause: unknown) => setError(registerError(cause)))
       .finally(() => setBusy(false));
   };
+
+  /*
+   * ⚠ **The one state where the two halves disagree, drawn rather than hit.**
+   *
+   * `POST /v1/register` refuses without `acceptedTerms` whenever the instance
+   * claims documents — on `legalDocuments` alone, which is the environment switch
+   * and nothing else. This form withholds the field unless the documents are also
+   * *finished*. Both rules are right on their own and they are not the same rule,
+   * so an instance that turned the switch on without replacing `OPERATOR` refuses
+   * every sign-up here with `400 terms_not_accepted`, over a form that drew no box
+   * to tick and links to pages `App` refuses to render.
+   *
+   * Sending the field anyway would be worse than the outage: it collects agreement
+   * to a contract naming its own data processor as `TODO`. So the account is still
+   * not created — and the reason is on the screen, where the operator of a fork
+   * can act on it, instead of being an opaque 400 with nothing to read.
+   *
+   * The control plane cannot make this check itself: `OPERATOR` is compiled into
+   * this bundle and no source edge runs from `packages/control-plane` into
+   * `packages/web`. Q1.638.
+   */
+  if (state.config?.legal === true && !legalPublishable()) {
+    return (
+      <GateCard title="Sign-up is unavailable" footer={<BackToSignIn />}>
+        {/* The documents are not named here, and that is `legalTitle`'s rule rather
+            than brevity: every sentence that names one takes the words from there,
+            so a fourth document appears by existing rather than by somebody
+            remembering a line. This screen is drawn precisely when there are no
+            titles to show. */}
+        <p className="text-sm text-muted">
+          This instance requires agreement to its legal documents, but it does not publish them
+          yet — so there is nothing to agree to and no account can be created.
+        </p>
+        <p className="mt-3 text-sm text-muted">
+          If you run this instance: fill in every field of <code>OPERATOR</code> in{" "}
+          <code>packages/web/src/legal/operator.ts</code>, or turn{" "}
+          <code>REEMOAT_CP_LEGAL_DOCUMENTS</code> off.
+        </p>
+      </GateCard>
+    );
+  }
 
   return (
     <GateCard title="Create an account" footer={<BackToSignIn />}>
@@ -438,6 +517,79 @@ function Register({ state }: { state: AppState }): ReactNode {
 
         {problem !== null && <p className="mt-2 text-sm text-muted">{passwordProblemText(problem)}</p>}
         {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
+
+        {/*
+         * **The box gates the button, so it stands before it.**
+         *
+         * ⚠ **It was under the submit, argued as "a term of the act, beneath the
+         * control that performs it" — and that argument was wrong on the screen.**
+         * `ready` is false until this is ticked, so the button sat disabled with
+         * its own precondition *below* it: you reach the button, press it, nothing
+         * happens, and the reason is further down the page. A precondition that
+         * follows the act it gates is a dead end however well the prose defends
+         * its position. Reported from the running screen rather than found in
+         * review, which is the only reason it was caught at all.
+         *
+         * ⚠ **Still not `GateCard`'s `footer`, and still not `SourceNotice` coming
+         * back.** That tombstone says the AGPL §13 notice must not be restored, and
+         * three things separate this from it. *Position*: that drew in the `footer`
+         * slot, which is the one place each screen keeps for the way back — chrome
+         * about the page rather than a term of the thing being done. *Scope*: it
+         * drew under all six pre-auth forms and was about the software; this is on
+         * the one screen that creates an account and is about that act.
+         * *Provenance*: it read a field off `GET /v1/instance` and drew nothing
+         * when the wire was silent, which is what made it deletable; this is
+         * compiled in and always draws. Q3.599.
+         *
+         * **A box rather than a sentence, by the owner's call.** The button alone is
+         * the commoner shape and would have done. It gates `ready`, and where the
+         * instance publishes documents it also sends `acceptedTerms` — a field the
+         * route refuses without, so the browser is not the only thing that knows an
+         * account may not be created without agreeing. **Nothing is stored**: no
+         * column, no timestamp, no version, so this instance still cannot say what
+         * anybody agreed to and does not claim to. A caller that sends `true` is
+         * indistinguishable from a person who ticked a box. Q7.134.
+         *
+         * **A new tab, and that is the whole reason these are anchors.** Four fields
+         * are filled in by this point, two of them passwords, and the tick itself is
+         * state on this component — `navigate` here would unmount the form and lose
+         * all five. The state cannot go in the address, because the state is a
+         * password.
+         *
+         * **Full width, unlike `UsersSection`'s `w-fit` box**, because here the label
+         * *is* a sentence that wraps: `w-fit` would be the width of the form anyway,
+         * and `items-start` keeps the box on the first line instead of floating to
+         * the vertical centre of a three-line paragraph. The links inside do not tick
+         * it — a click targeted at interactive content inside a `<label>` does not
+         * activate the labelled control.
+         *
+         * The names come from `legalTitle` and the list from `LEGAL_DOCS`, so a
+         * fourth document appears here by existing rather than by somebody
+         * remembering this line.
+         */}
+        {wantsConsent && (
+          <label className="mt-3 flex min-h-11 items-start gap-2 pr-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={accepted}
+              onChange={(event) => setAccepted(event.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-fg"
+            />
+            <span>
+              I agree to
+              {LEGAL_DOCS.map((doc, position) => (
+                <span key={doc}>
+                  {position === 0 ? " " : position === LEGAL_DOCS.length - 1 ? " and " : ", "}
+                  the{" "}
+                  <a href={legalPath(doc)} target="_blank" rel="noreferrer" className={LINK}>
+                    {legalTitle(doc)}
+                  </a>
+                </span>
+              ))}
+              .
+            </span>
+          </label>
+        )}
 
         <Button type="submit" tone="primary" disabled={!ready} className="mt-4 w-full">
           {busy ? "Signing up…" : "Create account"}
