@@ -313,6 +313,8 @@ export async function register(input: {
   name: string;
   password: string;
   email?: string;
+  /** Sent only on an instance that publishes documents to agree to. */
+  acceptedTerms?: boolean;
 }): Promise<RegisterAnswer> {
   const body = await publicPost<SessionToken & { pending: boolean; expiresAt: number }>("/v1/register", input);
   if (body.pending) return { kind: "sent", expiresAt: body.expiresAt };

@@ -18,9 +18,9 @@ import { IDLE_PARK_SWEEP_MS } from "./registry.js";
  *
  * **What makes this cheap is that the way back already existed.** Parking is
  * `stop("parked")`, and coming back is the same `session/resume` the daemon
- * performs after every one of its own restarts — measured over 120 real
- * reattaches in this machine's own event log at 1 292 ms p50 for claude resuming
- * on its own, 2 376 ms p90. So the trade is ~397 MB against ~1.3 s, and
+ * performs after every one of its own restarts — measured at 1 292 ms p50 for
+ * claude resuming on its own, 2 376 ms p90, over the 28 reattaches that make up
+ * that row of Q2.224's 120. So the trade is ~397 MB against ~1.3 s, and
  * `IDLE_PARK_MS` is where that arithmetic is written down.
  *
  * **What this class is, therefore, is a clock and nothing else.** Every decision
@@ -31,7 +31,9 @@ import { IDLE_PARK_SWEEP_MS } from "./registry.js";
  * driver has to be able to fake.
  *
  * Shaped on `AgentUpdates`, deliberately and down to the details — a static
- * factory so `off` arms no timer at all, a self-rescheduling `setTimeout` rather
+ * factory, though unlike `AgentUpdates` it always arms, because `enabled` is a
+ * thunk read at every tick rather than a mode fixed at construction (see
+ * {@link IdleParking.start}), a self-rescheduling `setTimeout` rather
  * than an interval, `unref()` so housekeeping is never a reason for the process to
  * stay alive, a re-entrancy guard against an injected schedule that fires twice,
  * and an idempotent `shutdown`. A second shape for the same job is a second set of

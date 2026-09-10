@@ -427,6 +427,15 @@ export interface ControlPlaneOptions {
    */
   pluginCatalogueUrl?: string | null;
   machineOfferUrl?: string | null;
+  /**
+   * Whether this deployment publishes the built-in legal documents as its own.
+   *
+   * Environment-only and with no compiled-in default, for
+   * `machineOfferUrl`'s reason one degree sharper: those documents name one
+   * particular party, and a deployment that has not adopted them would otherwise
+   * be asking its users to agree to a contract with a stranger.
+   */
+  legalDocuments?: boolean;
   /** Live tunnel state, or `null` when the relay is switched off. */
   relay?: RelayView | null;
   /**
@@ -497,6 +506,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const relayUrls = options.relayUrls ?? null;
   const pluginCatalogueUrl = options.pluginCatalogueUrl ?? null;
   const machineOfferUrl = options.machineOfferUrl ?? null;
+  const legalDocuments = options.legalDocuments ?? false;
   const relay = options.relay ?? null;
   const trustedProxyHops = options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS;
   const app = new Hono<AppEnv>();
@@ -1544,6 +1554,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
        * know one for.
        */
       machines: { offer: machineOfferUrl },
+      legal: { documents: legalDocuments },
       /*
        * Where the plugin market's catalogue lives, or `null`.
        *
@@ -1604,6 +1615,25 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     }
     const weak = checkPasswordPolicy(password, trimmed);
     if (weak !== null) return jsonError(c, 400, "weak_password", weak);
+
+    /*
+     * ⚠ **Required exactly when this deployment publishes documents, and this is
+     * a statement rather than a proof.**
+     *
+     * A caller that sends `true` is indistinguishable from a person who ticked a
+     * box, so what this buys is that the *route* names the requirement instead of
+     * leaving it to one screen: the browser is no longer the only thing that
+     * knows an account may not be created without agreeing. Nothing is stored —
+     * no column, no timestamp, no version — so this instance still cannot say
+     * what anybody agreed to and still does not claim to. Q3.599, Q7.134.
+     *
+     * Gated on `legalDocuments` because the documents name one particular party:
+     * a deployment that has not claimed them must not refuse anybody for failing
+     * to accept a contract it does not publish. Q1.638.
+     */
+    if (legalDocuments && body["acceptedTerms"] !== true) {
+      return jsonError(c, 400, "terms_not_accepted", "the terms have to be accepted to create an account");
+    }
 
     /*
      * The address is required exactly when mail works, and **refused when it does

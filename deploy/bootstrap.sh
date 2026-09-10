@@ -682,9 +682,14 @@ node_major() { "$1" --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p
 # may hold anything a keyboard produces except a NUL; the address is optional and
 # empty means absent.
 credential_body() {
-  printf '%s\0%s\0%s\0' "$1" "$2" "${3:-}" | "$NODE_BIN" -e '
-    const [name, password, email] = require("fs").readFileSync(0, "utf8").split("\0");
-    process.stdout.write(JSON.stringify(email ? {name, password, email} : {name, password}));
+  # `$4` is the consent, sent only on an instance that publishes documents — so an
+  # instance that publishes none never receives a claim about agreeing to them,
+  # which is the rule the browser follows for the same field.
+  printf '%s\0%s\0%s\0%s\0' "$1" "$2" "${3:-}" "${4:-}" | "$NODE_BIN" -e '
+    const [name, password, email, accepted] = require("fs").readFileSync(0, "utf8").split("\0");
+    const body = email ? {name, password, email} : {name, password};
+    if (accepted === "yes") body.acceptedTerms = true;
+    process.stdout.write(JSON.stringify(body));
   '
 }
 
@@ -871,6 +876,11 @@ probe_instance() {
   INSTANCE_JSON="$HTTP_BODY"
   REG_ENABLED=$(json_path registration.enabled "$INSTANCE_JSON")
   REG_EMAIL=$(json_path registration.requiresEmail "$INSTANCE_JSON")
+  # Whether this instance publishes legal documents, and therefore whether
+  # `POST /v1/register` refuses without `acceptedTerms`. Absent on a control plane
+  # older than the field, which reads as off — the same direction the browser's own
+  # parse takes, and the same one an unset switch takes.
+  REG_LEGAL=$(json_path legal.documents "$INSTANCE_JSON")
   SOURCE_URL=$(json_path source.url "$INSTANCE_JSON")
   SOURCE_VERSION=$(json_path source.version "$INSTANCE_JSON")
   note "control plane $CP (${SOURCE_VERSION:-?})"
@@ -946,7 +956,25 @@ register() {
   _pass=$(tty_secret "  password")
   _again=$(tty_secret "  again")
   [ "$_pass" = "$_again" ] || die "the two passwords are not the same."
-  _body=$(credential_body "$_name" "$_pass" "$_email")
+  # **Asked here rather than refused later.** `POST /v1/register` answers `400
+  # terms_not_accepted` without this field wherever the instance publishes
+  # documents, and there is no box to tick in a terminal — so a script that did not
+  # ask died on that refusal, after `ensure_node` had already written ~50 MB, under
+  # a sentence naming a control that does not exist here. Nothing is stored on
+  # either side, so a `yes` typed here carries exactly what the browser's tick
+  # carries.
+  _accepted=""
+  if [ "$REG_LEGAL" = true ]; then
+    say ""
+    say "  Before creating an account, please read:"
+    note "Terms of Use            $CP/terms"
+    note "Acceptable Use Policy   $CP/acceptable-use"
+    note "Privacy Policy          $CP/privacy"
+    _agree=$(tty_ask "  type yes to agree to all three")
+    [ "$_agree" = yes ] || die "sign-up needs agreement to the terms; nothing was created. $(nothing_installed)"
+    _accepted=yes
+  fi
+  _body=$(credential_body "$_name" "$_pass" "$_email" "$_accepted")
   http_request POST "$CP/v1/register" "$_body"
   case "$HTTP_STATUS" in
     201)

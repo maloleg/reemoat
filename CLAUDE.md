@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 919 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 923 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -378,6 +378,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `web-transcript.md` | `packages/web/src/ui/tail.ts`, `EventList.tsx`, `DiffView.tsx`, `packages/web/src/diff.ts` | What a conversation may leave out and what it must say instead · what folds into a run and what may never · how a diff is drawn, and what refuses to draw one · what a `/clear` leaves behind |
 | `ask-card.md` | `packages/web/src/ui/AskCard.tsx`, `PermissionCard.tsx`, `ElicitationCard.tsx`, `packages/web/src/permission.ts`, `ask.ts`, `elicitation.ts` | The one card for "the agent is waiting on you" · where it sits and what it may cover · which plan-mode requests are curated and which are drawn as sent · what may be picked, how many, and why nothing you typed is ever erased |
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
+| `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |
 | `telegram-mini-app.md` | `packages/web/src/telegram.ts`, `main.tsx`, `index.css` | Why the bridge is hand-written and must stay so · what a `navigate` destroys and what is latched against it · the one control Telegram draws · the three places its chrome can be, and why only Telegram knows |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |

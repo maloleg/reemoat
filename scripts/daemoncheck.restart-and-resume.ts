@@ -629,7 +629,19 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * aim at a stalled network mount.
      */
     const gone = join(users, "u_alice", "no_such_dir_at_all");
-    own.setSessionLimits({ live: 1 });
+    /*
+     * ⚠ **`ceilingFloorMs: 0` is what makes the cases below reach the eviction at
+     * all, and saying so is the point rather than a nuisance.**
+     *
+     * `releaseOneSlot` will not take a session that has only *just* gone idle —
+     * `CEILING_PARK_FLOOR_MS`, two minutes — because `parkable` cannot see a
+     * backgrounded build (Q7.113: the spawn is on the wire and its end is on no
+     * wire at all), so an agent whose turn ended seconds ago is the one it must
+     * not kill for a slot. Every fixture here resumes and reaches the ceiling in
+     * the same millisecond, which is exactly that shape, so the floor is faked to
+     * zero for the eviction cases and asserted for real in the block below.
+     */
+    own.setSessionLimits({ live: 1, ceilingFloorMs: 0 });
 
     /*
      * ⚠ **At the ceiling with something idle, the slot is *taken* rather than the
@@ -648,6 +660,34 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     check("so the machine is still inside its ceiling", own.liveSessionCount, 0);
 
     /*
+     * ⚠ **And the floor, against the real default rather than the faked one.**
+     *
+     * `releaseOneSlot` ignores the sweep's threshold on purpose — the sweep
+     * releases by age because nobody asked, a ceiling releases by need because
+     * somebody is asking — but it used to ignore the clock *entirely*, asking for
+     * candidates at `idleMs: 0`. That made the age clause vacuously true, so a
+     * create or a wake could take an agent whose turn had ended seconds earlier,
+     * which is the one thing `parkable` cannot rule out: a session running a
+     * backgrounded build reports `idle`, its spawn is on the wire and its end is
+     * on no wire at all (Q7.113). So the ceiling keeps a two-minute margin.
+     *
+     * Driven by putting the floor back and asserting the *refusal*: `s_live` was
+     * resumed moments ago, so it is inside the margin and must not be taken, and
+     * the request must reach the ceiling's refusal rather than the filesystem.
+     */
+    await own.get("s_live")?.resume();
+    check("a quiet agent is back for the floor case", own.get("s_live")?.status, "idle");
+    own.setSessionLimits({ live: 1, ceilingFloorMs: 2 * 60_000 });
+    check("a just-idle agent is not taken for a slot", await refusal(gone), "too_many_sessions");
+    check("and it still has its agent", own.get("s_live")?.status, "idle");
+    // Faked back down, and the same session is then taken — which is what says the
+    // refusal above was the floor rather than anything else about this fixture.
+    own.setSessionLimits({ live: 1, ceilingFloorMs: 0 });
+    check("while with the floor faked away it is", await refusal(gone), "PathError");
+    check("and that is where the slot came from", own.get("s_live")?.exit?.reason, "parked");
+    own.setSessionLimits({ live: 8, ceilingFloorMs: 0 });
+
+    /*
      * And the half that keeps the ceiling a ceiling: with nothing releasable it
      * still refuses, before it touches the filesystem.
      *
@@ -664,7 +704,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     busy.restore({ reapOrphans: false });
     await busy.autoResume({ ...options, concurrency: 1 });
     busy.get("s_busy_cap")?.prompt("keep working");
-    busy.setSessionLimits({ live: 1 });
+    busy.setSessionLimits({ live: 1, ceilingFloorMs: 0 });
     check("the one live session is working", busy.get("s_busy_cap")?.status, "running");
     const refusedBusy = await busy
       .create({ agent: "kimi", cwd: gone })
@@ -678,7 +718,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * what says the guard above refused for the reason it claimed rather than
      * because everything here fails.
      */
-    own.setSessionLimits({ live: 8 });
+    own.setSessionLimits({ live: 8, ceilingFloorMs: 0 });
     check("and with room it reaches the path check as before", await refusal(gone), "PathError");
 
     /*
@@ -691,7 +731,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * one of them was busy. No case combined the off switch with a create, which
      * is the only reason it was not caught; both halves are pinned here now.
      */
-    own.setSessionLimits({ live: 8, idleParkMs: 0 });
+    own.setSessionLimits({ live: 8, idleParkMs: 0, ceilingFloorMs: 0 });
     check("a machine that never releases still starts sessions", await refusal(gone), "PathError");
     check("and says so about itself", own.idleParkEnabled, false);
     check("and its sweep really does release nothing", await own.parkIdleSessions(now + 365 * 24 * 60 * 60_000), []);
@@ -703,10 +743,10 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      */
     await own.get("s_live")?.resume();
     check("with a quiet agent back in front of that conversation", own.get("s_live")?.status, "idle");
-    own.setSessionLimits({ live: 1, idleParkMs: 0 });
+    own.setSessionLimits({ live: 1, idleParkMs: 0, ceilingFloorMs: 0 });
     check("but at the ceiling it declines to take one anyway", await refusal(gone), "too_many_sessions");
     check("and the quiet session it would have taken is untouched", own.get("s_live")?.status, "idle");
-    own.setSessionLimits({ live: 8, idleParkMs: 45 * 60_000 });
+    own.setSessionLimits({ live: 8, idleParkMs: 45 * 60_000, ceilingFloorMs: 0 });
 
     /*
      * The other half, and it is needed: stopping a session makes it non-live, so
@@ -767,7 +807,12 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     own.restore({ reapOrphans: false });
     // Below the three that are coming back, so every wake after the second is
     // one the old code would have made room for by parking an earlier one.
-    own.setSessionLimits({ live: 2, idleParkMs: 45 * 60_000 });
+    // `ceilingFloorMs: 0` because these three resume in the same millisecond the
+    // create below asks for a slot, which is inside `CEILING_PARK_FLOOR_MS` — the
+    // margin that stops the ceiling taking an agent whose turn has only just
+    // ended. The floor's own behaviour is asserted against the real default in the
+    // ceiling block above; here it is faked so the *trigger* is what is under test.
+    own.setSessionLimits({ live: 2, idleParkMs: 45 * 60_000, ceilingFloorMs: 0 });
     await own.autoResume({ ...options, concurrency: 1 });
 
     const reasons = ["s_boot_a", "s_boot_b", "s_boot_c"].map((id) => own.get(id)?.exit?.reason ?? "live");
@@ -937,6 +982,39 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       roots: [users],
       logins: new AgentLoginRuns({ runtime: second.sessionRuntime, onWarning: () => {} }),
     }).app;
+    /*
+     * ⚠ **And before the message: the one route that could have destroyed this
+     * conversation while it slept.**
+     *
+     * `DELETE /sessions/:id/workspace` gated on `!managed.terminal`, and a parked
+     * session is terminal — so the worktree of a conversation the daemon has
+     * promised to bring back was removable, by anybody holding `machine:admin`,
+     * through a documented route. That is unrecoverable rather than merely rude:
+     * `workspaceReady` runs **before** the resume block in the prompt handler, so
+     * every later message answers `409 workspace_missing` and the wake below would
+     * never be attempted; the boot probe's `false` is settled and never retried;
+     * and no route re-creates a worktree for a session that already exists. The row
+     * is `keepsItsConversation`, so the prune will not take it either.
+     *
+     * Driven immediately before the wake it would have prevented, which is what
+     * makes the pair worth having in one place: the refusal, and then the message
+     * still working. The remedy in the sentence is the real one — Stop it first
+     * writes a reason that keeps no conversation and makes the worktree removable.
+     */
+    const held = await routed.fetch(
+      new Request("http://d/sessions/s_wake/workspace", {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}` },
+      }),
+    );
+    const heldBody = (await held.json()) as { error?: { code?: string; message?: string } };
+    check(
+      "a parked conversation keeps its worktree",
+      [held.status, heldBody.error?.code, heldBody.error?.message],
+      [409, "session_live", "stop this session before removing its worktree"],
+    );
+    check("and it is still parked, not changed by having been asked", second.get("s_wake")?.exit?.reason, "parked");
+
     const woke = await routed.fetch(
       new Request("http://d/sessions/s_wake/prompt", {
         method: "POST",
@@ -991,8 +1069,17 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * this block asserted an eviction that must not have happened: the machine
      * went one over instead, which is this section's *second* property arriving
      * early. Lowering the threshold is what makes the first one reachable.
+     *
+     * ⚠ **`ceilingFloorMs` is the second faked clock and it is a different one.**
+     * `idleParkMs` above is the *sweep's* threshold; this is the floor under the
+     * **ceiling's** eviction, which deliberately does not use that threshold —
+     * `CEILING_PARK_FLOOR_MS`, two minutes, so an agent whose turn ended seconds
+     * ago is never taken for a slot. `parkable` cannot see a backgrounded build
+     * (Q7.113), which is what that floor is protecting. Both have to be lowered
+     * here for the same fixture reason, and the floor's own behaviour is asserted
+     * against the real default in the ceiling block above.
      */
-    own.setSessionLimits({ live: 2, idleParkMs: 1 });
+    own.setSessionLimits({ live: 2, idleParkMs: 1, ceilingFloorMs: 0 });
     await own.get("s_want")?.resume();
     check("the machine stays at its ceiling", own.liveSessionCount, 2);
     check("the wake was not refused", own.get("s_want")?.status, "idle");

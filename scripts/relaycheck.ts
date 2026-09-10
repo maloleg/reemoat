@@ -10492,6 +10492,90 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
       await codeOf(await gpost("/v1/forgot", { email: "ada@example.com" })),
       [409, "mail_unconfigured"],
     );
+    /*
+     * ⚠ **Nothing above sent an `acceptedTerms` and nothing above was refused
+     * for it, and that is the assertion rather than an omission.** The built-in
+     * documents name one particular party, so an instance that has not claimed
+     * them may not refuse anybody for failing to agree to a contract it does not
+     * publish — and this whole section runs on the default, which is off. Q1.638.
+     */
+    check(
+      "an instance publishing no documents says so on the wire",
+      ((await (await gget("/v1/instance")).json()) as { legal?: { documents?: unknown } }).legal?.documents,
+      false,
+    );
+  }
+
+  /* -- the same routes on a deployment that has claimed the documents ----- */
+
+  {
+    /*
+     * ⚠ **Its own database, and the first attempt shared `gdb` and broke a test
+     * three hundred lines below.** The sign-up throttle counts attempts per
+     * caller, so three extra `POST /v1/register` calls here moved a counter that
+     * a later section reads — "both sign-ups answer like a fresh address" went
+     * red. The isolation is the fix and the reason is worth keeping: anything
+     * that registers is not a read-only observer of this fixture.
+     */
+    const ldb = new DatabaseSync(":memory:");
+    applyControlPlaneSchema(ldb);
+    ensureSigningKey(ldb);
+    writeSetting(ldb, "registration.enabled", "true", null);
+    const claimed = createControlPlaneApp({
+      db: ldb,
+      issuer: ISSUER,
+      tokenTtlSeconds: 300,
+      relayUrl: "ws://relay.invalid",
+      legalDocuments: true,
+    });
+    const cpost = (path: string, body: unknown): Promise<Response> =>
+      Promise.resolve(
+        claimed.request(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
+    check(
+      "a deployment that has claimed them says so",
+      ((await (await claimed.request("/v1/instance")).json()) as { legal?: { documents?: unknown } }).legal?.documents,
+      true,
+    );
+    check(
+      "and it refuses a sign-up that agreed to nothing",
+      await codeOf(await cpost("/v1/register", { name: "grace", password: "correct horse battery" })),
+      [400, "terms_not_accepted"],
+    );
+    /*
+     * Strictly `true`. A string, a `1` and an absent field are one state here:
+     * the route asserts that somebody said yes, and every other value is a client
+     * that did not.
+     */
+    check(
+      "a truthy value that is not true is not agreement",
+      await codeOf(
+        await cpost("/v1/register", { name: "grace", password: "correct horse battery", acceptedTerms: "yes" }),
+      ),
+      [400, "terms_not_accepted"],
+    );
+    check(
+      "and it takes one that did",
+      (await cpost("/v1/register", { name: "grace", password: "correct horse battery", acceptedTerms: true })).status,
+      201,
+    );
+    /*
+     * ⚠ **Nothing was written about it, and this is the half that keeps the
+     * documents honest.** No column, no timestamp, no version — the account
+     * `grace` now holds carries no record of what it agreed to, which is what
+     * Q7.134 says out loud rather than implying otherwise. If a consent column
+     * ever appears in this schema, this assertion is what says the decision
+     * changed on purpose rather than by accident.
+     */
+    const columns = ldb
+      .prepare("SELECT name FROM pragma_table_info('users')")
+      .all()
+      .map((row) => String((row as { name: unknown }).name));
+    check("and stored nothing about it", columns.filter((name) => /terms|consent|accepted/i.test(name)), []);
   }
 
   /* -- with mail --------------------------------------------------------- */

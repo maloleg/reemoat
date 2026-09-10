@@ -5,7 +5,7 @@ import { closeWss } from "./webcheck.ws.js";
 /**
  * The regression driver for the browser client.
  *
- * This file is the running order and nothing else: twenty-nine subject modules
+ * This file is the running order and nothing else: thirty subject modules
  * beside it hold the assertions, and five `webcheck.env`/`modules`/`ws`/`source`/
  * `rows` modules hold what they share. It was one 29 751-line file until it was
  * past the point of being openable, and the cut is a pure move — the emitted
@@ -69,6 +69,7 @@ await import("./webcheck.agent-card.js");
 await import("./webcheck.settings-routing.js");
 await import("./webcheck.shell-and-enrollment.js");
 await import("./webcheck.gate-and-server-settings.js");
+await import("./webcheck.legal-and-consent.js");
 await import("./webcheck.machine-limit-and-probe.js");
 await import("./webcheck.navigation-and-telegram.js");
 closeWss();

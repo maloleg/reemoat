@@ -678,6 +678,22 @@ if (machineOfferUrl !== null && !isBrowserReachable(machineOfferUrl)) {
   );
 }
 
+/*
+ * Whether this deployment publishes the built-in legal documents as its own.
+ *
+ * Filed here beside the offer URL because it is the same family and kept out of
+ * `SETTING_KEYS` for the same reason: those documents name one particular party,
+ * and a row on the Server settings screen of every fork would offer somebody
+ * else's contract as a switch. Off unless this says otherwise — an instance has
+ * to *claim* the documents, never inherit them.
+ *
+ * Any non-empty value other than `0`, `off`, `false` or `no` turns it on: this is
+ * a switch somebody sets once in an env file, and refusing `yes` because it is
+ * not `true` would be a refusal nobody is helped by.
+ */
+const legalRaw = (process.env["REEMOAT_CP_LEGAL_DOCUMENTS"] ?? "").trim().toLowerCase();
+const legalDocuments = legalRaw !== "" && !["0", "off", "false", "no"].includes(legalRaw);
+
 const app = createControlPlaneApp({
   db: store.db,
   issuer,
@@ -696,6 +712,7 @@ const app = createControlPlaneApp({
   // The same shape and the same reason: one predicate decides, and a warned
   // value reaches the app as the absent one rather than as itself.
   machineOfferUrl: machineOfferUrl !== null && isBrowserReachable(machineOfferUrl) ? machineOfferUrl : null,
+  legalDocuments,
 });
 
 /*

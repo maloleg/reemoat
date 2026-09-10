@@ -67,6 +67,24 @@ export interface InstanceConfig {
    * All three are the same state here and are drawn the same way: nothing.
    */
   offer: string | null;
+
+  /**
+   * Whether this instance publishes the built-in Terms, Acceptable Use Policy
+   * and Privacy Policy.
+   *
+   * A flag rather than an address, unlike `catalogue` and `offer`, because the
+   * documents ship *inside this bundle* — what varies is whether a given
+   * deployment adopts them as its own. `OPERATOR` names one particular party, so
+   * an instance that has not said "these are mine" must not draw them, must not
+   * ask anybody to agree to them, and must not have its sign-up refused for
+   * failing to.
+   *
+   * **`false` on an instance that has not opted in, on a control plane that
+   * predates the field, and on any value that is not literally `true`.** All
+   * three are the same state and are drawn the same way: no documents, no
+   * consent box, and no requirement on the register route. Q1.638.
+   */
+  legal: boolean;
 }
 
 /**
@@ -172,12 +190,20 @@ export function parseInstanceConfig(body: unknown): InstanceConfig | null {
    * and the reason it is not a `startsWith("http")`.
    */
   const offer = read(read(body, "machines"), "offer");
+  /*
+   * Strictly `true`, unlike the two above, and the asymmetry is the point: those
+   * two fail to `null` and lose a feature, while this one decides whether a
+   * document naming a named party is put in front of somebody. Anything that is
+   * not an explicit yes is a no.
+   */
+  const legal = read(read(body, "legal"), "documents");
   return {
     registration: enabled ? "open" : "off",
     email: configured,
     source,
     catalogue: typeof catalogue === "string" && isAbsoluteHttpUrl(catalogue) ? catalogue : null,
     offer: typeof offer === "string" && isAbsoluteHttpUrl(offer) ? offer : null,
+    legal: legal === true,
   };
 }
 

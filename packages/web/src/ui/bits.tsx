@@ -122,9 +122,9 @@ export const TAP_GROW_Y =
  *
  * It is a shared constant rather than a copy per surface because they all have to
  * be the *same* width or the card and the composer stop lining up with the text
- * they belong to — which is visible immediately and was the complaint. Six call
- * sites: the transcript, the composer, the shared ask-card frame, and in
- * `SessionView` a load skeleton and two banners.
+ * they belong to — which is visible immediately and was the complaint. Seven call
+ * sites: the transcript, the composer, the shared ask-card frame, a legal
+ * document, and in `SessionView` a load skeleton and two banners.
  *
  * ⚠ **There is no breakpoint here, and this sentence used to say there was.** It
  * is a `max-w`, so it simply stops binding once the pane is narrower than the

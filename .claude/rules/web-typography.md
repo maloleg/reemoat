@@ -108,6 +108,25 @@ oversight.
   pixel that is genuinely the subject rather than a restatement of the scale: the
   16px zoom threshold above is a fact about iOS Safari, not about `--text-sm`.
 
+## A long document, and the measure it is set to
+
+`COLUMN` (`ui/bits.tsx`) is the app's **only reading measure** and the transcript
+already reads at it. A page of prose takes it, never `GateCard`'s `max-w-sm` —
+that is a measure for four fields, and a policy set to it is a column about forty
+characters wide. Inventing a third width is a second arbitrary measure with no
+argument behind it.
+
+**The body size is stated once, on the column, and the blocks under it carry
+rhythm only.** That is the pair already asserted for the two mono spans that
+inherit their line's step: a size on a container with no blocks under it passes
+trivially, and a size on every block drifts apart one edit at a time. `webcheck`
+pins both halves.
+
+A list in a document uses the transcript's own `ml-4 list-disc` / `pl-0.5` so the
+app has one list treatment — with `space-y-1` rather than `space-y-0.5`, argued
+rather than copied: an item in a policy is a sentence and the tighter rhythm reads
+as a wall. `legal-pages.md` is the area.
+
 ## The three caps constants
 
 `text-2xs font-semibold tracking-wider … uppercase` — small caps with tracking — is

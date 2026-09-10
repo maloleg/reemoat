@@ -25,6 +25,56 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **Terms of Use, an Acceptable Use Policy and a Privacy Policy, at `/terms`,
+  `/acceptable-use` and `/privacy`.** Readable with no account, because the sign-up
+  form links to them and because they are the URLs somebody is given when they ask
+  what the terms are. Signing up now needs a ticked box, which gates the form and
+  is refused by `POST /v1/register` without an `acceptedTerms` field — but nothing
+  is stored, so this instance still cannot prove what anybody agreed to and does
+  not claim to. All of it is off unless `REEMOAT_CP_LEGAL_DOCUMENTS` says
+  otherwise: an instance that has not claimed the documents draws no pages, no
+  box, and refuses nobody. The
+  documents are adapted from the 37signals policies (CC BY 4.0, credited on the
+  page) and `github/site-policy` (CC0), and they name **one operator** — a fork
+  must replace the `OPERATOR` block in `packages/web/src/legal/operator.ts`. English
+  only.
+
+- **An idle agent is now shut down and the conversation kept.** A session nobody has
+  touched for `REEMOAT_IDLE_PARK_MINUTES` — 30 by default, on by default, `0` to
+  switch it off — is stopped with a new `parked` exit reason: the process goes, the
+  conversation, the worktree and the branch stay, and **the next message brings it
+  back**. There is no Resume control for one, deliberately; the composer is the whole
+  affordance. Measured before it was built: a resident agent is ~397 MB and comes
+  back in ~1.3s at the median, so a machine holding three sessions nobody had opened
+  in 48 hours was holding 1 384 MB to save that. It draws as an ordinary idle session
+  and says nothing, Stop still works on it, and its model and mode chips stay live —
+  a tap is recorded and applied when the agent returns.
+
+- **`GET` and `PATCH /settings` on the daemon, and a control on the machine's
+  settings screen** for the number above. A saved value **overrides**
+  `REEMOAT_IDLE_PARK_MINUTES`, which is therefore the default for a machine nobody
+  has set; it takes effect without a restart. The daemon's configuration is still env
+  only — this is the narrower class of setting whose owner is the person using the
+  machine rather than the one who deployed it.
+
+- **`parked` joins the `SessionStatus` and `ExitReason` unions**, and it is neither
+  `interrupted` (the daemon owes it back by itself) nor `exited` (somebody ended it).
+  A client older than this release has never heard of it; it keeps the composer and
+  reads the session as live, which is the safe direction, but it will label the exit
+  `ended: parked`. Deploy the control plane, which carries the web client, before the
+  daemons.
+
+### Changed
+
+- **A machine at its session ceiling now releases an idle agent instead of refusing.**
+  `POST /sessions` and any wake take the least recently used **idle** slot rather than
+  answering `429`, and a turn in flight, an unanswered permission and an unanswered
+  question are never taken at any ceiling. A create is still refused when every live
+  session is genuinely busy, and the sentence says so. The ceiling therefore counts
+  agents resident rather than conversations held.
+
 ### Removed
 
 - **`PUT` and `DELETE /v1/admin/grants`, and with them `cpctl admin grant` and

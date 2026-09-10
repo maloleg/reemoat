@@ -1887,7 +1887,9 @@ function readExitReason(exitJson: unknown): ExitReason | null {
  * to come back, so inactive, so ranked for the cap. That is the shape of the
  * incident this whole function was written after — Q2.222, five conversations
  * deleted at a restart — aimed this time at the quiet ones. `events.ts` owns both
- * predicates for the reason the paragraph above gives about `isPersistedGiveUp`. The one predicate for both the age sweep and the cap,
+ * predicates for the reason the paragraph above gives about `isPersistedGiveUp`.
+ *
+ * One predicate serves both the age sweep and the cap,
  * because when the cap carried its own copy as a SQL `CASE` it ranked a reason
  * this build cannot name as inactive and cut what the sweep kept (Q2.222, the
  * verification round). Rule 1 in `prune()`'s docblock says why each of the
@@ -2282,44 +2284,6 @@ function readCustomAgent(row: Record<string, unknown>): CustomAgent | null {
  * to be signed out today would rearrange somebody's screen the moment they signed
  * out, and put it somewhere else again when they signed back in.
  */
-/**
- * The settings a person set on this machine from the settings screen.
- *
- * **Narrow on purpose, and the narrowness is the design.** The daemon's *config*
- * is env only and stays so; what lives here is the class of setting whose owner is
- * the person using the machine rather than the person deploying it. Q2.225 is the
- * argument, and the only key today is how long a conversation may sit before its
- * agent is shut down.
- *
- * Keys are enumerated in {@link MACHINE_SETTING_KEYS}: a row whose key this build
- * cannot name is left where it is and never read, so a downgrade cannot act on a
- * setting it does not understand — `isExitReason`'s rule on a different column.
- * `read` therefore answers `null` for anything unknown rather than a string
- * somebody might parse.
- */
-export class SqliteMachineSettingsStore {
-  private readonly getStmt: StatementSync;
-  private readonly setStmt: StatementSync;
-
-  constructor(db: DatabaseSync) {
-    this.getStmt = db.prepare("SELECT value FROM machine_settings WHERE key = ?");
-    this.setStmt = db.prepare(
-      "INSERT INTO machine_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    );
-  }
-
-  /** The stored value, or `null` where nobody has set one. */
-  read(key: MachineSettingKey): string | null {
-    const row = this.getStmt.get(key);
-    return row === undefined ? null : String(row["value"]);
-  }
-
-  write(key: MachineSettingKey, value: string): void {
-    this.setStmt.run(key, value);
-  }
-
-}
-
 export class SqliteAgentStripStore {
   private readonly db: DatabaseSync;
   private readonly listStmt: StatementSync;
@@ -2409,6 +2373,43 @@ export class SqliteAgentStripStore {
   }
 }
 
+
+/**
+ * The settings a person set on this machine from the settings screen.
+ *
+ * **Narrow on purpose, and the narrowness is the design.** The daemon's *config*
+ * is env only and stays so; what lives here is the class of setting whose owner is
+ * the person using the machine rather than the person deploying it. Q2.225 is the
+ * argument, and the only key today is how long a conversation may sit before its
+ * agent is shut down.
+ *
+ * Keys are enumerated in {@link MACHINE_SETTING_KEYS}: a row whose key this build
+ * cannot name is left where it is and never read, so a downgrade cannot act on a
+ * setting it does not understand — `isExitReason`'s rule on a different column.
+ * `read` therefore answers `null` for anything unknown rather than a string
+ * somebody might parse.
+ */
+export class SqliteMachineSettingsStore {
+  private readonly getStmt: StatementSync;
+  private readonly setStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.getStmt = db.prepare("SELECT value FROM machine_settings WHERE key = ?");
+    this.setStmt = db.prepare(
+      "INSERT INTO machine_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    );
+  }
+
+  /** The stored value, or `null` where nobody has set one. */
+  read(key: MachineSettingKey): string | null {
+    const row = this.getStmt.get(key);
+    return row === undefined ? null : String(row["value"]);
+  }
+
+  write(key: MachineSettingKey, value: string): void {
+    this.setStmt.run(key, value);
+  }
+}
 
 export interface StoredIdentity {
   machineId: string;

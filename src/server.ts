@@ -68,6 +68,7 @@ import {
 } from "./changes.js";
 import {
   estimateBytes,
+  keepsItsConversation,
   oldestAvailable,
   type StoredEvent,
   type MachineSettingKey,
@@ -3799,9 +3800,32 @@ export function createApp(options: ServerOptions): AppBundle {
   }));
 
   app.delete("/sessions/:id/workspace", admin, withSession(async (c, managed) => {
-    // Checked first: removing a worktree out from under a running agent breaks it
-    // in a way that is hard to diagnose from the inside.
-    if (!managed.terminal) {
+    /*
+     * Checked first: removing a worktree out from under a running agent breaks it
+     * in a way that is hard to diagnose from the inside.
+     *
+     * ⚠ **`keepsItsConversation` rather than `!terminal`, and the widening is a
+     * repair.** `terminal` used to mean two things at once — "there is no process"
+     * and "this conversation is over" — and parking split them: a parked session
+     * is terminal with no process, and the daemon has promised to bring it back on
+     * the next message. So this guard, which is about the *second* meaning, began
+     * admitting exactly the conversations somebody is most likely to return to.
+     *
+     * Removing that worktree is unrecoverable rather than merely rude:
+     * `workspaceReady` runs **before** the resume block in `POST
+     * /sessions/:id/prompt`, so every later message answers `409
+     * workspace_missing` and the wake is never attempted; the boot probe's `false`
+     * is settled and never retried; and no route re-creates a worktree for a
+     * session that already exists. The row is `keepsItsConversation`, so the prune
+     * will not take it either — unreachable and undeletable.
+     *
+     * The same reading covers `interrupted`, which the old guard also admitted: a
+     * session the daemon is bringing back at the next boot is stranded by this in
+     * the identical way. Both are now refused with the sentence that was always
+     * the remedy — **Stop it first**, which writes a reason that keeps no
+     * conversation and makes the worktree removable.
+     */
+    if (!managed.terminal || keepsItsConversation(managed.exit)) {
       return jsonError(c, 409, "session_live", "stop this session before removing its worktree", {
         status: managed.status,
       });

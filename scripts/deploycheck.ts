@@ -2019,6 +2019,43 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * line says that `$2` is `AGENT_SOURCE`.
    */
   const bootFn = (name: string): string => blockIn("bootstrap.sh", bootLines, name, `${name}() {`, "}");
+
+  /*
+   * ⚠ **The installer is the *second* client of `POST /v1/register`, and it went
+   * one release without the field that route began requiring.**
+   *
+   * `packages/web` sends `acceptedTerms` from a checkbox; this script builds its
+   * own body, and it built `{name, password}` and nothing else — so on any instance
+   * with `REEMOAT_CP_LEGAL_DOCUMENTS` set, `curl install.sh | sh` reached the
+   * catch-all refusal arm and died with "the terms have to be accepted", after
+   * `ensure_node` had already written ~50 MB, with no box to tick in a terminal.
+   * `packages/web/src/account.ts` even words that refusal as "Tick the box", which
+   * is help for the one client that cannot be looking at it.
+   *
+   * Asserted as the three lines it actually takes, inside the functions they
+   * belong to, because a sweep over the whole file would pass on a mention in a
+   * comment: the switch is read off the same response two other fields come from,
+   * the consent is asked on the tty, and the body carries it. A rename fails here
+   * naming the reader that moved rather than passing on an empty search.
+   */
+  const probeInstance = bootFn("probe_instance");
+  const credentialBody = bootFn("credential_body");
+  const registerFn = bootFn("register");
+  check(
+    "the installer reads whether the instance publishes documents",
+    /REG_LEGAL=\$\(json_path legal\.documents/.test(probeInstance),
+    true,
+  );
+  check(
+    "and asks for agreement on the tty before creating an account",
+    [/\[ "\$REG_LEGAL" = true \]/.test(registerFn), registerFn.includes("$CP/terms"), /_agree.*=.*yes/.test(registerFn)],
+    [true, true, true],
+  );
+  check(
+    "and sends acceptedTerms only when it was asked for",
+    [/acceptedTerms = true/.test(credentialBody), /accepted === "yes"/.test(credentialBody)],
+    [true, true],
+  );
   check("the bootstrap defaults the agent source", lineIn("bootstrap.sh", bootLines, "the agent-source default", "AGENT_SOURCE="), "AGENT_SOURCE=vendor");
   const parseFlags = bootFn("parse_flags");
   check(
@@ -2309,7 +2346,14 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * outside the sweep is exactly why they are named here: an env-only variable
    * that nothing documents is one an operator has no way to discover.
    */
-  for (const envOnly of ["REEMOAT_CP_PLUGIN_CATALOGUE_URL", "REEMOAT_CP_MACHINES_OFFER_URL"]) {
+  for (const envOnly of [
+    "REEMOAT_CP_PLUGIN_CATALOGUE_URL",
+    "REEMOAT_CP_MACHINES_OFFER_URL",
+    // The third member, and the same argument at its sharpest: the documents this
+    // switch publishes name one party, so a row on every fork's Server settings
+    // screen would offer somebody else's contract as a toggle.
+    "REEMOAT_CP_LEGAL_DOCUMENTS",
+  ]) {
     check(
       `the example documents ${envOnly} as a commented assignment`,
       new RegExp(`^#\\s*${envOnly}=`, "m").test(cpExample),

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
 import { parseGateScreen, type GateScreen } from "./gate";
+import { parseLegalDoc, type LegalDoc } from "./legal";
 import { parseMarketRoute, type MarketRoute } from "./market";
 import { machineId, sessionId, type MachineId, type SessionRef } from "./ids";
 import { parseSettingsRoute, type SettingsRoute } from "./settings";
@@ -152,7 +153,18 @@ export type Route =
    * these URLs lives in `gate.ts`, for the reason `settings.ts` gives: this
    * module cannot be imported by `webcheck` at all.
    */
-  | { name: "gate"; screen: GateScreen };
+  | { name: "gate"; screen: GateScreen }
+  /**
+   * `/terms`, `/acceptable-use`, `/privacy`.
+   *
+   * ⚠ **A route of its own rather than three more `GateScreen`s**, which is the
+   * cheaper shape and the wrong one: `gate.ts` defines that family as the
+   * screens reached *before there is a credential*, and a policy is read before
+   * and after. Every rule about these URLs lives in `legal.ts`, for the reason
+   * `settings.ts` gives — this module cannot be imported by `webcheck` at all.
+   * Q3.598.
+   */
+  | { name: "legal"; doc: LegalDoc };
 
 /**
  * `decodeURIComponent`, for a segment nobody here wrote.
@@ -243,6 +255,14 @@ function parse(pathname: string): Route {
   }
   const gate = parseGateScreen(parts);
   if (gate !== null) return { name: "gate", screen: gate };
+  /*
+   * After the gate, and the two are asserted disjoint in both directions:
+   * whichever is tested first silently wins a collision, and a document named
+   * `register` losing to the one screen on this origin where a password is
+   * typed is the direction that would not be noticed.
+   */
+  const legal = parseLegalDoc(parts);
+  if (legal !== null) return { name: "legal", doc: legal };
   if (parts[0] === "settings") {
     // `decodeSegment` is passed in rather than applied here, so the one place
     // that knows a segment may not decode stays the one place.

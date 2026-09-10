@@ -86,6 +86,46 @@ const SHUTDOWN_SWEEP_MS = 3_000;
 const KILL_CONFIRM_MS = 250;
 
 /**
+ * The exits that may be written **over** `parked`, against `exitRecord`'s
+ * otherwise absolute first-writer-wins rule.
+ *
+ * That rule exists so a stop cannot relabel `daemon_restarted` as `stopped` and
+ * erase the daemon's promise to come back. `parked` carries no such promise — it
+ * means *nobody had decided* — so a later act that genuinely decides something may
+ * say so, and both members are such an act: `stopped` is a person pressing Stop,
+ * and `agent_signed_out` is `signOutSessions` sweeping an agent's credential away.
+ *
+ * A list rather than two `||`s because it is the thing to read when a third
+ * candidate is proposed: the test is whether the reason records somebody deciding,
+ * never merely that it is newer.
+ */
+const RELABELS_PARKED: readonly ExitReason[] = ["stopped", "agent_signed_out"];
+
+/**
+ * The youngest a session may be and still be taken to make room at the ceiling.
+ *
+ * ⚠ **This was `0`, and `0` is what made a lossless mechanism able to destroy
+ * work.** `releaseOneSlot` deliberately ignores {@link IDLE_PARK_MS} — the sweep
+ * releases by *age* because nobody asked, a ceiling releases by *need* because
+ * somebody is asking right now — but ignoring the threshold entirely made the age
+ * clause vacuous, so a create or a wake could take an agent whose turn had ended
+ * seconds earlier.
+ *
+ * That is the sharp edge on the one thing `parkable` cannot see. A session running
+ * a backgrounded build reports `idle` (Q7.113: the spawn is on the wire and its end
+ * is on no wire at all), so at the ceiling it was a candidate the instant its turn
+ * ended. Two minutes is not a judgement about background work — nothing here can
+ * make one — it is the margin that stops the *cheapest* version of the mistake,
+ * and it is short enough that a machine genuinely at its ceiling still evicts
+ * rather than refusing.
+ *
+ * Deliberately not `IDLE_PARK_MS`: that would restore the behaviour Q2.223
+ * records, where the daemon told somebody to destroy a conversation by hand rather
+ * than take a warm agent it could have taken losslessly.
+ */
+const CEILING_PARK_FLOOR_MS = 2 * 60_000;
+
+/**
  * How many sessions may be live at once, and why there is a number here at all.
  *
  * `create()` had no bound of any kind: it resolved a cwd, ran `git worktree add`
@@ -174,7 +214,7 @@ export const IDLE_PARK_MS = 30 * 60_000;
 export const IDLE_PARK_SWEEP_MS = 60_000;
 
 /**
- * The largest value the settings screen will accept, in minutes.
+ * The largest value `PATCH /settings` will accept, in minutes.
  *
  * A week. Not a limit anybody is expected to meet — it is there so a typed field
  * cannot store a number that makes the setting meaningless (a year is
@@ -2280,10 +2320,11 @@ export class ManagedSession {
      * agent has already forked — which is Q2.7's codeword-comes-back failure,
      * arrived at from the one direction `clearContext` does not guard.
      *
-     * Five other methods already refuse on exactly this pair (`prompt`,
-     * `clearContext`, `cancelTurn`, `setConfigOption`, `setMode`) under the rule
-     * one of them states as "one process boundary at a time". This is the sixth
-     * caller and it was the only one not asking.
+     * Six other members already refuse on exactly this pair (`prompt`,
+     * `clearContext`, `cancelTurn`, `setConfigOption`, `setMode` and
+     * `takesCredentialChange`) under the rule one of them states as "one process
+     * boundary at a time". This is the seventh caller and it was the only one not
+     * asking.
      */
     if (this.clearing || this.restarting) return false;
     if (this.agentSessionId === null) return false;
@@ -2972,7 +3013,32 @@ export class ManagedSession {
      * remainder stay terminal and come back on a prompt, which is what
      * `autoResumable` already says about `parked`.
      */
-    if (!quiet) await this.makeRoomForWake?.().catch(() => {});
+    if (!quiet) {
+      /*
+       * ⚠ **Re-checked after the await, because that await is real work and a
+       * person can decide something inside it.**
+       *
+       * At the ceiling `makeRoomForWake` is a full teardown of another session's
+       * agent — a `session/close`, SIGTERM, a confirmed SIGKILL — so this is a
+       * window seconds wide in which this session still reads `parked`. A `DELETE
+       * /sessions/:id` landing in it takes `stop()`'s {@link RELABELS_PARKED}
+       * branch and answers `200` reading `stopped`; without this the resume then
+       * carried on, `armForStart()` nulled the very `exitRecord` that recorded the
+       * decision, and the turn the person was aborting ran against a fresh agent.
+       *
+       * ⚠ **Identity, not `stopRequested`, and the difference is the whole of why
+       * this is written out.** The park that got us here *is* a stop, so
+       * `stopRequested` has been `true` since before this call and stays true until
+       * `armForStart` — testing it refuses every wake of every parked session. What
+       * actually distinguishes a decision made *inside* the await is that the
+       * relabel **replaces** `exitRecord` with a new object, so the reference is
+       * the signal. That is the same identity discipline `launch`/`onStarted`
+       * already use for a superseded launch.
+       */
+      const before = this.exitRecord;
+      await this.makeRoomForWake?.().catch(() => {});
+      if (this.exitRecord !== before) throw new ResumeUnavailableError(this.id, "session_live");
+    }
 
     const previousExit = this.exitRecord;
     /*
@@ -3209,7 +3275,28 @@ export class ManagedSession {
        * from conversation. Neither type is drawn anywhere, and the last 20 stderr
        * lines are already on `Session.recentLogs()`.
        */
-      if (event.type === "agent_log" || event.type === "other") return;
+      if (event.type === "agent_log" || event.type === "other") {
+        /*
+         * ⚠ **Dropped from the log, but not from the clock — and that distinction
+         * is what keeps the sweep from killing work in progress.**
+         *
+         * These two are deliberately not recorded (the paragraph above says why),
+         * and until this line they were not counted as activity either. So a
+         * session running a backgrounded build or subagent — which reports `idle`,
+         * because `daemon-sessions.md`'s own rule is that "the turn ending is not
+         * the agent stopping", and whose *end* is on no wire at all (Q7.113) —
+         * moved nothing at all while it produced output. `lastActivityAt` reads
+         * `lastEventAt`, `parkable` reads that, and at thirty minutes the sweep
+         * SIGKILLed the process group with nothing recorded but a `status` event.
+         *
+         * An agent still writing to stderr is an agent still doing something. That
+         * is the weakest possible signal and it is the only one this daemon gets,
+         * so it is spent here: the clock moves, the transcript does not, and a
+         * session nobody can see progress on is still not one the sweep may take.
+         */
+        this.lastEventAt = Date.now();
+        return;
+      }
 
       try {
         this.record(event);
@@ -3328,15 +3415,6 @@ export class ManagedSession {
   }
 
   /**
-   * Changes one of the agent's controls, refusing anything it did not advertise.
-   *
-   * Validated here rather than at the route because this is where the advertised
-   * set lives, and refusing locally keeps a typo from reaching the agent as a
-   * JSON-RPC error whose text is the agent's, not ours. The value check is
-   * deliberately against the *choices* rather than a format: `effort` and
-   * `thinking` share a category and share no values at all.
-   */
-  /**
    * Whether a control tapped now is a choice to be applied later.
    *
    * True for exactly one state: a session whose agent the daemon released for
@@ -3376,6 +3454,15 @@ export class ManagedSession {
     return { kind: "ok", config: this.snapshot().agentConfig };
   }
 
+  /**
+   * Changes one of the agent's controls, refusing anything it did not advertise.
+   *
+   * Validated here rather than at the route because this is where the advertised
+   * set lives, and refusing locally keeps a typo from reaching the agent as a
+   * JSON-RPC error whose text is the agent's, not ours. The value check is
+   * deliberately against the *choices* rather than a format: `effort` and
+   * `thinking` share a category and share no values at all.
+   */
   async setConfigOption(configId: string, value: string | boolean): Promise<AgentConfigResult> {
     if (this.configIsDeferred) {
       /*
@@ -3794,11 +3881,41 @@ export class ManagedSession {
      * repeated because there is nothing left to tear down: no process, no
      * subscriptions, no pending anything.
      *
-     * Narrow on purpose. Only a person's `stopped` may do this, and only over
-     * `parked`: `shutdown` and `signOutSessions` both iterate `!terminal` and never
-     * reach a parked row, so nothing else arrives here to be silently upgraded.
+     * Narrow on purpose, and the list is {@link RELABELS_PARKED}: only a reason
+     * somebody's own act writes may do this, and only over `parked`. `shutdown`
+     * iterates `!terminal` and never reaches a parked row, so nothing else arrives
+     * here to be silently upgraded.
+     *
+     * ⚠ **`agent_signed_out` is the second member and it is not a person pressing
+     * Stop — it is `signOutSessions`, which had the opposite bug.** That sweep also
+     * selected `!terminal`, so signing out of an agent left every parked session on
+     * it still reading `parked`: drawn as an ordinary sleeping conversation with a
+     * live composer, woken by the next message into an agent with no credential,
+     * and unreachable by `reloadCredentials`, whose revive filter looks for exactly
+     * the reason that was never written. Relabelling is the whole fix, because
+     * there is no process to tear down — and it puts the row where both the drawing
+     * and the revive already know how to treat it.
      */
-    if (reason === "stopped" && this.exitRecord?.reason === "parked") {
+    if (RELABELS_PARKED.includes(reason) && this.exitRecord?.reason === "parked") {
+      /*
+       * ⚠ **The intent is marked, not only the record, and that is what makes this
+       * win a race it used to lose.**
+       *
+       * Without these two lines the shortcut could not interrupt a wake already in
+       * flight. `doResume`'s first await is `makeRoomForWake`, which at the ceiling
+       * is a full teardown of somebody else's agent — so: a prompt enters
+       * `doResume` and waits there while the session still reads `parked`; a
+       * `DELETE /sessions/:id` lands, takes this branch, answers `200` reading
+       * `stopped`; the resume then continues, `armForStart()` nulls the very
+       * `exitRecord` this just wrote, and the turn the person was aborting runs
+       * against a fresh agent. Stop reported success and stopped nothing.
+       *
+       * `stopRequested` is what `doResume` re-checks after that await, and what
+       * `prompt` already tests; `stopping` makes the memo below hand back a settled
+       * promise so a second press is the no-op it should be.
+       */
+      this.stopRequested = true;
+      this.stopping ??= Promise.resolve();
       this.exitRecord = { ...this.exitRecord, reason, at: Date.now() };
       this.safeAppend({ type: "status", status: this.status, exit: this.exitRecord });
       this.touchSafe();
@@ -5129,6 +5246,13 @@ export class SessionRegistry {
    * screen gives the operator's number back rather than this file's.
    */
   private idleParkMs = IDLE_PARK_MS;
+  /**
+   * See {@link CEILING_PARK_FLOOR_MS}. Injectable for the reason
+   * `IDLE_PARK_SWEEP_MS` is: it is a policy about *when*, and a driver has to be
+   * able to fake it — the offline cases build a session and reach the ceiling in
+   * the same millisecond, which is precisely the shape the floor exists to refuse.
+   */
+  private ceilingParkFloorMs = CEILING_PARK_FLOOR_MS;
   /** What somebody set on the settings screen, or `null` if nobody has. */
   private storedIdleParkMs: number | null = null;
   private settingsStore: MachineSettingsPort | null = null;
@@ -5264,11 +5388,15 @@ export class SessionRegistry {
     burst?: number;
     refillMs?: number;
     idleParkMs?: number;
+    ceilingFloorMs?: number;
   }): void {
     if (limits.live !== undefined) this.maxLiveSessions = Math.max(1, limits.live);
     // Not clamped to a floor the way the others are: `0` is the documented way to
     // switch parking off, and `Math.max(1, …)` would turn it into "park after 1ms".
     if (limits.idleParkMs !== undefined) this.idleParkMs = Math.max(0, limits.idleParkMs);
+    // `0` is meaningful here too — it is what the drivers use to reach the
+    // pre-floor behaviour deliberately — so this is clamped at zero, not at one.
+    if (limits.ceilingFloorMs !== undefined) this.ceilingParkFloorMs = Math.max(0, limits.ceilingFloorMs);
     if (limits.burst !== undefined) {
       this.createBurst = Math.max(1, limits.burst);
       // Raising the burst must not leave the bucket below the new ceiling for a
@@ -5452,10 +5580,33 @@ export class SessionRegistry {
      */
     if (this.liveSessionCount < this.maxLiveSessions) return true;
     if (this.effectiveIdleParkMs <= 0) return false;
-    const [oldest] = this.parkCandidates(Date.now(), 0);
+    const [oldest] = this.parkCandidates(Date.now(), this.ceilingParkFloorMs);
     if (oldest === undefined) return false;
     await oldest.stop("parked");
     return true;
+  }
+
+  /**
+   * Whether {@link releaseOneSlot} would succeed, without taking anything.
+   *
+   * ⚠ **Exists so the ceiling can be weighed before the rate limiter while the
+   * *eviction* happens after it.** `create` used to `await releaseOneSlot()` first
+   * and consult the bucket second, so a request that was about to be refused `429
+   * session_rate_limited` had already parked somebody else's agent — and since
+   * `stop()` sets `stopRequested` synchronously, N concurrent creates each took a
+   * different victim. The eviction rate was therefore unbounded while the creation
+   * rate was 16 then one per two minutes: at the ceiling a loop parked every idle
+   * agent on the machine while creating almost nothing, and `POST
+   * /sessions/:id/resume` has no limiter at all to do it through instead.
+   *
+   * The same three tests as `releaseOneSlot`, in the same order and for the same
+   * reasons — the off switch is still consulted only once there is something to
+   * evict, which is the correction that function's own docblock records.
+   */
+  private canReleaseOneSlot(): boolean {
+    if (this.liveSessionCount < this.maxLiveSessions) return true;
+    if (this.effectiveIdleParkMs <= 0) return false;
+    return this.parkCandidates(Date.now(), this.ceilingParkFloorMs).length > 0;
   }
 
   /**
@@ -5471,6 +5622,25 @@ export class SessionRegistry {
    * an OOM policy, all of them damage limitation.
    */
   private async makeRoomForWake(): Promise<void> {
+    /*
+     * ⚠ **The wake is never refused; the *eviction* is metered.** Those are two
+     * different acts and only the second one reaches somebody else's session.
+     *
+     * `POST /sessions/:id/resume` carries no rate limiter of its own, and every
+     * non-quiet resume lands here — so without this a `session:write` holder could
+     * loop wake-and-evict and keep every idle agent on a shared machine
+     * permanently cold, one confirmed SIGKILL and one ~400 MB respawn per request.
+     * Spending a creation token bounds that at the burst and then one per refill,
+     * which is the same bound the same bucket already puts on spawning agents — and
+     * it is the same resource, so sharing it is the honest accounting rather than a
+     * second mechanism.
+     *
+     * With no token the wake **proceeds anyway**, one agent over a soft ceiling,
+     * which is exactly the asymmetry this function exists for: somebody typing
+     * into a conversation they already have is never told the machine is busy.
+     */
+    if (this.liveSessionCount < this.maxLiveSessions) return;
+    if (this.takeCreateSlot(Date.now()) > 0) return;
     await this.releaseOneSlot();
   }
 
@@ -5531,7 +5701,7 @@ export class SessionRegistry {
      * blocked on a person, or releasing switched off entirely — and that is the
      * one case where a refusal is the honest answer.
      */
-    if (!(await this.releaseOneSlot())) {
+    if (!this.canReleaseOneSlot()) {
       /*
        * ⚠ **It says the *limit*, and it used to say it as if it were the count.**
        * "this machine already has 6 live sessions" interpolated `maxLiveSessions`,
@@ -5567,6 +5737,30 @@ export class SessionRegistry {
         "session_rate_limited",
         wait,
         `too many sessions created recently; try again in ${wait}s`,
+      );
+    }
+    /*
+     * ⚠ **Nobody else's agent is taken until this request has paid for a slot,
+     * and that ordering is the bound on eviction.**
+     *
+     * The ceiling was weighed above with `canReleaseOneSlot`, which takes
+     * nothing, so the two refusals still never mask each other and a caller
+     * against a genuinely full daemon does not drain the burst it will need when
+     * a slot frees — the property the paragraph up there has always claimed.
+     * What has moved is the *act*: the park now happens below the bucket, so the
+     * rate that bounds creations bounds evictions with it.
+     *
+     * Answering `false` here is a lost race rather than the ordinary refusal —
+     * the candidate we weighed took a prompt in between — and it is honest to
+     * report it as the ceiling, because that is what it is. The token is spent
+     * either way, which is the right direction: the cost of the attempt falls on
+     * the caller that made it rather than on the sessions it would have taken.
+     */
+    if (!(await this.releaseOneSlot())) {
+      throw new SessionLimitError(
+        "too_many_sessions",
+        0,
+        `this machine is limited to ${this.maxLiveSessions} live sessions (REEMOAT_MAX_LIVE_SESSIONS) and every one of them is busy; wait for one to finish, or stop one`,
       );
     }
 
@@ -6018,8 +6212,25 @@ export class SessionRegistry {
    * Returns how many were ended, so the route can say so.
    */
   async signOutSessions(agent: AgentId): Promise<number> {
+    /*
+     * ⚠ **`!terminal` alone stopped being the right set when parking landed.** A
+     * parked session on this agent is terminal with no process, and it is *coming
+     * back on the next message* — so leaving it out meant signing out of an agent
+     * while quiet conversations on it went on believing they still had it: drawn as
+     * ordinary sleeping sessions, woken into `Failed to authenticate` inside the
+     * transcript, and skipped by `reloadCredentials`, which revives on
+     * `agent_signed_out` and finds `parked`.
+     *
+     * They are in the same list rather than a second pass, because `stop()` handles
+     * the difference: for a live one it is a real teardown, and for a parked one
+     * {@link RELABELS_PARKED} rewrites the reason with nothing to tear down. So the
+     * count the route reports is the number of conversations that lost the
+     * credential, which is what it always claimed to be.
+     */
     const live = [...this.sessions.values()].filter(
-      (session) => session.agent === agent && !session.terminal,
+      (session) =>
+        session.agent === agent &&
+        (!session.terminal || session.exit?.reason === "parked"),
     );
     // Sequential rather than `Promise.all`: each `stop` awaits a process teardown,
     // and firing every one at once on a machine with many sessions is a thundering

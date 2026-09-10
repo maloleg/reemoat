@@ -64,6 +64,28 @@ BSD-3-Clause and ISC across the runtime and build dependencies. Nothing else in
 the tree carries a license that restricts redistribution, and the AGPL obligations
 this project takes on are its own rather than inherited.
 
+## Text adapted from elsewhere
+
+Not a dependency and not code, but it arrives under somebody else's licence and a
+legal review asks about it, which is what this file is for. The three documents in
+`packages/web/src/legal/` — Terms of Use, Acceptable Use Policy, Privacy Policy —
+are adapted rather than written from nothing.
+
+| Source | Licence | Used by |
+|---|---|---|
+| [37signals open-source policies](https://github.com/basecamp/policies) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | All three documents: structure and much of the wording |
+| [`github/site-policy`](https://github.com/github/site-policy) | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) | The Acceptable Use Policy's restriction lists |
+
+**CC BY 4.0 asks for the attribution where the work is read**, so it is rendered
+on each page as well as recorded here, and `webcheck` asserts every field of that
+credit. The CC0-licensed text owes nothing and is credited anyway — telling the
+two apart at a glance is the mistake that would turn a courtesy into a breach.
+
+⚠ **These documents name one operator and are that operator's terms, not this
+software's.** A fork serving them unchanged is making a statement about a party
+with no relationship to its users; the header of `legal.ts` says so where the value
+is, in `SOURCE_URL`'s shape.
+
 ## Cryptography
 
 Every cryptographic primitive is a Node.js built-in — `node:crypto` for Ed25519

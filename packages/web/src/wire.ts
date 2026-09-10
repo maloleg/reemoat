@@ -706,11 +706,12 @@ export type ExitReason =
  * behaviour turns on, and the daemon uses the identical function to decide which
  * sessions it brings back.
  *
- * The exhaustive list, and why each of the other five is out: `stopped` is a
+ * The exhaustive list, and why each of the others is out: `stopped` is a
  * human's decision — the point. `start_failed`/`start_timeout` never had a
  * conversation. `agent_exited` is the agent quitting under a daemon that never
  * went anywhere, so the *daemon* did not end it. `agent_kill_failed` is legacy
- * and ambiguous.
+ * and ambiguous. `agent_signed_out` is a person to reverse it. And `parked` is in
+ * neither this list nor `FINAL_EXIT_REASONS` — it is its own part, see `isParked`.
  *
  * **A copy is only worth having while it is the same copy**, and this one was
  * wrong for exactly one release: `config_changed` was added to `src/events.ts`
@@ -731,8 +732,8 @@ export const DAEMON_EXIT_REASONS: readonly ExitReason[] = [
  *
  * Written out rather than derived, because it is what `endedWithDaemon` actually
  * tests — and the direction of that test is the whole point. `webcheck` asserts
- * the two lists partition the daemon's union, so this one cannot silently fall
- * behind either.
+ * that these two lists **plus `parked`** partition the daemon's union — three
+ * parts, not two — so neither can silently fall behind.
  */
 export const FINAL_EXIT_REASONS: readonly ExitReason[] = [
   "stopped",
@@ -1105,6 +1106,29 @@ export function isResumable(session: SessionSnapshot): boolean {
 export function isParked(session: SessionSnapshot): boolean {
   if (!isTerminal(session.status) || session.exit?.reason !== "parked") return false;
   return session.agentSessionId !== null;
+}
+
+/**
+ * A session this daemon released, on a daemon that cannot put it back.
+ *
+ * ⚠ **The rollback door, and it is recognised by the *shape of the answer* rather
+ * than by a version**, which is `compatibility.md`'s rule and the same trick the
+ * import flow uses on an old daemon. A build that knows about parking derives
+ * `status: "parked"` from the reason; one that predates it has no such member and
+ * its `status` switch has a `default:` arm, so the pair arrives as `parked`
+ * carried on `exited` — a combination no current daemon can produce.
+ *
+ * It matters because a rollback is somebody's break-glass. The older
+ * `autoResumable` is a `switch` with no `default:` and no `parked` arm, so it
+ * answers `undefined` — falsy on both triggers — and the transparent resume a
+ * prompt performs never fires: every message answers `409 session_terminal`. The
+ * conversation, its transcript and its worktree are all intact, and `POST
+ * /sessions/:id/resume` still works, because that route calls `resume()` directly
+ * rather than asking `autoResumable`. So the only thing missing is the control,
+ * which this restores — and only in the state where a message would not do.
+ */
+export function parkedByOlderDaemon(session: SessionSnapshot): boolean {
+  return isParked(session) && session.status !== "parked";
 }
 
 /** The daemon ended it and is bringing it back. Draw it as ordinary. */

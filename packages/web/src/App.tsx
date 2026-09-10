@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { clearRevokedKeyNotice, peekRevokedKeyNotice } from "./account";
+import { legalPublishable } from "./legal";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
 import { setTelegramBack } from "./telegram";
@@ -50,6 +51,13 @@ const PluginScreen = lazy(async () => ({ default: (await import("./ui/PluginScre
  * catalogue reader and the machine picker, and most sessions never open it.
  */
 const PluginsSheet = lazy(async () => ({ default: (await import("./ui/plugins/PluginsSheet")).PluginsSheet }));
+/*
+ * Split for the same reason as the rest, and it is the one that would have
+ * undone the measurement above: the three documents are reachable *from the
+ * sign-up form*, so bundling their prose would put a few kilobytes of policy
+ * back on the path to a login form for the sake of text almost nobody opens.
+ */
+const LegalScreen = lazy(async () => ({ default: (await import("./ui/legal/LegalScreen")).LegalScreen }));
 
 /**
  * What the tab is called with nothing waiting, and the string every badge is
@@ -202,10 +210,54 @@ export function App(): ReactNode {
    * cannot type it into a "current password" box — the link is their way out and
    * it has to beat the wall.
    *
-   * One branch and no predicate: `gateOutranksSession` lives inside `Gate`,
-   * where `webcheck` can import it. A predicate here would be a decision nothing
+   * One branch and no predicate: `Gate` asks `gateOutranksSession` itself, where
+   * `webcheck` can import it. A predicate here would be a decision nothing
    * asserts, which is what `settings.ts`'s own header forbids.
+   *
+   * ⚠ **That sentence was false for four releases and is now true.** The
+   * predicate existed, the driver asserted things about it, and *nothing read
+   * it* — `Gate` tested `!gateNeedsToken(screen)` directly, so the two agreed
+   * only because both said the same thing. Q3.598.
+   *
+   * **A document sits beside the gate and above the same phases**, for a
+   * narrower reason than a mailed link: it has to answer at all with no
+   * credential, because the sign-up form links to it and because it is the URL
+   * somebody is given when they ask what the terms are. Order between the two is
+   * arbitrary — `parseLegalDoc` and `parseGateScreen` are asserted disjoint — and
+   * saying so here is cheaper than somebody deriving it again.
    */
+  if (route.name === "legal") {
+    /*
+     * ⚠ **Three states, and the middle one is why this is not one condition.**
+     * The documents ship in this bundle and name one particular party, so an
+     * instance that has not claimed them has no such screen — but *whether* it
+     * has claimed them arrives from the wire, so until the config lands the honest
+     * answer is neither. Waiting rather than guessing: drawing optimistically
+     * would put one operator's contract on a fork's screen for a frame, and
+     * drawing the fall-through would flash a sign-in form at somebody who asked
+     * for the terms. Q1.638.
+     */
+    if (state.config === null) return <Waiting />;
+    /*
+     * ⚠ **Two conditions, and the second is a publication gate rather than a
+     * configuration.** `state.config.legal` is whether this deployment *claims*
+     * the documents; `legalPublishable()` is whether they are finished. A required
+     * `OPERATOR` field still holding `TODO` would otherwise render verbatim into a
+     * contract — the mail provider is named as a data processor — so an unfinished
+     * document is an address that names nothing here, exactly as an unclaimed one
+     * is. `webcheck` reports the placeholder as a `skip`, which cannot stop a
+     * release; this can.
+     */
+    if (state.config.legal && legalPublishable()) {
+      return (
+        <Suspense fallback={<Waiting />}>
+          <LegalScreen doc={route.doc} up={up} signedIn={state.phase === "ready" && state.me !== null} />
+        </Suspense>
+      );
+    }
+    // Off: this address names nothing here, so it falls through to whatever `/`
+    // would have drawn — the same answer every unknown path already gets.
+  }
   if (route.name === "gate") return <Gate screen={route.screen} state={state} />;
 
   if (state.phase === "signed_out") {
@@ -463,6 +515,10 @@ function screenOf(route: Route): string {
     case "gate":
     case "session":
       return route.name;
+    // Each document is its own screen, so arriving on one from another moves
+    // focus the way every other screen change does.
+    case "legal":
+      return `legal/${route.doc}`;
   }
 }
 

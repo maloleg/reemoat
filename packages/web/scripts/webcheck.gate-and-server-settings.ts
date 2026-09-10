@@ -210,10 +210,17 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
    * the assertion that was supposed to fail passes. The compiler is what catches
    * it here, so the field is written out rather than spread in.
    */
-  const off = { registration: "off", email: false, source: null, catalogue: null, offer: null } as const;
-  const offMail = { registration: "off", email: true, source: null, catalogue: null, offer: null } as const;
-  const openLocal = { registration: "open", email: false, source: null, catalogue: null, offer: null } as const;
-  const openMail = { registration: "open", email: true, source: null, catalogue: null, offer: null } as const;
+  /*
+   * ⚠ **`legal: false` on all four for `catalogue`'s reason, and it is the value
+   * that matters here.** None of the predicates below reads it either, and every
+   * one of them must keep not reading it: whether an instance publishes its
+   * operator's documents decides what the sign-up form *asks for*, never whether
+   * somebody may sign in or recover an account.
+   */
+  const off = { registration: "off", email: false, source: null, catalogue: null, offer: null, legal: false } as const;
+  const offMail = { registration: "off", email: true, source: null, catalogue: null, offer: null, legal: false } as const;
+  const openLocal = { registration: "open", email: false, source: null, catalogue: null, offer: null, legal: false } as const;
+  const openMail = { registration: "open", email: true, source: null, catalogue: null, offer: null, legal: false } as const;
 
   /* ---- the wire body actually becomes one of those ---- */
 
@@ -270,6 +277,7 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     configured: boolean,
     catalogue: string | null = null,
     offer: string | null = null,
+    legal = false,
   ): unknown => {
     const source = appSource.split("\n");
     const open = source.findIndex((line) => line.startsWith('  app.get("/v1/instance"'));
@@ -288,6 +296,7 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       "VERSION",
       "pluginCatalogueUrl",
       "machineOfferUrl",
+      "legalDocuments",
       "db",
       "c",
       source.slice(open + 1, close).join("\n"),
@@ -299,6 +308,7 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       VERSION,
       catalogue,
       offer,
+      legal,
       {},
       { json: (value: unknown) => value },
     ) as unknown;

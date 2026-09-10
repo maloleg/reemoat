@@ -248,6 +248,17 @@ daemon closes `4401` on its own ping tick at `exp + leeway`.
 | Control-plane bodies | 64 KiB above THE LINE, on the **seven** routes there that take one — `/v1/login`, `/v1/enroll`, `/v1/register`, `/v1/register/confirm`, `/v1/forgot`, `/v1/reset`, `/v1/provision`, the only places somebody whose credential the gate cannot resolve decides how many bytes are read — 256 KiB below it, both answering `413 payload_too_large` in the envelope every client parses. `currentPassword`/`newPassword` are refused over 512 chars |
 | Registration | Closed by default. A sign-up holds its login name for **24h** and releases it by expiring — `pending_registrations`, swept at startup, which is what makes a name reusable at all |
 
+⚠ **And one value broke that rule on purpose, which is worth knowing here rather
+than only where it lives.** The legal documents in `packages/web/src/legal/` name
+one sole proprietor in one jurisdiction, compiled in, in `OPERATOR`
+(`legal/operator.ts`) — a commercial
+party on the **sign-up screen of every instance**, which is the argument below
+sharpened rather than an exception to it. It is compiled in because the prose
+describes this software's behaviour and is true of any deployment while the party
+is not, so a fork inherits correct documents and a ⚠ block naming the one field it
+must replace, in `SOURCE_URL`'s shape. Q1.638 carries the argument and the exact
+price of moving the party to the environment; `legal-pages.md` is the area.
+
 **Two values reach the browser from the environment and never from
 `instance_settings`, and they are kept out for different reasons.**
 `REEMOAT_CP_PLUGIN_CATALOGUE_URL` cannot be a row because

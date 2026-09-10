@@ -120,7 +120,7 @@ Three pieces, and you can run all of them yourself.
 | `docs/API.md` | The HTTP surface of both services — 117 routes, what each is for, and the conventions every one of them answers in |
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 919 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 923 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |
@@ -130,3 +130,11 @@ Three pieces, and you can run all of them yourself.
 
 Third-party licenses, and the one dependency that is **not** open source, are in
 [`THIRD-PARTY.md`](THIRD-PARTY.md).
+
+The Terms of Use, Acceptable Use Policy and Privacy Policy in
+`packages/web/src/legal/` are **one operator's terms rather than this software's**,
+and they are adapted from texts under CC BY 4.0 and CC0. If you run your own control
+plane, replace the `OPERATOR` block in `packages/web/src/legal/operator.ts` and read
+them: serving them unchanged names a
+party your users have never dealt with. Nothing in them restricts any right this
+license grants you.

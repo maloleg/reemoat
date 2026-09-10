@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 130 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 131 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 83 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 343 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 345 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 133 | `###` |
-| | | **919** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 134 | `###` |
+| | | **923** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 919 rather than the 466
+dividers. So the count is over **both** depths, and it says 923 rather than the 468
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3684,6 +3684,60 @@ punctuation is each surface's own, the list's sublines being fragments where the
 machine screen's lines are sentences.
 
 **Status.** Known limitation
+
+### Q1.638 — Whose terms does a fork's control plane serve?
+
+**Decision.** The three documents are compiled into `packages/web/src/legal.ts`,
+and the party they bind is compiled in beside them, in `OPERATOR` — one named
+sole proprietor in one jurisdiction, with a ⚠ block at the top of the file saying
+so and telling a fork to replace it. That is a deliberate departure from the rule
+`.claude/rules/cp-accounts.md` states for the two environment-only values, and it
+is the owner's call rather than a derivation.
+
+**Why the rule points the other way.** Of `REEMOAT_CP_MACHINES_OFFER_URL` that
+rule says it *"points at one particular shop run by whoever runs the deployment"*
+and that neither it nor the catalogue URL has a compiled-in default, *"because
+this is AGPL software and forks run their own control planes."* Terms are that
+argument sharpened: they name a legal person with liability behind them, and they
+are drawn on the sign-up screen of **every** instance rather than on an admin
+screen. A fork that forgets to replace them is telling its users they have a
+contract with somebody who has never heard of them, and collecting their
+agreement to it under a button they pressed to sign up.
+
+**Why it is compiled in anyway.** `SOURCE_URL` is the counter-precedent and it is
+the shape adopted: a value that names one deployment, compiled in, carrying the
+instruction to change it at the site of the value. Two things decide it. The
+**prose** describes this software's behaviour — what an account is, what an agent
+may do on a machine, what the control plane stores and for how long — so a fork
+inherits documents that are *true*, and the marker tells it the one field that is
+not. And the documents were required at short notice for the instance this
+repository's author runs; a seam that made them absent by default on that
+instance would have solved a fork's problem by creating the operator's.
+
+**⚠ Amended: a switch was built, and it is not the one priced below.** The party
+stays compiled in; what became environment-driven is whether a deployment
+*publishes* these documents at all. `REEMOAT_CP_LEGAL_DOCUMENTS` is env-only with
+no compiled default, the third member of the family `cp-accounts.md` describes,
+and off is the default — an instance claims the documents rather than inherits
+them. With it off there is no document page, no consent box and no requirement on
+the register route, so a fork's users are never shown one operator's contract and
+never refused for failing to accept it. The party being compiled in thereby stops
+being a statement made to a fork's users and becomes a value that fork must
+replace before turning the switch on, which is what the ⚠ block at the head of
+`legal.ts` says. `instance.ts` reads the flag strictly — only literal `true` is a
+claim — and `App.tsx` has three states for a document route rather than two,
+because *not yet known* may not be drawn either way.
+
+**The way back for the party itself is written down so nobody re-derives it.** Move the party to an
+environment variable named REEMOAT\_CP\_LEGAL\_OPERATOR, published on
+`GET /v1/instance` beside `machines.offer`, read in `instance.ts` with the guard
+`isAbsoluteHttpUrl`'s sibling, and fall back to *"whoever runs this control
+plane"* — `gateNotice`'s own sentence, so two screens cannot disagree about who
+somebody is being asked to deal with. Its price is a field on that route, which
+`webcheck` lifts with `new Function`: the handler gains a free variable or the
+driver throws `ReferenceError` at call time, and four flat fixtures gain a field.
+
+**Status.** Current
 
 ## Session lifecycle, questions and attachments
 
@@ -19758,6 +19812,126 @@ one sentence and a pointer.
 
 **Status.** Active
 
+#### Q3.598 — Three documents that had to be readable with no account
+
+**Decision.** `/terms`, `/acceptable-use` and `/privacy` are a top-level `Route`
+arm of their own, `{ name: "legal"; doc: LegalDoc }`, with every rule about the
+URLs in `packages/web/src/legal.ts` and the screen in `ui/legal/LegalScreen.tsx`.
+Drawn in `App.tsx` above `signed_out` and above `loading`, beside the gate's
+branch, because answering with no credential is the point rather than an accident
+of a token.
+
+**Why not three more `GateScreen`s**, which is the cheaper shape by every count —
+no `router.ts` edit, no `nav.ts` arm, a parser and an `App` branch already
+written. It breaks four things that are written down. `gate.ts` defines that
+family as *"the screens somebody reaches before there is a credential"*, and a
+policy is read before **and** after. `depthOf`'s gate arm argues those screens are
+*"the sign-in form with different fields"*, which a policy is not. `GateCard` is
+`max-w-sm`, a measure for four fields, where a document wants `COLUMN` — the app's
+only reading measure. And `BackToSignIn` replaces *always*, justified by a token
+in the fragment that a document does not carry.
+
+**Measured cost of the arm chosen:** four compile errors, all wanted — `depthOf`,
+`sheetKind`, `sheetTitle` and `screenOf` are exhaustive switches with no
+`default`. **Three more sites take a new arm in silence**, and they are the half
+the compiler cannot hold: `isSheet` is an `||` chain, `isOverlayPath` a list of
+string literals, and `sheetUpLabel` an early return on one route name. The case
+table in `webcheck.plugin-reach-and-mirror.ts` is what covers all three, and it
+gained two rows rather than one assertion.
+
+**⚠ It also closed a predicate that nothing read.** `App.tsx` claimed
+*"`gateOutranksSession` lives inside `Gate`, where `webcheck` can import it"* —
+and `Gate` asked `!gateNeedsToken(screen)` directly, so mutating that function's
+body changed no screen, and the driver's equality over the two passed because
+both were the same sentence written twice. It is asked properly now. This was
+found by designing the cheap shape, not by looking for it: adding documents to
+`GateScreen` would have made the predicate answer `false` about screens the app
+in fact draws over a live session, with every driver still green.
+
+**Measured**, 2026-09-10, and it caught a regression no driver could. The rules
+module is imported by `router.ts` to parse every URL this app opens, so whatever
+it imports rides the entry chunk — and the prose table living beside the parsers
+put three whole policies there: entry **365.21 kB (112.01 kB gzipped)** against
+**308.82 kB (95.68 kB)** with the table moved to `legal/text.ts`, the documents
+landing in a `LegalScreen` chunk of 32.57 kB (11.14 kB) that is fetched only when
+somebody opens one. `typecheck` is blind to it, every assertion was green over it,
+and it showed up in `pnpm web:build` output alone. Pinned now by one line asserting
+that `legal.ts` imports no prose.
+
+**Rejected: a `SettingsLeaf`**, which is *"a screen one tap under a section that
+is a **form**"* and sits behind `visibleSections`, i.e. behind the credential
+these pages must not need. **Rejected: static files under `packages/web/public/`**,
+which is cheaper still and really does work — the static handler appends
+`index.html` to a directory — and buys a second hand-written copy of both font
+stacks and five scale steps *inside this repository*, plus prose outside every
+driver, on a route `navigate` cannot reach. That is Q7.133's failure with the
+excuse removed.
+
+**Status.** Current
+
+#### Q3.599 — Consent is a box under the button, and the tombstone above it had to be rewritten
+
+**Decision.** One checkbox inside `Register`'s `<form>`, immediately **before**
+the submit button, whose label is generated from `LEGAL_DOCS` and named by
+`legalTitle`. It gates `ready` and sends `acceptedTerms`, which
+`POST /v1/register` refuses without — and **stores nothing**: no column, no
+timestamp, no version pinned to an account.
+
+**The route states the requirement rather than proving it.** A caller that sends
+`true` is indistinguishable from a person who ticked a box, so what the field buys
+is that the browser stops being the only thing that knows an account may not be
+created without agreeing — a `curl` that skips the form now gets a `400
+terms_not_accepted` instead of an account. It was client-only first; that was
+raised as a question rather than found in review, and the answer was that a
+requirement no server knows about is a requirement in one bundle.
+
+**Why a box rather than a sentence.** A sentence under the button is the commoner
+shape and would have been enough — the button is already the act. The tick is
+what a reviewer looks for, and it was the owner's call. What it does **not** buy
+is a record: on the mail path there is no `users` row at sign-up at all, only
+`pending_registrations`, so anything "recorded on the account" has no account to
+be recorded on until the link is opened. This instance cannot prove what anybody
+agreed to, and says so rather than implying otherwise. Q7.134.
+
+**⚠ It was under the button first, and that was wrong.** The argument for it was
+that a term of an act belongs beneath the control that performs it, and a control
+above a submit reads as a label for it. On the running screen the opposite decides:
+the box gates `ready`, so the button sat **disabled** with its own precondition
+below it — a press did nothing and the reason was further down the page. A
+precondition that follows the act it gates is a dead end whatever the prose says.
+Caught by the owner looking at the screen, not in review, which is worth recording
+because nothing in the driver could have seen it: the assertion asserted the wrong
+order confidently. It is still **not** in `GateCard`'s `footer`, which is
+documented as the one place each screen keeps for the way back — chrome about the
+page rather than a term of the thing being done.
+
+**⚠ Q3.440 is neither reversed nor untouched.** That entry deleted `SourceNotice`
+and ends *"the offer now lives in `LICENSE`, in `README.md` and in the image's OCI
+label, and in no rendered page."* All of that stands: no screen draws the source
+URL, the version or the licence name, and `source` on the wire still has no
+reader. What is superseded is one sentence's **reach** — §13 is an obligation the
+*licence* places on the operator toward anybody who interacts over a network, and
+Q3.440 decided it is discharged in artefacts. Consent runs the other way: it is a
+term of an act, at the moment of the act, and nothing in a tarball can carry it.
+A page can discharge the second and cannot discharge the first. `GateCard.tsx`'s
+tombstone says so now and cites both numbers, which also fixed a *"see
+`docs/DECISIONS.md`"* with no number in it — a citation `docscheck` could not
+resolve because there was nothing to resolve.
+
+**The links open a new tab, and that is the one place this app does so
+same-origin.** Four fields are filled in by then, two of them passwords, and the
+tick is state on the component; `navigate` from there unmounts all five, and the
+state cannot go in the address because the state is a password. A click targeted
+at interactive content inside a `<label>` does not activate the labelled control,
+so the links do not tick the box on the way past.
+
+**Measured, and unverifiable without a phone:** whether a same-origin `_blank`
+survives Telegram's webview. The idiom is already exercised there off-origin by
+`MarketEntry` and `AgentsPanel`, and `inTelegram` is the seam if it turns out not
+to be.
+
+**Status.** Current
+
 
 ## Deployment, packaging and code layout
 
@@ -29764,3 +29938,43 @@ and an nginx config with no `package.json`, unlike `services/plugins` and
 workflow up to compare two font stacks costs more than the drift it catches.
 
 **Status.** Known limitation, taken deliberately
+
+
+### Q7.134 — What the three documents deliberately do not do
+
+**Position.** Four things, and none of them is an oversight.
+
+**English only.** `LEGAL_LANGS` is what exists and `LegalLang` is what may; a
+second language is a second set of strings behind the same union, plus a control
+on the screen. It is deliberately **not** a localisation layer: this app has never
+had one, `ProfileMenu` says so in its own docblock, and a document is the worst
+possible place to start, because a translated one is a second binding text that
+can disagree with the first.
+
+**No acceptance record.** No column, no timestamp, no version pinned to an
+account. The register route does refuse a sign-up that carries no `acceptedTerms`,
+which states the requirement rather than evidencing anything: a caller that sends
+`true` is indistinguishable from a person who ticked a box. This instance cannot
+say what anybody agreed to and does not imply it can. Adding that is a migration
+and a version on every document, which is why `effective` is data rather than
+prose. Q3.599.
+
+**No indexable copy.** One `index.html` serves every route carrying `noindex,
+nofollow`, because this is a control surface. Making one path indexable means
+writing the meta at run time, which a crawler that runs JS reads and one that does
+not does not — half indexed, with a restore that could put the whole surface into
+an index. A public copy belongs on the landing page, in the other repository,
+**linked and never copied**: a second copy where CI cannot see it is Q7.133
+exactly.
+
+**No link from the sign-in screen, the profile menu, the settings sheet or the
+confirmation mail**, and the reasons differ per surface. `ProfileMenu`'s own
+docblock sets the test a fourth row must pass — *"it is about **you** rather than
+about what is on screen"* — and a policy is about the service. `SignIn`'s two
+doors are argued at length and its shared-link count is pinned at two. A settings
+door would work and would throw away both the sheet and the screen under it, since
+`upFrom` lands on the root. And `templates.ts` already rules that *"two links in a
+transactional message, one of which goes nowhere useful, is one link too many."*
+The named seam, so it is not invented twice, is a line in `HelpButton`'s popover.
+
+**Status.** Deliberate non-goal

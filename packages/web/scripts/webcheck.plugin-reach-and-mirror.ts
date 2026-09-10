@@ -1069,6 +1069,11 @@ process.stdout.write("\nwhich routes are pop-ups, asked from both directions\n")
     [{ name: "home" }, "/", false],
     [{ name: "session", ref: { machineId: "m", sessionId: "s" } }, "/m/m/s/s", false],
     [{ name: "gate", screen: "register" }, "/register", false],
+    // A document is a screen, and this is the table that says so from both
+    // directions: `isSheet` is an `||` chain and `isOverlayPath` a list of
+    // literals, so a new route arm reaches neither and `typecheck` sees nothing.
+    [{ name: "legal", doc: "terms" }, "/terms", false],
+    [{ name: "legal", doc: "privacy" }, "/privacy", false],
     [{ name: "new", machineId: null, cwd: null }, "/new", true],
     [{ name: "settings", section: null, machineId: null, system: null }, "/settings", true],
     [{ name: "plugin", machineId: "m", pluginId: "board" }, "/p/m/board", true],

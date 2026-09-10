@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
-import { isParked, isResumable, isTerminal } from "../wire";
+import { isParked, isResumable, isTerminal, parkedByOlderDaemon } from "../wire";
 import { Icon, IconButton, MENU_PANEL } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
@@ -100,11 +100,20 @@ export function SessionMenu({
    * given up, so a person pressing it is retrying something that failed, which is
    * a different act from starting something that was never attempted.
    */
+  /*
+   * ⚠ **…unless the daemon it is pointed at cannot wake it, which is the one
+   * state where a message is not the way back.** See `parkedByOlderDaemon`: a
+   * `parked` reason arriving under a status that is not `parked` is a daemon
+   * older than this feature, whose prompt path answers `409 session_terminal`
+   * for ever. Hiding Resume there leaves a conversation reachable only from
+   * `pnpm client resume`, which is the dead end Q2.224 already fixed once for
+   * the auto-resume-off case and did not cover for a rollback.
+   */
   const canResume =
     session !== undefined &&
     isTerminal(session.status) &&
     isResumable(session) &&
-    !isParked(session);
+    (!isParked(session) || parkedByOlderDaemon(session));
   const pinned = session?.pinned === true;
 
   // Same dismissal as every other popover here: pointerdown rather than blur,
@@ -273,7 +282,9 @@ export function SessionMenu({
             />
           ))}
 
-          {(canResume || !isTerminal(session.status)) && <div className="my-1 border-t border-edge/60" />}
+          {(canResume || !isTerminal(session.status) || isParked(session)) && (
+            <div className="my-1 border-t border-edge/60" />
+          )}
 
           {canResume && (
             <MenuItem
