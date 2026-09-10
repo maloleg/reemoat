@@ -660,9 +660,19 @@ export function hasLiveAgent(status: SessionStatus): boolean {
  *
  * The number and nothing else: this carried a `source` saying whether the value
  * was stored here or came from the machine's env file, and the line it fed was
- * removed as noise — see `MachineSettingsView`, which holds the argument.
+ * removed as noise — the daemon's copy of this interface holds the argument.
+ *
+ * ⚠ **The name is the daemon's, and matching it is what makes this mirror
+ * checked at all.** `webcheck.plugin-protocol.ts` guards every interface here
+ * against the daemon's own by looking the *name* up in `src/`, and a name with no
+ * counterpart hits its `continue` and is never compared. Its floor is a floor on
+ * how many pairs were compared, so a pair that was skipped does not lower it —
+ * which makes the miss invisible in both directions. This was `MachineSettings`
+ * for one release and the sweep covered none of it; the docblock over that
+ * `continue` already records the same failure for three other types, one release
+ * earlier. Renaming either side without the other switches the guard off silently.
  */
-export interface MachineSettings {
+export interface MachineSettingsView {
   /** Minutes a conversation may sit untouched before its agent is shut down. `0` never does. */
   idleReleaseMinutes: number;
 }

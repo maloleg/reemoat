@@ -569,7 +569,11 @@ function Field({
               aria-checked={mark === "many" ? counted : undefined}
               aria-pressed={mark === "one" ? counted : undefined}
               aria-labelledby={nameId}
-              className="tap flex h-11 shrink-0 items-center pr-3 pl-2"
+              // `min-w-11` as well as `h-11`: `pl-2` + a 16px mark + `pr-3` is 36px
+              // across, so the box had grown on one axis only and the 44px this
+              // comment claims held for height alone. `justify-end` keeps the mark
+              // in the row's trailing slot while the button owns the wider target.
+              className="tap flex h-11 min-w-11 shrink-0 items-center justify-end pr-3 pl-2"
             >
               <ChoiceMark mark={mark} chosen={counted} />
             </button>

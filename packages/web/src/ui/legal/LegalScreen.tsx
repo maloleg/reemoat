@@ -52,7 +52,15 @@ export function LegalScreen({
   const text = legalDocument(doc);
   const others = LEGAL_DOCS.filter((other) => other !== doc);
   return (
-    <div className="min-h-full">
+    /* `pt-safe`/`pb-safe` on the shell rather than on the column: inside Telegram
+       the chrome floats ✕ Close and ⌄ ⋯ **over** the page, so without this the
+       document's own `<h1>` sits under the pill and the way out sits under the
+       home indicator. `nav.ts`'s `upFrom` wires this screen for the mini app by
+       name, so it is reached from there by design; `Header.tsx` states the rule and
+       this screen draws no header of its own to inherit it from. Here and not one
+       element down because the column states the body size, and `webcheck` reads
+       that class string whole. */
+    <div className="pt-safe pb-safe min-h-full">
       <div className={`${COLUMN} px-4 py-8 text-sm`}>
         <h1 className="text-xl font-semibold">{legalTitle(doc)}</h1>
         <p className="mt-1 text-xs text-muted">Effective {text.effective}</p>

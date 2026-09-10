@@ -350,13 +350,26 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
       "Child extends Base",
     ]);
     /*
-     * ⚠ **48, raised from 45 when `HarnessContribution` and `SystemContribution`
-     * joined the mirror.** Measured: 44 interfaces before `systems.ts` and
-     * `agentask.ts` were sources at all, 47 with them, **50** with the two a
-     * contributed harness and provider put on the wire. The floor is the count
-     * less the slack the last raise chose, and it moves *with* the corpus — a floor
-     * left where it was is one that goes on passing over a whole group deleted,
-     * which is the exact silence this number exists to break.
+     * ⚠ **49, raised from 48 when `MachineSettingsView` started being compared at
+     * all.** Measured: 44 interfaces before `systems.ts` and `agentask.ts` were
+     * sources at all, 47 with them, 50 with the two a contributed harness and
+     * provider put on the wire, **51** once the machine-settings mirror was named
+     * the way the daemon names it. The floor is the count less the slack the last
+     * raise chose, and it moves *with* the corpus — a floor left where it was is
+     * one that goes on passing over a whole group deleted, which is the exact
+     * silence this number exists to break.
+     *
+     * ⚠ **This raise is a different kind from the two before it, and the
+     * difference is the point.** Those came from the corpus *growing*. This one
+     * came from a pair that had been here all along becoming *visible*: the client
+     * called it `MachineSettings` while `registry.ts` called it
+     * `MachineSettingsView`, so the lookup below found nothing, took its
+     * `continue`, and never compared the two. Nothing said so. A skipped pair does
+     * not lower `compared`, it merely fails to raise it, so this floor is
+     * structurally blind to exactly the failure the `continue` produces — it
+     * catches "the sweep found nothing at all", never "the sweep quietly covered
+     * one fewer than it should". The half that needs asserting is upstream, in the
+     * naming, and `wire.ts` now states it where the interface is declared.
      *
      * ⚠ **The number and the sentence above it move together or neither means
      * anything.** This is the second time a raise has been owed and the first time
@@ -365,7 +378,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
      * sharper version of it in the same week — its corpus tripled against an
      * unmoved floor, which would have passed with an entire check group removed.
      */
-    report("there are mirrored interfaces to compare at all", compared >= 48, `${compared} interfaces`);
+    report("there are mirrored interfaces to compare at all", compared >= 49, `${compared} interfaces`);
     check("and the session snapshot is one of them", fieldsOf(registrySrc, "SessionSnapshot") !== null, true);
     check("no interface this client mirrors knows less than the daemon's own", behind, []);
 

@@ -340,8 +340,11 @@ function Register({ state }: { state: AppState }): ReactNode {
    * required `OPERATOR` field still holding `TODO` renders verbatim into the
    * prose this box links to — the mail provider is named there as a data
    * processor — so an unfinished document must not be linked, and agreement to
-   * it must not be collected. Both halves fail the same way: no box, no field
-   * sent, nothing refused. `App` draws no page under the same test.
+   * it must not be collected. Both halves drop the box and the field, and `App`
+   * draws no page under the same test — but **only the first half also relaxes the
+   * register route**, which is gated on `legalDocuments` alone. The two disagreeing
+   * is a misconfiguration this screen now draws rather than submits into; see the
+   * guard above `return`.
    */
   const wantsConsent = state.config?.legal === true && legalPublishable();
   const problem = password.length > 0 || confirm.length > 0 ? passwordProblem("", password, confirm) : null;
@@ -380,6 +383,47 @@ function Register({ state }: { state: AppState }): ReactNode {
       .catch((cause: unknown) => setError(registerError(cause)))
       .finally(() => setBusy(false));
   };
+
+  /*
+   * ⚠ **The one state where the two halves disagree, drawn rather than hit.**
+   *
+   * `POST /v1/register` refuses without `acceptedTerms` whenever the instance
+   * claims documents — on `legalDocuments` alone, which is the environment switch
+   * and nothing else. This form withholds the field unless the documents are also
+   * *finished*. Both rules are right on their own and they are not the same rule,
+   * so an instance that turned the switch on without replacing `OPERATOR` refuses
+   * every sign-up here with `400 terms_not_accepted`, over a form that drew no box
+   * to tick and links to pages `App` refuses to render.
+   *
+   * Sending the field anyway would be worse than the outage: it collects agreement
+   * to a contract naming its own data processor as `TODO`. So the account is still
+   * not created — and the reason is on the screen, where the operator of a fork
+   * can act on it, instead of being an opaque 400 with nothing to read.
+   *
+   * The control plane cannot make this check itself: `OPERATOR` is compiled into
+   * this bundle and no source edge runs from `packages/control-plane` into
+   * `packages/web`. Q1.638.
+   */
+  if (state.config?.legal === true && !legalPublishable()) {
+    return (
+      <GateCard title="Sign-up is unavailable" footer={<BackToSignIn />}>
+        {/* The documents are not named here, and that is `legalTitle`'s rule rather
+            than brevity: every sentence that names one takes the words from there,
+            so a fourth document appears by existing rather than by somebody
+            remembering a line. This screen is drawn precisely when there are no
+            titles to show. */}
+        <p className="text-sm text-muted">
+          This instance requires agreement to its legal documents, but it does not publish them
+          yet — so there is nothing to agree to and no account can be created.
+        </p>
+        <p className="mt-3 text-sm text-muted">
+          If you run this instance: fill in every field of <code>OPERATOR</code> in{" "}
+          <code>packages/web/src/legal/operator.ts</code>, or turn{" "}
+          <code>REEMOAT_CP_LEGAL_DOCUMENTS</code> off.
+        </p>
+      </GateCard>
+    );
+  }
 
   return (
     <GateCard title="Create an account" footer={<BackToSignIn />}>

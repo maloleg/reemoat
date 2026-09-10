@@ -87,7 +87,6 @@ import {
 import { containedInResolved } from "./paths.js";
 import { inspectWorkspace, listWorktrees, removeWorkspace, WorktreeError, type RemoveRefusal } from "./worktree.js";
 import {
-  autoResumable,
   awaitingHuman,
   describeResumeFailure,
   MAX_TITLE_CHARS,
@@ -3000,41 +2999,13 @@ export function createApp(options: ServerOptions): AppBundle {
     const workspace = await workspaceReady(c, managed);
     if (workspace) return workspace;
 
-    if (
-      managed.terminal &&
-      /*
-       * ⚠ **`parked` is outside the auto-resume switch, and has to be.**
-       *
-       * `REEMOAT_AUTO_RESUME=0` says "do not put agents back on your own" — it is
-       * about the boot pass deciding for somebody. Parking is not a spawn the
-       * operator declined; it is one *this daemon performed*, on by default, and
-       * a message is the only documented way back. Gated together, a machine with
-       * auto-resume off parked every conversation after half an hour and then
-       * answered `409 session_terminal` to the message that was supposed to wake
-       * it — with `SessionMenu` deliberately drawing no Resume for a parked
-       * session, `sessionNotice` deliberately saying nothing, and
-       * `autoResumeEnabled` on no wire the client could read. The conversation
-       * was reachable only through `pnpm client resume`, and nothing on the phone
-       * said so.
-       *
-       * So the switch keeps its meaning for every other reason and stops
-       * deciding for the one the daemon caused itself.
-       */
-      (registry.autoResumeEnabled || managed.exit?.reason === "parked") &&
-      // The same gate the boot pass uses: an agent that has told us it no longer
-      // holds this conversation will say it again, and spawning one per typed
-      // message to hear it is worse than answering from what we already know.
-      !managed.resumeSettled &&
-      autoResumable(managed.exit, managed.agentSessionId, "prompt")
-    ) {
-      try {
-        await managed.resume();
-      } catch {
-        // Swallowed on purpose — `managed.resume()` restores the original exit,
-        // so the arm below still reports how the session actually ended rather
-        // than how this attempt to revive it did.
-      }
-    }
+    /*
+     * Wake it if it needs waking. The whole condition — including why `parked` sits
+     * outside `REEMOAT_AUTO_RESUME` — is `SessionRegistry.wakeForPrompt`, which
+     * lives there because the plugin API's `sessions.prompt` is the second caller
+     * and reached `ManagedSession.prompt` without it.
+     */
+    await registry.wakeForPrompt(managed);
 
     /*
      * `/clear` is carried out here, not forwarded.

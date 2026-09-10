@@ -4,7 +4,7 @@ import type { ContentValue } from "./elicitation";
 import type { SessionId } from "./ids";
 import type { MachineConnection } from "./machine";
 import type {
-  MachineSettings,
+  MachineSettingsView,
   AgentAuthListing,
   AgentCapabilities,
   AgentCommand,
@@ -178,6 +178,29 @@ export class DaemonClient {
     return this.machine.request(`/custom-agents/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
+  /** This machine's own preferences. */
+  machineSettings(): Promise<{ settings: MachineSettingsView }> {
+    return this.machine.request("/settings");
+  }
+
+  /**
+   * Change one setting.
+   *
+   * `PATCH` and one key at a time, deliberately: the body names only what is being
+   * changed, so a client that has never heard of a setting a newer daemon holds
+   * cannot erase it by sending the ones it does know.
+   */
+  saveMachineSettings(patch: Partial<Record<keyof MachineSettingsView, number>>): Promise<{
+    saved: true;
+    settings: MachineSettingsView;
+  }> {
+    return this.machine.request("/settings", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+  }
+
   /**
    * Which agents this machine's New session strip offers, and in what order.
    *
@@ -191,29 +214,6 @@ export class DaemonClient {
    * it is deliberately **not** on `slowRoute` and sits on the ordinary budget the
    * strip's first paint deserves.
    */
-  /** This machine's own preferences. */
-  machineSettings(): Promise<{ settings: MachineSettings }> {
-    return this.machine.request("/settings");
-  }
-
-  /**
-   * Change one setting.
-   *
-   * `PATCH` and one key at a time, deliberately: the body names only what is being
-   * changed, so a client that has never heard of a setting a newer daemon holds
-   * cannot erase it by sending the ones it does know.
-   */
-  saveMachineSettings(patch: Partial<Record<keyof MachineSettings, number>>): Promise<{
-    saved: true;
-    settings: MachineSettings;
-  }> {
-    return this.machine.request("/settings", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(patch),
-    });
-  }
-
   agentStrip(): Promise<{ entries: AgentStripEntry[] }> {
     return this.machine.request<{ entries: AgentStripEntry[] }>("/agent-strip");
   }

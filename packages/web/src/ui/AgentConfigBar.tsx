@@ -382,6 +382,7 @@ export function AgentConfigBar({
 }): ReactNode {
   const [busy, setBusy] = useState<string | null>(null);
   const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowRef = useRef<HTMLDivElement | null>(null);
   // Read from module state rather than held here, because the other door into
   // `applyConfigChange` is a sibling component — see `choices.ts`.
   useSyncExternalStore(subscribeChoices, choicesVersion);
@@ -479,6 +480,26 @@ export function AgentConfigBar({
    * the panel is open would otherwise leave a layer nothing is drawing.
    */
   useDismissible("menu", () => setOverflowOpen(false), overflowOpen && slots.overflow.length > 0);
+
+  /*
+   * ⚠ **And a press outside closes it, because Escape is a desktop answer to a
+   * phone-first control.**
+   *
+   * `useDismissible` registers a layer and nothing else — `overlay.ts` listens
+   * for `keydown` alone — so on a phone the only exit was a second tap on the
+   * trigger, which is `disabled` while a config change is in flight. That is
+   * exactly the window the docblock above says was the defect, left open by the
+   * repair for it. `Select` and `Absent` in this file each carry this effect
+   * already; this popover was the one that did not.
+   */
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const close = (event: Event): void => {
+      if (overflowRef.current?.contains(event.target as Node) !== true) setOverflowOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [overflowOpen]);
 
   // Memoised on the events array identity, which the store replaces only when the
   // transcript actually changes — this walks the whole window backwards, and the
@@ -632,7 +653,7 @@ export function AgentConfigBar({
         )}
 
         {slots.overflow.length > 0 && (
-          <div className="relative">
+          <div ref={overflowRef} className="relative">
             <button
               type="button"
               onClick={() => setOverflowOpen(!overflowOpen)}
@@ -698,8 +719,6 @@ function label(option: AgentConfigOption): ReactNode {
  * ever say, in the real font, and the value changing inside it moves nothing.
  */
 function chipInner(option: AgentConfigOption, parts: ChipParts): ReactNode {
-  /*
-   */
   return (
     <>
       {label(option)}
@@ -1639,6 +1658,11 @@ function Select({
                */}
               <div
                 ref={listRef}
+                // The rows `sections` draws carry `role="option"`, and an option
+                // outside a `listbox` is an orphan. The anchored panel above owns
+                // the role for its copy; one `open` draws both, so this copy owns
+                // it too or the phone — the primary surface — is the one without.
+                role="listbox"
                 className={`min-h-0 overscroll-contain px-1.5 pb-1.5 ${
                   expanded ? "flex-1 overflow-y-auto" : "touch-none overflow-hidden"
                 }`}
@@ -1954,7 +1978,7 @@ function Toggle({
        */
       className={`${CHIP} px-2 ${
         disabled
-          ? "text-faint"
+          ? "border-transparent text-faint"
           : on
             ? "border-edge-strong bg-raised font-medium text-fg hover:bg-edge active:bg-edge"
             : "border-transparent text-muted hover:bg-raised active:bg-raised hover:text-fg"

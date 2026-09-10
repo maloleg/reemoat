@@ -1791,6 +1791,28 @@ export class ManagedSession {
    * the first one opened is left live inside the agent with nothing left to close
    * it.
    */
+  /**
+   * Whether this session was already `parked` when its agent was signed out.
+   *
+   * ⚠ **The one thing the relabel destroys, kept so that signing back in can put
+   * it back rather than spawn.** `signOutSessions` rewrites `parked` →
+   * `agent_signed_out` because a parked row carrying the old reason is woken by
+   * the next message into an agent with no credential, and `reloadCredentials`'s
+   * revive filter looks for exactly that reason. Both are right. What they cost
+   * together is that the reason a session was *released for being idle* is now
+   * indistinguishable from one whose agent was *taken away mid-conversation*, and
+   * the second is resumed on sign-in while the first must not be: `events.ts` says
+   * bringing them all back "would refill exactly the memory parking freed —
+   * measured, five simultaneous resumes turned a 1.3s reattach into 90s."
+   *
+   * In memory rather than on the exit record, and deliberately: `SessionExit` is
+   * on the wire, and a new member of `ExitReason` is the five-surface change this
+   * repository has twice been bitten by. The cost of the choice is bounded and
+   * worth stating — a daemon restart between the sign-out and the sign-in loses
+   * the flag, and that session is resumed on the next sign-in as it is today.
+   */
+  private parkedAtSignOut = false;
+
   private clearing = false;
 
   /**
@@ -2881,6 +2903,10 @@ export class ManagedSession {
 
   private armForStart(): void {
     this.exitRecord = null;
+    // With the exit record gone the origin it described is gone too, or a session
+    // woken between a sign-out and a sign-in would be put back to `parked` by a
+    // later `returnToParked` while holding a live agent.
+    this.parkedAtSignOut = false;
     this.stopRequested = false;
     this.stopping = null;
     this.startAbandoned = false;
@@ -3916,6 +3942,8 @@ export class ManagedSession {
        */
       this.stopRequested = true;
       this.stopping ??= Promise.resolve();
+      // What the relabel is about to make unsayable. See {@link parkedAtSignOut}.
+      if (reason === "agent_signed_out") this.parkedAtSignOut = true;
       this.exitRecord = { ...this.exitRecord, reason, at: Date.now() };
       this.safeAppend({ type: "status", status: this.status, exit: this.exitRecord });
       this.touchSafe();
@@ -3927,6 +3955,33 @@ export class ManagedSession {
     this.stopRequested = true;
     this.stopping = this.doStop(reason);
     return this.stopping;
+  }
+
+  /**
+   * Undo a sign-out's relabel for a session that was only ever parked.
+   *
+   * **The counterpart to {@link RELABELS_PARKED}, and the reason the revive loop
+   * does not simply resume everything it relabelled.** For a session whose agent
+   * was live when the credential went away, coming back is the repair — that is
+   * what `reloadCredentials` is for. For one that was already released as idle,
+   * the repair is the *reason*, not the process: it is put back to `parked`, the
+   * state it was in before, and the next message brings it back exactly as
+   * parking says it should. Spawning it instead refills the memory parking freed,
+   * all at once, for conversations nobody asked about — which is the case
+   * `events.ts` measured at 90s for five simultaneous resumes.
+   *
+   * Answers whether it acted, so the caller can tell "put back" from "resume this
+   * one" without asking the same question twice. Nothing is torn down here and
+   * nothing is spawned: there is no process on either side of this call.
+   */
+  returnToParked(): boolean {
+    if (!this.parkedAtSignOut) return false;
+    this.parkedAtSignOut = false;
+    if (this.exitRecord === null || this.exitRecord.reason !== "agent_signed_out") return false;
+    this.exitRecord = { ...this.exitRecord, reason: "parked", at: Date.now() };
+    this.safeAppend({ type: "status", status: this.status, exit: this.exitRecord });
+    this.touchSafe();
+    return true;
   }
 
   private async doStop(reason: ExitReason): Promise<void> {
@@ -5667,6 +5722,56 @@ export class SessionRegistry {
     return 0;
   }
 
+  /**
+   * Bring a session back because somebody is about to talk to it, if it needs it.
+   *
+   * ⚠ **On the registry rather than at the one call site, because there are two
+   * and only one of them had it.** `POST /sessions/:id/prompt` grew this block
+   * when parking landed; `sessions.prompt` on the plugin API calls
+   * `ManagedSession.prompt` directly, and that method's first line refuses a
+   * terminal session — so a plugin could not talk to any conversation the daemon
+   * had released, and could not wake it either, there being no `sessions.resume`
+   * in the method table. Parking was swept through the plugin *hook* fan and not
+   * through the plugin *API*, which is the fifth surface `CLAUDE.md` warns is
+   * checked by neither the compiler nor a driver.
+   *
+   * A no-op for a live session, so both callers may simply await it first.
+   *
+   * **`parked` is outside the auto-resume switch, and has to be.**
+   * `REEMOAT_AUTO_RESUME=0` says "do not put agents back on your own" — it is
+   * about the boot pass deciding for somebody. Parking is not a spawn the operator
+   * declined; it is one *this daemon performed*, on by default, and a message is
+   * the only documented way back. Gated together, a machine with auto-resume off
+   * parked every conversation after half an hour and then answered `409
+   * session_terminal` to the message that was supposed to wake it — with
+   * `SessionMenu` deliberately drawing no Resume for a parked session,
+   * `sessionNotice` deliberately saying nothing, and `autoResumeEnabled` on no
+   * wire the client could read. The conversation was reachable only through
+   * `pnpm client resume`, and nothing on the phone said so.
+   *
+   * So the switch keeps its meaning for every other reason and stops deciding for
+   * the one the daemon caused itself.
+   */
+  async wakeForPrompt(managed: ManagedSession): Promise<void> {
+    if (
+      managed.terminal &&
+      (this.autoResumeEnabled || managed.exit?.reason === "parked") &&
+      // The same gate the boot pass uses: an agent that has told us it no longer
+      // holds this conversation will say it again, and spawning one per typed
+      // message to hear it is worse than answering from what we already know.
+      !managed.resumeSettled &&
+      autoResumable(managed.exit, managed.agentSessionId, "prompt")
+    ) {
+      try {
+        await managed.resume();
+      } catch {
+        // Swallowed on purpose — `managed.resume()` restores the original exit, so
+        // the caller's own arm still reports how the session actually ended rather
+        // than how this attempt to revive it did.
+      }
+    }
+  }
+
   async create(options: CreateSessionOptions): Promise<ManagedSession> {
     /*
      * **Settled before anything is touched**, which is the whole point of doing
@@ -6354,7 +6459,27 @@ export class SessionRegistry {
          */
         if (this.shuttingDown) return;
         if (!(session.terminal && session.exit?.reason === "agent_signed_out")) continue;
-        await session.resume().catch(() => undefined);
+        /*
+         * A session that was merely *parked* when the credential went away is put
+         * back to `parked` rather than spawned. See `returnToParked`: the relabel
+         * this undoes exists so the row is drawn and reachable, not so that idle
+         * conversations are all revived at once the moment somebody signs in.
+         */
+        if (session.returnToParked()) continue;
+        /*
+         * ⚠ **`quiet`, for `autoResumePass`'s reason and not a different one.**
+         *
+         * Nobody typed here: this loop is detached, the route answered a count
+         * before it ran, and no person is waiting on any one of these. A
+         * non-quiet resume runs `makeRoomForWake`, which at the ceiling is a
+         * `session/close`, a SIGTERM, a confirmed SIGKILL and a ~400 MB respawn
+         * of *somebody else's* idle agent — and this loop's order is
+         * `this.sessions.values()` while `parkCandidates` takes least recently
+         * active, which is the same inversion `doResume` records: the pass
+         * evicted sessions it had itself just resumed, in the opposite order to
+         * the one it queued in.
+         */
+        await session.resume(START_TIMEOUT_MS, true).catch(() => undefined);
       }
     })();
     return restarting.length + returning.length;

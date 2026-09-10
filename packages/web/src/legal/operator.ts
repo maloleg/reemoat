@@ -100,8 +100,20 @@ export function operatorIncomplete(): readonly string[] {
  *
  * The other half of `REEMOAT_CP_LEGAL_DOCUMENTS`: the instance says whether it
  * *claims* the documents, and this says whether they are *finished*. Both have to
- * be true, and they fail in the same direction — no pages, no consent box, no
- * requirement on the register route.
+ * be true for a page to be drawn or a consent box to appear.
+ *
+ * ⚠ **They do not both reach the register route, and the sentence that said they
+ * did was wrong.** `POST /v1/register` refuses without `acceptedTerms` on
+ * `legalDocuments` alone — the control plane holds the environment switch and
+ * cannot see this constant, since `OPERATOR` is compiled into the browser bundle
+ * and no source edge runs from `packages/control-plane` into `packages/web`. So
+ * the switch on with a `TODO` here is a state where the route demands a field the
+ * form is right not to send, and every sign-up answers `400 terms_not_accepted`.
+ * `Gate` draws that state as a named misconfiguration rather than submitting into
+ * it; `deploy/bootstrap.sh` gates its own prompt on the server's flag, so the
+ * terminal path asks for agreement to pages this build will not render. Both are
+ * reachable only by a deployment that turned the switch on without finishing this
+ * block, which is the thing this file exists to warn about.
  */
 export function legalPublishable(): boolean {
   return operatorIncomplete().length === 0;

@@ -6222,7 +6222,39 @@ and the rows it has *given up* coming back to sit inside them, which is D27 and
 closes the one class rule 1 had left unbounded. So the file holds at most the cap
 in inactive rows plus the active ones, and those have bounds of their own: a live
 row counts against `MAX_LIVE_SESSIONS`, and a daemon-ended row was a live one
-under that ceiling, which the next boot restores or gives up. At ~8 MB a session
+under that ceiling, which the next boot restores or gives up.
+
+⚠ **That last sentence stopped being true when parking landed, and this is the
+correction rather than a second opinion.** A `parked` row is active —
+`keepsItsConversation` is what `isActiveRow` reads — and it satisfies neither
+bound the sentence names. It does not count against `MAX_LIVE_SESSIONS`, because
+`liveSessionCount` counts `!terminal` and a parked session is terminal; and the
+boot pass neither restores it nor gives up on it, because `autoResumable` answers
+`parked` on a prompt alone. Nothing else moves it: `markInterrupted` returns early
+on an existing exit record, `shutdown` iterates the live ones, and only a person
+pressing Stop or a sign-out relabels it (`RELABELS_PARKED`). **So the active class
+is unbounded again, by a different door than D27's.**
+
+What made the old shape self-limiting was the thing parking removed on purpose: an
+abandoned conversation used to hold ~400 MB and a slot, so a machine ran out of
+ceiling long before it ran out of disk. A parked row costs neither, so nothing
+pushes back. Measured on the development machine 2026-09-10, hours after the
+feature landed: 5 parked rows of 12. Second-order, and the sharper half — `active`
+counts parked rows into the floor (`if (active + rank <= options.minSessions)`),
+so a machine holding fifty parked conversations has spent the whole 50-row floor
+on rows that were never at risk, and it stops protecting the inactive ones it was
+written for.
+
+**Deliberately not bounded yet, and that is the decision rather than an
+oversight.** A parked conversation is one somebody is *expected* to return to,
+which makes it the last row a prune should take — an age bound here is Q2.222
+pointed at the quietest sessions instead of the busiest, and there is no
+measurement behind whatever number it would pick. At ~8 MB a session the runway is
+years. What is owed is this paragraph, so the next person to read "the file holds
+at most the cap" does not believe it, and a look at real numbers before a bound is
+chosen. If one is wanted, the shape to weigh first is excluding parked rows from
+the floor's arithmetic — it loses nothing recent and restores what `minSessions`
+was for. At ~8 MB a session
 the cap is ~1.6 GB of transcripts nobody is coming back to, and the floor's
 ~0.4 GB is the part of that which may sit there however stale. And `reclaim()`,
 on bytes, whose condition is independent of what the prune removed and says so in

@@ -1246,7 +1246,18 @@ export class SqliteSessionStore implements SessionStore {
    *      — the daemon's own promise to bring it back (a machine put down for a
    *      week must come back holding its conversations), or an agent it released
    *      for being idle, which is a conversation somebody is expected to return
-   *      to — or when its exit cannot be
+   *      to — ⚠ **and a `parked` row is therefore active for ever, which is a
+   *      class nothing bounds.** It never becomes inactive on its own: no boot
+   *      pass reaches it (`autoResumable` answers `parked` on a prompt alone),
+   *      `markInterrupted` returns early on an existing exit record, and only a
+   *      person stopping it or a sign-out relabels it. Before parking, an
+   *      abandoned conversation held ~400 MB and a `MAX_LIVE_SESSIONS` slot, so
+   *      the class was self-limiting by memory; a parked one costs neither. The
+   *      floor feels it first: `active` counts these, so a machine holding
+   *      `minSessions` parked rows has spent the whole floor on rows that were
+   *      never at risk. Left unbounded on purpose — see D27's correction in
+   *      `docs/DECISIONS.md` — because an age bound here deletes exactly the
+   *      conversation this rule exists to keep — or when its exit cannot be
    *      read — not JSON, not an object, or a `reason` this build cannot name
    *      (`isExitReason`) — because a deletion may not be decided from a value
    *      it cannot read. **Unless the daemon has given it up**: a row whose

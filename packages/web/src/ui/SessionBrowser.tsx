@@ -228,11 +228,18 @@ export function SessionBrowser({
             ref={drag.pillRef}
             /* Two elements: the outer one is *where*, written by the gesture as a
                single transform rather than as two React re-renders a frame; the
-               inner one is *what*, offset by half its own size so the chip is
-               centred on the pointer whatever its text measures. */
+               inner one is *what*, offset from its own size so the chip clears the
+               pointer whatever its text measures. */
             className="pointer-events-none absolute top-0 left-0 z-30"
           >
-            <div className="-translate-x-1/2 -translate-y-1/2 rounded-md border border-edge-strong bg-surface px-2 py-1 text-2xs font-medium whitespace-nowrap text-danger shadow-sm">
+            {/* ⚠ **Above the contact point, not centred on it.** Centred is where a
+                mouse cursor wants it and where a thumb hides it: this is the one
+                pre-commit notice in the gesture — the only outcome carrying the row
+                back does not undo — and on the surface this rail is read from, the
+                finger holding the row covered it completely. Horizontal centring
+                stays; the vertical half is what had to move, by the chip's own
+                height plus a thumb's clearance. */}
+            <div className="-translate-x-1/2 -translate-y-[calc(100%+18px)] rounded-md border border-edge-strong bg-surface px-2 py-1 text-2xs font-medium whitespace-nowrap text-danger shadow-sm">
               Release to unpin
             </div>
           </div>

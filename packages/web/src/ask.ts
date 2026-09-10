@@ -78,7 +78,7 @@ export function setDraftField(
 /**
  * Everything held for one request, once it has been answered one way or another.
  *
- * **Three statements and not one `||` chain**, which is what this was and which
+ * **Four statements and not one `||` chain**, which is what this was and which
  * did not do what its own first line says. `a.delete(k) || b.delete(k)` stops at
  * the first `true`, so any elicitation that had a draft dropped the draft and
  * leaked its step index and its collapsed flag — visible when a poll already in

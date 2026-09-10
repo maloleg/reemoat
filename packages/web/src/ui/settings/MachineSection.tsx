@@ -9,7 +9,7 @@ import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
 import { agentStripPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
-import { enrolledByText, type MachineSettings } from "../../wire";
+import { enrolledByText, type MachineSettingsView } from "../../wire";
 import {
   Button,
   ChoiceRow,
@@ -633,7 +633,7 @@ function RenameMachine({ machine }: { machine: AppState["machines"][number] }): 
  * would make invisible housekeeping into something to interpret.
  */
 function IdleRelease({ machineId }: { machineId: MachineId }): ReactNode {
-  const [settings, setSettings] = useState<MachineSettings | null>(null);
+  const [settings, setSettings] = useState<MachineSettingsView | null>(null);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
