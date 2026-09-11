@@ -33,6 +33,7 @@ import { composerKey } from "../keys";
 import { formatBytes } from "../paths";
 import { store, type AgentCommandList, type AppState } from "../store";
 import {
+  acceptsMidTurn,
   canCancelTurn,
   cancelInFlight,
   MAX_PROMPT_ATTACHMENTS,
@@ -811,25 +812,65 @@ export function Composer({
   /*
    * The daemon will not take a message, so the composer does not offer to send one.
    *
-   * `ManagedSession.prompt` returns `busy` while `this.turn !== null`, and a
-   * parked question keeps the turn open — so both of these are a guaranteed `409
-   * turn_in_flight`. `composerPlaceholder` already says which one it is, in the
-   * box the sentence belongs in.
+   * ⚠ **This used to be `blocked || working`, and that is the change.** Those two
+   * were a guaranteed `409 turn_in_flight` because `ManagedSession.prompt` refused
+   * outright while a turn was open — and a parked question keeps one open. The
+   * daemon takes both now: `acceptsMidTurn` is the daemon saying so about itself,
+   * either by steering the message into the running turn or by holding it until
+   * the turn ends. So the gate survives only for a daemon that has not been
+   * updated, where the old refusal is still exactly what would happen and a live
+   * Send would be the button lying — the defect `attach.ts` records shipping once.
+   *
+   * ...**and while a plan is waiting it never applied anyway**, because writing
+   * one stops the turn and sends it — see `send` — so the gate would be refusing
+   * the very thing that state exists for.
+   *
+   * `stopping` is the one refusal that is not about the turn: the daemon answers
+   * `409 session_terminal` on `stopRequested`, and it is a live non-terminal
+   * status carrying its own dot for seconds — `canCancelTurn`'s own reason for
+   * excluding it, read here from the other side.
    */
+  const midTurnOk = acceptsMidTurn(session);
+  const sessionRefused = revising
+    ? false
+    : session.status === "stopping" || (!midTurnOk && (blocked || working));
   /*
-   * ...**except while a plan is waiting, where a message *is* an answer.**
-   * Writing one stops the turn and sends it — see `send` — so the daemon takes
-   * it and the gate would be refusing the very thing this state exists for.
+   * ⚠ **The one text the daemon still refuses mid-turn, and it has to be refused
+   * here or Send is live onto a route that can only fail.**
+   *
+   * `POST /sessions/:id/prompt` carries `/clear` out itself rather than forwarding
+   * it, and `clearContext` refuses while a turn is in flight — deliberately, because
+   * clearing under a running agent means deciding what happens to that turn's own
+   * output and there is no answer to that which is not a surprise. So it still
+   * answers `409 turn_in_flight`, and `/clear` is in the client's own restored
+   * command list for claude, which is a *steerable* agent: lifting the gate for
+   * mid-turn messages made "type `/clear` while it works, press Send, get a red
+   * toast" reachable for the first time. That is verbatim the defect `attach.ts`
+   * records this composer having shipped once already, narrowed to one command.
+   *
+   * A refusal of its own rather than folded into `sessionRefused`, because the
+   * remedy is different and the slot has to say so: this one is about what is in
+   * the box, so the box keeps a **disabled Send** carrying the sentence, where a
+   * session-level refusal hands the slot back to Stop.
    */
-  const sendRefused = revising ? false : blocked || working;
+  const clearRefused = !revising && session.turn !== null && text.trim() === "/clear";
+  const sendRefused = sessionRefused || clearRefused;
   /*
    * The two halves of the send slot's other state.
    *
-   * `stoppable` is `canCancelTurn`, which is `sendRefused` restated from the
-   * snapshot's own fields — the two coincide today and are *not* the same
-   * sentence, so they are read from the predicate that means what this control
-   * means rather than reusing the one above. `pendingCancel` is whether somebody
-   * has already asked, which is the daemon's answer and not this tab's.
+   * `stoppable` is `canCancelTurn` narrowed by `!revising && !slotSends`, read
+   * from the predicate that means what this control means rather than reusing the
+   * one above.
+   *
+   * ⚠ This said `canCancelTurn` "is `sendRefused` restated from the snapshot's own
+   * fields — the two coincide today", and mid-turn messages ended that. On an
+   * updated daemon they are close to complementary: `sendRefused` no longer covers
+   * `blocked || working`, which is exactly the span `canCancelTurn` is true
+   * through, so a working session is now cancellable *and* not refused. Neither
+   * predicate can be read off the other any more.
+   *
+   * `pendingCancel` is whether somebody has already asked, which is the daemon's
+   * answer and not this tab's.
    */
   /*
    * ...and while a plan is waiting the slot is **Send**, not Stop.
@@ -839,7 +880,54 @@ export function Composer({
    * that slot should say what somebody came to this screen to do, and in front of
    * a plan that is "say what to change", not "stop".
    */
-  const stoppable = canCancelTurn(session) && !revising;
+  /*
+   * ...**and the slot now follows the draft rather than the turn.**
+   *
+   * With a message in the box the thing somebody is about to do is send it, not
+   * stop the agent — that is the whole of what "you no longer have to stop the
+   * model to correct it" means at this end. With the box empty there is nothing
+   * to send and Stop is the only act left, which is where it was before.
+   *
+   * ⚠ **It reads `sendable` and not `draftPresent`, and that reversal came out of
+   * a review.** `draftPresent` is the right answer to "is there anything in the
+   * box" and the wrong one here, because the arm it falls through to is gated on
+   * `sendable` — so every state where the two disagree drew a **disabled Send
+   * over a live turn**, taking away the only turn-cancel this client has. Three
+   * of them are ordinary: an attachment still uploading, one that failed, and —
+   * the one that would have shipped to everybody — a daemon not yet updated,
+   * where `sendRefused` is exactly the old refusal and `compatibility.md` says
+   * that state *is* the normal fleet between a release and the last owner running
+   * `deploy.sh`. The worst instance is a parked question on such a daemon, which
+   * is precisely the state `canCancelTurn` is deliberately wider than
+   * `showsWorking` to reach.
+   *
+   * So the rule is one predicate rather than two that have to partition:
+   * **Send is drawn when it would work, and Stop holds the slot the rest of the
+   * time.** Whitespace does not make it work, which is the behaviour asked for;
+   * an upload in flight does not either, and there Stop simply stays, which is
+   * what it did before this feature existed.
+   */
+  const slotSends = sendable(text, attachments, sendRefused);
+  /*
+   * ⚠ **...and the one exception to "Stop holds the slot the rest of the time",
+   * which is a refusal about the *draft* rather than about the session.**
+   *
+   * Three states reach it: an attachment still going up, one that failed, and
+   * `/clear` typed mid-turn. In all three the daemon would take a message — this
+   * message just is not one it can take yet — and the remedy is in the box, so
+   * the answer is the **disabled Send** with its own sentence, which is what the
+   * idle case already draws and which is otherwise unreachable. Letting Stop take
+   * the slot there put a destructive control under a thumb aimed at Send, and
+   * then swapped it back on its own when the upload landed.
+   *
+   * `!sessionRefused` and not `!sendRefused` is the whole of the distinction. A
+   * session-level refusal — a daemon too old to take a mid-turn message — keeps
+   * handing the slot to Stop, because there the person can do nothing about the
+   * draft and taking away the only turn-cancel this client has is the worse of
+   * the two, which is what the previous round of this reasoning established.
+   */
+  const draftAnswerable = !sessionRefused && !slotSends && (text.trim().length > 0 || attachments.length > 0);
+  const stoppable = canCancelTurn(session) && !revising && !slotSends && !draftAnswerable;
   const pendingCancel = cancelInFlight(session);
 
   const reconnecting = waitingForDaemon(session) || resumeStalled(session);
@@ -1851,7 +1939,7 @@ export function Composer({
             <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-fg text-ink">
               <Spinner />
             </span>
-          ) : stopping || pendingCancel ? (
+          ) : (stopping || pendingCancel) && !slotSends ? (
             /*
              * A cancel has been asked for and the agent has not finished.
              *
@@ -1869,6 +1957,17 @@ export function Composer({
              * the moment the answer came back would invite a second tap at every
              * stop. If the agent never answers, the escalation is Stop in the
              * session menu, which is a different act with a different cost.
+             *
+             * ⚠ **And it yields to a sendable draft, which it did not at first.**
+             * The cancel outliving its request is the point of this arm, but that
+             * window is measured in seconds and "stop it, then tell it what I
+             * meant" is one gesture — so somebody who taps Stop and then types had
+             * the spinner drawn over the whole correction. `submit` never agreed:
+             * `sendable` is true there, so Enter sent while the visible control
+             * was a `role="status"` spinner, and on a coarse pointer — where Enter
+             * is the newline and the button *is* the send — there was no way to
+             * send at all. The guard and the drawn control have to say the same
+             * thing, and the one that was wrong is this one.
              */
             <span
               role="status"
@@ -1930,12 +2029,24 @@ export function Composer({
                */
               icon={ArrowUp}
               /*
-               * **It does not queue, and this said it did.** `ManagedSession.prompt`
-               * refuses while a turn is open, so that tooltip described a feature
-               * nothing implements and Send was live onto a guaranteed `409
-               * turn_in_flight` — a red toast on every message typed while the agent
-               * was working or while a question was parked. `canSend` refuses now
-               * and the placeholder says which of the two it is.
+               * ⚠ **This once read "Send — queues behind the current turn", which
+               * described nothing; then it read "wait for the agent", which
+               * described a refusal. Both are gone, and the second one is the
+               * interesting correction.**
+               *
+               * The tooltip lied first: `ManagedSession.prompt` refused while a
+               * turn was open, so Send was live onto a guaranteed `409
+               * turn_in_flight` and every message typed mid-turn came back as a
+               * red toast. Gating the button fixed the lie by removing the
+               * feature. The daemon holds a queue now — and steers where the
+               * agent takes one — so the original sentence is true at last and is
+               * still not written here: what happens to a mid-turn message is
+               * said in the **transcript**, under the message itself, where
+               * somebody is already looking. A tooltip on a control explaining
+               * the fate of something already sent is furniture.
+               *
+               * What is left in this label is the one state that really is a
+               * refusal, and it names it rather than saying "not now".
                */
               /*
                * The third arm is heard rather than seen, and it is worth having
@@ -1951,7 +2062,11 @@ export function Composer({
                */
               label={
                 sendRefused
-                  ? "Wait for the agent — it cannot take a message yet"
+                  ? session.status === "stopping"
+                    ? "This session is stopping — it cannot take a message"
+                    : clearRefused
+                      ? "/clear waits for the turn to end — stop the agent, or send it after"
+                      : "Wait for the agent — this machine's daemon cannot take a message yet"
                   : stalled(attachments)
                     ? "An attachment did not upload — retry it or remove it"
                     : "Send"
@@ -1965,7 +2080,7 @@ export function Composer({
               // way sending would deliver the message without the file it is about;
               // `sendable` carries the argument, including why the failed half of it
               // reverses what this comment used to say.
-              disabled={!sendable(text, attachments, sendRefused)}
+              disabled={!slotSends}
             />
           )}
         </div>

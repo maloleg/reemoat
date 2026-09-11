@@ -231,6 +231,27 @@ handed the tool. Q2.28.
   `LaunchOptions.fileIo` is **required**, so deleting the argument is a type error
   rather than a silent grant. Q5.37, Q5.38.
 
+## Sending into a turn that is already running
+
+**`_session/steering` is an ACP extension two of the four serve, and it is read
+from `initialize`'s top-level `_meta` — a sibling of `agentCapabilities`, not a
+member of it.** Measured 2026-09-11 on the installed binaries: claude-agent-acp
+0.73.0 and codex-acp 1.8.0 both send `_meta.steering.supported: true`; kimi 0.29.2
+sends no `_meta` at all and declares no `_session/*` method; opencode is
+unmeasured. ⚠ claude also sends `agentCapabilities._meta.claudeCode.promptQueueing`
+one key away, so reading the wrong bag is silent.
+
+**Injected, the original `session/prompt` resolves exactly once.** Driving a real
+turn and steering into it: `{outcome: "injected"}` in single-digit milliseconds on
+both, then one response, `end_turn`. claude pre-empts — it dropped the essay it was
+writing and answered the injected message 1.2s later; codex finished first and took
+it ~29s later. No second turn end either way. ⚠ **With no turn running it answers
+`startedNewTurn` and starts one with no `session/prompt` to resolve**, which is why
+this daemon always sends `idleBehavior: "promptRequired"`.
+
+**A second `session/prompt` means two different things**: claude queues it FIFO,
+codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.107.
+
 ## Layout
 
 | File | Holds |

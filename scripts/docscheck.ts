@@ -391,6 +391,15 @@ const FOREIGN = new Set([
   // than in this repository's code.
   "ResumeSessionRequest",
   "LoadSessionRequest",
+  // The two adapters' own internals, cited in Q6.107 because the whole entry is
+  // about the fact that they differ: `turnQueue` is claude-agent-acp's FIFO of
+  // in-flight prompts — a second `session/prompt` joins it — while
+  // `activePrompt` is codex-acp's *single* slot, whose replacement is how a
+  // second prompt there supersedes the first instead. That difference is the
+  // argument for `_session/steering` and against sending a second prompt, so
+  // both names have to be quotable.
+  "turnQueue",
+  "activePrompt",
 ]);
 
 /*

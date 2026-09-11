@@ -25,6 +25,30 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **A message sent while the agent is working is taken rather than refused.**
+  Correcting an agent mid-run no longer means pressing Stop and losing whatever
+  the turn had half-done. Where the agent supports it — claude and codex, over
+  the `_session/steering` extension they advertise on `initialize` — the message
+  goes straight into the turn already running. Where it does not, the daemon
+  holds the message and hands it over the moment the turn ends, and the
+  transcript says so under the message. The queue is the daemon's, so it survives
+  a closed tab, a sleeping phone and a dropped connection; it does not survive a
+  daemon restart, and a session stopped with messages still waiting records that
+  they never arrived.
+- `POST /sessions/:id/prompt` answers `202` for a message sent mid-turn, carrying
+  `steered` or `queued` beside the usual `seq`, where it previously answered
+  `409 turn_in_flight`. A daemon that has not been updated still answers the
+  `409`, and the web client keeps its old behaviour against one.
+
+### Changed
+
+- **The composer's send slot follows what you have typed rather than what the
+  agent is doing.** With the box empty it is Stop, as before; with anything in it
+  worth sending it is Send. Whitespace does not count, so a stray space or tab
+  leaves Stop where it was.
+
 ## [0.8.0] - 2026-09-11
 
 ### Added

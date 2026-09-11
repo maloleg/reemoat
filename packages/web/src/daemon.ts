@@ -459,12 +459,36 @@ export class DaemonClient {
     return this.machine.request(`/sessions/${encodeURIComponent(id)}/cancel`, { method: "POST" });
   }
 
-  /** 202 on success, carrying the seq at which the prompt landed in the log. */
+  /**
+   * 202 on success, carrying the seq at which the prompt landed in the log.
+   *
+   * **Three landings, one status code, one `seq`.** A message sent while the
+   * agent is working is *accepted* rather than refused: `steered` says it went
+   * into the turn already running, `queued` says the daemon is holding it until
+   * that turn ends, and neither is present on an ordinary send. A client reads
+   * those to decide what to *say*, never whether the send worked — the daemon has
+   * not refused anything, and `seq` names the `prompt` event in every case, which
+   * is what lets `promptLanded` settle the echo down one path instead of three.
+   *
+   * Both are optional because an older daemon sends neither and answers `409
+   * turn_in_flight` instead. `turn` is nullable for the one arm that has no turn
+   * to name: a message queued behind an agent that cannot be steered.
+   */
   prompt(
     id: SessionId,
     text: string,
     attachments: readonly string[] = [],
-  ): Promise<{ accepted: boolean; turn: number; seq: number; session: SessionSnapshot }> {
+  ): Promise<{
+    accepted: boolean;
+    turn?: number | null;
+    seq: number;
+    steered?: boolean;
+    queued?: boolean;
+    /** The queue entry, matching `queuedPrompts[].id` on the snapshot. */
+    id?: string;
+    position?: number;
+    session: SessionSnapshot;
+  }> {
     return this.machine.request(`/sessions/${encodeURIComponent(id)}/prompt`, {
       method: "POST",
       // The key is omitted entirely when there is nothing to send, so a daemon

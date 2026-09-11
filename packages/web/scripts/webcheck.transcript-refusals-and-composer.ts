@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
 import {
   TRANSCRIPT_SILENT,
+  acceptsMidTurn,
   buildTail,
   canCancelTurn,
   cancelInFlight,
@@ -11,7 +12,9 @@ import {
   isTerminal,
   machineSubline,
   markKeyNav,
+  needsHuman,
   permissionDecisions,
+  queuedSeqs,
   refused,
   shouldFocusComposer,
   shouldReleaseComposer,
@@ -678,6 +681,59 @@ process.stdout.write("\nwho is working, and what the box says\n");
     "Answer the request above first",
   );
   /*
+   * ⚠ **And it stops saying that where the box no longer waits, which is the one
+   * arm of this function that reads a capability rather than a state.**
+   *
+   * "Answer the request above first" is an *instruction*, and it was true only
+   * while the daemon refused everything sent inside a parked turn. On a daemon
+   * that takes a mid-turn message it is not: the message goes — claude's steering
+   * delivers it at the adapter's `later` priority precisely so a parked request
+   * is not interrupted — and Send beside it is live. A box telling somebody to
+   * wait, over a button that does not, is the composer arguing with itself.
+   *
+   * The fall-through is `working`, deliberately, so this costs no seventh string:
+   * the count above is what makes that a decision rather than an oversight.
+   */
+  /*
+   * ⚠ **And that sentence stands on every agent, including one that takes a
+   * mid-turn message.** It was briefly gated on the agent being steerable, on the
+   * reasoning that an instruction to wait argues with a live Send. It does not:
+   * the instruction is about the *turn*, not the box — a parked request keeps the
+   * turn open whatever else happens, so answering it is still the only thing that
+   * lets the agent get anywhere.
+   */
+  check(
+    "and it says so however the daemon would deliver a message sent now",
+    say({ blocked: true }),
+    "Answer the request above first",
+  );
+
+  /*
+   * ⚠ **The grid may only contain states `Composer` can build, and this is the
+   * assertion that keeps it honest.**
+   *
+   * A gate was added here whose documented fall-through was `working` — and it
+   * could never be reached, because `blocked` is `needsHuman` while `working` is
+   * `showsWorking`, which carries `!needsHuman`. So the fall-through was actually
+   * the **idle** line, drawn over a session with a question parked, and the grid
+   * was green because it enumerates `blocked` and `working` independently and
+   * that pair covered for it. Asserted against the two predicates themselves
+   * rather than restated, so it cannot drift from what the composer computes.
+   */
+  {
+    const parked = session({ turn: 4, status: "blocked", pendingPermissions: [{ permissionId: "p" }] });
+    check(
+      "a blocked session is never also a working one, whatever this grid says",
+      [needsHuman(parked), showsWorking(parked)],
+      [true, false],
+    );
+    check(
+      "so the state a placeholder rule may not rely on is the one the app cannot build",
+      say({ blocked: true, working: false }),
+      say({ blocked: true, working: true }),
+    );
+  }
+  /*
    * **And a plan outranks even that, because it is the one blocked state where
    * this box is an answer rather than something to wait behind.** A message
    * written in front of a plan stops the turn and goes, which refuses the plan
@@ -695,6 +751,48 @@ process.stdout.write("\nwho is working, and what the box says\n");
     "Say what to change…",
   );
 
+  /* ---- whether the daemon takes a mid-turn message at all ---- */
+
+  /*
+   * ⚠ **The whole compatibility story for sending mid-turn, and it was asserted
+   * nowhere.**
+   *
+   * `midTurnDelivery` is a field an older daemon does not send, and its *absence*
+   * is what has to mean "this daemon still answers `409 turn_in_flight`". Every
+   * other check in this file pins the shape of the gate that reads it, and all of
+   * them stay green over an `acceptsMidTurn` that answers the wrong way:
+   * measured, `session.midTurnDelivery ?? "queue"` — the plausible "give it a
+   * sensible default" edit — passes `webcheck` and `tsc` and hands a live Send to
+   * every un-updated daemon in the fleet, which `compatibility.md` says is the
+   * normal fleet between a release and the last owner running `deploy.sh`. That
+   * is the exact red-toast defect `attach.ts` records having shipped once.
+   *
+   * Four snapshots, because the two "no" answers arrive by different routes: a
+   * daemon that has never heard of the field, and one that has no agent to ask.
+   */
+  {
+    const snap = (over: Record<string, unknown>): never =>
+      ({ status: "running", turn: 1, pendingPermissions: [], exit: null, agentSessionId: "a", resume: null, ...over }) as never;
+    check("a daemon that does not send the field is one that still refuses", acceptsMidTurn(snap({})), false);
+    check("and so is one with no agent to ask", acceptsMidTurn(snap({ midTurnDelivery: null })), false);
+    check(
+      "while both ways of taking one are yes",
+      [acceptsMidTurn(snap({ midTurnDelivery: "steer" })), acceptsMidTurn(snap({ midTurnDelivery: "queue" }))],
+      [true, true],
+    );
+    /*
+     * And the seqs the transcript draws its line against. `undefined` becoming
+     * `[]` is stated in `wire.ts` as happening in exactly one place, which is
+     * what lets `EventList` ask `has(seq)` without knowing about old daemons.
+     */
+    check("no queue on the wire is no seqs", queuedSeqs(snap({})).size, 0);
+    check(
+      "and a queued message is named by the seq of the prompt it already is",
+      [...queuedSeqs(snap({ queuedPrompts: [{ id: "q_1", seq: 7, at: 0 }] }))],
+      [7],
+    );
+  }
+
   /* ---- the three places that state has to hold together ---- */
 
   /*
@@ -706,12 +804,112 @@ process.stdout.write("\nwho is working, and what the box says\n");
   const composerSrc = readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8");
   check(
     "a plan lifts the send gate rather than being gated by it",
-    /const sendRefused = revising \? false : blocked \|\| working;/.test(composerSrc),
+    /const sessionRefused = revising\s*\n\s*\? false/.test(composerSrc),
+    true,
+  );
+  /*
+   * ⚠ **And that the gate is read off the daemon at all.** Every clause below
+   * pins the *shape* of `sendRefused`, and all of them stay green over a
+   * `midTurnOk` that is a constant — which is exactly what a "sensible default"
+   * on the other side of `acceptsMidTurn` produces. Measured: `?? "queue"` in
+   * `wire.ts` passes `webcheck` and `tsc` and puts a live Send in front of every
+   * daemon that still answers `409 turn_in_flight`.
+   */
+  check(
+    "and the gate is the daemon's own answer rather than a constant",
+    /const midTurnOk = acceptsMidTurn\(session\);/.test(composerSrc),
+    true,
+  );
+  /*
+   * ⚠ **And the rest of that gate is what a mid-turn message costs, asserted
+   * clause by clause because each one is a separate way to break it.**
+   *
+   * `blocked || working` used to be the whole of it and is now the *fallback*:
+   * it applies only where the daemon says it cannot take a mid-turn message, and
+   * pinning `!midTurnOk &&` in front of it is what stops a well-meaning
+   * simplification putting the old refusal back for everybody. The `stopping`
+   * clause is the one refusal that survives on every daemon — `stopRequested`
+   * answers `409 session_terminal` — and it is separate because it is not about
+   * the turn at all.
+   */
+  check(
+    "and where the daemon cannot take one, the old refusal is still exactly that",
+    /!midTurnOk && \(blocked \|\| working\)/.test(composerSrc),
     true,
   );
   check(
-    "and takes the Stop slot for Send",
-    /const stoppable = canCancelTurn\(session\) && !revising;/.test(composerSrc),
+    "while a session already stopping is refused on every daemon",
+    /session\.status === "stopping"/.test(composerSrc),
+    true,
+  );
+  /*
+   * ⚠ **The send slot, decided by one predicate — the same one that says whether
+   * Send would work.**
+   *
+   * It read a separate `draftPresent` for a while, and the two did not partition
+   * the slot: every state where a draft exists and cannot be sent drew a
+   * **disabled Send over a live turn**, taking away the only turn-cancel this
+   * client has. An upload in flight, a failed chip, and — shipping to the whole
+   * fleet — a daemon not yet updated, where a parked question is the worst
+   * instance, since `canCancelTurn` is deliberately wider than `showsWorking` to
+   * reach exactly that state.
+   *
+   * Both halves pinned: that the slot reads `slotSends`, and that `slotSends` is
+   * `sendable` and nothing else.
+   */
+  check(
+    "the slot is decided by whether Send would work",
+    /const slotSends = sendable\(text, attachments, sendRefused\);/.test(composerSrc),
+    true,
+  );
+  check(
+    "and Stop holds it the rest of the time",
+    /const stoppable = canCancelTurn\(session\) && !revising && !slotSends && !draftAnswerable;/.test(
+      composerSrc,
+    ),
+    true,
+  );
+  /*
+   * ⚠ **The one exception, and it is the other half of the same argument.**
+   *
+   * Where the draft cannot send but the *daemon would take a message* — an
+   * attachment still going up, one that failed, or `/clear` typed mid-turn —
+   * handing the slot to Stop puts a destructive control under a thumb aimed at
+   * Send, and then swaps it back on its own when the upload lands. There the
+   * answer is the disabled Send with its own sentence, which is otherwise
+   * unreachable. `!sessionRefused` is what keeps this from undoing the rule
+   * above: against a daemon too old to take a mid-turn message the person can do
+   * nothing about the draft, and Stop stays.
+   */
+  check(
+    "except where the refusal is about the draft, which keeps its own sentence",
+    /const draftAnswerable = !sessionRefused && !slotSends &&/.test(composerSrc),
+    true,
+  );
+  /*
+   * ⚠ **`/clear` is the one text the daemon still refuses mid-turn**, and the
+   * route carries it out itself rather than forwarding it — so `clearContext`'s
+   * `turn !== null` refusal reaches the composer as a guaranteed
+   * `409 turn_in_flight`. Lifting the mid-turn gate made that state reachable for
+   * the first time, on claude, whose command list this client restores `/clear`
+   * into. Pinned because nothing else can see it: the daemon is right to refuse,
+   * and the only fix is here.
+   */
+  check(
+    "and the one command the daemon still refuses mid-turn is refused here too",
+    /const clearRefused = !revising && session\.turn !== null && text\.trim\(\) === "\/clear";/.test(composerSrc),
+    true,
+  );
+  /*
+   * And a sendable draft outranks the cancel spinner. Without this, somebody who
+   * taps Stop and then types has a `role="status"` spinner where the button
+   * should be for the whole of a cancel the turn routinely outlives — while
+   * `submit` sends on Enter, so the guard and the drawn control disagreed, and on
+   * a coarse pointer there was no way to send at all.
+   */
+  check(
+    "and a sendable draft outranks the stopping spinner",
+    /\(stopping \|\| pendingCancel\) && !slotSends/.test(composerSrc),
     true,
   );
   /*
@@ -1376,21 +1574,70 @@ process.stdout.write("\nwhether a message can be sent at all\n");
   // A failed chip is not going to finish, so it must not hold Send hostage —
   // there would be no way out but removing it.
   /*
-   * The turn, and it is here because the composer was offering a send the daemon
-   * could only refuse. `ManagedSession.prompt` answers `busy` while a turn is
-   * open — a parked question keeps one open — so every message typed then came
-   * back `409 turn_in_flight` as a red toast, under a button whose own tooltip
-   * claimed it queued. Nothing queues anywhere in this system.
+   * ⚠ **"Nothing queues anywhere in this system" stood here for four releases and
+   * is now false. It is replaced rather than deleted, because the thing it
+   * guarded still needs guarding — it just moved.**
    *
-   * ⚠ That sentence briefly stopped being true and is true again. A correction
-   * typed on the plan card used to be *held* by the client and sent when the
-   * agent stopped; it is now an ordinary message in the ordinary box, gated by
-   * the ordinary rule. See Q3.454 for what that bought and what it cost.
+   * What it recorded: `ManagedSession.prompt` answered `busy` while a turn was
+   * open, a parked question keeps one open, so every message typed then came back
+   * `409 turn_in_flight` as a red toast under a button whose own tooltip claimed
+   * it queued. Twice since, a client-side hold was built to fix that and taken
+   * back out — most recently the plan card's, Q3.454 — and each time this
+   * sentence was restored.
+   *
+   * What changed is *where*. The queue is the **daemon's** now, which is the one
+   * place the two failure modes named against it do not exist: a tab that closes
+   * is not holding anything, and a session that ends drops the queue and writes
+   * an `error` event saying so. Where the agent takes a mid-turn message
+   * directly — claude and codex, over `_session/steering` — there is no queue at
+   * all and the message reaches the turn already running.
+   *
+   * So this third argument no longer means "a turn is in flight". It means the
+   * caller has decided this send would be refused, which is a much narrower set:
+   * `Composer`'s `sendRefused` is a session that is `stopping`, or a daemon too
+   * old to take one. The **property** below is unchanged and is what is actually
+   * pinned: whatever the caller calls a refusal, this function does not offer a
+   * send into it.
    */
-  check("a turn in flight refuses the send", canSend("hello", [], true), false);
-  check("and so does a parked question, which is the same open turn", canSend("hello", [chip("ready", "u_1")], true), false);
-  check("with no turn it is the rule it always was", canSend("hello", [], false), true);
+  check("a refusal the caller has decided is not overridden here", canSend("hello", [], true), false);
+  check("whatever is attached to it", canSend("hello", [chip("ready", "u_1")], true), false);
+  check("and with no refusal it is the rule it always was", canSend("hello", [], false), true);
   check("and the argument defaults to off, so nothing else had to change", canSend("hello", []), true);
+
+  /*
+   * **The Stop/Send swap reads this same predicate, and that is the fix rather
+   * than the shortcut.**
+   *
+   * It briefly read a separate `draftPresent` — "is there anything in the box" —
+   * and every state where the two disagreed drew a **disabled Send over a live
+   * turn**, taking away the only turn-cancel this client has: an upload in
+   * flight, a failed chip, and — the one that would have shipped to everybody —
+   * a daemon not yet updated, where `sendRefused` is the old refusal and that is
+   * the normal fleet between a release and the last owner updating. So the slot
+   * is decided by whether Send would *work*, and the cases below are that rule
+   * read as the swap: whitespace keeps Stop, one character takes it.
+   */
+  check("an empty box keeps Stop", canSend("", []), false);
+  check("a space is not a message", canSend(" ", []), false);
+  check("nor is a tab", canSend("\t", []), false);
+  check("nor any run of them", canSend("  \t \n  ", []), false);
+  check("one character takes the slot for Send", canSend("x", []), true);
+  check("and so does a file with nothing typed", canSend("", [chip("ready", "u_1")]), true);
+  /*
+   * The three states that must keep Stop rather than draw a Send that cannot be
+   * pressed. Asserted as the *pair* — draft present, send impossible — because
+   * either half alone reads as an ordinary refusal.
+   */
+  check(
+    "an upload in flight keeps Stop even with text typed",
+    canSend("hello", [chip("uploading")]),
+    false,
+  );
+  check(
+    "and a daemon that would refuse the send keeps it too",
+    canSend("hello", [], true),
+    false,
+  );
 
   check("a failed chip does not", canSend("hello", [chip("failed")]), true);
   // But it is not a message either.

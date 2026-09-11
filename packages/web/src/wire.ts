@@ -947,6 +947,29 @@ export interface ElicitationResolvedEvent {
   by: AnswerResolvedBy;
 }
 
+/**
+ * One message waiting for the agent, as the daemon reports it.
+ *
+ * Carries no text on purpose: the message is already a `prompt` event in the log
+ * and `seq` is what points at it, so putting the body here would send the same
+ * sentence on every frame until it was delivered.
+ *
+ * ⚠ **Named `QueuedPrompt` because `registry.ts` names it that**, and the name is
+ * the only thing holding the drift guard on. `webcheck.plugin-protocol.ts` looks
+ * each interface here up in `src/` **by name** and takes its `continue` when the
+ * lookup misses, so a `…Snapshot` suffix would make this a mirror nothing
+ * compares — and the floor cannot say so, because a skipped pair does not lower
+ * `compared`, it merely fails to raise it. Measured while this shipped suffixed:
+ * 51 interfaces compared with this pair invisible, 52 under the daemon's own
+ * name. Third time that `continue` has swallowed a whole feature; the rule is
+ * stated where the mirror is declared.
+ */
+export interface QueuedPrompt {
+  id: string;
+  seq: number;
+  at: number;
+}
+
 export interface SessionSnapshot {
   id: string;
   agent: AgentId;
@@ -980,6 +1003,32 @@ export interface SessionSnapshot {
    * cancel outstanding — the state the control was in before any of this existed.
    */
   cancelRequestedAt?: number | null;
+  /**
+   * Messages the daemon has taken and the agent has not been given yet.
+   *
+   * Always empty on an agent that can be steered — the message went straight into
+   * the running turn, so there is nothing to wait. `seq` names the `prompt` event
+   * the message already is, which is how the transcript finds the bubble to draw
+   * its line under without matching on text.
+   *
+   * Optional for `cancelRequestedAt`'s reason, and every reader goes through
+   * {@link queuedSeqs} so `undefined` behaves as `[]` in one place.
+   */
+  queuedPrompts?: QueuedPrompt[];
+  /**
+   * What this session does with a message sent while a turn is running.
+   *
+   * ⚠ **Its absence is the whole compatibility story for sending mid-turn.** A
+   * daemon that does not send this field is one that still answers
+   * `409 turn_in_flight`, so {@link acceptsMidTurn} answers `false`, the composer
+   * keeps every gate it had, and Send stays refused while the agent works —
+   * exactly today's behaviour, degraded rather than broken. Nothing branches on a
+   * daemon *version* (`compatibility.md` rule 1); it branches on a capability the
+   * daemon states about itself.
+   *
+   * `null` while there is no agent to ask.
+   */
+  midTurnDelivery?: "steer" | "queue" | null;
   /** Not `lastActivity`, not `updatedAt`. The daemon calls it this. */
   lastEventAt: number | null;
   createdAt: number;
@@ -1311,6 +1360,48 @@ export function turnInFlight(session: SessionSnapshot): boolean {
  */
 export function cancelInFlight(session: SessionSnapshot): boolean {
   return (session.cancelRequestedAt ?? null) !== null && canCancelTurn(session);
+}
+
+/**
+ * Whether this daemon takes a message sent while the agent is working.
+ *
+ * ⚠ **The one gate in this file that reads a field an older daemon does not
+ * send, and it is written to answer `false` for one.** That is not a degradation
+ * to tolerate, it is the correct answer: a daemon without `midTurnDelivery`
+ * refuses a mid-turn prompt with `409 turn_in_flight`, so a composer that offered
+ * Send would be live onto a route that can only fail — the exact defect
+ * `attach.ts` records having shipped once already.
+ *
+ * `null` — an agent that is away — is `false` too, and for a different reason
+ * that arrives at the same place: there is nothing to steer and nothing to queue
+ * behind, so a send goes down the ordinary path and the ordinary path is not
+ * refused. Nothing is lost by saying no here.
+ */
+export function acceptsMidTurn(session: SessionSnapshot): boolean {
+  const delivery = session.midTurnDelivery ?? null;
+  return delivery === "steer" || delivery === "queue";
+}
+
+/**
+ * The seqs of messages taken and not yet delivered.
+ *
+ * A `Set` because the transcript asks once per row, and the one place `undefined`
+ * becomes `[]` — see {@link SessionSnapshot.queuedPrompts}. Called by
+ * `SessionView`, which memoises the result: a non-empty queue builds a fresh
+ * `Set`, and what it feeds is a **context**, so an unstable identity re-renders
+ * every bubble in the conversation on every token.
+ *
+ * ⚠ **The empty answer is one shared value rather than a fresh `Set`**, and that
+ * is the common case twice over: every session on a steerable agent, and every
+ * session on a daemon too old to have a queue. It costs nothing to give it back
+ * from here, and it makes "the identity only changes when the queue changes" true
+ * of this function rather than only of the memo above it.
+ */
+const NOTHING_WAITING: ReadonlySet<number> = new Set();
+
+export function queuedSeqs(session: SessionSnapshot): ReadonlySet<number> {
+  const waiting = session.queuedPrompts ?? [];
+  return waiting.length === 0 ? NOTHING_WAITING : new Set(waiting.map((entry) => entry.seq));
 }
 
 /**

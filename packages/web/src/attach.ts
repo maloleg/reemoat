@@ -260,33 +260,38 @@ export function admitFiles(existing: readonly PendingAttachment[], incoming: rea
  * deliver the message without the file it is about — which for a files-only
  * message means delivering nothing at all.
  *
- * **`busy` is the turn, and it is here because the composer was lying about it.**
- * `ManagedSession.prompt` refuses outright while `this.turn !== null` — there is
- * no queue anywhere in this system — so every message typed while the agent was
- * working, or while a question was parked, came back `409 turn_in_flight` and
- * surfaced as a red toast. Send was enabled onto a route that could only fail.
- * Two things said otherwise and both were wrong: the button's own tooltip read
- * "Send — queues behind the current turn", and CLAUDE.md said the message sends
- * with no error and the reply arrives after the current one.
+ * **`refused` is what the daemon will not take, and it is a much narrower thing
+ * than it used to be.**
  *
- * So the rule the daemon actually has is the rule the button now has, and the
- * placeholder already explains both halves of it — `composerPlaceholder` says
- * "answer the request above first" while something is parked and "agent is
- * working…" otherwise. A disabled control next to a sentence saying why beats a
- * live control that throws.
+ * ⚠ **It was the turn, and this paragraph used to end "there is no queue anywhere
+ * in this system". That sentence is now false and the reversal is deliberate.**
+ * What it recorded was real: `ManagedSession.prompt` refused outright while
+ * `this.turn !== null`, so every message typed while the agent was working came
+ * back `409 turn_in_flight` as a red toast under a button whose own tooltip
+ * claimed it queued, and gating the button was the honest fix at the time. It
+ * also named the price — *"you can still write the message, it just will not go
+ * until the turn ends"* — and the remedy, *"a real queue … is a feature with its
+ * own failure modes (a session that ends, a tab that closes)"*.
  *
- * Type-ahead is what this costs, and it is worth naming rather than pretending it
- * was never there: you can still write the message, it just will not go until the
- * turn ends. A real queue — hold it and send it on the next idle — is a feature
- * with its own failure modes (a session that ends, a tab that closes) and is not
- * something to arrive at by way of a button that used to error.
+ * Both of those failure modes are the argument for where the queue was eventually
+ * built, which is the **daemon**: a closed tab is not a failure mode for a thing
+ * that never lived in the tab, and a session that ends drops the queue and says so
+ * in the transcript. So the daemon takes a mid-turn message now — steering it into
+ * the running turn on claude and codex, holding it on kimi — and this argument
+ * inverts: a button that refused would be the one lying.
+ *
+ * What is left to refuse is narrow and is the caller's to decide, not this
+ * function's: see `Composer`'s `sendRefused`, which is a session that is
+ * `stopping` and a daemon too old to have the queue at all. Everything else about
+ * this predicate is unchanged — text or files, and an upload in flight wins over
+ * both.
  */
 export function canSend(
   text: string,
   list: readonly PendingAttachment[],
-  busy = false,
+  refused = false,
 ): boolean {
-  if (busy) return false;
+  if (refused) return false;
   const { ids, blocked } = sendableAttachments(list);
   if (blocked) return false;
   return text.trim().length > 0 || ids.length > 0;

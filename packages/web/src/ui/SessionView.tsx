@@ -20,6 +20,7 @@ import {
   humanRequests,
   isBuiltinAgentId,
   mayStillReport,
+  queuedSeqs,
   showsWorking,
   waitingCount,
   type SessionSnapshot,
@@ -28,6 +29,18 @@ import { agentLabel } from "./agentCard";
 import { Composer } from "./Composer";
 import { EventList } from "./EventList";
 import { FileAccessContext, type FileAccess } from "./files";
+
+/**
+ * What `QueuedContext` holds for a session with no snapshot yet.
+ *
+ * A module constant rather than a `new Set()` in the memo, for the same reason
+ * `queuedSeqs` hands back one shared value when nothing is waiting: this feeds a
+ * **context**, and an identity that changed on every render would re-render every
+ * bubble in the conversation on every arriving token. Between the two, the
+ * no-queue case is one identity for the life of the tab — which is every session
+ * on a steerable agent, and every session on a daemon too old to have a queue.
+ */
+const EMPTY_QUEUE: ReadonlySet<number> = new Set();
 import { saveBlob } from "./download";
 import { Header } from "./Header";
 import { ElicitationCard } from "./ElicitationCard";
@@ -811,6 +824,29 @@ function Transcript({
   const echo = echoFor(key);
 
   /*
+   * Which of this conversation's messages the daemon is still holding.
+   *
+   * ⚠ **Memoised on the seqs and not on the snapshot**, and that is the whole
+   * reason this is here rather than one line inside `EventList`. `queuedSeqs`
+   * builds a fresh `Set` every call and the value goes into a **context**, so an
+   * unstable identity re-renders every prompt bubble in the transcript on every
+   * arriving token — the exact cost `DecisionsContext`'s own docblock was written
+   * about. The key is the seqs joined, so this changes when the queue changes and
+   * never when a snapshot merely arrives; empty is the common case and stays one
+   * identity through a whole turn.
+   */
+  const queuedKey = (snapshot?.queuedPrompts ?? []).map((entry) => entry.seq).join(",");
+  // `queuedKey` is the whole dependency by construction — it is derived from the
+  // only field `queuedSeqs` reads, so a snapshot arriving with the same queue
+  // cannot change the answer. `snapshot` is deliberately not in the list: it is a
+  // new object on every poll, which is precisely what this memo exists to absorb.
+  const queued = useMemo(
+    () => (snapshot === null ? EMPTY_QUEUE : queuedSeqs(snapshot)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    [queuedKey],
+  );
+
+  /*
    * How this transcript's files are reached.
    *
    * Memoised on the three things that actually decide it, because `EventList` is
@@ -1122,6 +1158,7 @@ function Transcript({
             <EventList
               files={files}
               echo={echo}
+              queued={queued}
               transcript={transcript}
               askHeight={askHeight}
               working={working}

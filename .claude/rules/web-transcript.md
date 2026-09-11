@@ -44,6 +44,18 @@ stays off, because it is untrusted text quoting an untrusted repository.
   shows it. Settled in `store.ts` — `onEvents` compares the seq, and
   `promptLanded` does it again when the POST answers, because that answer
   routinely loses the race to the socket.
+- **A message the agent has not been given yet says so, and only where that is
+  true.** A `prompt` row whose seq is in the snapshot's `queuedPrompts` draws one
+  line under the bubble, `Waiting for the agent to finish`. Nothing is drawn where
+  the message was *steered* into the running turn — it is already in front of the
+  model, and a status line for something that has already happened is furniture.
+  ⚠ **Not the `pending` marker `Bubble.tsx` forbids**: that rule is about a
+  message *this tab* has sent and not had answered, a claim about the network
+  drawn as doubt over something delivered. This is the daemon reporting a fact
+  about the agent, it survives closing the tab, and the bubble is untouched.
+  `QueuedContext` carries it for `DecisionsContext`'s reason, and its **identity**
+  is part of the contract — `SessionView` memoises the set on the seqs, or every
+  bubble re-renders on every token. `mid-turn-messages.md`, Q3.601.
 - **A turn that stopped says so in words, and a cancel says it where `working…`
   was.** `stopReasonText` and `resolvedByText` in `tail.ts` replace three places
   that drew a wire identifier with its underscores taken out (`turn cancelled`,

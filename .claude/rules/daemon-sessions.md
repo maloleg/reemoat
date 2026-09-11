@@ -434,7 +434,7 @@ non-goal, with the numbers, at Q7.113.
 | `src/agentupdate.ts` | Runs `deploy/agents.sh` five minutes after start, then daily; drops the cached CLI choice after; nudged when a resume finds no CLI. `REEMOAT_AGENT_UPDATES=off` arms nothing |
 | `src/idlepark.ts` | The idle sweep: a clock and nothing else. Which sessions may be released is `ManagedSession.parkable`, in what order is `parkIdleSessions`. `REEMOAT_IDLE_PARK_MINUTES=0` arms nothing |
 | `scripts/harness.ts` | Pre-daemon CLI that drives `Session` directly. Keep it working: the regression test for the untouched default paths |
-| `scripts/daemoncheck.ts` | Offline driver for the daemon's HTTP surface and durable state. The runner only — the assertions are in the nineteen `daemoncheck.<subject>.ts` beside it, and what they share is in `daemoncheck.env`/`.fixtures`/`.bodies` |
+| `scripts/daemoncheck.ts` | Offline driver for the daemon's HTTP surface and durable state. The runner only — the assertions are in the twenty `daemoncheck.<subject>.ts` beside it, and what they share is in `daemoncheck.env`/`.fixtures`/`.bodies` |
 
 ## Bounds
 

@@ -53,7 +53,26 @@ export function composerPlaceholder(state: {
    * invisible.
    */
   if (state.revising) return "Say what to change…";
-  // Blocked first: nothing typed here moves until the request above is answered.
+  /*
+   * Blocked first: the card above is what unblocks the turn, on every agent.
+   *
+   * ⚠ **This was briefly gated on the agent being steerable, and that was wrong
+   * twice over.** The reasoning was that a message sent now is *taken*, so an
+   * instruction to wait argues with a live Send — but the instruction is not
+   * about the box, it is about the turn: a parked request keeps the turn open
+   * whatever else happens, so answering it is still the only thing that lets the
+   * agent get anywhere, steered message or not.
+   *
+   * The gate was also **unreachable in the direction it mattered**, which is the
+   * half a reader should take away. `blocked` is `needsHuman` and `working` is
+   * `showsWorking`, which carries `!needsHuman` — so `blocked` implies `!working`
+   * and the "falls through to `working`" this was documented as doing could never
+   * happen. What it actually fell through to was the **idle** line, `Type / for
+   * commands`, drawn over a session with a question parked. `webcheck` was green
+   * over it because the fixture set `working: true` beside `blocked: true`, a
+   * state `Composer` cannot construct — the same shape as the plan-mode fixture
+   * `ask-card.md` already records. The grid below is what catches that class now.
+   */
   if (state.blocked) return "Answer the request above first";
   /*
    * Then reconnecting, which is the rarer and the more surprising of the two —

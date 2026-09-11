@@ -3054,9 +3054,75 @@ export function createApp(options: ServerOptions): AppBundle {
     switch (result.kind) {
       case "accepted":
         return c.json({ accepted: true, turn: result.turn, seq: result.seq, session: managed.snapshot() }, 202);
+      /*
+       * **A turn is running, and that is no longer a refusal.**
+       *
+       * ⚠ It answered `409 turn_in_flight` for four releases, and the whole of
+       * this feature is that it does not: the message is taken, and how it
+       * reaches the agent depends on what the agent can do. `sendMidTurn` is
+       * async — `Session.steer` is an RPC — which is why the split is a second
+       * method rather than a branch inside `ManagedSession.prompt`, whose
+       * synchronous contract is the guard everything else here depends on.
+       *
+       * Both landings are a **202** carrying the same `seq`, because both really
+       * did accept the message: the difference is only whether the agent has it
+       * yet. A client reads `steered`/`queued` to decide what to say, never the
+       * status code — the daemon has not refused anything.
+       */
+      case "turn_in_flight": {
+        const mid = await managed.sendMidTurn(text, staged);
+        switch (mid.kind) {
+          case "steered":
+            return c.json(
+              { accepted: true, steered: true, turn: mid.turn, seq: mid.seq, session: managed.snapshot() },
+              202,
+            );
+          case "queued":
+            return c.json(
+              {
+                accepted: true,
+                queued: true,
+                id: mid.id,
+                seq: mid.seq,
+                position: mid.position,
+                session: managed.snapshot(),
+              },
+              202,
+            );
+          case "accepted":
+            // The turn ended underneath us. An ordinary send, answered the
+            // ordinary way — a refusal here would be about a state that has
+            // already gone.
+            return c.json({ accepted: true, turn: mid.turn, seq: mid.seq, session: managed.snapshot() }, 202);
+          case "queue_full":
+            // 429 rather than 409: nothing about this session is wrong and
+            // nothing needs answering first, there is simply a ceiling and the
+            // remedy is to wait. The same shape `POST /sessions` uses at its own.
+            return jsonError(c, 429, "prompt_queue_full", "too many messages are already waiting", {
+              limit: mid.limit,
+            });
+          case "busy":
+            return jsonError(c, 409, "session_busy", "this session's context is being cleared", {
+              status: mid.status,
+            });
+          case "not_ready":
+            return jsonError(c, 409, "session_not_ready", "the agent has not finished starting", {
+              status: mid.status,
+            });
+          case "terminal":
+            return jsonError(c, 409, "session_terminal", "this session has ended", {
+              status: mid.status,
+              exit: mid.exit,
+            });
+        }
+        break;
+      }
       case "busy":
-        // The commonest reason a prompt is refused is a blocked session nobody
-        // answered, so say so here rather than making the caller go and look.
+        // A `/clear` or a restart, which really is a refusal: the agent's session
+        // id is being replaced and nothing may address it. The code stays
+        // `turn_in_flight` — it is what every deployed client reads, and
+        // `daemoncheck` pins it — even though the honest reading of it narrowed
+        // when the arm above stopped sharing this one.
         return jsonError(c, 409, "turn_in_flight", "a turn is already in flight", {
           status: result.status,
           pendingPermissions: managed.snapshot().pendingPermissions,

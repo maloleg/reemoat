@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 923 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 929 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -100,7 +100,11 @@ pnpm daemoncheck                     # the daemon's HTTP surface and durable sta
                                      #   compared — and, against a **real** store, that a second save
                                      #   replaces the row and leaves its age alone, which the route
                                      #   section cannot reach because it stands a `Map` in, and a
-                                     #   `Map` upserts
+                                     #   `Map` upserts. Plus a message sent while the
+                                     #   agent works: two stubs, one advertising steering and one not,
+                                     #   plus the one that advertises and then refuses — pinning that
+                                     #   the message is never lost and never doubled, no second prompt
+                                     #   on the wire and no second `prompt` event on delivery
 pnpm relaycheck                      # framing, flow control, authorization, tunnel supersede,
                                      #   tunnel presence as a row and the relay's own health route,
                                      #   live-row revocation, the control plane's routes,
@@ -363,6 +367,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | Rule | Loads on | Answers |
 |---|---|---|
 | `daemon-sessions.md` | `src/registry.ts`, `src/session.ts`, `src/events.ts`, `src/store/` | What a restart brings back and what it does not · the two verbs for stopping · what the agent says after the turn ends · the log's invariants · the daemon's bounds |
+| `mid-turn-messages.md` | `src/registry.ts`, `src/session.ts`, `src/acp/client.ts`, `packages/web/src/ui/Composer.tsx`, `packages/web/src/attach.ts`, `packages/web/src/wire.ts` | Sending while the agent is working · which door a message goes through, and who decides · what an injection does to the turn, measured · what the queue costs and what a stop does to it · Stop or Send, and what whitespace is worth |
 | `acp-agents.md` | `src/acp/`, `src/session.ts`, `packages/web/src/ui/tail.ts` | What claude, kimi and codex actually send, measured · asking you a question · ultracode · subagents, commands and the snapshot · every gotcha that is a fact about an agent |
 | `agent-login.md` | `src/agentauth.ts`, `src/runtime/`, `packages/web/src/ui/login.ts` | How a credential reaches the host with no terminal · the pty and the two `script`s · what each CLI's status probe prints and on which stream |
 | `files-paths-git.md` | `src/changes.ts`, `src/worktree.ts`, `src/uploads.ts`, `src/stall.ts`, `src/paths.ts`, `src/git.ts` | Attachments in, files out · containment, symlinks and the one `rmSync` · why no synchronous filesystem call may touch a path this daemon did not create · how git is parsed |

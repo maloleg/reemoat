@@ -48,8 +48,9 @@ stopRequested`) and `isTerminal` does not cover it: a session stopped mid-turn
 carries `{status: "stopping", turn: 5}` for seconds. `cancelInFlight`
 additionally reads `cancelRequestedAt`, so the button does not re-arm the instant
 the request returns; the field is optional on the wire, so `?? null` is the whole
-migration. In `Composer.tsx` the Stop control takes the **send slot**, and nothing
-is drawn optimistically — claiming an agent had been called off while it is still
+migration. In `Composer.tsx` the Stop control takes the **send slot** while the box
+is empty — with a *sendable* draft the slot is Send, because the daemon takes a
+mid-turn message now (`mid-turn-messages.md`) — and nothing is drawn optimistically — claiming an agent had been called off while it is still
 working is the one lie this control must not tell. Q3.222.
 
 **A late-write gate is half a rule and the reset is the other half.** `stopping`

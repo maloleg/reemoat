@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 131 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 83 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 345 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 85 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 348 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 66 | `###` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 67 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 134 | `###` |
-| | | **923** | |
+| | | **929** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 923 rather than the 468
+dividers. So the count is over **both** depths, and it says 929 rather than the 471
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -6752,6 +6752,143 @@ the mechanism either.
 
 **Status.** Current
 
+### Q2.226 — Can somebody correct the agent without stopping it?
+
+**Question.** Until now, no. `ManagedSession.prompt` answered `busy` while
+`this.turn !== null`, the route turned that into `409 turn_in_flight`, and the
+composer refused Send — so the only way to change course mid-run was to press
+Stop, which ends the turn and throws away whatever it had half-done. The ask was
+the behaviour Claude Code has: type the correction, and it is taken.
+
+**Rule.** A message sent while a turn is running is **accepted**, and how it
+reaches the agent is the agent's own answer:
+
+- Where the agent advertises `_meta.steering.supported` on `initialize`, the
+  daemon sends the ACP extension `_session/steering` and the message goes **into
+  the turn already running**. claude and codex both do.
+- Where it does not, `ManagedSession` **holds** the message and delivers it the
+  instant the turn ends. kimi does not, and opencode is unmeasured.
+
+Both answer `202` carrying the same `seq`, distinguished by `steered` / `queued`
+so a client knows what to say and never whether the send worked.
+
+**Why not a second `session/prompt`.** Because it means two different things on
+two agents and one of them is destructive. Measured 2026-09-11 by reading the
+pinned adapters: claude-agent-acp 0.73.0 queues a second prompt FIFO
+(`turnQueue`, and it advertises `agentCapabilities._meta.claudeCode.promptQueueing`),
+while codex-acp 1.8.0 keeps **one** `activePrompt` per session and every
+continuation of the first checks `this.activePrompts.get(sessionId) !== activePrompt`
+and bails — a supersede that silently abandons a live turn. `Session.turnActive`
+and `ManagedSession.turn` both assume one turn either way.
+
+**Why the queue is the daemon's.** `attach.ts` had already named the two failure
+modes against building one — *"a session that ends, a tab that closes"* — and both
+are failure modes of a **client-side** hold, which is what had been built and
+withdrawn twice before (most recently the plan card's, Q3.454). Neither exists
+here: a closed tab is not holding anything, and a session that ends drops the
+queue and writes an `error` event saying so.
+
+**Where it is delivered, and why that is the last statement in the block.**
+`deliverQueued` runs at the very end of `pump`'s `finally`. `sweepPending` in that
+same block is **not** fenced on turn identity, so a turn started any earlier would
+have its own freshly-raised permissions cancelled by the previous turn's sweep.
+`whenRestarted` and `clearContext` call it too, because a restart and a clear are
+two of the three states it declines in and something has to pick the queue back up
+on the way out.
+
+**One rule for the log.** A `prompt` event is appended when the daemon **accepts**
+a message — which is what that event's own definition has always said — in all
+three landings, and never a second time on delivery. That is what gives the client
+a `seq` to settle its echo against, puts the bubble where the message was written,
+and makes the queue a fact about *delivery* rather than about the conversation.
+Whether a taken message is still waiting rides the **snapshot**
+(`queuedPrompts`), which is `cancelRequestedAt`'s arrangement from Q2.42 and is
+here for the identical reason.
+
+**In memory, and the cost is written down rather than hidden.** A daemon restart
+drops the queue — the same standing the interrupted turn itself has (Q2.12) — and
+what survives is the transcript showing the message with no answer under it. A
+**stop** is the case that can be reported, and is: `doStop` writes one `error`
+event counting what never arrived, because each queued message is already a
+`prompt` with nothing after it, which is precisely the shape Q2.218 named as a
+message that reached no model.
+
+**Two guards that are not obvious.** `parkable` answers `false` with a non-empty
+queue: `status` reads an honest `idle` between the turn ending and the queue
+draining, and `releaseOneSlot` asks with an `idleMs` of `0`, so the ceiling could
+otherwise take the agent away from a message the daemon had already accepted,
+recorded and spent the uploads for — the eighth caller of the "one process
+boundary at a time" rule the `clearing` marker states. And the queue bound
+(`MAX_QUEUED_PROMPTS`, 8) is checked **before** anything is appended, because on
+the steer path the queue is only reached once the steer has failed.
+
+**Rejected.** Cancel-then-prompt for the agents that cannot be steered — what
+Q3.454's plan card does. It gives an immediate pickup on all four, and it throws
+away the in-flight turn, which is the one thing this feature exists not to do.
+
+**A cancel delivers what is waiting**, and that is decided rather than incidental:
+it makes *type the correction, press Stop* one gesture that steers a queueing
+agent — the same act Q3.454 performs from the other direction. There is
+deliberately no way to take a queued message back (no ✕, matching Claude Code), so
+Stop cannot also mean "and forget what I said": dropping it there would lose typed
+text in silence, which is the failure this codebase does not ship.
+
+⚠ **Three defects found in review, all of them about *when* a guard was taken, and
+recorded because each was invisible to the drivers that existed:**
+
+- **An agent restart is not a stop.** `restartAgent` reaches its boundary through
+  `stop("config_changed")`, so `doStop`'s drop threw the message away and wrote
+  *"the session stopped"* into a session that had not stopped — reached from
+  `onAgentUnusable`, i.e. an agent dying mid-turn, which is the likeliest turn to
+  hold a correction. The queue survives the three reasons `autoResumable` calls
+  the daemon's own doing.
+- **A stop landing inside the steer walked past every guard**, because all of them
+  are taken before `sendMidTurn`'s two awaits. It answered `202 {queued: true}`
+  for a terminal session, said nothing (the drop had run while the queue was still
+  empty), and left an entry on every snapshot of a dead session for ever.
+- **`steered` could answer `turn: null` against a declared `number`** — TypeScript
+  keeps a property narrowing across an `await`, so `this.turn` read as `number`
+  while `pump`'s `finally` had cleared it. The turn is captured before the awaits
+  now, which is also the honest value: it names the turn the agent injected into.
+
+**And two assertions that were green over nothing**, found by mutation: the
+`parkable` queue clause is refused at `status !== "idle"` long before it is
+reached — it is unreachable as the code stands and kept as a refusal, beside
+`resumeGivenUp`, which is in the same position — and `idleBehavior:
+"promptRequired"` was asserted nowhere at all, so deleting the whole opt-in left
+every check passing.
+
+**Status.** Current
+
+### Q2.227 — What splitting `busy` cost, and why the code stayed
+
+**Question.** `ManagedSession.prompt` refused on one expression —
+`this.turn !== null || this.clearing || this.restarting` — answering a single
+`busy`. Taking a mid-turn message means one of those three stops being a refusal.
+Is that a new arm or a new method?
+
+**Decision.** Both, and the split is along the line the old expression blurred. A
+`/clear` or a restart is the agent being **unaddressable**; a turn is the agent
+**working**, which is the ordinary state somebody types a correction in. So
+`prompt` keeps `busy` for the first two — with every assertion it had, including
+`daemoncheck`'s that a prompt beside an in-flight clear still answers
+`409 turn_in_flight` over HTTP — and answers a new `turn_in_flight` arm for the
+third, which appends nothing and tells the route to go elsewhere.
+
+**Why a second method rather than a branch.** `prompt` is synchronous by contract
+and the contract is load-bearing: it answers a 202 carrying `{turn, seq}`, it calls
+`safeAppend`, and its guard is an assignment made before any await. `Session.steer`
+is an RPC. An await inside `prompt` would put a suspension point in front of the
+one assignment every other guard in the class depends on. `sendMidTurn` is the
+async half, and the route calls it only on the arm that says to.
+
+**The precedent it follows.** `POST /sessions/:id/prompt` already waits where
+`ManagedSession` refuses — `await managed.whenRestarted()`, with `daemoncheck`
+pinning both halves: *"the session itself still refuses a prompt mid-restart"* and
+*"but the route waits and sends it"*. This is the same division one state over.
+
+**Status.** Current
+
 
 ## The web client
 
@@ -12968,7 +13105,17 @@ Nothing about the composer changes, and that is worth being explicit about rathe
 than leaving to be re-derived: this path never presses reject. It sends while the
 permission is still parked and the turn is still in flight, so `cancelTurn` is
 required for the reason it always was — a prompt sent inside a turn is
-`409 turn_in_flight`. What expired is the anecdote about the operator pressing Stop,
+`409 turn_in_flight`.
+
+⚠ **And that reason has since expired too, though the ordering has not.** Q2.226
+made a mid-turn prompt something the daemon *takes*, so "a prompt sent inside a
+turn is `409 turn_in_flight`" is no longer the fact this chain rests on. What
+keeps `revising` its own path is the other half, which is unchanged: this is the
+one state where cancelling **is** the answer — the message refuses the plan, and a
+steered correction that left the plan parked would settle nothing. So `revising`
+still lifts `sendRefused` outright rather than through `acceptsMidTurn`, and still
+cancels before it prompts. It is no longer the *only* way to send while busy,
+which is what this entry used to be able to say. What expired is the anecdote about the operator pressing Stop,
 not the ordering it justified. Kept rather than deleted because it is the record of
 an adapter bump changing behaviour under a decision, which is the same failure
 Q3.585 records for `PLAN_SHAPES` and is why that one is a list.
@@ -19964,6 +20111,149 @@ to be.
 
 **Status.** Current
 
+#### Q3.600 — Stop or Send: the send slot follows the draft, not the turn
+
+**Decision.** While a turn is running, the one control in the send slot is **Send
+where Send would work, and Stop the rest of the time**. `slotSends` is
+`sendable(text, attachments, sendRefused)` and `stoppable` is
+`canCancelTurn(session) && !revising && !slotSends`. Whitespace is not worth
+sending, so a stray space or tab leaves Stop exactly where it was — `canSend`
+trims, which is the rule it has always applied to the same question one level
+down.
+
+**Why.** With Q2.226 the daemon takes a mid-turn message, so the act somebody is
+about to perform with a half-typed correction on screen is *send it*, not stop the
+agent. Keeping Stop there would leave the whole feature reachable only by a
+keyboard: on a phone, Enter inserts a newline and the button **is** the send.
+
+**Why one predicate and not two.** The slot has two arms and only one of them can
+hold the draft, so whichever predicate gates the Send arm has to be the one that
+decides the swap — otherwise every state where the two disagree draws neither a
+working Send nor a Stop. `sendable` is that predicate, so `sendable` decides.
+
+**And one exception, which is what the two predicates were reaching for.** Where
+the draft cannot send but the **daemon would take a message** — an attachment still
+going up, one that failed, or `/clear` typed mid-turn — `draftAnswerable` keeps the
+disabled Send and its sentence. Handing the slot to Stop there put a destructive
+control under a thumb already aiming at Send, and then swapped it back with no
+action from anybody when the upload landed; it also made the label *"An attachment
+did not upload — retry it or remove it"* unreachable, since the arm that draws it
+was never taken. The gate is `!sessionRefused`, not `!sendRefused`, and that is the
+whole distinction: against a daemon too old to take a mid-turn message the person
+can do nothing about the draft, so Stop stays and the turn-cancel survives, which
+is what the reversal above established.
+
+**`/clear` is refused in the composer, and it is the only text that is.** `POST
+/sessions/:id/prompt` carries a bare `/clear` out itself rather than forwarding it,
+and `clearContext` refuses while a turn is in flight — Q2.6's decision, unchanged:
+clearing under a running agent means deciding what happens to that turn's own
+output. So that one send still answers `409 turn_in_flight`, and `/clear` is in
+this client's restored command list for **claude**, which is a *steerable* agent —
+so lifting the gate made a guaranteed red toast reachable for the first time. That
+is the defect `attach.ts` records having shipped once, narrowed to one command and
+arriving by the opposite door. Refused in the box, with the reason on the control,
+because a disabled control next to a sentence saying why beats a live control that
+throws.
+
+**What this costs, and it is the honest half.** Stop is unreachable while the
+draft is *sendable*. That is acceptable only because the box is *yours*: clearing
+it is one gesture and it is a gesture nobody makes by accident, where the four
+occupants of this slot are otherwise identical 32px circles. The escalation for a
+turn that will not stop is unchanged and is elsewhere — Stop in the session menu,
+a different act with a different cost.
+
+⚠ **It read a separate `draftPresent` for one round, and the reversal came out of
+review.** "Is there anything in the box" is the wrong question, because the arm it
+falls through to is gated on `sendable` — so every state where the two disagree
+drew a **disabled Send over a live turn**, taking away the only turn-cancel this
+client has. Three of them are ordinary: an attachment still uploading, one that
+failed, and — the one that would have shipped to the whole fleet — a daemon not
+yet updated, where `compatibility.md` says the un-updated state *is* the normal
+fleet between a release and the last owner running `deploy.sh`. The worst instance
+is a parked question on such a daemon, which is exactly the state `canCancelTurn`
+is deliberately wider than `showsWorking` to reach. One predicate decides the slot
+now: **Send is drawn when it would work, and Stop holds it the rest of the time.**
+
+**A sendable draft also outranks the cancel spinner**, which it did not at first.
+Somebody who taps Stop and then types had a `role="status"` spinner where the
+button should be for the whole of a cancel the turn routinely outlives — while
+`submit` sent on Enter, so the guard and the drawn control disagreed, and on a
+coarse pointer, where Enter is the newline and the button *is* the send, there was
+no way to send at all. In exactly the flow this feature exists to remove the need
+for.
+
+**And the gate above it moved with it.** `sendRefused` was `blocked || working`,
+both of which were a guaranteed `409 turn_in_flight`. It is now
+`session.status === "stopping" || (!acceptsMidTurn(session) && (blocked ||
+working))`: the old refusal survives only against a daemon that has not been
+updated, where it is still exactly what would happen, and `stopping` is the one
+refusal that stands on every daemon because `stopRequested` answers
+`409 session_terminal`. `webcheck` pins all four clauses as source text — the
+failure mode is silent, and a gate left reading `blocked || working` refuses the
+one send this whole feature exists for.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.602 — The placeholder rule that could not fire, and the fixture that hid it
+
+**Behaviour.** `composerPlaceholder`'s `blocked` line was briefly gated on the
+agent being steerable, on the reasoning that *"Answer the request above first"* is
+an instruction and argues with a live Send. Both halves were wrong.
+
+**Why the reasoning was wrong.** The instruction is about the **turn**, not the
+box. A parked request keeps the turn open whatever else happens, so answering it
+is still the only thing that lets the agent get anywhere — steered message or not.
+The sentence stands on every agent, and the gate is gone.
+
+⚠ **Why it was worse than wrong: the branch could not fire in the direction it was
+documented as firing.** `blocked` is `needsHuman` and `working` is `showsWorking`,
+which carries `!needsHuman` — so `blocked` implies `!working`, and the fall-through
+this was written as going to `working` actually went to the **idle** line. A
+session with a question parked read *"Type / for commands"*.
+
+**And `webcheck` was green over it**, because the placeholder grid enumerates
+`blocked` and `working` independently and the fixture set both true — a state
+`Composer` cannot construct. The same shape as the plan-mode fixture `ask-card.md`
+records, arrived at from a different direction. What is asserted now is the
+invariant itself, read off `needsHuman` and `showsWorking` rather than restated, so
+a rule that leans on an impossible pair fails here rather than shipping.
+
+**Status.** Reversed an earlier decision
+
+#### Q3.601 — What the transcript says about a message the agent has not seen yet
+
+**Decision.** One line under the bubble, `Waiting for the agent to finish`, drawn
+**only** where the daemon is holding the message — that is, only on an agent that
+cannot be steered. Where the message went into the running turn it is already in
+front of the model, and a status line about something that has already happened is
+furniture.
+
+**Why it is not a lie about `Bubble.tsx`'s "no `pending`" rule**, which forbids
+exactly this shape. That rule is about a message *this tab* has sent and not had
+answered: a claim about the network, drawn as doubt over something that had in
+fact been delivered. This is the **daemon** reporting a fact about the agent — the
+queue is on the snapshot, it survives closing the tab, and the line goes away when
+the message is handed over. The bubble itself is untouched, undimmed and unmarked.
+
+**Keyed on the seq and never on the text.** `queuedPrompts` carries `{id, seq,
+at}` and no body, so the snapshot does not resend the same sentence on every frame
+until it is delivered, and two identical messages cannot be confused for each
+other.
+
+**A context, and its identity is part of the contract.** `QueuedContext`, for the
+reason `DecisionsContext` already gives — a fresh `Set` as a prop is a new identity
+on every row on every token, which defeats `TailRow`'s memo entirely. The half
+that does not come free: `queuedSeqs` builds a fresh `Set` per call, so
+`SessionView` memoises it on the seqs themselves. It changes when the queue
+changes and at no other time, and the common case — empty — is one identity for
+the life of a turn.
+
+**No control to take it back**, on the owner's word and matching Claude Code,
+which has none either. What ends a wait is the turn ending, and what discards it
+is stopping the session, which says so in the transcript (Q2.226).
+
+**Status.** Current
+
 
 ## Deployment, packaging and code layout
 
@@ -25264,6 +25554,61 @@ PATH. `daemoncheck` drives what stands with stubs on PATH and an injected
 `--version`, the in-flight collapse, the fence, and `spawnPlan`; `webcheck` the
 refusals of the picker line; `relaycheck` nothing — none of this crosses the relay.
 What keeps the PATH copy moving is Q4.113.
+
+### Q6.107 — `_session/steering`: what the four agents actually do with a message sent mid-turn
+
+**Question.** ACP has no way to put a message into a turn that is already running,
+and the specification says nothing at all about a second `session/prompt` — the
+1.3.0 types carry no `concurrent`, no `busy`, no ordering rule. So what happens is
+adapter-defined, and Q2.226 needed it measured rather than inferred.
+
+**Measured 2026-09-11**, by sending one `initialize` to each installed binary and
+printing the answer:
+
+| Agent | Build | `_meta.steering.supported` |
+|---|---|---|
+| claude | claude-agent-acp 0.73.0 | `true` |
+| codex | codex-acp 1.8.0 | `true` |
+| kimi | @moonshot-ai/kimi-code 0.29.2 | **no `_meta` on the response at all** |
+| opencode | — | not measured; no adapter package in the tree |
+
+kimi's whole method set is the standard fourteen and its bundle declares no
+`_session/*` at all, so this is a real per-agent split rather than a formality.
+
+⚠ **It is a sibling of `agentCapabilities`, not a member of it.** claude also
+sends `agentCapabilities._meta.claudeCode.promptQueueing: true`, one key away, and
+reading the wrong `_meta` would answer `undefined` on codex and `true` on claude
+for the wrong reason. `AcpClient.supportsSteering` reads the top-level bag.
+
+**Measured, second: what an injection does to the turn.** Driving a real
+conversation on each, prompting for a long essay and injecting *"STOP … reply with
+exactly the word PINEAPPLE"* six seconds in:
+
+- **claude** answered `{outcome: "injected"}` in ~2 ms, abandoned the essay
+  mid-generation and streamed `P` / `INE` / `APPLE` 1.2 s later.
+- **codex** answered `{outcome: "injected"}` in ~4 ms and *finished* the essay
+  first, taking the message ~29 s later. Its adapter serialises steers per session
+  rather than pre-empting.
+
+⚠ **And the property the daemon depends on: on both, the original
+`session/prompt` stayed open and resolved exactly once, `stopReason: "end_turn"`.**
+An injection produces no second response and no second turn end, so `pump`'s
+accounting needs no change at all. That was the open risk in the plan for Q2.226 —
+claude's adapter documents pre-emption as *aborting* the cycle, which reads as if
+it would emit a `result` of its own — and it did not fire: `Turn.steeredEchoes`
+settles the turn at the SDK's `idle` instead.
+
+**Measured, third, and it is why the daemon opts into a fallback nobody asked
+for.** Steering a session with **no** turn running answers
+`{outcome: "startedNewTurn"}` and *starts* one — and that turn has no
+`session/prompt` request to resolve, so nothing would ever hand this daemon a
+`turn_end` for it. `Session.steer` therefore always sends
+`_meta.steering.idleBehavior: "promptRequired"`, the adapters' opt-in that makes
+the same race answer `promptRequired` and hand the decision back. `SteerOutcome`
+keeps a `started_new_turn` arm anyway, reported through `onWarning`, for an
+adapter that ignores the opt-in.
+
+**Status.** Current
 
 ## Open questions and deliberate non-goals
 

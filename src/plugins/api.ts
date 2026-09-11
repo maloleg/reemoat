@@ -468,7 +468,28 @@ export class PluginApi {
         const result = managed.prompt(prompt);
         if (result.kind !== "accepted") {
           undo?.();
-          throw new PluginApiError(`session_${result.kind}`, `that session would not take a prompt: ${result.kind}`);
+          /*
+           * ⚠ **A turn in flight is still a refusal *here*, and it is reported
+           * under the word it always was.**
+           *
+           * `ManagedSession.prompt` grew a `turn_in_flight` arm when a person's
+           * mid-turn message stopped being refused, and building this code out of
+           * `result.kind` would have silently renamed a plugin-visible error from
+           * `session_busy` to `session_turn_in_flight` — a wire change nobody
+           * asked for, in a surface with no version negotiation at all.
+           *
+           * It is also the right behaviour rather than merely the compatible one.
+           * A plugin's prompt takes an **origin claim** (`claimTurn` above), and
+           * `origin.ts` spends that claim on the next `turn_end` — which a steered
+           * message never produces, because an injection is not a second turn. So
+           * a steered plugin message would spend the *current* turn's end and
+           * suppress the hook for a turn it had nothing to do with, which is
+           * exactly the misattribution that machinery exists to prevent. Letting a
+           * plugin steer needs the claim to learn about messages that are not
+           * turns; until then this door stays shut.
+           */
+          const kind = result.kind === "turn_in_flight" ? "busy" : result.kind;
+          throw new PluginApiError(`session_${kind}`, `that session would not take a prompt: ${kind}`);
         }
         return result;
       }

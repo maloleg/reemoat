@@ -92,7 +92,8 @@ export const {
   withChoice,
   effortFollowUp,
 } = await import("../src/ui/agentConfig.js");
-export const { canCancelTurn, cancelInFlight, hasLiveAgent, isTerminal, showsWorking } = await import("../src/wire.js");
+export const { acceptsMidTurn, canCancelTurn, cancelInFlight, hasLiveAgent, isTerminal, needsHuman, queuedSeqs, showsWorking } =
+  await import("../src/wire.js");
 export const {
   TRANSCRIPT_SILENT,
   buildTail,

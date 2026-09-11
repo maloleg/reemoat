@@ -1220,6 +1220,34 @@ export interface SessionSnapshot {
    * is `{turn: null, cancelRequestedAt: null}` again, and asking twice is allowed.
    */
   cancelRequestedAt: number | null;
+  /**
+   * Messages this daemon has taken and the agent has not been given yet.
+   *
+   * Empty on every agent that can be steered, because there is nothing to wait:
+   * see {@link midTurnDelivery}. The `seq` on each entry names the `prompt` event
+   * the message already is, so a client draws its line under that bubble rather
+   * than inventing a row — the same division of labour `cancelRequestedAt` has
+   * with `turn_end`.
+   */
+  queuedPrompts: QueuedPrompt[];
+  /**
+   * What this session does with a message sent while a turn is running.
+   *
+   * `"steer"` — the agent takes it into the turn (claude, codex).
+   * `"queue"` — it waits for the turn to end (kimi, and anything else).
+   *
+   * ⚠ **On the snapshot because the client has to draw two different sentences,
+   * and optional on the mirror because an older daemon draws neither.** Its
+   * absence in `wire.ts` is the whole compatibility story for this feature: a
+   * daemon that does not send it is one that still answers `409 turn_in_flight`,
+   * so the composer keeps every gate it has today and Send stays refused. Nothing
+   * branches on a *version* — `compatibility.md` rule 1 — it branches on a
+   * capability the daemon states.
+   *
+   * `null` while there is no agent to ask. `holdConfig`'s problem and not this
+   * one: nothing is drawn from it while the strip is `stale`.
+   */
+  midTurnDelivery: "steer" | "queue" | null;
   lastEventAt: number | null;
   createdAt: number;
   /**
@@ -1424,9 +1452,113 @@ export type AgentConfigResult =
 
 export type PromptResult =
   | { kind: "accepted"; turn: number; seq: number }
+  /**
+   * A turn is running, so this message goes the other way in.
+   *
+   * ⚠ **Not a refusal any more, and splitting it off `busy` is what says so.** The
+   * two used to be one arm answering `409 turn_in_flight`, and they were never one
+   * fact: a `/clear` or a restart is the agent being *unaddressable* for a second,
+   * while a turn in flight is the agent working — which is the ordinary state
+   * somebody types a correction in. This arm carries no seq and appends nothing;
+   * it tells the route to go and call {@link ManagedSession.sendMidTurn}, which is
+   * async and therefore cannot live inside this method.
+   *
+   * `busy` keeps every assertion it had, including `daemoncheck`'s that a prompt
+   * beside an in-flight clear still answers `409 turn_in_flight` over HTTP.
+   */
+  | { kind: "turn_in_flight"; status: SessionStatus }
   | { kind: "busy"; status: SessionStatus }
   | { kind: "not_ready"; status: SessionStatus }
   | { kind: "terminal"; status: SessionStatus; exit: SessionExit | null };
+
+/**
+ * What became of a message sent while the agent was working.
+ *
+ * Three ways it can land and four ways it can fail, and the first two are the
+ * whole feature:
+ *
+ *   `steered` — the agent took it *into* the running turn. Nothing waits, nothing
+ *     is drawn, and the reply arrives in the turn already on screen.
+ *   `queued`  — the agent has no way to take it mid-turn, so this daemon holds it
+ *     and delivers it the instant the turn ends. `position` is how many are ahead
+ *     of it, so a client can say so rather than guess.
+ *   `accepted` — the turn ended underneath us between the route's check and here.
+ *     The honest answer is the ordinary one, and it is a **success**: re-answering
+ *     `turn_in_flight` for a session that is now idle would be a refusal about a
+ *     state that no longer exists.
+ *
+ * `queue_full` is the only new refusal. The rest are the states
+ * {@link PromptResult} already names, re-checked because this method awaits and
+ * the session can have gone terminal in between.
+ */
+export type MidTurnResult =
+  | { kind: "steered"; turn: number; seq: number }
+  | { kind: "queued"; id: string; seq: number; position: number }
+  | { kind: "accepted"; turn: number; seq: number }
+  | { kind: "queue_full"; limit: number }
+  | { kind: "busy"; status: SessionStatus }
+  | { kind: "not_ready"; status: SessionStatus }
+  | { kind: "terminal"; status: SessionStatus; exit: SessionExit | null };
+
+/**
+ * A message this daemon has taken and the agent has not been given yet.
+ *
+ * It rides the **snapshot** and never the log, which is `cancelRequestedAt`'s
+ * arrangement and it is here for the identical reason (Q2.42): the message itself
+ * is already a `prompt` event — appended when the daemon accepted it, which is
+ * what {@link PromptEvent} has always meant — so an event for *waiting* would put
+ * a second row on screen for one act. `seq` is what joins the two, and it is what
+ * lets a client draw the line under the right bubble without matching on text.
+ *
+ * In memory only. A daemon restart drops it, the same standing the interrupted
+ * turn itself has (Q2.12), and the cost is stated at {@link ManagedSession.doStop}
+ * rather than hidden: what is lost is the delivery, never the record.
+ */
+export interface QueuedPrompt {
+  id: string;
+  seq: number;
+  at: number;
+}
+
+/**
+ * A queued prompt with the message still attached.
+ *
+ * Split from {@link QueuedPrompt} so the *snapshot* carries neither the text nor
+ * the uploads: a snapshot is built on every status read and serialized to every
+ * attached socket, and a client needs only `seq` to find the bubble this is about.
+ * Putting the body on the wire would send the same message twice — once as the
+ * `prompt` event it already is, and again on every frame until it is delivered.
+ */
+interface QueuedEntry extends QueuedPrompt {
+  text: string;
+  attachments: readonly UploadRow[];
+}
+
+/**
+ * How many messages one session may hold for an agent that cannot be steered.
+ *
+ * A bound rather than a number somebody liked: every queued message is a `prompt`
+ * event already in the log and a set of uploads already marked consumed, so an
+ * unbounded queue is an unbounded write nobody pressed twice. Eight is well past
+ * the two or three corrections this exists for and well under anything that reads
+ * as a backlog.
+ */
+export const MAX_QUEUED_PROMPTS = 8;
+
+/**
+ * What the transcript says about a message this daemon took and will not deliver.
+ *
+ * One function rather than the literal at each site, because there are three of
+ * them — {@link ManagedSession.doStop}, the post-await re-check in
+ * {@link ManagedSession.sendMidTurn}, and the restart that could not bring an
+ * agent back — and a driver matching it by regex would go on passing while two of
+ * the three said different things about the same event.
+ */
+export function stoppedBeforeDelivery(count: number): string {
+  return count === 1
+    ? "the session stopped before this message reached the agent"
+    : `the session stopped before ${count} messages reached the agent`;
+}
 
 /**
  * What a `/clear` answered with.
@@ -1758,6 +1890,25 @@ export class ManagedSession {
    * value could only ever describe a turn that no longer exists.
    */
   private cancelRequestedAt: number | null = null;
+  /**
+   * Messages taken while a turn was running, waiting for it to end.
+   *
+   * Only ever non-empty on an agent that cannot be steered — {@link sendMidTurn}
+   * pushes here exactly when `Session.steer` was not an option. In memory, so a
+   * restart drops it; {@link doStop} is where that cost is written down.
+   *
+   * ⚠ **It is read by {@link parkable}**, and that is not tidiness. `status`
+   * reads `running` while the turn is up, but the queue outlives the turn by
+   * design — so between the turn ending and the drain there is an honest `idle`
+   * over a session that owes somebody an answer, and a queue that cannot drain
+   * only gets older while it waits. Exactly the hole the `clearing` marker had to
+   * close one field over.
+   */
+  private queuedPrompts: QueuedEntry[] = [];
+  /** Where a degradation with no other surface is reported. See the constructor. */
+  private readonly warn: ((detail: string) => void) | null = null;
+  /** Distinguishes queued entries within one session. Never leaves the daemon. */
+  private queueSeq = 0;
   private lastEventAt: number | null = null;
 
   /**
@@ -2087,6 +2238,11 @@ export class ManagedSession {
     // the message — a function has no name worth printing and the session id is
     // what identifies the loss.
     const onWarning = options.onWarning;
+    // Kept on the instance as well, because the log is no longer the only thing
+    // here with something to report: `sendMidTurn` has one arm — an agent that
+    // advertised steering and then started a turn of its own — that is invisible
+    // from every other surface. See `SteerOutcome`.
+    this.warn = onWarning ?? null;
     this.log = new SessionLog(
       id,
       store,
@@ -2349,6 +2505,32 @@ export class ManagedSession {
      * asking.
      */
     if (this.clearing || this.restarting) return false;
+    /*
+     * ⚠ **And a third clause, which — like `resumeGivenUp` below it — cannot fire
+     * today, and is kept deliberately with the reason written here rather than
+     * left to be rediscovered.**
+     *
+     * A queue outlives the turn it was filled during, so "idle with something
+     * waiting" is the state to worry about: taking the agent away there strands a
+     * message already accepted, already written into the transcript and already
+     * charged its uploads. It is unreachable as the code stands, and the argument
+     * is exhaustive rather than hopeful — `deliverQueued` runs in `pump`'s
+     * `finally`, after `whenRestarted` and after `clearContext`, and it declines
+     * in exactly six places: an empty queue, `terminal || stopRequested`,
+     * `clearing || restarting`, a turn in flight, and no session. None of those is
+     * a state `status` reports as `idle` while something is still queued. So a
+     * queue is either draining or behind a boundary the two clauses above already
+     * refuse on.
+     *
+     * It stays because it is the clause somebody would otherwise delete on the
+     * way to "…and park the settled ones too", and because what makes it
+     * unreachable is a property of *another* function's call sites — one new
+     * early return in `deliverQueued` reopens it in silence. Neither threshold
+     * would stand in for it: the sweep's half hour and the ceiling's two-minute
+     * floor are both about *age*, and a queue that cannot drain gets older while
+     * it waits.
+     */
+    if (this.queuedPrompts.length > 0) return false;
     if (this.agentSessionId === null) return false;
     if (this.resumeGivenUp !== null) return false;
     return now - (this.lastActivityAt ?? this.createdAt) >= idleMs;
@@ -2507,6 +2689,20 @@ export class ManagedSession {
       turn: this.turn,
       turnStartedAt: this.turnStartedAt,
       cancelRequestedAt: this.cancelRequestedAt,
+      /*
+       * Copied, like every other array here: a frame built now and serialized
+       * later must describe now.
+       *
+       * ⚠ **Field by field, never a spread.** `QueuedEntry` extends the public
+       * shape with the message body and its uploads, and `{...entry}` copied both
+       * onto every frame — found by driving a real kimi, where the snapshot came
+       * back carrying the text of a message that is already a `prompt` event one
+       * seq away. That is the duplication {@link QueuedPrompt} exists to prevent,
+       * on every snapshot until delivery, and it is invisible to a type: the
+       * extra keys are assignable to the declared one.
+       */
+      queuedPrompts: this.queuedPrompts.map((entry) => ({ id: entry.id, seq: entry.seq, at: entry.at })),
+      midTurnDelivery: this.session === null ? null : this.session.supportsSteering ? "steer" : "queue",
       lastEventAt: this.lastEventAt,
       createdAt: this.createdAt,
       // Primitives, so `Object.freeze` being shallow is not a problem the way it
@@ -2655,6 +2851,15 @@ export class ManagedSession {
       // every prompt for the rest of its life — `session.clearContext` can throw,
       // and the conversation it was replacing is then still the live one.
       this.clearing = false;
+      // And the same nudge the restart path owes, for the same reason: a clear is
+      // the second of the three states `deliverQueued` declines in.
+      //
+      // ⚠ A message queued *before* a `/clear` is delivered *after* it, into the
+      // fresh conversation. That is the honest reading of both acts in the order
+      // they were asked for, and it is why the queue is not emptied here: the
+      // person sent the message and then cleared, so the message is what they
+      // want the new conversation to start with.
+      this.deliverQueued();
     }
   }
 
@@ -3737,6 +3942,23 @@ export class ManagedSession {
        */
       this.restart = null;
       this.touchSafe();
+      // A restart is one of the states `deliverQueued` declines in, so the way out
+      // of it owes the queue a nudge — otherwise a message taken just before the
+      // agent was replaced waits for a turn that nobody will start.
+      this.deliverQueued();
+      /*
+       * ⚠ **And if no agent came back, the nudge lands on nothing.**
+       *
+       * `doStop` deliberately keeps the queue for `config_changed`, which is how
+       * `restartAgent` reaches its process boundary — so a `resume()` that threw
+       * leaves entries with no path out at all: `deliverQueued` returns at its
+       * `!session`, and its only other callers are `pump`'s `finally` and
+       * `clearContext`, neither of which runs on a session that never came back.
+       * `onAgentUnusable` swallows the failure (`.catch(() => undefined)`) and is
+       * exactly the caller most likely to hit it, since it fires when the agent is
+       * already broken.
+       */
+      if (this.session === null) this.dropQueuedUndelivered();
       // Resolved last, so a prompt that was waiting resumes against the corrected
       // state rather than racing the frame that corrects it. `resolve`, never
       // `reject`: see {@link whenRestarted}.
@@ -4002,6 +4224,47 @@ export class ManagedSession {
     // which burns the whole cancel grace and pushes teardown onto the kill path.
     this.sweepPending("session_stopped");
 
+    /*
+     * **A message this daemon took and will not deliver says so, and that is
+     * required rather than tidy.**
+     *
+     * Each queued message is already a `prompt` event in the log — appended when
+     * it was accepted — so dropping the queue in silence leaves a prompt with no
+     * turn end after it, which is precisely the shape Q2.218 named as "a message
+     * that reached no model" and spent four releases being invisible. One `error`
+     * event rather than one per message: what a reader needs is that the session
+     * ended owing them a reply, and a stop that discards five drafts should not
+     * write five rows about one act.
+     *
+     * The same silence is what a **daemon restart** costs, and there is no event
+     * for that one because there is nobody left to write it: the queue is in
+     * memory (see the field), the interrupted turn is deliberately not re-run
+     * either (Q2.12), and what survives is the transcript showing the message
+     * with no answer under it.
+     */
+    /*
+     * ⚠ **Only where the session is not coming back, and that qualifier is a
+     * defect this block shipped without.**
+     *
+     * `restartAgent` reaches its process boundary through `stop("config_changed")`
+     * — the daemon taking the agent away and bringing it straight back — so an
+     * unconditional drop here threw away a message somebody had just typed and
+     * then wrote *"the session stopped"* into the transcript of a session that
+     * had not. Reproduced from `onAgentUnusable`, i.e. an agent dying or failing
+     * to authenticate **mid-turn**, which is precisely the turn a correction gets
+     * typed into. It also made `restartAgent`'s own `deliverQueued` dead code.
+     *
+     * The test is the same one `autoResumable` makes about this exact reason set:
+     * these three are the daemon's own doing and it owes the conversation a fresh
+     * agent, so the queue is owed the same. `parked` never reaches here with a
+     * queue — `parkable` refuses on one — and `daemon_shutdown` keeps a queue this
+     * process is about to lose anyway, which costs nothing and needs no arm of
+     * its own.
+     */
+    const comingBack =
+      reason === "daemon_shutdown" || reason === "daemon_restarted" || reason === "config_changed";
+    if (!comingBack) this.dropQueuedUndelivered();
+
     // The controls belong to the live agent, so they go with it. Assigned rather
     // than announced: appending an `agent_config` here would put "no controls"
     // in the transcript as if the agent had said so, when the terminal `status`
@@ -4150,15 +4413,240 @@ export class ManagedSession {
     if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
     const session = this.session;
     if (!session) return { kind: "not_ready", status: this.status };
-    // `clearing` beside `turn`, because during a `/clear` this session has no turn
-    // and is still not something to send a prompt to: the id `Session.prompt`
-    // would read is the one `clearContext` is in the middle of closing. See the
-    // field.
-    if (this.turn !== null || this.clearing || this.restarting) return { kind: "busy", status: this.status };
+    // `clearing` beside `restarting`, because during a `/clear` this session has
+    // no turn and is still not something to send a prompt to: the id
+    // `Session.prompt` would read is the one `clearContext` is in the middle of
+    // closing. See the field.
+    //
+    // ⚠ **`this.turn !== null` used to be the third clause of this expression and
+    // is its own arm now**, and the split is the feature rather than a tidy-up: a
+    // clear is the agent being unaddressable, a turn is the agent *working*, and
+    // only the first is a reason to refuse a person's message. Everything about
+    // `busy` is unchanged, including the `409 turn_in_flight` it still answers.
+    if (this.clearing || this.restarting) return { kind: "busy", status: this.status };
+    if (this.turn !== null) return { kind: "turn_in_flight", status: this.status };
 
-    // Guard on our own counter, assigned before any await. Session.prompt is a
-    // generator, so its own "already in flight" throw would not surface until the
-    // first next() — far too late to answer the request with a 409.
+    const turn = this.armTurn();
+    const seq = this.recordPrompt(session, text, attachments);
+    this.runTurn(session, text, attachments, turn);
+    return { kind: "accepted", turn, seq };
+  }
+
+  /**
+   * Take a message while the agent is working.
+   *
+   * The other half of {@link prompt}, and async where that one is synchronous by
+   * contract — which is the whole reason it is a second method rather than a
+   * branch. `Session.steer` is an RPC, `prompt` has nowhere to put an await, and
+   * the guard `prompt` depends on is an assignment made before any await. So the
+   * route calls this one when `prompt` answers `turn_in_flight`.
+   *
+   * **Two ways in and one rule for the log.** Steered or queued, the message is
+   * appended as an ordinary `prompt` event the moment this daemon accepts it —
+   * which is what {@link PromptEvent} has always said it means — and it is never
+   * appended a second time on delivery. That is what gives the client a seq to
+   * settle its echo against, puts the bubble where the message was actually
+   * written, and makes the queue a fact about *delivery* rather than about the
+   * conversation.
+   *
+   * **The bound is checked before anything is written.** It has to be: the queue
+   * is only reached on the steer path when the steer *fails*, by which point an
+   * append would already have happened, and a recorded prompt nobody will ever
+   * deliver is precisely the shape Q2.218 calls a message that reached no model.
+   * On a steerable agent the queue is empty, so the check is free and still right.
+   */
+  async sendMidTurn(text: string, attachments: readonly UploadRow[] = []): Promise<MidTurnResult> {
+    if (this.terminal) return { kind: "terminal", status: this.status, exit: this.exitRecord };
+    if (this.stopRequested) return { kind: "terminal", status: this.status, exit: null };
+    const session = this.session;
+    if (!session) return { kind: "not_ready", status: this.status };
+    if (this.clearing || this.restarting) return { kind: "busy", status: this.status };
+
+    // The turn ended between the route's call to `prompt` and this one. Not a
+    // refusal and not a special case: the ordinary path is now the correct one,
+    // and it re-guards everything above from scratch.
+    const turn = this.turn;
+    if (turn === null) return this.asMidTurn(this.prompt(text, attachments));
+
+    if (this.queuedPrompts.length >= MAX_QUEUED_PROMPTS) {
+      return { kind: "queue_full", limit: MAX_QUEUED_PROMPTS };
+    }
+
+    const seq = this.recordPrompt(session, text, attachments);
+
+    let promptRequired = false;
+    if (session.supportsSteering) {
+      const extra =
+        attachments.length === 0 || !this.uploads
+          ? []
+          : await this.uploads.blocksFor(attachments, { image: session.acceptsImages });
+      const outcome = await session.steer(text, extra);
+      if (outcome === "injected") {
+        this.touchSafe();
+        /*
+         * ⚠ **The turn captured above, never `this.turn` re-read here.** Two
+         * awaits have happened, so `pump`'s `finally` may have cleared the field
+         * — and TypeScript keeps the `=== null` narrowing across an await, so
+         * `this.turn` reads as `number` while being `null` at runtime, which is
+         * how a `202 {steered: true, turn: null}` reached the wire against a
+         * declared `number`. The captured value is also the honest one: it names
+         * the turn the agent said it injected into, which does not stop being
+         * true when that turn ends.
+         */
+        return { kind: "steered", turn, seq };
+      }
+      if (outcome === "started_new_turn") {
+        /*
+         * The agent took the message and started a turn this daemon does not own.
+         *
+         * Reachable two ways: the turn ended inside the RPC and the adapter
+         * ignored the `promptRequired` opt-in `Session.steer` sends, or it never
+         * supported that opt-in. Either way the message is *delivered* — so
+         * re-sending it would double it — and what is lost is the turn boundary:
+         * there is no `session/prompt` to resolve, so no `turn_end` will ever
+         * arrive for it. The output is not lost with it; `startIdleDrain` is
+         * already reading the queue between turns and records every event of it.
+         *
+         * Reported rather than swallowed, because this is invisible from every
+         * other surface: the transcript just shows an answer with no turn around
+         * it.
+         */
+        this.warn?.(`${this.id}: a steered message started a turn this daemon cannot see end`);
+        this.touchSafe();
+        // The captured turn, for the reason the arm above states.
+        return { kind: "steered", turn, seq };
+      }
+      // `prompt_required` — the turn ended and nothing was delivered — or
+      // `unsupported`, an agent that advertised the method and then refused it.
+      // Both fall through to the two honest routes below, and `prompt_required`
+      // is answered *after* the re-check rather than here: see the arm.
+      promptRequired = outcome === "prompt_required";
+    }
+
+    /*
+     * ⚠ **Re-checked, because everything above may have happened during an
+     * await.**
+     *
+     * The guards at the top of this method were true when it was entered;
+     * `blocksFor` and `steer` are two real awaits, and a stop landing inside them
+     * used to answer `202 {queued: true}` for a session that was already
+     * terminal — with `doStop`'s own drop having run while the queue was still
+     * empty, so nothing was said either. The message then rode `queuedPrompts` on
+     * every snapshot of a dead session for ever. Recorded here rather than left
+     * silent for the reason `doStop` states: a `prompt` event with nothing after
+     * it is Q2.218's shape, and this daemon says when it will not deliver one.
+     *
+     * The bound is re-read for a smaller reason on the same axis: on the steer
+     * path the push is two awaits after the check, so concurrent sends could each
+     * pass it at zero and land past it.
+     */
+    if (this.terminal || this.stopRequested) {
+      this.safeAppend({ type: "error", message: stoppedBeforeDelivery(1), data: null });
+      return { kind: "terminal", status: this.status, exit: this.exitRecord };
+    }
+
+    /*
+     * **The turn ended under the steer and nothing was delivered, so this message
+     * is owed an ordinary turn of its own.**
+     *
+     * ⚠ **Below the re-check, and that position is the fix rather than the
+     * layout.** This arm used to sit inside the `supportsSteering` block and
+     * `return` from there, so it took only `this.turn === null` and
+     * `this.session !== null` after two awaits — skipping the four guards the top
+     * of this method takes. Reproduced: a `/clear` starting in that window left
+     * `clearing` true, and the turn was armed anyway and its `session/prompt`
+     * addressed to the ACP session `clearContext` had **just abandoned** — the
+     * message going to a conversation nobody would ever read, under a
+     * `202 {accepted: true}`. That is verbatim the defect the `clearing` field
+     * exists to prevent. `terminal`/`stopRequested` are covered by the block
+     * above; `clearing`/`restarting` are named here, and a message that meets one
+     * falls through to the queue, which `clearContext` and `whenRestarted` each
+     * drain on their way out.
+     *
+     * ⚠ The one place the append happens *before* the turn is armed, where
+     * `prompt` does it the other way round. It cannot be helped and it is
+     * harmless: the steer needed the seq before it knew whether the message had
+     * landed. What `prompt`'s ordering buys is that nobody sees a turn begin on a
+     * nameless session, and the title was set by `recordPrompt` above, so that
+     * property holds here too.
+     *
+     * `this.session` re-read rather than the local captured before the awaits: a
+     * restart can begin and finish inside the ten seconds a steer is allowed, and
+     * pumping the disposed `Session` would arm a turn against a dead agent and
+     * lose the message to a closed-queue error.
+     */
+    if (promptRequired && this.turn === null && !this.clearing && !this.restarting) {
+      const live = this.session;
+      if (live !== null) {
+        const started = this.armTurn();
+        this.runTurn(live, text, attachments, started);
+        return { kind: "accepted", turn: started, seq };
+      }
+    }
+
+    if (this.queuedPrompts.length >= MAX_QUEUED_PROMPTS) {
+      this.safeAppend({
+        type: "error",
+        message: "too many messages were already waiting, so this one was not queued",
+        data: null,
+      });
+      return { kind: "queue_full", limit: MAX_QUEUED_PROMPTS };
+    }
+
+    this.queueSeq += 1;
+    const entry: QueuedEntry = {
+      id: `q_${this.queueSeq}`,
+      seq,
+      at: Date.now(),
+      text,
+      attachments,
+    };
+    this.queuedPrompts.push(entry);
+    const position = this.queuedPrompts.length - 1;
+    this.touchSafe();
+    /*
+     * ⚠ **Because the turn may have ended while the steer was in flight, and then
+     * nothing would ever come back for this.**
+     *
+     * `deliverQueued` runs from `pump`'s `finally`, so a turn that ends during the
+     * `await` above drains an **empty** queue and goes quiet — and the entry
+     * pushed one line up is then waiting for a turn nobody is going to start. It
+     * is not a narrow window either: the steer is bounded at ten seconds and this
+     * arm is reached precisely when the agent is not answering promptly.
+     *
+     * A no-op in the ordinary case, where the turn is still running, so this is
+     * one call rather than a condition somebody has to keep true. The `prompt_required`
+     * arm above handles its own half explicitly because it has a turn to name in
+     * the answer; this one does not, and `queued` stays the honest word for a
+     * message that was queued — the snapshot the route sends back is what says
+     * whether it is still waiting.
+     */
+    this.deliverQueued();
+    return { kind: "queued", id: entry.id, seq, position };
+  }
+
+  /**
+   * A {@link PromptResult} read as a {@link MidTurnResult}.
+   *
+   * The two unions share every arm the ordinary path can produce; `turn_in_flight`
+   * is the one that cannot be reached from here, because the only caller has just
+   * established there is no turn. Refused with a `busy` rather than widened,
+   * because a `MidTurnResult` saying "a turn is in flight" would send the route
+   * back round a loop it just came out of.
+   */
+  private asMidTurn(result: PromptResult): MidTurnResult {
+    return result.kind === "turn_in_flight" ? { kind: "busy", status: result.status } : result;
+  }
+
+  /**
+   * Claim the next turn number, synchronously and before any await.
+   *
+   * `Session.prompt` is a generator, so its own "already in flight" throw would
+   * not surface until the first `next()` — far too late to answer a request. This
+   * counter is the guard that does, and every assignment in here happens in one
+   * synchronous run so nothing can interleave between them.
+   */
+  private armTurn(): number {
     this.turnCounter += 1;
     const turn = this.turnCounter;
     this.turn = turn;
@@ -4167,16 +4655,27 @@ export class ManagedSession {
     // this message meets the same wall. See `onAgentUnusable` and the flag's own
     // docblock.
     this.authRestartArmed = true;
+    return turn;
+  }
 
+  /**
+   * Write the message into the log and spend its uploads, once.
+   *
+   * Called at the moment the daemon **accepts** a message — which for a queued one
+   * is well before the agent is handed it, and that is deliberate. The delivery
+   * path deliberately does not call this again; a second `prompt` event for one
+   * message would put the same bubble in the conversation twice.
+   */
+  private recordPrompt(session: Session, text: string, attachments: readonly UploadRow[]): number {
     // The first prompt names the session, once.
     //
-    // Below the guards above, so a prompt this daemon *refused* never names
-    // anything — a session called "hi" that never ran would be worse than one
-    // called by its path. The `=== null` test is the whole of the "written once"
-    // rule: a manual rename leaves the field non-null and therefore wins for ever,
-    // and clearing a title back to null is what re-arms this. `touchSafe()` below
-    // persists it and fans it out in the same frame as the turn start, so no
-    // client sees a turn begin on a session that is still nameless.
+    // Below the guards in the callers, so a prompt this daemon *refused* never
+    // names anything — a session called "hi" that never ran would be worse than
+    // one called by its path. The `=== null` test is the whole of the "written
+    // once" rule: a manual rename leaves the field non-null and therefore wins for
+    // ever, and clearing a title back to null is what re-arms this. `touchSafe()`
+    // in the callers persists it and fans it out in the same frame as the turn
+    // start, so no client sees a turn begin on a session that is still nameless.
     //
     // Still the text alone, with attachments deliberately not consulted — and the
     // second half of that reasoning has changed, so it is worth restating rather
@@ -4216,6 +4715,11 @@ export class ManagedSession {
      * the ordering actually buys is that the recorded event and the mark cannot
      * interleave.
      *
+     * ⚠ **A queued message spends its uploads here too, at accept rather than at
+     * delivery.** It has to: the 24-hour sweep does not know about the queue, and
+     * a message waiting for a long turn is exactly the one whose files would be
+     * collected out from under it.
+     *
      * Synchronous SQLite, off the agent's emit path.
      */
     if (attachments.length > 0) {
@@ -4224,12 +4728,84 @@ export class ManagedSession {
         attachments.map((row) => row.uploadId),
       );
     }
+    return seq;
+  }
 
+  /** Hand the turn to the agent. The half of a send that is the same either way. */
+  private runTurn(
+    session: Session,
+    text: string,
+    attachments: readonly UploadRow[],
+    turn: number,
+  ): void {
     void this.pump(session, text, attachments, turn).catch(() => {
       // pump() already recorded whatever went wrong.
     });
     this.touchSafe();
-    return { kind: "accepted", turn, seq };
+  }
+
+  /**
+   * Hand the agent the next message that has been waiting for it.
+   *
+   * ⚠ **Called from the very end of `pump`'s `finally`, and the position is the
+   * rule.** `sweepPending` runs in that block and is *not* fenced on turn
+   * identity, so starting the next turn any earlier would have this session's own
+   * sweep cancel a permission the new turn had already raised. Everything else in
+   * there — clearing `turn`, the idle drain, `onAgentUnusable` — has to have
+   * happened too, which is why this is last rather than merely late.
+   *
+   * Every refusal is a no-op that leaves the queue alone. A session that is
+   * terminal, stopping, clearing or restarting will be asked again: `whenRestarted`
+   * and `clearContext` both call this on their way out, so the only way a message
+   * strands is a state none of the four ever leaves.
+   *
+   * ⚠ **A stop is not that state, and it used to be the whole of this
+   * paragraph.** `doStop` empties the queue only where the session is *not* coming
+   * back: for `daemon_shutdown`, `daemon_restarted` and `config_changed` it
+   * deliberately keeps it, which is what makes `restartAgent`'s own call live code
+   * rather than dead. So a queue outliving a stop is a designed state, and what
+   * has to hold is that every path out of one asks again.
+   */
+  /**
+   * Forget what is waiting, and say so once.
+   *
+   * The debt {@link doStop} states: every queued message is already a `prompt`
+   * event in the log, so letting one go in silence leaves a prompt with no turn
+   * end after it — Q2.218's shape exactly. One `error` for the act rather than one
+   * per message, because what a reader needs is that the session ended owing them
+   * a reply.
+   *
+   * ⚠ **Two callers, and the second is the one that was missing.** `doStop` pays
+   * this where the session is not coming back; `restartAgent` pays it where the
+   * session was *supposed* to come back and did not. Without the second, a resume
+   * that threw left the queue on a terminal session's snapshot for ever — the
+   * transcript drawing "Waiting for the agent to finish" under a message on a
+   * conversation that had ended, with nothing to clear it and no event saying
+   * what happened. Worse than the silence: `wakeForPrompt` can revive such a
+   * session, and the stale entry was then delivered **after** whatever the person
+   * typed next, reordering the conversation they came back to.
+   */
+  private dropQueuedUndelivered(): void {
+    const dropped = this.queuedPrompts.length;
+    if (dropped === 0) return;
+    this.queuedPrompts = [];
+    this.safeAppend({ type: "error", message: stoppedBeforeDelivery(dropped), data: null });
+  }
+
+  private deliverQueued(): void {
+    if (this.queuedPrompts.length === 0) return;
+    if (this.terminal || this.stopRequested) return;
+    if (this.clearing || this.restarting) return;
+    if (this.turn !== null) return;
+    const session = this.session;
+    if (!session) return;
+
+    const entry = this.queuedPrompts.shift();
+    if (entry === undefined) return;
+    const turn = this.armTurn();
+    // No `recordPrompt`: this message was written into the log when it was
+    // accepted, and its uploads were spent then too.
+    this.runTurn(session, entry.text, entry.attachments, turn);
   }
 
   /**
@@ -4312,9 +4888,13 @@ export class ManagedSession {
   ): Promise<void> {
     let failed = false;
     try {
-      // The one place an attachment's bytes are read, and the only await this
-      // feature adds to a turn. Here rather than in `prompt` because this method
-      // is already async — the emit path above it is not and must stay that way.
+      // Here rather than in `prompt` because this method is already async — the
+      // emit path above it is not and must stay that way.
+      //
+      // ⚠ This said "the one place an attachment's bytes are read, and the only
+      // await this feature adds to a turn", and mid-turn messages made both halves
+      // false: `sendMidTurn` calls `blocksFor` too, on the steer path, and that one
+      // runs *concurrently with a live turn* rather than at the head of one.
       const extra =
         attachments.length === 0 || !this.uploads
           ? []
@@ -4420,7 +5000,10 @@ export class ManagedSession {
          * has been replaced does not attach a reader to the old one.
          */
         const live = this.session;
-        if (live !== null) this.startIdleDrain(live);
+        // Not while something is waiting: `deliverQueued` at the foot of this
+        // block is about to claim the queue for a turn, and `claimForTurn` would
+        // displace a drain started one statement earlier for no reason.
+        if (live !== null && this.queuedPrompts.length === 0) this.startIdleDrain(live);
       }
       this.sweepPending(failed ? "pump_failed" : "turn_ended");
       /*
@@ -4451,6 +5034,16 @@ export class ManagedSession {
        */
       if (failed) this.onAgentUnusable();
       this.touchSafe();
+      /*
+       * **Last, and the position is the rule rather than the ordering that read
+       * best.** `sweepPending` above is not fenced on turn identity, so a turn
+       * started any earlier in this block would have its own permissions
+       * cancelled by this turn's sweep; `onAgentUnusable` above may have armed a
+       * restart, which `deliverQueued` then declines and `whenRestarted` picks up.
+       * Everything it needs to be true is true by the time it runs, which is the
+       * whole reason it is a call at the end rather than a branch in the middle.
+       */
+      this.deliverQueued();
     }
   }
 

@@ -106,6 +106,62 @@ const CANCEL_SEND_TIMEOUT_MS = 1_000;
 const CANCEL_SETTLE_MS = 1_500;
 const CLOSE_TIMEOUT_MS = 2_000;
 /**
+ * The ACP **extension** that puts a message into the turn already running.
+ *
+ * The leading underscore is the protocol's own mark for a method outside the
+ * standard set, so nothing here may treat it as ACP proper: it is offered by an
+ * agent or it is not, `AcpClient.supportsSteering` is the whole test, and a
+ * daemon-held queue is what covers the agents that decline.
+ *
+ * Measured 2026-09-11 against the pinned adapters, driving a real turn and
+ * injecting into it:
+ *
+ *   claude-agent-acp 0.73.0  `{outcome: "injected"}` in ~2ms; the agent abandoned
+ *                            the essay it was writing and answered the injected
+ *                            message instead.
+ *   codex-acp 1.8.0          `{outcome: "injected"}` in ~4ms; the agent finished
+ *                            what it was saying first and took the message after.
+ *
+ * ⚠ **And the property this daemon actually depends on: the original
+ * `session/prompt` stayed open and resolved exactly once, `end_turn`, on both.**
+ * An injection is not a second turn, produces no second response and no second
+ * `turn_end`, so `pump`'s accounting is untouched by it. That was the open risk
+ * and it did not fire.
+ */
+const STEER_METHOD = "_session/steering";
+/**
+ * Ceiling on the steer request, which writes to the agent's stdin like every
+ * other RPC here.
+ *
+ * ⚠ **A timeout is the one place this feature can duplicate a message**, and it
+ * is bounded rather than solved: nothing distinguishes "the agent never read it"
+ * from "the agent took it and was slow to answer", so a caller that queued on
+ * timeout could deliver the same text twice. Ten seconds is chosen against the
+ * measurement above — both adapters answered in single-digit milliseconds,
+ * because the answer says only that the message was *accepted*, never that it was
+ * acted on — so a timeout here means the pipe is not being read at all, which is
+ * the case where a queued retry is right.
+ */
+const STEER_TIMEOUT_MS = 10_000;
+
+/**
+ * What became of a steered message.
+ *
+ * Four values where the wire has three, and the fourth is the point: `unsupported`
+ * is this daemon's word for "ask somebody else", covering both an agent that never
+ * advertised the method and one that advertised it and then refused the call.
+ *
+ * ⚠ **`started_new_turn` is a failure mode here rather than a success.** Measured
+ * 2026-09-11 on claude-agent-acp 0.73.0: steering with no turn running starts one,
+ * and that turn has **no `session/prompt` request to resolve** — so nothing ever
+ * hands this daemon a `turn_end` for it and `pump` could never close it. That is
+ * why {@link Session.steer} opts into the adapters' `promptRequired` fallback and
+ * why {@link ManagedSession} only steers while it holds a turn. Reaching this arm
+ * means the race was lost or the adapter ignored the opt-in; the events still
+ * arrive and are recorded by the idle drain, and the caller reports it.
+ */
+export type SteerOutcome = "injected" | "started_new_turn" | "prompt_required" | "unsupported";
+/**
  * Ceiling on the `session/new` a clear opens.
  *
  * Measured at ~600ms against claude 0.63.0 on an already-running process — no
@@ -1668,6 +1724,83 @@ export class Session {
    */
   awaitTurnEnd(timeoutMs: number = CANCEL_SETTLE_MS): Promise<boolean> {
     return this.waitForTurnToSettle(timeoutMs);
+  }
+
+  /**
+   * Whether this agent takes a message into the turn it is already running.
+   *
+   * Read through to the client, like {@link acceptsImages}, so a caller never has
+   * to know that the answer lives in `initialize`'s `_meta` rather than in
+   * `agentCapabilities`.
+   */
+  get supportsSteering(): boolean {
+    return this.client.supportsSteering();
+  }
+
+  /**
+   * Put a message into the turn that is already running.
+   *
+   * The one thing plain `session/prompt` cannot do, and the reason this method
+   * exists rather than a second prompt: claude's adapter queues a second prompt
+   * FIFO while codex's **supersedes** the first, so the same call means two
+   * different things on two agents and one of them silently discards a live turn.
+   * `_session/steering` means one thing on both.
+   *
+   * **`idleBehavior: "promptRequired"` is not optional here**, and it is opt-in on
+   * the wire because the adapters' default is the older behaviour. Without it, a
+   * steer that finds no turn *starts* one — with no `session/prompt` for this
+   * daemon to await, so `pump` would never see it end. With it, the same race
+   * answers `prompt_required` and hands the decision back, which is the only shape
+   * `ManagedSession` can act on. See {@link SteerOutcome}.
+   *
+   * Bounded like every other RPC that writes to agent stdin, and the bound is a
+   * refusal rather than a guess: a timeout answers `unsupported`, so the caller
+   * queues. {@link STEER_TIMEOUT_MS} carries what that costs.
+   *
+   * An outcome string this daemon does not know degrades to `injected`, which is
+   * `compatibility.md`'s "fail toward keep working" pointed at the one direction
+   * that matters here: the request succeeded, so the agent took the message, and
+   * re-sending it because we could not read the label would put the same sentence
+   * into the model twice.
+   */
+  async steer(text: string, extra: readonly acp.ContentBlock[] = []): Promise<SteerOutcome> {
+    if (!this.supportsSteering) return "unsupported";
+
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), STEER_TIMEOUT_MS);
+    });
+
+    let answer: unknown;
+    try {
+      answer = await Promise.race([
+        this.client.agent.request<unknown, unknown>(STEER_METHOD, {
+          sessionId: this.sessionId,
+          // The same block-building rule `prompt` states: no empty text block,
+          // because a message that is only a screenshot is legitimate and an
+          // empty string is a turn the agent has to interpret.
+          prompt: text.length === 0 ? [...extra] : [{ type: "text", text }, ...extra],
+          _meta: { steering: { idleBehavior: "promptRequired" } },
+        }),
+        expired,
+      ]);
+    } catch {
+      // An agent that advertised the method and then refused the call — `-32601`
+      // from one that lied, or anything else. Both mean the same thing to the
+      // caller, which is that this message needs the other route.
+      return "unsupported";
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (answer === "timeout") return "unsupported";
+    const outcome =
+      answer !== null && typeof answer === "object"
+        ? (answer as Record<string, unknown>)["outcome"]
+        : undefined;
+    if (outcome === "startedNewTurn") return "started_new_turn";
+    if (outcome === "promptRequired") return "prompt_required";
+    return "injected";
   }
 
   private sendCancel(): Promise<void> {

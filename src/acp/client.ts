@@ -597,6 +597,40 @@ export class AcpClient {
   }
 
   /**
+   * Whether this agent will take a message *into* the turn already running.
+   *
+   * `_session/steering` is an ACP **extension** — the underscore is the protocol's
+   * own mark for one — so it is read from `_meta` rather than from
+   * `agentCapabilities`, and it is a **fourth** capability shape read a fourth way.
+   * `sessionCapabilities.resume` is an empty-object marker, `promptCapabilities.
+   * image` a declared boolean, `elicitation.form` a marker whose absence is the
+   * only decline — and this one is a declared boolean nested under a top-level
+   * `_meta` key, i.e. a sibling of `agentCapabilities` and not a member of it.
+   * Reading it off `agentCapabilities._meta` is the obvious mistake and it
+   * typechecks, because both `_meta` bags are open.
+   *
+   * Measured 2026-09-11 on the pinned builds, by sending one `initialize` and
+   * printing the answer:
+   *
+   *   claude-agent-acp 0.73.0  `_meta.steering.supported: true`
+   *   codex-acp 1.8.0          `_meta.steering.supported: true`
+   *   kimi 0.29.2              no `_meta` on the response at all
+   *   opencode                 not measured; no adapter package to read
+   *
+   * So this is genuinely a per-agent answer rather than a formality, which is why
+   * `ManagedSession` carries a queue for the agents that say no. `=== true`, not
+   * `!= null`, for `acceptsImages`' reason: a declared boolean read as a marker
+   * turns `{supported: false}` into yes.
+   */
+  supportsSteering(): boolean {
+    const meta = this.initializeResult._meta;
+    if (meta === null || typeof meta !== "object") return false;
+    const steering = (meta as Record<string, unknown>)["steering"];
+    if (steering === null || typeof steering !== "object") return false;
+    return (steering as Record<string, unknown>)["supported"] === true;
+  }
+
+  /**
    * Shuts the agent down without leaving an orphan.
    *
    * Closing stdin is the graceful path — both adapters treat EOF as "connection

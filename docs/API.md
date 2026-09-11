@@ -102,7 +102,7 @@ plugin *manifest* does name all three, disclosed in `consent.adds` on
 | `POST /sessions` · `GET /sessions` | Create, list |
 | `GET /sessions/:id` · `DELETE /sessions/:id` | One session's snapshot; stop it and drop its worktree |
 | `POST /sessions/:id/resume` | Reattach an agent to a session that ended |
-| `POST /sessions/:id/prompt` | Answers 202; the turn runs on the daemon |
+| `POST /sessions/:id/prompt` | Answers 202; the turn runs on the daemon. Sent while a turn is already running it is still 202, carrying `steered` where the agent took it into that turn, `queued` (with `id` and `position`) where the daemon is holding it until the turn ends, or neither where the turn ended under the request and it became an ordinary send. `429 prompt_queue_full` carries the `limit` past which nothing more is held; `409 turn_in_flight` survives and now names only the `/clear`-and-restart window, where the agent's session id is being replaced and nothing may address it. Whether a mid-turn message is taken at all is `midTurnDelivery` on the snapshot — `"steer"`, `"queue"`, or `null` while no agent is up — and an **absent** field names a daemon that still refuses, which is what a client must branch on rather than on a version |
 | `POST /sessions/:id/cancel` | Stop the turn. The conversation stays loaded |
 | `POST /sessions/:id/config` | The agent's own controls — mode, model, effort |
 | `POST /sessions/:id/meta` | Title, pin, and where the row sits in the list. `rank` is a position clock — a millisecond, `null` for "follows its age" — and it is **always** on the snapshot, so an absent field names a daemon that cannot store an order. A drop into the pinned group carries `pinned` and `rank` in one request, which is why this is not a route of its own |

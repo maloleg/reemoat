@@ -430,7 +430,7 @@ length guard does not tell the two apart. Q3.410.
 | `packages/web/src/ui/commands.ts` | What a `/` means, as pure functions: where the token starts and ends, which entries exist, how a query ranks them |
 | `packages/web/src/ui/composing.ts` | What the empty box says and who gets the caret, including `focusWorthKeeping` |
 | `packages/web/src/ui/agentConfig.ts` | The config bar's rules as pure functions: slotting, `labelFor`, `choiceOverride`, the prose the snapshot strips |
-| `packages/web/src/ui/Composer.tsx` | Where a prompt is written, and **the box everything else here is inside**: Enter to send, auto-grow, the draft, the `/` menu, the chips, the paperclip, the control row, Stop in the send slot. It **writes** the optimistic echo and does not draw it |
+| `packages/web/src/ui/Composer.tsx` | Where a prompt is written, and **the box everything else here is inside**: Enter to send, auto-grow, the draft, the `/` menu, the chips, the paperclip, the control row, and the send slot — Stop while the box is empty, Send the moment it is not (`mid-turn-messages.md`). It **writes** the optimistic echo and does not draw it |
 | `packages/web/src/ui/CommandMenu.tsx` | The menu: the agent's commands and the controls it does *not* publish, one list, two stages. Never takes focus |
 | `packages/web/src/ui/AgentConfigBar.tsx` | The agent's own controls, as a cluster in the composer's control row: mode left, model/effort right, a nested control inside its host's menu, the rest behind `…`. Drawn from `category`, never an id |
 

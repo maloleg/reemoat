@@ -20,6 +20,7 @@ import type {
   PermissionOptionKind,
   PermissionResolvedEvent,
   ElicitationResolvedEvent,
+  PromptEvent,
   SessionEvent,
 } from "../wire";
 import type { PendingEcho } from "../echo";
@@ -121,6 +122,7 @@ export function EventList({
   turnElapsedMs,
   stale,
   echo,
+  queued,
 }: {
   transcript: Transcript;
   /**
@@ -204,6 +206,15 @@ export function EventList({
    * the prop is a value that changes twice per message.
    */
   echo: PendingEcho | null;
+  /**
+   * Seqs of messages the daemon has taken and not yet handed to the agent.
+   *
+   * ⚠ **Its *identity* is part of the contract, not just its contents.** It goes
+   * into `QueuedContext`, so a fresh `Set` on every render would re-render every
+   * prompt bubble in the conversation on every arriving token. `SessionView`
+   * memoises it on the seqs; see the context.
+   */
+  queued: ReadonlySet<number>;
 }): ReactNode {
   /*
    * The whole loaded transcript, cut only at the agent's own `/clear`.
@@ -462,9 +473,11 @@ export function EventList({
            */}
           {notice?.kind === "skeleton" && <TranscriptSkeleton />}
           <DecisionsContext.Provider value={decisions}>
-            {rows.map((node) => (
-              <TailRow key={node.key} node={node} files={files} />
-            ))}
+            <QueuedContext.Provider value={queued}>
+              {rows.map((node) => (
+                <TailRow key={node.key} node={node} files={files} />
+              ))}
+            </QueuedContext.Provider>
           </DecisionsContext.Provider>
           {/*
            * Your own message, at once, in the bubble the committed event will use.
@@ -574,6 +587,26 @@ export function EventList({
  * reads it where it is used and nothing else subscribes.
  */
 const DecisionsContext = createContext<ReadonlyMap<string, PermissionOptionKind>>(new Map());
+
+/**
+ * Which messages the daemon has taken and not yet handed to the agent.
+ *
+ * A context for `DecisionsContext`'s reason and with the same two halves of the
+ * argument, one of which had to be arranged rather than merely observed:
+ *
+ * **Exactly one component consumes it** — `PromptRow`, and only the arm of it
+ * that draws the line. Nothing else subscribes.
+ *
+ * ⚠ **And its identity is stable across a token**, which is the half that does
+ * not come for free: `queuedSeqs` builds a fresh `Set` on every call, so passed
+ * straight down it would re-render every prompt bubble in the conversation on
+ * every arriving chunk — exactly the cost that argument was written about.
+ * `SessionView` memoises it on the seqs themselves, so this value changes when
+ * the queue changes and at no other time. Empty on every agent that can be
+ * steered, and empty on every daemon too old to have a queue, so the common case
+ * is one shared frozen `Set`.
+ */
+const QueuedContext = createContext<ReadonlySet<number>>(new Set());
 
 /**
  * Tell the transcript a row changed its own height.
@@ -1104,6 +1137,69 @@ function ElicitationResolvedRow({
 }
 
 /**
+ * The person's message, and — where it has not reached the agent yet — one line
+ * saying so.
+ *
+ * ⚠ **A component rather than an arm of `renderEvent`, because the line reads a
+ * context and `renderEvent` is a plain function.** That is a mechanical reason
+ * for a split that also happens to be the right one: `UserBubble` is shared by
+ * four call sites and must not learn about queues, and this is the only one of
+ * the four where a message can be waiting.
+ *
+ * **What the line is for.** A message sent while the agent is working is taken
+ * rather than refused, and *how* it reaches the agent depends on the agent:
+ * claude and codex take it into the turn already running, so it is already in
+ * front of the model and nothing is drawn — a status line about something that
+ * has already happened is furniture. kimi has no way to, so the daemon holds it
+ * until the turn ends, and that is a real wait somebody would otherwise read as
+ * the message having been ignored.
+ *
+ * **`Bubble.tsx`'s "no `pending`" rule is untouched**, and the distinction is
+ * worth stating because this looks like the thing that rule forbids. That rule is
+ * about a message *this tab* has sent and not had answered — a claim about the
+ * network, drawn as doubt over something that had in fact been delivered. This is
+ * the daemon reporting a fact about the agent: the queue is on the snapshot, it
+ * survives closing the tab, and the line goes away when the message is handed
+ * over. The bubble itself is the same bubble, undimmed and unmarked.
+ */
+function PromptRow({
+  seq,
+  event,
+  files,
+}: {
+  seq: number;
+  event: PromptEvent;
+  files: FileAccess | null;
+}): ReactNode {
+  const waiting = useContext(QueuedContext).has(seq);
+  return (
+    <>
+      <UserBubble
+        text={event.text}
+        // `?? []` is the whole fail-open story: a daemon that predates
+        // attachments sends no such field, and its prompts render exactly as
+        // they always did rather than as ones with a broken chip.
+        attachments={event.attachments ?? []}
+        files={files}
+      />
+      {waiting && (
+        /*
+         * `-mt-3` against the bubble's own `my-4`: this belongs to the message
+         * above it, so it sits closer to that than the 16px a turn boundary gets,
+         * and the wrapper keeps the boundary's spacing below itself. Right, under
+         * the bubble it is about, at the transcript's machinery tone — this is
+         * the daemon's bookkeeping and not a second thing the person said.
+         */
+        <p className="-mt-3 mb-4 flex items-center justify-end gap-2 text-2xs text-faint">
+          <Dot tone="pending" />
+          Waiting for the agent to finish
+        </p>
+      )}
+    </>
+  );
+}
+
+/**
  * One coalesced run of agent or user text.
  *
  * Rendered as markdown, which is what it always was — the agent writes markdown
@@ -1163,16 +1259,7 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
 
   switch (event.type) {
     case "prompt":
-      return (
-        <UserBubble
-          text={event.text}
-          // `?? []` is the whole fail-open story: a daemon that predates
-          // attachments sends no such field, and its prompts render exactly as
-          // they always did rather than as ones with a broken chip.
-          attachments={event.attachments ?? []}
-          files={files}
-        />
-      );
+      return <PromptRow seq={stored.seq} event={event} files={files} />;
 
     /*
      * Only the requests nothing ever answered reach here — `tail.ts` merges the
