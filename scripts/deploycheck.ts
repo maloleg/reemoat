@@ -2353,6 +2353,17 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     // switch publishes name one party, so a row on every fork's Server settings
     // screen would offer somebody else's contract as a toggle.
     "REEMOAT_CP_LEGAL_DOCUMENTS",
+    /*
+     * The two that decide what this process *serves* rather than what it says.
+     * Neither can be a row for a reason the others do not have: both are read once,
+     * at app construction, and Hono cannot unregister a route — so a database-owned
+     * value and the behaviour would disagree until a restart, which is a switch
+     * that lies. `REEMOAT_CP_INSTALL` was documented in **no** example file in the
+     * tree until the deployment modes were written down, which is precisely the
+     * failure this loop exists to catch and could not, because nothing named it.
+     */
+    "REEMOAT_CP_WEB",
+    "REEMOAT_CP_INSTALL",
   ]) {
     check(
       `the example documents ${envOnly} as a commented assignment`,
@@ -2367,6 +2378,41 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       true,
     );
   }
+  /*
+   * **The two switches spell "off" and "the default" the same way, and nothing but
+   * this says so.**
+   *
+   * They are the only pair in this service where a value is *either* a boolean
+   * *or* a path, and that shape has one trap: an affirmative spelling read as a
+   * path resolves to a directory named `1`, which does not exist, and the service
+   * then answers a permanent 404 indistinguishable from a trimmed image.
+   * `REEMOAT_CP_INSTALL` was given the three-and-three and `REEMOAT_CP_WEB` was
+   * not — and the comment sitting beside the fix *named* the other variable as
+   * carrying the same trap, for two releases, while it stayed open. A paragraph
+   * that knows about a defect is not a check.
+   *
+   * Read off the source by regex because nothing can import `main.ts`: it is a
+   * process entry with side effects at module load, which is also why the fix
+   * itself is otherwise unasserted. What this fails on is a third variable of this
+   * shape arriving with a fourth spelling, which is the way the next one goes
+   * wrong.
+   */
+  {
+    const mainTs = readFileSync(join(repoRoot, "packages/control-plane/src/main.ts"), "utf8");
+    const spellings = (name: string, sense: "Off" | "Default"): string[] => {
+      const found = new RegExp(`const ${name}${sense} =([^;]+);`).exec(mainTs)?.[1] ?? "";
+      return [...found.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").sort();
+    };
+    check("the web switch spells off three ways", spellings("web", "Off"), ["0", "false", "no"]);
+    check("and the installer switch spells it the same three", spellings("install", "Off"), ["0", "false", "no"]);
+    check("the web switch spells the default three ways", spellings("web", "Default"), ["1", "true", "yes"]);
+    check(
+      "and the installer switch spells it the same three",
+      spellings("install", "Default"),
+      ["1", "true", "yes"],
+    );
+  }
+
   /*
    * And asks rather than assuming. A `set_env` with a literal would be a
    * decision made on the operator's behalf about whether a proxy exists, which

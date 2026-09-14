@@ -8265,6 +8265,130 @@ process.stdout.write("\nwhat an API-only instance still sends\n");
   // rather than on what was served is how that arm reached `index.html` once.
   check("but no cache directive reaches a JSON answer", mine.headers.get("cache-control"), null);
   check("and no policy is spent on a body that is not a document", mine.headers.get("content-security-policy"), null);
+
+  /*
+   * **The first impression of an API-only instance, asserted.**
+   *
+   * `REEMOAT_CP_WEB=0` is a supported deployment — the native app carries its own
+   * copy of the interface — and what somebody typing the address into a browser
+   * then gets is this. It must be the envelope every other refusal answers in and
+   * not Hono's bare 404: the first is a service saying it serves no UI, the second
+   * is indistinguishable from a service that is broken. `app.notFound` is what
+   * provides it, and it is registered *outside* the `webRoot` guard; a future edit
+   * that moved it inside would pass every other assertion in this file.
+   */
+  const bare = await Promise.resolve(app.request("/"));
+  check("a browser at the root is refused in the envelope", bare.status, 404);
+  check(
+    "and told so in JSON rather than in nothing",
+    ((await bare.json()) as { error?: { code?: string } }).error?.code,
+    "not_found",
+  );
+  const deep = await Promise.resolve(app.request("/m/m_x/s/s_y"));
+  check("as is a deep link a client-side router would own", [deep.status, deep.headers.get("content-type")?.startsWith("application/json")], [404, true]);
+
+  // The API is what is left, and it still answers. `/health` and `/v1/instance`
+  // are the two an operator and a client respectively reach for first.
+  check("health is unaffected by there being no bundle", (await Promise.resolve(app.request("/health"))).status, 200);
+  check("and so is the instance document every client boots on", (await Promise.resolve(app.request("/v1/instance"))).status, 200);
+}
+
+/* ------------------------------------------------------------------ *
+ * The installer, with no bundle behind it
+ *
+ * ⚠ **`GET /install.sh` was proved by `imagecheck` alone** — in docker, with the
+ * web bundle present — and `imagecheck` is a separate CI job that needs a network.
+ * So the one route that adds a machine to a fleet had no offline coverage at all,
+ * and none in the shape an API-only deployment actually runs: no `webRoot`, which
+ * is also the arrangement where a missing `serveStatic` in front of it would go
+ * unnoticed.
+ *
+ * The substitution itself is the part worth holding: the body is caller-influenced
+ * through the `Host` header and it is piped into `sh`, so `shellQuote` is the whole
+ * of what stands between an instance and remote code execution on every machine
+ * somebody adds. `webcheck` already drives that function over hostile URLs; this
+ * asserts the route actually calls it.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe installer, with no bundle behind it\n");
+{
+  const dir = tmp("relaycheck-install-");
+  const script = join(dir, "bootstrap.sh");
+  writeFileSync(script, "#!/bin/sh\nREEMOAT_CONTROL_PLANE=@REEMOAT_CONTROL_PLANE@\n");
+  const app = createControlPlaneApp({
+    db,
+    issuer: ISSUER,
+    tokenTtlSeconds: 300,
+    relayUrl,
+    relay: registry,
+    bootstrapScript: script,
+  });
+
+  /*
+   * A full URL rather than a path plus a `Host` header, because `publicUrl` reads
+   * `new URL(c.req.url).origin` and Hono builds that URL from the argument — a
+   * header alone leaves it `http://localhost` and the substitution looks correct
+   * while asserting nothing about the value that actually varies.
+   */
+  const served = await Promise.resolve(app.request("http://cp.example/install.sh"));
+  const body = await served.text();
+  check(
+    "an instance with no UI still hands out an installer",
+    [served.status, served.headers.get("content-type"), served.headers.get("cache-control")],
+    [200, "text/plain; charset=utf-8", "no-store"],
+  );
+  check("with its own address substituted in", body.includes("'http://cp.example'"), true);
+  check("and no placeholder left behind", body.includes("@REEMOAT_CONTROL_PLANE@"), false);
+
+  // The `Host` reaches `URL.origin` intact through every one of these — measured
+  // and written up at `packages/web/src/enrollment.ts` — so the quoting is the
+  // only thing stopping `a`touch PWNED`b` from running on the next machine added.
+  const hostile = await Promise.resolve(app.request("http://a$(id)b/install.sh"));
+  check("a hostile Host is quoted rather than refused", (await hostile.text()).includes("'http://a$(id)b'"), true);
+
+  // A missing file is a legal deployment — a trimmed image, an override pointing
+  // at nothing — and must be the envelope rather than a 500.
+  const absent = createControlPlaneApp({
+    db,
+    issuer: ISSUER,
+    tokenTtlSeconds: 300,
+    relayUrl,
+    relay: registry,
+    bootstrapScript: join(dir, "nothing-here.sh"),
+  });
+  const missing = await Promise.resolve(absent.request("/install.sh"));
+  check(
+    "a missing script is a 404 rather than a 500",
+    [missing.status, ((await missing.json()) as { error?: { code?: string } }).error?.code],
+    [404, "not_found"],
+  );
+
+  // Two placeholders is ambiguous and none is an installer that refuses at run
+  // time with a message about a placeholder. Both are worse than no installer.
+  for (const [name, content] of [
+    ["none", "#!/bin/sh\necho hi\n"],
+    ["two", "#!/bin/sh\nA=@REEMOAT_CONTROL_PLANE@\nB=@REEMOAT_CONTROL_PLANE@\n"],
+  ] as const) {
+    const path = join(dir, `${name}.sh`);
+    writeFileSync(path, content);
+    const app2 = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry, bootstrapScript: path });
+    const answer = await Promise.resolve(app2.request("/install.sh"));
+    check(`a template with ${name} placeholders is refused`, answer.status, 404);
+  }
+
+  // And the switch off: no `bootstrapScript` at all means the route was never
+  // registered, which is the `REEMOAT_CP_INSTALL=0` deployment. It has to land on
+  // `app.notFound` rather than anywhere else, because `looksLikeAsset` matching a
+  // trailing `.sh` is what keeps this path free for the route in the first place.
+  const none = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry });
+  const off = await Promise.resolve(none.request("/install.sh"));
+  check(
+    "and an instance that serves no installer says so in the envelope",
+    [off.status, ((await off.json()) as { error?: { code?: string } }).error?.code],
+    [404, "not_found"],
+  );
+
+  rmSync(dir, { recursive: true, force: true });
 }
 
 /* ------------------------------------------------------------------ *

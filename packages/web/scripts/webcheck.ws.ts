@@ -12,6 +12,10 @@ import { WebSocketServer, type WebSocket as ServerSocket } from "ws";
 import type { AddressInfo } from "node:net";
 import { sleep } from "./webcheck.env.js";
 import { SessionStream, type Stream } from "./webcheck.modules.js";
+// Type-only, so it is erased rather than evaluating `machine.ts` ahead of the
+// `window` stub — the rule `webcheck.modules.ts` states. Imported rather than
+// re-declared: a hand-written copy of this shape is what went stale below.
+import type { Route } from "../src/machine.js";
 
 /* ------------------------------------------------------------------ *
  * A daemon-shaped WebSocket server
@@ -128,13 +132,27 @@ let tokenExpiresAt: number | null = null;
 export const machine = {
   id: "m_1",
   ensureToken: async (): Promise<string> => "t_ok",
-  // `{base}` alone: `Route` lost its `kind` with the direct path, and a stub that
-  // kept the old shape would be the last place the deleted vocabulary survived.
-  resolveRoute: async (): Promise<{ base: string }> => ({ base: `http://127.0.0.1:${port}` }),
-  currentRoute: (): { base: string } => ({ base: `http://127.0.0.1:${port}` }),
+  /*
+   * `kind: "relay"`, and it is not decoration.
+   *
+   * ⚠ This stub said `{base}` alone, with a comment asserting that *"`Route` lost
+   * its `kind` with the direct path"*. That was true for four releases and is not
+   * any more — a `Route` carries `kind` again, read by `settleAnswer` to apply a
+   * 401 rule the relay arm must never get. The stub is handed over `as never`, so
+   * **nothing type-checked this**: a comment was the only thing saying what the
+   * shape was, and a comment is what went stale. `relay` because these sections are
+   * about rotation and the cursor, which are the same on both arms.
+   */
+  resolveRoute: async (): Promise<Route> => ({ base: `http://127.0.0.1:${port}`, kind: "relay" }),
+  currentRoute: (): Route => ({ base: `http://127.0.0.1:${port}`, kind: "relay" }),
   forgetRoute: (): void => void (forgotten += 1),
   tokenExpiresAt: (): number | null => tokenExpiresAt,
-  streamUrl: (session: string, since: number): string =>
+  /*
+   * The real signature, four arguments, though only two are read here.
+   * `SessionStream.open` passes all four; a two-argument stub compiled only because
+   * of the `as never` above, and it is the shape a reader would copy.
+   */
+  streamUrl: (session: string, since: number, _token: string, _route: Route): string =>
     `ws://127.0.0.1:${port}/sessions/${session}/stream?since=${since}&token=t_ok`,
 };
 

@@ -46,6 +46,32 @@ it — so a citation here would be the one kind nothing checks.
 - `pnpm nativecheck`, a ninth offline driver, and a `native` CI job for the parts
   that need a Rust toolchain. Nothing about the native app builds, signs or
   publishes on a push.
+- **The app reaches a daemon on the same computer without going out to the relay
+  and back.** A daemon that has been enrolled writes where it is listening into
+  `~/.reemoat/daemon.json` when it starts — its machine id, a loopback address and
+  the port it actually bound — at `0600` inside a `0700` directory, and removes it
+  on a clean stop. The app reads that through the host process and proves the
+  daemon is the machine it wants with one authenticated request before it sends
+  anything else. Nothing to configure: a daemon on a custom port, or on one the
+  kernel picked, is found the same way, and a daemon that has not been enrolled
+  announces nothing at all.
+
+  It is on by default and switched off per machine in Settings → Machines → *This
+  device*, which is also where the one cost is stated: the relay is what checks a
+  grant is still live before each request, so on this path a grant the owner takes
+  away keeps working from that computer for up to about six minutes. Everywhere
+  else it stops at once. Only a program running as the user who owns the daemon can
+  take the path at all — which is a user who already has that daemon's database.
+
+  Nothing above the transport changed. The same session API answers on both paths,
+  no screen knows which one replied, and a browser cannot take the local one.
+- **An instance can serve the API and the relay and no web interface at all.**
+  `REEMOAT_CP_WEB=0` was always there and is now a documented deployment mode with
+  a driver behind it: every `/v1` route, `/health`, `/install.sh`, the relay and the
+  tunnel behave identically, and a browser at `/` gets the error envelope every
+  other refusal answers in rather than a page. `docs/API.md` has the table and
+  `deploy/README.md` has the operator's version. The app carries its own copy of
+  the interface, so a fleet whose clients are all native needs no public UI.
 
 ### Fixed
 
@@ -53,6 +79,19 @@ it — so a citation here would be the one kind nothing checks.
   the page's own origin. In a browser that is the control plane and is right; under
   a custom scheme it printed a `curl` line naming the app itself. They ask where the
   control plane is now, and one of the three had never been asserted.
+- **The native window would navigate to a control plane on loopback.** Its
+  navigation guard allowed `http://localhost` and `http://127.0.0.1` in every build,
+  for the Vite dev server — and a Reemoat control plane on loopback is the ordinary
+  self-hosted shape, serving its own page at `/`. A script assigning `location.href`
+  could therefore have replaced the running app with the backend's page, inside the
+  window holding the sign-in: the one thing bundling the interface exists to make
+  impossible. Those two are development-build only now, and every navigation the
+  client itself makes is asserted to be a path rather than an address.
+- `REEMOAT_CP_WEB=1` served a directory called `1`, and every page then answered a
+  404 indistinguishable from an image built without the interface. `1`, `true` and
+  `yes` mean the default now, matching `REEMOAT_CP_INSTALL`, whose own comment had
+  named this variable as carrying the same trap for two releases. `REEMOAT_CP_INSTALL`
+  is also documented for the first time — it appeared in no example file anywhere.
 
 ## [0.9.0] - 2026-09-14
 

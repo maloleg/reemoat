@@ -99,6 +99,78 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
 }
 
 /* ------------------------------------------------------------------ *
+ * The transport is five modules, and no screen is one of them
+ * ------------------------------------------------------------------ */
+{
+  /*
+   * **The separation this client is built on, asserted instead of described.**
+   *
+   * `MachineConnection` is where a token, a route, a retry budget, a timeout table
+   * and what a failure *means* all live, and `DaemonClient` is the logical session
+   * API above it — the same object whether the answer came down the relay's tunnel
+   * or over loopback, which is the whole reason adding the second arm changed no
+   * screen. A component that reached past `store.daemonFor(id)` and held a
+   * connection would be a second place deciding what a transport failure is, and
+   * `isTransportFailure` is a **negation**: the two ways a second opinion can
+   * disagree are "every subway tunnel signs the fleet out" and "nobody is ever
+   * signed out".
+   *
+   * An exact set rather than a ceiling, in this file's own idiom: a ceiling passes
+   * for ever while the set drifts, and what is interesting here is the **absence**
+   * of a fifth name. Comments are stripped first, so `http.ts` — whose
+   * `meansMachineGone` docblock names the class it is the rule for — is correctly
+   * not one of them: the point is who *holds* a connection, not who mentions one.
+   */
+  const holders = files.filter((f) => /\bMachineConnection\b/.test(stripComments(src(f)))).sort();
+  check("the daemon transport is named in four modules", holders, [
+    "daemon.ts",
+    "machine.ts",
+    "store.ts",
+    "stream.ts",
+  ]);
+  report(
+    "and no screen is one of them",
+    holders.every((f) => !f.startsWith("ui/")),
+    holders.join(", "),
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Nothing navigates this window off its own document
+ * ------------------------------------------------------------------ */
+{
+  /*
+   * ⚠ **The caller-side half of `is_our_own`, and it became load-bearing.** The
+   * shell's navigation guard allowed `http://localhost` and `http://127.0.0.1`
+   * unconditionally, on the reasoning that they are the Vite dev server — and a
+   * Reemoat control plane on loopback is the ordinary self-hosted shape, serving
+   * its own `index.html` at `/`. So a navigation to it would have replaced the
+   * running app with the *backend's* page, inside the window holding the fleet's
+   * credential: precisely what bundling the frontend exists to make impossible.
+   * The guard is `#[cfg(debug_assertions)]` now, and this is the other side of it.
+   *
+   * Every assignment in this client passes a **root-relative literal** — `"/"`,
+   * today, at every site — which stays inside the app whatever origin it is
+   * serving from. A computed one would be a value an agent's output could reach.
+   * The CSP cannot help here: there is no `navigate-to` directive, and neither
+   * `form-action` nor `base-uri` constrains `location.assign`.
+   */
+  const sites: string[] = [];
+  for (const file of files) {
+    const body = stripComments(src(file));
+    for (const match of body.matchAll(/location\.(?:assign\(|href\s*=)\s*([^;)]*)/g)) {
+      sites.push(`${file}: ${(match[1] ?? "").trim()}`);
+    }
+  }
+  report("there are navigations to check", sites.length > 0, `${sites.length} assignments`);
+  check(
+    "every navigation this app makes is a root-relative literal",
+    sites.filter((site) => !/:\s*"\/[^"]*"$/.test(site)),
+    [],
+  );
+}
+
+/* ------------------------------------------------------------------ *
  * The commands this side calls are the commands the shell registers
  * ------------------------------------------------------------------ */
 {

@@ -127,6 +127,27 @@ check(
   true,
 );
 
+/*
+ * **The last way a chunk URL could point off-origin**, and it fails closed in the
+ * quietest possible manner.
+ *
+ * `frontendDist` being a path decides where the *bundle* comes from; Vite's `base`
+ * decides what the `<script src>` inside `index.html` says. Set to a URL, Vite
+ * emits absolute module URLs and the shell's `script-src 'self'` refuses them —
+ * so the app is a blank window with the reason in a console nobody has open on a
+ * page that never painted. Absent today, which is what makes root-relative URLs
+ * resolve against `tauri://localhost`.
+ *
+ * Checked as "names no scheme" rather than "is absent", because `base: "./"` and
+ * `base: "/"` are both legitimate and neither leaves the origin.
+ */
+const viteConfig = read("packages/web/vite.config.ts");
+check(
+  "the web build emits no asset URL that could leave this origin",
+  /base:\s*["'`][a-z][a-z0-9+.-]*:/i.test(viteConfig),
+  false,
+);
+
 const windows = (app["windows"] ?? []) as Record<string, unknown>[];
 check("there is a window to check", windows.length, 1);
 const main = windows[0] ?? {};
@@ -342,6 +363,66 @@ check("and they are the same set", rustSchemes, webSchemes);
 /* ------------------------------------------------------------------ *
  * The command surface, from three directions
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * The file a daemon writes, and the file this shell reads
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe announcement, from both sides of it\n");
+
+/*
+ * **One shape, written down twice, compared** — the same rule as `OPENABLE` below
+ * and for a sharper reason. `src/announce.ts` is the only writer of
+ * `~/.reemoat/daemon.json` and `local.rs` is the only reader, and they are in
+ * different languages in different packages built by different toolchains. A field
+ * renamed on one side is not a compile error anywhere: it is a local route that
+ * silently stops being offered, on a fleet that goes on working through the relay,
+ * with nothing in any log. Nobody would find it.
+ *
+ * The version is compared too. It is the field that decides whether a reader
+ * *tries*, so two numbers drifting apart is the same failure arriving deliberately.
+ */
+{
+  const ts = read("src/announce.ts");
+  const rs = read("packages/native/src-tauri/src/local.rs");
+
+  const written = capture(ts, /export interface LocalAnnounce \{([\s\S]*?)\n\}/);
+  check("the daemon's side of the shape was readable", written !== null, true);
+  const writtenKeys = [...(written ?? "").matchAll(/^\s{2}(\w+)[?]?:/gm)].map((m) => m[1] ?? "").sort();
+
+  const stored = capture(rs, /struct Stored \{([\s\S]*?)\n\}/);
+  check("and the shell's side of it", stored !== null, true);
+  /*
+   * Walked line by line rather than matched as one pattern: a field's JSON name is
+   * the `rename` on the line above it when there is one and its own name when there
+   * is not, and that "when there is one" is the whole thing being compared. A
+   * single regex that got the lookbehind subtly wrong would answer a *superset* and
+   * pass for ever.
+   */
+  const readJsonKeys: string[] = [];
+  let pending: string | null = null;
+  for (const line of (stored ?? "").split("\n")) {
+    const rename = /serde\(rename = "(\w+)"\)/.exec(line);
+    if (rename !== null) {
+      pending = rename[1] ?? null;
+      continue;
+    }
+    const field = /^\s{4}(\w+): /.exec(line);
+    if (field === null) continue;
+    readJsonKeys.push(pending ?? field[1] ?? "");
+    pending = null;
+  }
+  readJsonKeys.sort();
+
+  check("both sides were found to have fields", [writtenKeys.length > 0, readJsonKeys.length > 0], [true, true]);
+  check("and the daemon writes exactly what the shell reads", writtenKeys, readJsonKeys);
+
+  check(
+    "the version the daemon stamps is the version the shell accepts",
+    capture(ts, /export const ANNOUNCE_VERSION = (\d+);/),
+    capture(rs, /const ANNOUNCE_VERSION: u32 = (\d+);/),
+  );
+}
 
 process.stdout.write("\nthe commands, declared against registered\n");
 

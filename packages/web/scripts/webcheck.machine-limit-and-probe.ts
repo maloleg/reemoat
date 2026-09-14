@@ -748,7 +748,23 @@ process.stdout.write("\nthe machine limit\n");
     check("and the empty arm is one somebody can reach", /Only you so far\./.test(src), true);
     check("and \"Nobody yet\" is not drawn over a list that always has you in it", /Nobody yet/.test(src), false);
     // The panel's direction is measured on the tap, never taken from the index.
-    check("the kebab's direction is measured, not indexed", /getBoundingClientRect\(\)/.test(src) && !/openUp/.test(src), true);
+    /*
+     * ⚠ **The measurement moved out of this file and the property did not.** It
+     * read `getBoundingClientRect()` here against `window.innerHeight` — which was
+     * the wrong box: this pane is `overflow-y-auto`, so the viewport answered
+     * "room below" about a scroller that ends higher up, and the panel grew that
+     * scroller instead of fitting. `menuPlacement` in `bits.tsx` is the one
+     * spelling now, and it walks to the nearest scrolling ancestor.
+     *
+     * What is still asserted is what this line always meant: the direction comes
+     * from geometry read at the tap, never from the row's `index` — which is how
+     * it was wrong before either version, opening the last rows off the screen.
+     */
+    check(
+      "the kebab's direction is measured, not indexed",
+      /menuPlacement\(/.test(src) && !/openUp/.test(src) && !/index/.test(src.slice(src.indexOf("setPlacement") - 200, src.indexOf("setPlacement") + 200)),
+      true,
+    );
   }
 
   {

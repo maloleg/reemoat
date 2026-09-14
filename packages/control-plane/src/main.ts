@@ -549,12 +549,32 @@ const relayView: RelayView = tunnels ?? dbRelayView(store.db);
  * runs from the package root while a bare `tsx src/main.ts` does not, and a UI
  * that appears or vanishes depending on where you started the process is a
  * miserable thing to debug. `REEMOAT_CP_WEB=0` opts out; a path overrides.
+ *
+ * **Off is a supported deployment rather than a broken one.** A fleet reached by
+ * the native app needs the API, the relay and nothing else, and every route
+ * outside the two registrations `app.ts` gates on `webRoot` is unaffected — an
+ * unrouted path then answers the same JSON envelope every other refusal does.
+ * `docs/API.md` names the two modes.
+ *
+ * ⚠ **The affirmative spellings mean "the default", not "a directory called 1"** —
+ * the trap `REEMOAT_CP_INSTALL` below carries a paragraph about, which said in so
+ * many words that this variable *"has the same shape and the same trap"* and then
+ * did not close it. Only the negative spelling was ever documented, so
+ * `REEMOAT_CP_WEB=1` is the natural thing for somebody to write, and read as a
+ * path it resolves to `<cwd>/1`, fails `existsSync`, and serves a permanent 404
+ * that looks exactly like an image built without the bundle. Same three words on
+ * each side as the installer's, because two spellings of one idea in one file is
+ * how the next variable gets a third. Case-sensitive, matching it: a *path* is
+ * case-significant on the filesystems this runs on, and lowercasing before the
+ * path arm would be a quieter bug than the one being fixed.
  */
 const webEnv = (process.env["REEMOAT_CP_WEB"] ?? "").trim();
+const webOff = webEnv === "0" || webEnv === "false" || webEnv === "no";
+const webDefault = webEnv === "1" || webEnv === "true" || webEnv === "yes";
 const webRoot =
-  webEnv === "0"
+  webOff
     ? null
-    : webEnv.length > 0
+    : webEnv.length > 0 && !webDefault
       ? (isAbsolute(webEnv) ? webEnv : join(process.cwd(), webEnv))
       : fileURLToPath(new URL("../../web/dist", import.meta.url));
 
@@ -578,11 +598,15 @@ const webRoot =
 const installEnv = (process.env["REEMOAT_CP_INSTALL"] ?? "").trim();
 /*
  * ⚠ **The affirmative spellings mean "the default", not "a file called 1".**
- * `REEMOAT_CP_WEB` has the same shape and the same trap, and only the *negative*
- * spelling is documented anywhere — so `REEMOAT_CP_INSTALL=1` is the natural
- * thing for somebody to write, and read as a path it resolves to `<cwd>/1`,
- * ENOENT, and a permanent 404 that looks exactly like a trimmed image. Naming
- * them costs one line and removes a silent off-switch.
+ * `REEMOAT_CP_INSTALL=1` is the natural thing for somebody to write, and read as a
+ * path it resolves to `<cwd>/1`, ENOENT, and a permanent 404 that looks exactly
+ * like a trimmed image. Naming them costs one line and removes a silent
+ * off-switch.
+ *
+ * `REEMOAT_CP_WEB` above carries the identical three-and-three, and for two
+ * releases this paragraph named it as having the same trap while it went unfixed —
+ * which is the argument for `deploycheck` reading both predicates off this file and
+ * asserting they agree, rather than for a third variable being told about it here.
  */
 const installOff = installEnv === "0" || installEnv === "false" || installEnv === "no";
 const installDefault = installEnv === "1" || installEnv === "true" || installEnv === "yes";

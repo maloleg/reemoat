@@ -224,7 +224,11 @@ the process was derived from a credential for a different fleet.
 
 An app-defined `#[tauri::command]` is **not** ACL-gated — it is callable from every
 window without an entry — so `commands.rs` is the whole surface and
-`capabilities/default.json` grants nothing. The three Tauri plugins here
+`capabilities/default.json` grants nothing. Nine of them; the newest is
+`host_local_daemon`, which reads a file the *daemon* wrote and answers a finished
+origin rather than the host and port it was built from — `local.rs` refuses
+anything but `127.0.0.1` and `::1`, in the host process, for `host_cp`'s reason. It
+opens no socket, so the leg count two sections up is unchanged. The three Tauri plugins here
 (`opener`, `dialog`, `clipboard-manager`) are driven **from Rust**, so a JS
 permission for any of them would be a door the webview could walk through on a page
 that renders agent output. `nativecheck` pins the permission list empty as an exact
@@ -253,6 +257,19 @@ Separately, `on_navigation` allows **only this app's own document** — not an
 allowlist, a single rule — so a script assigning `location.href` cannot replace the
 running app with somebody else's page inside a window holding the fleet's
 credential.
+
+⚠ **`localhost` and `127.0.0.1` were in that rule unconditionally, and it was a
+hole rather than a loosening.** They are there for the Vite dev server — but a
+Reemoat control plane on loopback is the ordinary self-hosted shape (`pnpm cp`, a
+dev stand, a single-box install) and it serves its own `index.html` at `/`. So the
+one navigation a bundled frontend exists to make impossible was reachable, on
+precisely the deployments this client is for. They are `cfg!(debug_assertions)`
+now; `tauri.localhost` stays in every build, being the *bundle's* origin on Windows
+and Android rather than a server's. The CSP could not have helped: there is no
+`navigate-to` directive, and neither `form-action` nor `base-uri` constrains a
+navigation. `webcheck.native-bridge.ts` holds the caller-side half — every
+`location.assign` in this client is a root-relative literal, today `"/"` at all
+four sites.
 
 ## Where this package sits, and what depends on that
 
@@ -297,16 +314,22 @@ names, which is the `pnpm-lock.yaml` hazard that driver already refuses. Q4.117.
 
 ## What is not built, and where the seam is
 
-- **No local-daemon route.** The daemon does bind `127.0.0.1:7887` and, with
-  `REEMOAT_AUTH=signed`, would accept a control-plane token whose `aud` matches. It
-  is still refused: `machine.ts`'s `Route` docblock records that the direct path was
-  **deleted** because the relay reads live user, machine and grant rows before a
-  byte enters the tunnel, so revocation takes effect on the next request rather than
-  within a token lifetime. The seam is `probeRoute`, which returns one answer and
-  used to return two. Conditions for reopening it: loopback only, the `aud` check
-  establishing the machine, the ~360 s gap (300 s plus 60 s leeway either way)
-  stated to the *sharer* rather than to the owner, a `forgetRoute` status rule the
-  relay candidate must not get, and opt-in per machine.
+- ~~No local-daemon route.~~ **Built, and every condition this bullet set was met.**
+  `probeRoute` returns two answers again; `Route` carries a `kind`, read by
+  `settleAnswer` alone. Loopback is enforced in `local.rs` rather than in the page;
+  the `aud` check on one authenticated `GET /fs/roots` establishes the machine, and
+  ⚠ any status but 401 is proof, since a 403 about a scope and a bare 404 both come
+  from below the auth gate; the ~360 s gap is the sentence beside the switch in
+  Settings → Machines → *This device*; `meansWrongMachine` is the 401 rule, guarded
+  on `route.kind` so the relay candidate cannot reach it; and the switch is per
+  machine. `.claude/rules/relay.md` is the area and Q7.137 is the argument.
+
+  Two things changed *under* the conditions rather than satisfying them, and both
+  are in that entry. **On by default**, because who can take this path at all is the
+  uid that already owns `~/.reemoat`. And a **file rather than a port probe** —
+  `host_local_daemon` reads what `src/announce.ts` wrote — because a probe has to
+  carry a machine token to prove anything, and that hands a 300-second bearer to
+  whatever happened to answer.
 - **No device identity.** `SecretStore` in Rust is a trait with one member and no
   `list()`, and `read`/`write` are documented as *a string this process will see* —
   which names, at the interface, why a private key cannot use them. **No first-run

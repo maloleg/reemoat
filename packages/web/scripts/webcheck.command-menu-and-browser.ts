@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { check } from "./webcheck.env.js";
-import { stripComments } from "./webcheck.source.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 import { snapshot, workspaceAt } from "./webcheck.ws.js";
 import {
   RANK_STEP,
@@ -2227,4 +2227,60 @@ process.stdout.write("\nwhose order the rail is in\n");
       true,
     );
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Which way a menu opens, decided once
+ * ------------------------------------------------------------------ */
+{
+  /*
+   * ⚠ **A menu panel that does not fit below its trigger grows the scroller it is
+   * inside, and a scrollbar appears down the rail.** `SessionBrowser`'s own
+   * scroller comment already carries the fact — *a positioned descendant is part
+   * of the scrollable overflow region* — and it caught the kebab's tap pad on the
+   * horizontal axis. The panel itself is the same class of defect on the vertical
+   * one, and it shipped: tapping a session's kebab put a bar down the side of the
+   * list.
+   *
+   * What makes it a check rather than a fix is that the question was answered
+   * **twice**, in two files, and one of the two answers was measuring the wrong
+   * box. `UsersSection` read `window.innerHeight` while its pane is
+   * `overflow-y-auto`, so the viewport said "room below" about a box that ended
+   * two hundred pixels higher — invisible there only because that pane carries
+   * `no-scrollbar`. One spelling now, in `bits.tsx`, and this is what keeps it one.
+   */
+  const files = srcFiles();
+
+  /*
+   * The property stated directly, rather than a pattern for the one shape the
+   * homegrown version happened to have. A first attempt matched
+   * `innerHeight - rect.bottom` and a rewrite with one pair of brackets walked
+   * straight through it — which is the usual fate of a census that describes the
+   * defect instead of the rule.
+   */
+  const homegrown = files.filter((f) => {
+    const body = stripComments(srcFile(f));
+    return [...body.matchAll(/setPlacement\(/g)].some(
+      (m) => !body.slice(m.index + m[0].length).startsWith("menuPlacement("),
+    );
+  });
+  check("every menu takes its direction from the one helper", homegrown, []);
+
+  /*
+   * The two menus that can sit inside a scroller both ask. Named rather than swept,
+   * because what is interesting is that these *specific* two do it — a sweep over
+   * "every file with a popover" would pass on a file that has no popover left.
+   */
+  for (const file of ["ui/SessionMenu.tsx", "ui/settings/UsersSection.tsx"]) {
+    check(`${file} asks where there is room`, /menuPlacement\(/.test(stripComments(srcFile(file))), true);
+  }
+
+  /*
+   * And the cap is read off the class that enforces it rather than guessed. The
+   * constant it replaced was 240 — neither `max-h-72` nor any real panel's height.
+   */
+  const bits = stripComments(srcFile("ui/bits.tsx"));
+  const cap = /export const MENU_MAX_PX = (\d+);/.exec(bits)?.[1] ?? "";
+  const cls = /max-h-(\d+)/.exec(bits)?.[1] ?? "";
+  check("the room a menu needs is the height its own class caps it at", cap, String(Number(cls) * 4));
 }

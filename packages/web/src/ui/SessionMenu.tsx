@@ -4,7 +4,7 @@ import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
 import { isParked, isResumable, isTerminal, parkedByOlderDaemon } from "../wire";
-import { Icon, IconButton, MENU_PANEL } from "./bits";
+import { Icon, IconButton, MENU_PANEL, menuPlacement } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
 import { pluginFailure, sessionActions } from "../plugins";
@@ -75,6 +75,7 @@ export function SessionMenu({
   size?: "sm" | "lg";
 }): ReactNode {
   const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<"up" | "down">("down");
   const [busy, setBusy] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const row = state.rowsByKey.get(keyOf(sessionRef));
@@ -223,7 +224,18 @@ export function SessionMenu({
         size={size}
         disabled={busy}
         active={open}
-        onClick={() => setOpen(!open)}
+        /*
+         * Measured at the tap and handed to the panel below — see `menuPlacement`.
+         * This row lives inside `SessionBrowser`'s `overflow-y-auto` scroller, so a
+         * panel that does not fit below it grows that scroller rather than hanging
+         * out of it, and a scrollbar appears down the rail the moment the menu
+         * opens. Read here rather than in an effect so there is one pass and no
+         * flicker, and discarded on close.
+         */
+        onClick={() => {
+          if (!open) setPlacement(menuPlacement(boxRef.current));
+          setOpen(!open);
+        }}
       />
       {open && (
         <div
@@ -231,7 +243,9 @@ export function SessionMenu({
           // `MENU_PANEL` rather than a fourth hand-written copy of it, which is
           // what this was — byte-adjacent to the shared string and drifting from
           // it in the radius, the padding and the shadow.
-          className={`absolute top-full right-0 mt-1 w-52 max-w-[calc(100vw-2rem)] ${MENU_PANEL}`}
+          className={`absolute right-0 w-52 max-w-[calc(100vw-2rem)] ${
+            placement === "up" ? "bottom-full mb-1" : "top-full mt-1"
+          } ${MENU_PANEL}`}
         >
           <MenuItem
             icon={Pencil}

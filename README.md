@@ -24,6 +24,12 @@ Several agents at once, each in its own git worktree. Close the lid, drop to LTE
 kill the tab: the daemon is the source of truth, and the agent never notices you
 left.
 
+The **desktop app** is the primary client. It carries its own copy of the
+interface, so the server it supervises cannot replace the code running in it, and
+it reaches a daemon on the same computer over loopback rather than out to the relay
+and back. The web UI is the same app in a browser and is optional: an instance can
+serve the API and the relay and no public interface at all.
+
 ## Install
 
 On the machine you want agents to run on:
@@ -128,7 +134,7 @@ and keeps the session in the operating system's credential store.
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/NATIVE.md` | The native app: building it, the prerequisites per platform, what signing and notarization would take, and what is deliberately not built |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 939 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 941 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

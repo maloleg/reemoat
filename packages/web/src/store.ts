@@ -1465,6 +1465,23 @@ class AppStore implements StreamSink {
   }
 
   /**
+   * Re-decide *how* to reach a machine, without disturbing anything else.
+   *
+   * Settings' "This device" row calls it when somebody switches the loopback path
+   * on or off, so the change lands on the next request rather than on the next
+   * wake. Deliberately not {@link forgetMachine}, which drops the connection, the
+   * token and every session row with it — a routing preference is not a reason to
+   * throw away a minted token or repaint the screen.
+   *
+   * Nothing in flight is disturbed: `SessionStream` re-resolves the route per
+   * connection, so an open socket keeps running on the path it opened on until it
+   * rotates or drops.
+   */
+  forgetMachineRoute(id: MachineId): void {
+    this.connections.get(id)?.forgetRoute();
+  }
+
+  /**
    * The app signed you out without being asked. Registered on `cp.onSignedOut`.
    *
    * Connections are dropped rather than left behind: signing back in *as somebody

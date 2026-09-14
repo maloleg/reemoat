@@ -17,6 +17,7 @@ import { systemSecretFor } from "../src/acp/systems.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import { AgentUpdates, agentChannelFrom, agentSourceFrom } from "../src/agentupdate.js";
+import { removeAnnounce, writeAnnounce, ANNOUNCE_VERSION } from "../src/announce.js";
 import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
@@ -859,8 +860,44 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
    * runs once the server is already serving, and `RelayTunnel.start` returns
    * immediately and dials in the background.
    */
-  startRelayTunnel(localAddress(info, host, port));
+  const local = localAddress(info, host, port);
+  startRelayTunnel(local);
+  announceLocally(local);
 });
+
+/**
+ * Tell a client on this computer where to find this daemon.
+ *
+ * Only where there is an identity to name and a mode that accepts a token for it:
+ * a `shared_secret` daemon has no machine id, and announcing one would offer the
+ * app a route whose every request is refused. `src/announce.ts` carries why this
+ * is a file rather than a well-known port.
+ *
+ * Nothing depends on it. A failure is one line and a fleet that reaches this
+ * machine the way every other client does — through the relay.
+ */
+function announceLocally(local: { host: string; port: number }): void {
+  if (machineId === null || authMode === "shared_secret") return;
+  if (local.port === 0) {
+    // `localAddress` answers 0 for "could not tell", which is the same state that
+    // stops the tunnel dialling. An announced port of 0 is an address nothing can
+    // connect to, so say nothing rather than something wrong.
+    return;
+  }
+  try {
+    writeAnnounce({
+      v: ANNOUNCE_VERSION,
+      machineId,
+      host: local.host,
+      port: local.port,
+      instanceId,
+      authMode,
+    });
+    console.log(`local: announced at ${local.host}:${local.port} for apps on this computer`);
+  } catch (error) {
+    console.error(`local: could not announce this daemon (${describe(error)}); clients will use the relay`);
+  }
+}
 /*
  * A refused bind is a configuration mistake, so it reads like one.
  *
@@ -1103,6 +1140,15 @@ async function shutdown(signal: string): Promise<void> {
   }, SHUTDOWN_HARD_LIMIT_MS);
   hard.unref();
 
+  // First, and before the tunnel: a stopped daemon that is still advertising a
+  // loopback address costs the next local probe a refused connection. Cheap,
+  // synchronous, and `force: true` so a daemon that never announced is a no-op.
+  try {
+    removeAnnounce();
+  } catch {
+    // A crash leaves it behind anyway, so nothing may depend on this running —
+    // see `removeAnnounce`. Not worth a line of output during a shutdown.
+  }
   // Before the sessions, so the relay stops handing this daemon new work while it
   // is winding down. A tunnel closing is routine — clients fail over or retry.
   await tunnel?.stop();

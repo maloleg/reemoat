@@ -2190,6 +2190,66 @@ export function Disclosure({
  * describes had already happened underneath it.
  */
 export const MENU_PANEL = `${LAYER.menu} max-h-72 overflow-y-auto overscroll-contain rounded-lg border border-edge bg-surface p-1.5 shadow-lg`;
+
+/**
+ * The tallest a menu panel can be, stated once and read rather than guessed.
+ *
+ * `max-h-72` above is 18rem. Everything that decides whether a menu fits has to
+ * agree with the class that actually caps it, and the two ways this went wrong are
+ * both live in this repository's history: a constant somebody picked by eye (240,
+ * which was neither the cap nor any real panel's height), and the same question
+ * answered twice in two files.
+ */
+export const MENU_MAX_PX = 288;
+
+/**
+ * Which way a menu anchored to this trigger should open.
+ *
+ * ⚠ **The bound is the nearest *scrolling* ancestor, not the viewport, and that is
+ * the whole of why this exists.** A menu panel is absolutely positioned, and
+ * `SessionBrowser`'s own scroller comment already states the fact this rests on:
+ * *a positioned descendant is part of the scrollable overflow region*. So a panel
+ * that overflows the box it is inside does not merely hang out of it — it grows
+ * that box's scroll extent, and a scrollbar appears down the side of the rail the
+ * moment somebody taps a kebab. Measured against `window.innerHeight` instead, the
+ * answer is "plenty of room" while the scroller it is actually inside ends two
+ * hundred pixels higher up. That was the bug: the rail's list and the settings
+ * pane are both `overflow-y-auto`, and both grew a bar on open.
+ *
+ * Upward has no such failure and that asymmetry is not luck: scrollable overflow
+ * extends only past the block-end edge, so a panel above its trigger is clipped at
+ * worst and never scrolled to. Which is why the answer is a direction rather than a
+ * size, and why "does it fit below" is the only question asked.
+ *
+ * **One-shot, read at the tap and discarded.** Not a layout effect measuring the
+ * panel after it mounts — that is exact and costs a second pass on every open — and
+ * emphatically not a breakpoint held in state, which `AppShell` forbids because a
+ * resized window cannot correct one. A measurement that is wrong is wrong for one
+ * open. {@link MENU_MAX_PX} is deliberately the *cap* rather than a panel's real
+ * height, so a two-item menu near the bottom opens upward when it would have fitted
+ * — the cheaper of the two errors by a long way.
+ */
+export function menuPlacement(trigger: Element | null, needed: number = MENU_MAX_PX): "up" | "down" {
+  if (trigger === null) return "down";
+  const rect = trigger.getBoundingClientRect();
+  let floor = window.innerHeight;
+  for (let node = trigger.parentElement; node !== null; node = node.parentElement) {
+    // `documentElement` and `body` are the viewport's own scrollers and are
+    // already what the fallback means; walking into them would answer the same
+    // thing twice and, for `body`, with a rect that is the content height rather
+    // than the window.
+    if (node === document.body || node === document.documentElement) break;
+    const overflow = window.getComputedStyle(node).overflowY;
+    // `overlay` is WebKit's, and it scrolls exactly like `auto` — it only paints
+    // differently. Leaving it out would miss the one engine this app runs in
+    // inside the native shell.
+    if (overflow === "auto" || overflow === "scroll" || overflow === "overlay") {
+      floor = Math.min(floor, node.getBoundingClientRect().bottom);
+      break;
+    }
+  }
+  return floor - rect.bottom < needed ? "up" : "down";
+}
 /**
  * One row in a menu: 44px, and its cross-axis alignment stated rather than
  * defaulted.

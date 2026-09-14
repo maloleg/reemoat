@@ -294,6 +294,45 @@ export function setNativeCredential(value: string | null): void {
 }
 
 /**
+ * A daemon running on *this computer*, as the host process found it.
+ *
+ * The daemon writes `~/.reemoat/daemon.json` from its own listening callback
+ * (`src/announce.ts`); the host reads it and answers this, or `null`. Everything
+ * that could go wrong there — no file, an unknown version, a non-loopback host, a
+ * `shared_secret` daemon — is the same `null`, because the caller has exactly one
+ * question and it is not *why not*.
+ *
+ * ⚠ **`base` is finished, and nothing here builds one.** Loopback is enforced in
+ * the host, where the page cannot reach it, for the reason `host_cp` keeps the
+ * control-plane origin there: this app renders agent output, and a rule the page
+ * holds is a rule a page can be talked into breaking. So the shell hands over an
+ * origin rather than a host and a port, and `localRoute.ts` concatenates nothing.
+ *
+ * `machineId` is a **hint, not a proof.** What establishes that the thing on that
+ * port is that machine is the daemon's own `aud` check, which `machine.ts` spends
+ * one authenticated request on. This only decides whether that request is worth
+ * making — and, because the file sits in a directory this uid owns, whether it is
+ * safe to show a token to whatever is listening at all.
+ */
+export interface LocalDaemon {
+  machineId: string;
+  base: string;
+  instanceId: string;
+}
+
+export async function localDaemon(): Promise<LocalDaemon | null> {
+  if (!inNativeShell()) return null;
+  try {
+    return (await invoke<LocalDaemon | null>("host_local_daemon")) ?? null;
+  } catch {
+    // The command is the only thing that can fail here and its every refusal is
+    // already `None`. A throw means the bridge itself is gone, which is the same
+    // answer: there is no local daemon this client can reach.
+    return null;
+  }
+}
+
+/**
  * Adopt a server, and answer the one canonical spelling of it.
  *
  * **The host normalizes, and this returns its answer** rather than computing one

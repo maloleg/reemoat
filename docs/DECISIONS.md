@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 133 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 134 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 351 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 56 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 67 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 136 | `###` |
-| | | **939** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 137 | `###` |
+| | | **941** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 939 rather than the 478
+dividers. So the count is over **both** depths, and it says 941 rather than the 480
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3818,6 +3818,51 @@ browser with storage disabled; two spellings of one state is a defect this
 repository has shipped before.
 
 **Status.** Current.
+
+### Q1.641 — Why serving the web UI is an environment variable and not a setting
+
+**Question.** `REEMOAT_CP_WEB=0` makes the control plane an API and a relay with no
+public interface — a supported shape now that the desktop app carries its own copy
+of the client. `SETTING_KEYS` is where a value goes when an admin should be able to
+change it from the Server settings screen without a redeploy. Why is this not one?
+
+**Decision.** Environment only, restart to change, and the reason is mechanical
+rather than editorial: `createControlPlaneApp` registers `serveStatic` and the SPA
+fallback **once**, at construction, and Hono has no route deregistration. A row in
+`instance_settings` would be readable per request and would change nothing — the
+value and the behaviour would disagree until somebody restarted the process, which
+is a switch that lies. `app.ts` already makes this argument for
+`REEMOAT_CP_PLUGIN_CATALOGUE_URL`, where the value is compiled into a CSP built once;
+this is the same shape one directive over.
+
+**Rule.** The two switches deciding what this process *serves* spell themselves
+identically: `0`, `false` or `no` turn it off, `1`, `true` and `yes` mean **the
+default**, and anything else is a path. That is a trap rather than a nicety — an
+affirmative spelling read as a path resolves to a directory named `1`, `existsSync`
+fails, and every page answers 404 in a way indistinguishable from an image built
+without the bundle.
+
+**Measured.** `REEMOAT_CP_INSTALL` was given the three-and-three and
+`REEMOAT_CP_WEB` was not, and the comment beside the fix *named the other variable
+as carrying the same trap* — for two releases, while it stayed open. A paragraph
+that knows about a defect is not a check. `deploycheck` now reads both predicates
+out of `main.ts` and asserts they agree, which is what fails the day a third
+path-or-switch variable arrives with a fourth spelling. It also found that
+`REEMOAT_CP_INSTALL` was documented in **no** `.env.example` in the tree: the
+`SETTING_KEYS` sweep cannot reach an env-only value, so both are named in the
+`envOnly` list beside the other three.
+
+**Why they are two switches and not one.** Turning off the interface must not turn
+off `GET /install.sh`, which is how the next machine joins the fleet, and turning off
+the installer must not take the interface with it. Stated in
+`packages/control-plane/.env.example` because that is where somebody sets one and
+reasonably assumes the other follows.
+
+**Status.** Current. `relaycheck` asserts an API-only instance still answers
+`/health`, `/v1/instance` and `/install.sh` — with the substitution and the shell
+quoting, which until now was proved by `imagecheck` alone, in docker, with the
+bundle present — and that a browser at `/` gets the error envelope rather than a
+page or a bare 404.
 
 ## Session lifecycle, questions and attachments
 
@@ -31034,3 +31079,100 @@ that nothing in this fleet has agreed to record.
 **Status.** Deliberate non-goal. `docs/NATIVE.md` carries what turning on signed
 updates would take, including the one step that has to happen before a first public
 build.
+
+
+### Q7.137 — Whether the native client should reach a local daemon directly
+
+**Question.** Q7.135 asked this and answered *deliberate non-goal*, with five
+conditions for reopening it. The native shell now exists and the app is the primary
+client. Does the answer hold?
+
+**Decision. Built, on by default, and reachable by one client only.** The desktop
+app reaches a daemon on the **same computer** over loopback. `probeRoute` returns
+two answers again; `Route` carries a `kind`, read by `settleAnswer` and by nothing
+else. A browser cannot take this path at all — `localBaseFor` answers `null` outside
+the shell, because a page served over `https:` cannot reach `http://127.0.0.1`.
+
+**Why, and it is one fact Q7.135 did not weigh: who can take this path.** That entry
+priced the loss correctly — the relay reads live user, machine and grant rows before
+a byte enters the tunnel, so a direct path replaces revocation-on-the-next-request
+with the token's ~360 s (300 s plus 60 s of leeway either way) — and then compared it
+against nothing. The party who gains the window is not *a client*; it is a process
+running as the uid that owns `~/.reemoat`, which already holds `reemoat.db`, the
+identity, `identity.tunnel_key` and every transcript. A guarantee is only worth what
+it denies somebody, and this one denies that process nothing it does not already
+have. That is what makes **on by default** defensible where Q7.135 required opt-in.
+The switch stays, per machine, in Settings → Machines → *This device*, and the ~360 s
+is the sentence beside it rather than a footnote here.
+
+**Measured, 2026-09-14, and it reverses the entry's own cost list.** Q7.135 said the
+sound method "costs N control-plane mints per wake, on the one path `refetchRoute`
+explicitly refuses to spend". It costs **none**: `probeRoute` already awaits
+`ensureToken()` before it probes anything, and `resumeMachine` mints per machine on
+every wake regardless. The loopback candidate adds no control-plane request at all.
+
+**Rejected — a well-known port, and this is the sharpest part of the entry.**
+Probing `127.0.0.1:7887` is the obvious design, needs no daemon change, and was
+built. It is wrong, and not for a reason about tidiness: the probe has to carry a
+machine token to prove anything, and a token is a 300-second bearer for that machine
+**spendable through the relay from anywhere**. So the probe hands one to whichever
+process won the race for that port. On a single-user laptop that is the daemon; on a
+shared host it is a different OS user, per wake, and this daemon would have created
+the escalation rather than found it. Validating `GET /health` first does not close
+it — an unauthenticated answer is forgeable by whatever is listening.
+
+**So a daemon says where it is.** `src/announce.ts` writes `~/.reemoat/daemon.json`
+at `0600` inside a `0700` directory, from the listening callback where
+`localAddress` already computes the bound pair; `removeAnnounce` runs on a clean
+stop. The directory is the mechanism: another uid cannot write it, so the app never
+shows a token to a listener it was not told about by the daemon's own user. It is
+not new authority — every field is either public (a port, visible to `lsof`) or
+already in `reemoat.db`, which that uid can read. It also reaches a daemon on a
+custom `REEMOAT_PORT`, or on `0`, which no probe can.
+
+**The four rules that bound it, each the answer to a condition.**
+
+- **Loopback or nothing**, enforced in `local.rs` — in the host process, where the
+  page cannot reach it, which is `host_cp`'s argument one command over. `localhost`
+  is deliberately refused beside every LAN address: a name is whatever a resolver
+  says it is.
+- **The `aud` check establishes the machine and nothing else does.** `proveLocal`
+  spends one authenticated `GET /fs/roots`; the announced id is a hint that decides
+  only whether that request is worth making. ⚠ **Any status but 401 is proof** — the
+  auth middleware sits above every route, so a `403 insufficient_scope` from a
+  read-only grant and a bare 404 from an older daemon both mean the signature, the
+  issuer, the audience and the window all passed. Requiring 200 would refuse a
+  healthy local daemon over a scope the probe never needed. `GET /health` is asked
+  *afterwards*, never before: it is unauthenticated, so a 200 from it is a
+  stranger's 200. `/fs/roots` rather than `/sessions`, which builds a snapshot of
+  every session before it applies a limit.
+- **A 401 rule the relay candidate does not get.** `meansWrongMachine` is keyed on
+  the code, and `settleAnswer` guards on `route.kind === "local"` as well: down the
+  tunnel the relay has already derived the machine from the same verified `aud`, so
+  the code there would mean two services disagreeing about one fact rather than
+  *reach it the other way*. It calls `denyLocal`, ⚠ **never `forgetRoute`** — that
+  drops the memo and the next resolve would return to loopback for ever — and never
+  `refetchRoute`, which would spend a mint on a daemon answering about itself. ⚠
+  Retrying a non-replayable method is safe **here and only here**: that 401 comes
+  from middleware above every route, so no handler ran.
+- **Off per machine, and sticky per session.** The deny is cleared in `update()`,
+  which `runResume` calls per machine per wake — so a re-enrolled daemon is found
+  again without a reload, while a shut machine does not earn an authenticated
+  loopback request every fifteen seconds in the meantime.
+
+**Rejected — a Unix socket**, which is the shape this obviously wants. A webview
+cannot open one, so the daemon leg would move into Rust, and
+`.claude/rules/native-shell.md` refuses that for four independently sufficient
+reasons. It also would not remove the TCP port: `RelayTunnel.accept` splices every
+*relayed* stream to `127.0.0.1:<port>`, and so do `pnpm client` and `deploy/lib.sh`'s
+`/health` probe. A socket nothing connects to, added now for later, is the half-built
+seam this repository refuses everywhere else.
+
+**Known limitation.** Whether a packaged webview reaches loopback is a per-platform
+measurement no driver here can make. macOS is settled — App Transport Security
+exempts loopback, the entitlement is `com.apple.security.network.client`, the App
+Sandbox is off. Windows (WebView2, Chromium's Private Network Access) and Linux
+(WebKitGTK) are open, and `docs/NATIVE.md` carries them. A platform that refuses
+costs nothing visible: `proveLocal` fails and the relay answers.
+
+**Status.** Reversed an earlier decision. Q7.135 is superseded.

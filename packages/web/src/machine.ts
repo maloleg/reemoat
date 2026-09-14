@@ -4,9 +4,11 @@ import {
   contentTypeFor,
   isTransportFailure,
   meansMachineGone,
+  meansWrongMachine,
   parseBody,
   withTimeout,
 } from "./http";
+import { localBaseFor } from "./localRoute";
 import type { MachineId } from "./ids";
 import type { DaemonHealth, MachineRecord, Scope } from "./wire";
 
@@ -167,20 +169,29 @@ export function uploadDeadlines(bytes: number): { stallMs: number; hardMs: numbe
 }
 
 /**
- * Where a machine is reached, and there is one answer.
+ * Where a machine is reached, and which of the two ways answered.
  *
- * This used to be a *choice* — `direct | relay`, probed in that order, memoised,
- * and dropped again by `forgetRoute` on any transport failure. All of it is gone
- * with the direct path: every request to every machine goes down the tunnel its
- * daemon dialled out to the control plane, which is what makes a grant something
- * that can be revoked and take effect on the next request rather than within a
- * token lifetime.
+ * **The direct path is still deleted.** What this used to be was a *choice*
+ * between a `baseUrl` the registry handed out and the relay, probed in that order;
+ * that is gone with the column, and no address a server names is ever dialled. A
+ * machine is reached down the tunnel its own daemon dialled out to the control
+ * plane, which is what makes a grant revocable on the *next request* rather than
+ * within a token lifetime.
  *
- * Kept as a named type rather than inlined as a string, because it is what a
- * request is built against and the shape is mirrored on the daemon's side.
+ * What came back is narrower and it is not the same feature: a daemon on **this
+ * computer**, named by a file only its own uid can write, reached over loopback by
+ * the desktop app and by nothing else. There is no address to trust, nothing to
+ * discover on a network, and no way for a browser to take this path at all.
+ * Q7.137 carries the argument; `.claude/rules/relay.md` carries the four rules.
+ *
+ * `kind` exists for exactly one reader — {@link MachineConnection.settleAnswer} —
+ * which applies a 401 rule to the local arm that the relay candidate must never
+ * get. Nothing else branches on it, and `request`, `upload`, `download` and
+ * `streamUrl` all take `base` and cannot tell the two apart.
  */
 export interface Route {
   base: string;
+  kind: "relay" | "local";
 }
 
 export type Reach = "unknown" | "probing" | "online" | "offline";
@@ -436,6 +447,17 @@ export class MachineConnection {
   private minting: Promise<string> | null = null;
   private chosen: Route | null = null;
   private resolving: Promise<Route | null> | null = null;
+  /**
+   * Stop asking loopback about this machine.
+   *
+   * Set only where the daemon on this computer said `wrong_machine`, i.e. where the
+   * announcement naming this machine is stale. Sticky for the session and cleared
+   * in {@link update}, which `store.ts`'s `runResume` calls per machine per wake —
+   * so a re-enrolled daemon is found again on the next wake rather than on a
+   * reload, and a *shut* machine does not earn an authenticated loopback request
+   * every fifteen seconds in the meantime.
+   */
+  private localDenied = false;
 
   private reach: Reach = "unknown";
   private offlineReason: OfflineReason = null;
@@ -469,6 +491,16 @@ export class MachineConnection {
 
   /** Fold in a fresh registry row without discarding the token or the route memo. */
   update(record: MachineRecord): void {
+    /*
+     * The one thing here that is *not* folded in from the row.
+     *
+     * `runResume` calls this per machine per wake, which is the cadence a stale
+     * loopback refusal should be re-tested at: the daemon on this computer may
+     * have been re-enrolled, restarted onto another port, or started at all since
+     * the last probe. Anything more often turns a shut machine into a token spent
+     * on loopback every fifteen seconds; anything less means a reload.
+     */
+    this.localDenied = false;
     this.name = record.name;
     this.relayUrl = record.relayUrl;
     this.relayOnline = record.relayOnline;
@@ -757,11 +789,18 @@ export class MachineConnection {
   }
 
   /**
-   * Confirm the machine is up, which is now one question with one answer.
+   * Confirm the machine is up, and decide which of the two ways reaches it.
    *
-   * The probe is authenticated, and always was on this path: the relay checks
+   * The probe is authenticated, and always was on the relay path: the relay checks
    * every request including `/health`, and an unauthenticated one would be a free
    * oracle for which machines in the fleet are online.
+   *
+   * ⚠ **The local candidate is tried above the `relayOnline` check, and that
+   * placement is the whole of whether it is useful.** `relayOnline` is what the
+   * *control plane* last saw — so a laptop whose tunnel is down, or whose control
+   * plane is unreachable, answers `false` there and would never reach a local
+   * candidate placed below it. That machine is precisely the one this feature is
+   * for: it is three feet away and running.
    */
   private async probeRoute(): Promise<Route | null> {
     if (!this.enrolled) {
@@ -801,6 +840,15 @@ export class MachineConnection {
       return null;
     }
 
+    const local = this.localDenied ? null : await localBaseFor(this.id);
+    if (local !== null) {
+      const health = await this.proveLocal(local, token);
+      if (health !== null) {
+        this.health = health;
+        return this.settleRoute({ base: local, kind: "local" }, null);
+      }
+    }
+
     // `relayOnline` comes from the registry row and is what the control plane
     // last saw; the probe is what this client can see. Both have to hold.
     const relay = this.relayOnline ? this.relayUrl : null;
@@ -809,7 +857,7 @@ export class MachineConnection {
     const health = await this.probe(relay, token);
     if (health === null) return this.settleRoute(null, "no_route");
     this.health = health;
-    return this.settleRoute({ base: relay }, null);
+    return this.settleRoute({ base: relay, kind: "relay" }, null);
   }
 
   private settleRoute(route: Route | null, reason: OfflineReason): Route | null {
@@ -819,6 +867,83 @@ export class MachineConnection {
     if (route !== null) this.lastError = null;
     this.onChange();
     return route;
+  }
+
+  /**
+   * Is the daemon on this computer *this* machine?
+   *
+   * **The `aud` check establishes it and nothing else does**, which is the
+   * condition Q7.135 set and the reason this spends a request rather than trusting
+   * the file. `src/auth.ts`'s middleware sits above every route, so what a
+   * non-401 answer proves is that the signature verified against a key this daemon
+   * captured at enrollment, the issuer matched, the audience is this daemon's own
+   * machine id, and the token is inside its window. That is the identity claim in
+   * full. The announcement only decided the question was worth asking.
+   *
+   * ⚠ **Any status but 401 is proof**, and the temptation to require 200 is a bug
+   * waiting to happen. A grant with no `session:read` scope answers `403
+   * insufficient_scope`, and a daemon older than a route answers Hono's bare 404 —
+   * both *after* the gate, so both mean the audience matched. Requiring 200 would
+   * make a legitimate local daemon unreachable for a reason that has nothing to do
+   * with which machine it is.
+   *
+   * `GET /fs/roots` and not `GET /sessions`: the latter builds a snapshot of every
+   * session before it applies a limit. Not `OPTIONS` either — `src/cors.ts`
+   * short-circuits a preflight *above* the auth gate, so it would answer 204
+   * whoever asked and prove nothing at all.
+   *
+   * A `wrong_machine` denies loopback for the session; every other 401 declines
+   * this round without denying, because they are facts about the *token* — a
+   * rotated signing key, a clock, a daemon still on `shared_secret` — that the next
+   * wake may find changed.
+   */
+  private async proveLocal(base: string, token: string): Promise<DaemonHealth | null> {
+    let response: Response;
+    try {
+      response = await fetch(new URL("/fs/roots", base), {
+        signal: withTimeout(PROBE_TIMEOUT_MS),
+        headers: { authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // Refused, blocked or too slow. On this path that is nearly always "the
+      // daemon stopped and left its announcement behind", and the answer is the
+      // same as for every other failure here: use the relay.
+      return null;
+    }
+    if (response.status === 401) {
+      const body = await response.text();
+      let refusal: unknown;
+      try {
+        parseBody(response.status, response.statusText, body);
+      } catch (error) {
+        refusal = error;
+      }
+      if (meansWrongMachine(refusal)) this.denyLocal();
+      return null;
+    }
+    // Proven. `/health` is unauthenticated, so it is asked *after* the identity is
+    // settled rather than before — a shape nothing else could have told us apart
+    // from a stranger answering 200.
+    return await this.probe(base, null);
+  }
+
+  /**
+   * Stop offering the loopback path for this machine.
+   *
+   * ⚠ **Not `forgetRoute()`**, which drops the memo and would send the very next
+   * `resolveRoute` straight back to loopback, for ever. And ⚠ **not
+   * `refetchRoute()`**: that forces a control-plane mint, and this is a *daemon*
+   * answering a question about itself — spending a round trip on the one service
+   * this client is built to survive the outage of would be exactly backwards.
+   *
+   * The memo is cleared on the next wake; see the field.
+   */
+  private denyLocal(): void {
+    this.localDenied = true;
+    if (this.chosen?.kind === "local") {
+      this.chosen = null;
+      this.onChange();
+    }
   }
 
   private async probe(base: string, token: string | null): Promise<DaemonHealth | null> {
@@ -977,6 +1102,31 @@ export class MachineConnection {
       if (firstAttempt && ApiError.isApiError(error) && error.code === "token_expired") {
         await this.ensureToken(true);
         return retry();
+      }
+      /*
+       * **The one status rule the relay candidate must not get.**
+       *
+       * `forgetRoute`'s docblock says a route is never dropped on an HTTP status
+       * other than `no_tunnel`, and that stays true — this does not call it. What
+       * this handles is narrower and only exists on the loopback arm: the daemon on
+       * this computer says the token was issued for a *different* machine, which
+       * means the file naming it is stale. A daemon re-enrolled, or a second one
+       * took the port. `route.kind` is the guard rather than the code alone, because
+       * down the tunnel the relay has already derived the machine from the same
+       * verified `aud` before a byte moved — a `wrong_machine` from *there* is two
+       * services disagreeing about one fact, and not a reason for one client to
+       * abandon the only path it has.
+       *
+       * ⚠ **Retrying a non-replayable method is safe here, and here only.** A
+       * `wrong_machine` 401 comes from the middleware `src/server.ts` mounts above
+       * every route, so no handler ran: nothing was created, no prompt was
+       * delivered, no upload was stored. That is what `isReplayable` exists to be
+       * unsure about on a *transport* failure, and what a parsed refusal settles.
+       */
+      if (this.chosen?.kind === "local" && meansWrongMachine(error)) {
+        this.denyLocal();
+        if (firstAttempt) return retry();
+        throw error;
       }
       /*
        * **`no_tunnel` is the one HTTP answer that means the machine is gone, and

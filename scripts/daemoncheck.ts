@@ -91,5 +91,6 @@ await import("./daemoncheck.plugin-routes.js");
 await import("./daemoncheck.systems-and-harnesses.js");
 await import("./daemoncheck.contributions-and-launch.js");
 await import("./daemoncheck.agent-routes-and-capabilities.js");
+await import("./daemoncheck.announce.js");
 
 finish();

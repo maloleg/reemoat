@@ -13,6 +13,7 @@
 mod commands;
 mod config;
 mod credential;
+mod local;
 mod proxy;
 
 use std::sync::Mutex;
@@ -31,17 +32,35 @@ use commands::Host;
 /// a window holding the fleet's credential.
 ///
 /// The dev server is here because `tauri dev` loads the frontend from Vite, and a
-/// rule that only worked in a packaged build is a rule nobody develops against.
+/// rule that only worked in a packaged build is a rule nobody develops against —
+/// but it is here *only* in a development build, and that is load-bearing rather
+/// than tidy.
+///
+/// ⚠ **`localhost` and `127.0.0.1` were allowed unconditionally and that was a
+/// hole.** A Reemoat control plane on loopback is the ordinary self-hosted shape —
+/// `pnpm cp`, a dev stand, a single-box install — and it serves `index.html` at
+/// `/`. Unconditionally allowed, a script assigning `location.href` could
+/// therefore replace the running app with the *backend's* page, inside the window
+/// holding the fleet's credential: the one thing bundling the frontend exists to
+/// make impossible. The CSP cannot help — there is no `navigate-to` directive, and
+/// neither `form-action` nor `base-uri` constrains a navigation. A local daemon at
+/// `127.0.0.1:7887` falls under the same rule; it serves only JSON today, which is
+/// luck rather than a boundary.
+///
+/// `tauri.localhost` stays in every build: it is the *bundle's* own origin on
+/// Windows and Android, not a server's.
 fn is_our_own(url: &url::Url) -> bool {
     match url.scheme() {
         // macOS and Linux serve the bundle from `tauri://localhost`.
         "tauri" => true,
-        // Windows and Android serve it from `http://tauri.localhost`, and the dev
-        // server is `http://localhost:5173`. Both are this app's own document.
-        "http" | "https" => matches!(
-            url.host_str(),
-            Some("tauri.localhost") | Some("localhost") | Some("127.0.0.1")
-        ),
+        "http" | "https" => match url.host_str() {
+            // Windows and Android serve the bundle from here. Always this app.
+            Some("tauri.localhost") => true,
+            // The Vite dev server — and, in a packaged build, somebody else's
+            // service. See above.
+            Some("localhost") | Some("127.0.0.1") => cfg!(debug_assertions),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -53,6 +72,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             commands::host_boot,
+            commands::host_local_daemon,
             commands::host_set_server,
             commands::host_credential_set,
             commands::host_credential_clear,
@@ -115,7 +135,23 @@ mod tests {
         assert!(at("tauri://localhost/"));
         assert!(at("tauri://localhost/m/m_ab12/s/s_cd34"));
         assert!(at("http://tauri.localhost/settings"));
-        assert!(at("http://localhost:5173/"));
+    }
+
+    /// The dev server, and the rule stated so it holds in **both** profiles.
+    ///
+    /// Written as an equality against `cfg!` rather than as two `#[cfg]` tests,
+    /// because CI runs `cargo test` in debug only (`.github/workflows/check.yml`)
+    /// and a release-only test there would assert nothing. This one fails in debug
+    /// if the arm is deleted and in release if the `cfg!` is dropped, from one run.
+    #[test]
+    fn loopback_navigates_only_in_a_development_build() {
+        let dev = cfg!(debug_assertions);
+        assert_eq!(at("http://localhost:5173/"), dev);
+        assert_eq!(at("http://127.0.0.1:5173/"), dev);
+        // A control plane and a daemon are the two loopback services this app
+        // actually meets, and a packaged build may navigate to neither.
+        assert_eq!(at("http://127.0.0.1:7888/"), dev);
+        assert_eq!(at("http://127.0.0.1:7887/sessions"), dev);
     }
 
     #[test]

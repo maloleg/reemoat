@@ -1,6 +1,6 @@
 //! Everything the webview may ask this process to do, and nothing else.
 //!
-//! Eight, and the list is short on purpose: an app-defined command is not
+//! Nine, and the list is short on purpose: an app-defined command is not
 //! ACL-gated, so this file *is* the capability surface. `pnpm nativecheck` holds
 //! it to the set `packages/web/src/native.ts` actually calls, in both directions —
 //! a command nobody calls is a door nobody is watching, and a call with no command
@@ -9,13 +9,14 @@
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::config;
 use crate::credential;
+use crate::local::{self, LocalDaemon};
 use crate::proxy::{self, CpAnswer, CpRequest};
 
 pub struct Host {
@@ -75,6 +76,22 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
 /// is one it has no reason to keep, and doing it here — rather than on some later
 /// sign-out that may never happen — is what makes "no credential is retained for a
 /// server you are not using" true of the act rather than of an intention.
+/// Is there a daemon on *this computer*, and which machine is it?
+///
+/// A separate call rather than a field on {@link Boot}, because a daemon can start
+/// after the app does — and usually has, on a laptop where both come up at login.
+/// The client re-asks; a boot payload would be a one-shot answer to a question
+/// whose answer changes.
+///
+/// `None` for every failure, including the ordinary one of there being no daemon
+/// here. `local::read` is where the refusals are, and loopback is enforced inside
+/// it so the page never sees the parts an address was built from.
+#[tauri::command]
+pub fn host_local_daemon(app: AppHandle) -> Option<LocalDaemon> {
+    let home = app.path().home_dir().ok()?;
+    local::read(&home)
+}
+
 #[tauri::command]
 pub fn host_set_server(url: String, host: State<'_, Host>) -> Result<String, String> {
     let origin = config::normalize_origin(&url)?;

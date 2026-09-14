@@ -15,7 +15,7 @@ building and shipping it.
 
 ## What it adds, and what it deliberately does not
 
-Four things a webview cannot do for itself:
+Five things a webview cannot do for itself:
 
 | | |
 |---|---|
@@ -23,10 +23,21 @@ Four things a webview cannot do for itself:
 | the credential | in the operating system's credential store, keyed on the server's origin, never in `localStorage` |
 | a link | opened in the real browser, through `ui/links.ts`'s own three-scheme allowlist |
 | a download | written through the platform's save panel |
+| a daemon on this computer | read out of `~/.reemoat/daemon.json`, which a webview cannot open. The host answers a finished loopback origin and refuses any other |
 
-Not built, on purpose: no local-daemon shortcut (every request goes down the relay's
-tunnel, which is where a revoked grant takes effect on the *next* request), no
-device identity, no updater, no menu bar, no tray, no notifications.
+The fifth is what makes the app more than a window: a daemon on the same machine is
+reached over loopback rather than out to the relay and back. ⚠ **It changes what a
+revocation costs, and only here.** The relay reads live user, machine and grant rows
+before each request; loopback does not, so on this path a revoked grant keeps
+working for the token's remaining life — 300 s plus 60 s of leeway either way.
+Everywhere else it stops at once. Settings → Machines → *This device* says so beside
+the switch, and switches it off per machine. What makes that trade defensible is
+*who* can take it: only a process running as the uid that owns `~/.reemoat`, which
+already holds the daemon's database, its signing keys and every transcript.
+`docs/DECISIONS.md` Q7.137.
+
+Not built, on purpose: no device identity, no updater, no menu bar, no tray, no
+notifications.
 
 ## Developing
 
@@ -214,6 +225,16 @@ Recorded here rather than discovered, in the column this repository keeps them i
 - **An intermediary in front of a real relay meeting `Origin: tauri://localhost`.**
   The relay itself answers `*` and never `Access-Control-Allow-Credentials`; a CDN
   in front of it may not.
+- **Loopback from a packaged webview, per platform.** macOS is settled by the
+  `lsof` step in the checklist: App Transport Security exempts loopback, the
+  entitlement is already `com.apple.security.network.client`, and the App Sandbox is
+  off. The other two are not. Windows runs WebView2, which is Chromium and applies
+  **Private Network Access** preflights, and Linux runs WebKitGTK. A platform that
+  refuses costs nothing visible — `proveLocal` fails and the relay answers, which is
+  the same path every other client takes — so the failure to watch for is the silent
+  one: the feature never engaging on a machine where it should. `lsof` on the app is
+  the instrument; a WebSocket to `127.0.0.1:<port>` rather than to the relay's origin
+  is the answer.
 - **The keychain, end to end.** The key *shape* is unit-tested and the crate's Apple
   backend is the one that compiles, but writing a real entry needs an unlocked login
   keychain: from a non-interactive shell `security add-generic-password` answers

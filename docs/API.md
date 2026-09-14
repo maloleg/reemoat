@@ -2,8 +2,15 @@
 
 Two services, two surfaces, and they are not the same shape. The **control
 plane** issues identity and holds accounts; the **daemon** owns sessions and runs
-on your machine. A browser talks to both — the control plane directly, the daemon
-through the relay.
+on your machine.
+
+A client talks to both, and how it reaches the second depends on where it is. The
+control plane is always addressed directly. A daemon is reached **through the
+relay** — the only way in from anywhere else — except for one case: the desktop app
+reaching a daemon on the **same computer**, which goes over loopback. That is one
+base URL instead of another and nothing else; every route below, every header and
+every refusal is identical on both paths, which is why this document does not
+mention it again.
 
 This file is a map, not a specification. Every route's actual rules — what a
 refusal means, what may be replayed, what a 409 carries — are in
@@ -247,3 +254,32 @@ password change is refused all of it by a second positional gate.
 `GET *` serves `packages/web/dist` with an SPA fallback, from disk, per request.
 `REEMOAT_CP_WEB=0` turns it off — and takes the security headers with it, which
 you then have to send yourself. See `packages/control-plane/.env.example`.
+
+## Deployment modes
+
+Two, and the second is a supported shape rather than a degraded one.
+
+| | Serves | Reached by |
+|---|---|---|
+| **Full** | the API, the relay, and the web client at `/` | anything: a browser, the desktop app, a phone |
+| **API-only** (`REEMOAT_CP_WEB=0`) | the API and the relay | the desktop app, and any client that speaks the routes above |
+
+The desktop app carries its own copy of the interface, compiled into the binary,
+and **never downloads one** — which is what makes the second mode possible: a fleet
+whose clients are all native needs no public web UI at all. `docs/NATIVE.md`
+records how that invariant is held and what asserts it.
+
+Two registrations are gated on the bundle being served, and nothing else is.
+`/health`, every `/v1` route, `/install.sh`, the relay listener and the tunnel
+endpoint all behave identically either way. A path that names no route then answers
+the same error envelope as every other refusal instead of a page, which is the
+right answer and also the first thing an operator sees.
+
+What an API-only instance stops sending is the **document** security headers — the
+CSP, `frame-ancestors`, the cache directives — because they are set on an HTML
+response and there is no longer one. If you serve the client from somewhere else,
+you are taking those over with it; `packages/control-plane/.env.example` carries
+the minimum set verbatim.
+
+`REEMOAT_CP_INSTALL=0` is a **separate** switch for `/install.sh`. Turning off the
+interface does not turn off the route the next machine joins through.

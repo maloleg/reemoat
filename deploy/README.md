@@ -270,6 +270,29 @@ between them or the pair does not work at all — a second file would be a secon
 place for them to disagree, silently, with a relay answering 401 to every request
 because its `iss` no longer matches.
 
+#### Serving no web UI
+
+`REEMOAT_CP_WEB=0` in the control plane's file, and that is the whole mechanism.
+The Reemoat desktop app carries its own copy of the interface and never downloads
+one, so a fleet whose clients are all native needs no public web UI — and the
+control plane is then an API and a relay.
+
+What changes: `GET /` and every client-side route answer the JSON error envelope
+instead of a page, and the document security headers stop being sent because there
+is no longer a document to send them on. What does not: `/health`, every `/v1`
+route, `/install.sh`, the relay listener, the tunnel endpoint, enrollment, tokens,
+grants. `docs/API.md` has the table.
+
+⚠ **`REEMOAT_CP_INSTALL=0` is a different switch.** Turning off the interface does
+not turn off `GET /install.sh`, which is how the next machine joins; turning off
+the installer does not take the interface with it. Both spell "off" as `0`, `false`
+or `no`, and `1`, `true` and `yes` mean *the default* rather than a path — anything
+else is read as one.
+
+The image still builds and still carries `packages/web` in either mode, and that is
+deliberate: it makes the switch a restart rather than a redeploy, and flipping it
+back needs nothing fetched.
+
 Two more overrides exist and are install-time rather than runtime.
 `REEMOAT_CPCTL_ENV` moves the admin-key file. `REEMOAT_UNIT_PATH` replaces the
 `PATH` baked into the unit outright — needed only on a machine with two copies of

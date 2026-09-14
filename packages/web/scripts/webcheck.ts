@@ -86,6 +86,7 @@ await import("./webcheck.strip-order-and-hidden.js");
 await import("./webcheck.refusing-controls.js");
 await import("./webcheck.harness-and-systems.js");
 await import("./webcheck.model-list.js");
+await import("./webcheck.local-route.js");
 await import("./webcheck.typography.js");
 
 finish();
