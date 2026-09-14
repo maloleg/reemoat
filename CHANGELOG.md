@@ -25,6 +25,8 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-14
+
 ### Added
 
 - **A message sent while the agent is working is taken rather than refused.**
