@@ -25,6 +25,35 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **Reemoat runs as a native macOS application.** `packages/native` is a Tauri 2
+  window around the existing web client, built once and **embedded in the binary** —
+  so the control plane it supervises serves it no JavaScript and cannot replace any.
+  It asks which server to connect to, signs in through the same routes the browser
+  uses, and keeps the session in the operating system's credential store rather than
+  in browser storage, keyed on the server's origin so two servers can never share
+  one sign-in. Windows and Linux are structurally supported and iOS and Android are
+  prepared; `docs/NATIVE.md` has the prerequisites, what signing and notarization
+  would take, and what is deliberately not built.
+- **The same bundle, not a second copy.** There is one `packages/web` and no
+  `@tauri-apps` dependency anywhere in it: the shell injects one function and the
+  app reads it through a hand-written bridge, the way it already reads Telegram's.
+  Every screen, every retry rule, the WebSocket, the cursor and the upload progress
+  are the code the browser client runs. One leg differs — `/v1/*` goes through the
+  host process, because the control plane mounts no CORS and adding one to serve a
+  client that does not need it would be the wrong repair.
+- `pnpm nativecheck`, a ninth offline driver, and a `native` CI job for the parts
+  that need a Rust toolchain. Nothing about the native app builds, signs or
+  publishes on a push.
+
+### Fixed
+
+- `packages/web`'s three "add a machine" screens built their install command out of
+  the page's own origin. In a browser that is the control plane and is right; under
+  a custom scheme it printed a `curl` line naming the app itself. They ask where the
+  control plane is now, and one of the three had never been asserted.
+
 ## [0.9.0] - 2026-09-14
 
 ### Added

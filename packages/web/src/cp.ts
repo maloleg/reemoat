@@ -2,6 +2,8 @@ import type { AuthFailure } from "./account";
 import { authFailure } from "./account";
 import { ApiError, readJson, withTimeout } from "./http";
 import { parseInstanceConfig } from "./instance";
+import type { CpInit } from "./native";
+import { cpSend, inNativeShell, setNativeCredential } from "./native";
 import type { ConfigField, InstanceConfig } from "./instance";
 import type {
   AdminUser,
@@ -17,11 +19,20 @@ import type {
 /**
  * The control plane, from the browser.
  *
- * Same-origin: this page is served by it, and in dev Vite proxies `/v1` to it.
- * That is not an implementation detail, it is the security boundary — **the
- * credential is sent here and nowhere else.** It never goes to a daemon and never
- * to the relay; those get short-lived, machine-scoped tokens that this service
- * mints.
+ * **The credential is sent to one origin and nowhere else.** It never goes to a
+ * daemon and never to the relay; those get short-lived, machine-scoped tokens that
+ * this service mints. That is the security boundary, and it is held two different
+ * ways depending on where this code is running.
+ *
+ * In a browser it is held by *being* same-origin: this page is served by the
+ * control plane, and in dev Vite proxies `/v1` to it rather than letting the call
+ * go cross-origin. In the native shell there is no such thing as same-origin — the
+ * document comes from a custom scheme and the control plane mounts no CORS at all —
+ * so the base URL lives in the host process instead, this module sends it a *path*,
+ * and the host refuses anything that would leave the configured origin. **Stronger
+ * than same-origin rather than weaker**: the page cannot name the address the
+ * credential goes to. `native.ts` is the seam and `.claude/rules/native-shell.md`
+ * carries the argument.
  *
  * The credential is a session token now, obtained by signing in. It is **not a
  * cookie**: `src/cors.ts` answers `*` and never sends
@@ -115,7 +126,46 @@ export function authHeader(credential: Credential | null): Record<string, string
   return { authorization: `Bearer ${credential.value}` };
 }
 
-let credential: Credential | null = readStoredCredential();
+/*
+ * ⚠ **Two stores, and which one is read is decided synchronously, here.**
+ *
+ * In a browser this line is unchanged and is the whole story: `localStorage`, read
+ * once in the module body, with the pre-rename names adopted and swept.
+ *
+ * In the native shell there is no `localStorage` worth trusting, and the sharper
+ * reason is not trust: **there is one webview origin for every server somebody
+ * might point that app at.** A browser hands out one storage area per origin and
+ * therefore scopes a credential to a server for free; a custom scheme does not. So
+ * the credential lives in the operating system's credential store under a key that
+ * *is* the server's origin (`packages/native/src-tauri/src/credential.rs`), which
+ * means it cannot be read for a server it was not issued by — structurally, rather
+ * than because a code path remembered to clear it on a change.
+ *
+ * That store is async and this assignment is not, so the native arm starts empty
+ * and `store.bootstrap()` fills it through {@link adoptHydratedCredential} after
+ * awaiting `hostReady`. `nativeHydrating()` is what stops the sign-in screen being
+ * drawn in the frame before it lands. The alternatives, and why each is worse, are
+ * in `native.ts`'s docblock for `hostReady`.
+ */
+let credential: Credential | null = inNativeShell() ? null : readStoredCredential();
+
+/**
+ * Adopt what the operating system's credential store held, once it has answered.
+ *
+ * **A function the store calls rather than a `.then` registered here**, so the
+ * ordering is something a reader can see and a driver can drive: two promise
+ * callbacks on one promise resolve in registration order, which is true and is
+ * exactly the kind of thing that stops being true when somebody moves an import.
+ *
+ * A credential adopted since is **newer than the keyring's** and wins — a sign-in
+ * that completed while the keyring read was in flight is the whole case, and it is
+ * the same reasoning `cpFetch` uses when it refuses to let a late 401 clear a fresh
+ * credential.
+ */
+export function adoptHydratedCredential(value: string | null): void {
+  if (value === null || credential !== null) return;
+  credential = { value, kind: credentialKind(value) };
+}
 
 function readStoredCredential(): Credential | null {
   try {
@@ -164,6 +214,20 @@ export function currentCredential(): Credential | null {
  */
 export function setSession(token: string): void {
   credential = { value: token.trim(), kind: credentialKind(token.trim()) };
+  /*
+   * ⚠ **The native arm returns, and never falls through to the writes below.**
+   *
+   * Writing to `localStorage` *as well* would be the one thing a native client must
+   * not do: the whole reason the credential lives in the OS store is that a
+   * webview's storage is neither protected nor scoped to a server, and a second
+   * copy sitting beside it would be the unprotected one somebody later reads.
+   * `webcheck` asserts the absence under all three names rather than trusting this
+   * comment.
+   */
+  if (inNativeShell()) {
+    setNativeCredential(credential.value);
+    return;
+  }
   try {
     window.localStorage.setItem(CREDENTIAL_STORAGE, credential.value);
     /*
@@ -183,6 +247,12 @@ export function setSession(token: string): void {
 
 export function clearSession(): void {
   credential = null;
+  // Removed from the keyring rather than blanked, and before anything else: this is
+  // the path `store.signOut()` takes, and it ends in a full reload.
+  if (inNativeShell()) {
+    setNativeCredential(null);
+    return;
+  }
   try {
     window.localStorage.removeItem(CREDENTIAL_STORAGE);
     for (const key of LEGACY_STORAGE) window.localStorage.removeItem(key);
@@ -204,7 +274,7 @@ export function onSignedOut(handler: (failure: AuthFailure) => void): void {
   signedOutHandler = handler;
 }
 
-async function cpFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function cpFetch<T>(path: string, init: CpInit = {}): Promise<T> {
   /*
    * Which credential this request actually carried, held so the refusal below can
    * be attributed to it rather than to whatever is current when it lands.
@@ -216,7 +286,7 @@ async function cpFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (headers === null) throw new ApiError(401, "missing_api_key", "not signed in");
   if (init.body !== undefined) headers["content-type"] = "application/json";
 
-  const response = await fetch(path, { ...init, headers, signal: withTimeout(CP_TIMEOUT_MS) });
+  const response = await cpSend(path, { ...init, headers, signal: withTimeout(CP_TIMEOUT_MS) });
   try {
     return await readJson<T>(response);
   } catch (error) {
@@ -264,7 +334,7 @@ async function cpFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
  * ------------------------------------------------------------------ */
 
 async function publicPost<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
+  const response = await cpSend(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -291,7 +361,7 @@ async function publicPost<T>(path: string, body: unknown): Promise<T> {
  * with everything off — is the failure it replaces.
  */
 export async function instanceConfig(): Promise<InstanceConfig> {
-  const response = await fetch("/v1/instance", { signal: withTimeout(CP_TIMEOUT_MS) });
+  const response = await cpSend("/v1/instance", { signal: withTimeout(CP_TIMEOUT_MS) });
   const config = parseInstanceConfig(await readJson<unknown>(response));
   if (config === null) throw new Error("this control plane described itself in a shape this client cannot read");
   return config;
@@ -361,7 +431,7 @@ export function consumePasswordReset(token: string, newPassword: string): Promis
  * special case in exactly the place that must not have any.
  */
 export async function login(name: string, password: string): Promise<Me> {
-  const response = await fetch("/v1/login", {
+  const response = await cpSend("/v1/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, password }),

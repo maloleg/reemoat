@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { signInError, signInReady } from "../account";
 import { gateNotice, showsGateLink } from "../gate";
+import { nativeBoot } from "../native";
 import { navigate } from "../router";
 import { store } from "../store";
 import type { InstanceConfig } from "../instance";
@@ -193,6 +194,24 @@ export function SignIn({
           the wrong reason.
         */}
         <div className="mt-8 space-y-2 text-sm text-muted">
+          {/*
+            ⚠ **The same state and the same sentence as a browser with storage
+            disabled**, arriving by a different cause: there a private window has no
+            durable storage, here the machine has no credential store this app can
+            use. `cp.ts`'s `readStoredCredential` catch is the browser half and says
+            *"The app still works for one session; it just asks for the password
+            again next time."*
+            One state, one wording — two spellings of one state is a defect this
+            repository has shipped before. Read from `nativeBoot()` directly rather
+            than taken as a prop: this screen is only ever drawn once hydration has
+            settled, because `phase` cannot be `signed_out` before then.
+          */}
+          {nativeBoot()?.durable === false && (
+            <p className="text-fg">
+              This computer has no credential store Reemoat can use, so it will ask you to sign in again after it
+              restarts.
+            </p>
+          )}
           {showsGateLink("register", config) && (
             <p>
               No account?{" "}

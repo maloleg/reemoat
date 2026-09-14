@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Minimal, and it stays minimal.
+
+  One entitlement: this app makes outbound HTTPS requests to a control plane
+  somebody chose. It reaches nothing else.
+
+  Not here, deliberately: there is no App Sandbox, so `com.apple.security.app-sandbox`
+  is absent and keychain access needs no entitlement of its own. The hardened
+  runtime is on (`bundle.macOS.hardenedRuntime`), which is what notarization
+  requires, and WKWebView runs out of process carrying its own.
+
+  This file becomes load-bearing the day sandboxing or App Store distribution is
+  wanted, and not one day before. `docs/NATIVE.md` carries what that would take.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.network.client</key>
+    <true/>
+  </dict>
+</plist>

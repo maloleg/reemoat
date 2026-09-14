@@ -61,7 +61,19 @@ export const sleep = (ms: number): Promise<void> => new Promise((resolve) => set
 
 export const storage = new Map<string, string>();
 (globalThis as Record<string, unknown>)["window"] = {
-  location: { href: "http://127.0.0.1/", protocol: "http:" },
+  /*
+   * `origin` beside `href`, added deliberately rather than by reflex — this stub's
+   * own ⚠ one comment down is about a field that was *faked* and cost a failure
+   * three screens away, so a field added here has to be one a real browser would
+   * answer the same way.
+   *
+   * It is read by `native.ts`'s `controlPlaneOrigin()`, which is the browser arm of
+   * "where is the control plane": the origin this page was served by. Without it the
+   * three screens that print an install command would build one out of `undefined`
+   * under this driver, and the assertion about them would be green over a sentence
+   * nobody could run.
+   */
+  location: { href: "http://127.0.0.1/", origin: "http://127.0.0.1", protocol: "http:" },
   localStorage: {
     getItem: (key: string): string | null => storage.get(key) ?? null,
     setItem: (key: string, value: string): void => void storage.set(key, value),

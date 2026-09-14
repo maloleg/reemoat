@@ -88,6 +88,13 @@ Three pieces, and you can run all of them yourself.
 - **The web UI** supervises the fleet from a phone. One screen, shaped around one
   question: *does anything anywhere need me?*
 
+And one shell around that UI rather than a fourth piece: **the native app**
+(`packages/native`, a Tauri window) is the same bundle, embedded in a binary, so the
+server it supervises serves it no JavaScript and cannot replace any. It asks which
+control plane to connect to, then signs in through the same routes the browser uses
+and keeps the session in the operating system's credential store.
+`docs/NATIVE.md` has the prerequisites and what is not built.
+
 ```
    you, anywhere             one box you run              machines you own
   ───────────────           ─────────────────            ──────────────────
@@ -119,8 +126,9 @@ Three pieces, and you can run all of them yourself.
 | `.claude/rules/` | The same, per area, loaded when you open a file it covers |
 | `docs/API.md` | The HTTP surface of both services — 118 routes, what each is for, and the conventions every one of them answers in |
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
+| `docs/NATIVE.md` | The native app: building it, the prerequisites per platform, what signing and notarization would take, and what is deliberately not built |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 932 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 939 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

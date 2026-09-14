@@ -2,6 +2,7 @@ import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { CONTROL_PLANE_UNREACHABLE } from "../../account";
 import { installCommand } from "../../enrollment";
+import { controlPlaneOrigin } from "../../native";
 import {
   machineAllowanceText,
   machineBadgeText,
@@ -180,7 +181,7 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
         {canAdd ? (
           <>
             <div className="mt-3">
-              <CommandLine command={installCommand(location.origin)} />
+              <CommandLine command={installCommand(controlPlaneOrigin())} />
             </div>
             {/* Under the command, never above it: the free way to add a machine
                 is the answer, and this is the alternative for somebody who has

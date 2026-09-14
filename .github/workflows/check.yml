@@ -143,6 +143,21 @@ jobs:
         if: '!cancelled()'
         run: pnpm webcheck
 
+      # The native shell's *configuration*, which no other check here can see:
+      # `typecheck` compiles no Rust, `webcheck` is scoped to `packages/web`, and
+      # `pincheck` reads version sites by literal path. It belongs in this job and
+      # not beside the `native` job below because it never runs `cargo` — it reads
+      # text and JSON and finishes in milliseconds.
+      #
+      # The assertion worth naming: Tauri intercepts OS file drops by default, which
+      # takes the composer's attachments and the code importer with it while the
+      # paperclip beside them keeps working. Nothing else in this repository can
+      # observe that, and the shape of the failure invites the conclusion that the
+      # feature never existed.
+      - name: nativecheck
+        if: '!cancelled()'
+        run: pnpm nativecheck
+
       # Two files pin the ACP adapter and a third copy is the one that runs.
       # Nothing enforced their agreement until this existed, and nothing but this
       # ever compares any of them to what is actually installed.
@@ -241,3 +256,79 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks version
           /tmp/gitleaks detect --no-git --config .gitleaks.toml --redact --verbose
+
+  # The native shell, compiled. Its own job for the two reasons the `image` job
+  # gives — it is not offline-in-one-process (cargo fetches crates) and it is
+  # minutes rather than seconds — plus one of its own: it is the **first non-Linux
+  # runner in this repository**, because the platform this app is primarily built
+  # for is macOS and a Linux compile would not exercise the Apple bundle at all.
+  #
+  # It does not `needs: check`. What it catches that nothing else can is a
+  # capability file naming a permission that does not exist — `tauri-build`
+  # compiles `capabilities/*.json` into an ACL, and `nativecheck` can only read
+  # that file as text — and a `version` path that does not resolve. Gating it
+  # behind the other jobs would only delay the one signal nothing else gives.
+  #
+  # ⚠ **Nothing here signs, notarizes or uploads anything.** The permission block
+  # at the top of this file is `contents: read`, and a job that read a signing
+  # identity would not belong in a workflow that runs on every push. `docs/NATIVE.md`
+  # carries what a signed build takes, and `deploy.yml`'s own header carries why
+  # nothing in this repository publishes on a push.
+  native:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # `dtolnay/rust-toolchain` rather than the runner's preinstalled Rust: the
+      # image's version moves without notice, and `clippy` with `-D warnings` is a
+      # gate that a compiler bump can change the meaning of.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native/src-tauri
+
+      # Two installs, and the second is not a mistake. `packages/native` is under
+      # `packages/` and deliberately **excluded** from the workspace — the three
+      # deploy behaviours that depend on that line are in `pnpm-workspace.yaml`
+      # beside it — so the root install does not reach it.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir packages/native install --frozen-lockfile
+
+      # `frontendDist` has to exist before Tauri reads the configuration, and the
+      # failure otherwise is a path error that reads like a config bug.
+      - run: pnpm web:build
+
+      - name: cargo fmt
+        run: cargo fmt --manifest-path packages/native/src-tauri/Cargo.toml --check
+
+      - name: cargo clippy
+        if: '!cancelled()'
+        run: cargo clippy --manifest-path packages/native/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # The Rust unit tests: the origin-escape table `host_cp` rests on, the
+      # normalization that makes one server one credential key, the keyring scope,
+      # and what this window may navigate to.
+      - name: cargo test
+        if: '!cancelled()'
+        run: cargo test --manifest-path packages/native/src-tauri/Cargo.toml
+
+      # `--no-bundle`, because bundling a `.dmg` adds minutes and asserts nothing
+      # this does not: the binary links, the capability files compile into an ACL,
+      # the `version` path resolves, and the embedded frontend is where the
+      # configuration says it is. Unsigned, which is what a runner with no identity
+      # produces and is the same artifact a developer gets.
+      - name: tauri build
+        if: '!cancelled()'
+        run: pnpm --dir packages/native exec tauri build --no-bundle

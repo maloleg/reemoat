@@ -1,3 +1,5 @@
+import { inNativeShell, saveNative } from "../native";
+
 /**
  * Handing a downloaded file to the person who asked for it.
  *
@@ -36,6 +38,22 @@
  * because a blob URL is same-origin.
  */
 export function saveBlob(blob: Blob, filename: string): void {
+  /*
+   * **The native arm returns before any of the eight lines below**, and the reason
+   * is not that they would be worse there — it is that `anchor.download` is a
+   * request to the *browser*, and a webview under a custom scheme is not obliged to
+   * honour it. A save that silently does nothing is the failure this whole module
+   * is shaped around, one platform over.
+   *
+   * The bytes go to the shell and the shell shows the platform's save panel, so the
+   * three rules above are kept by construction rather than by discipline: there is
+   * no URL, no anchor and no browsing context to navigate. See `saveNative` for why
+   * the payload is raw bytes and not JSON.
+   */
+  if (inNativeShell()) {
+    void saveNative(blob, filename);
+    return;
+  }
   const url = URL.createObjectURL(new Blob([blob], { type: "application/octet-stream" }));
   const anchor = document.createElement("a");
   anchor.href = url;

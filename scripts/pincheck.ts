@@ -715,6 +715,32 @@ check(
 );
 process.stdout.write("  note  app.ts's VERSION literal is checked by relaycheck, against the response rather than the file\n");
 
+/*
+ * **The native shell adds no seventh site, and this is where somebody looking for
+ * one finds that out.**
+ *
+ * `packages/native/src-tauri/tauri.conf.json` carries a `version` field that Tauri
+ * stamps into the bundle, and `Cargo.toml` carries one because Cargo requires it —
+ * so on the face of it this release is written down in eight places. It is not:
+ * the first names a *path* to the root manifest and the second is pinned inert at
+ * `0.0.0`. Both are asserted by `pnpm nativecheck`, which is also where the Tauri
+ * CLI and crate pins live, for the reason the block above gives about `app.ts` —
+ * one driver owns one subject, and the note is what stops deleting it from being
+ * quiet.
+ *
+ * Asserted rather than only noted, so the pointer cannot outlive what it points at.
+ */
+const nativecheckSrc = read("scripts/nativecheck.ts");
+check(
+  "the native shell's two version fields are still asserted where nativecheck asserts them",
+  [
+    nativecheckSrc.includes("tauri.conf.json's version is a path rather than a literal"),
+    nativecheckSrc.includes("and it is the inert one"),
+  ],
+  [true, true],
+);
+process.stdout.write("  note  the native shell's version fields are checked by nativecheck; neither is a release site\n");
+
 
 process.stdout.write("\nthe API-key ceiling, on both sides of the wire\n");
 

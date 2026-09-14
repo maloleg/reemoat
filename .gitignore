@@ -61,3 +61,20 @@ dist/
 # repository root — `tar -czf board.tgz -C plugins/board .` — so the documented
 # first step leaves an untracked archive beside the tree it was built from.
 *.tgz
+
+# The native shell's build tree and its generated projects.
+#
+# `target/` is **2.9 GB** after one `cargo check` on this checkout, which is why
+# this is not only hygiene: `scripts/docscheck.ts` walks the working tree rather
+# than `git ls-files`, so it would read every `.json` fingerprint in there into the
+# symbol corpus — slow, and one dependency away from making a stale symbol
+# "resolve" and inverting the ratchet that catches broken pointers. `SKIP_DIR` in
+# that driver is the half that actually holds; this is the half that keeps the tree
+# clean and keeps `gitleaks --no-git` from scanning build output.
+#
+# `gen/schemas/` is written by `tauri-build` on every compile from the capability
+# files. `gen/android` and `gen/apple` are **not** matched here on purpose: those
+# are generated once by `tauri android init` / `tauri ios init` and then edited and
+# committed, the way a checked-in Xcode project is.
+packages/native/src-tauri/target/
+packages/native/src-tauri/gen/schemas/

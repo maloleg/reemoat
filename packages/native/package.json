@@ -1,0 +1,17 @@
+{
+  "name": "@reemoat/native",
+  "private": true,
+  "type": "module",
+  "description": "The native shell. Bundles packages/web and talks to a control plane the person chooses.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "tauri icon icon.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

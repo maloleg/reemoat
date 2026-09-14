@@ -9,6 +9,7 @@ import { ApiError, errorText, isTransportFailure, meansLater } from "./http";
 import type { InstanceConfig } from "./instance";
 import { keyOf, machineId, refOf, sessionId, type MachineId, type SessionKey, type SessionRef } from "./ids";
 import { describe, MachineConnection, type MachineState } from "./machine";
+import { hostReady, nativeHydrating, type NativeBoot } from "./native";
 import { mergeOptimistic } from "./sessionOrder";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
 import {
@@ -845,6 +846,16 @@ export interface AppState {
    * is no longer a key somebody pastes.
    */
   phase: "signed_out" | "loading" | "ready";
+  /**
+   * What the native shell answered about itself, or `null`.
+   *
+   * **`null` in a browser and for ever**, which is what makes the server picker
+   * structurally unreachable in the web build: there is no flag to set, no route to
+   * type and no env var to flip — the field is non-null only where a Tauri global
+   * was injected before the first script ran. `App.tsx` branches on it, and that
+   * branch is the only place it is read.
+   */
+  host: NativeBoot | null;
   me: Me | null;
   machines: MachineState[];
   /**
@@ -948,7 +959,17 @@ const EMPTY_TRANSCRIPT: Transcript = {
 class AppStore implements StreamSink {
   private listeners = new Set<() => void>();
   private snapshot: AppState = {
-    phase: cp.currentCredential() === null ? "signed_out" : "loading",
+    /*
+     * ⚠ **`nativeHydrating()` is what stops a flash of the sign-in form.**
+     *
+     * In the native shell the credential comes out of the OS keyring, which is
+     * async, so at this line there is genuinely no answer yet — and the honest
+     * value for "no answer yet" is the one this app already draws a spinner for.
+     * Without the conjunct every native launch shows the sign-in screen for a frame
+     * and then replaces it, which reads as having been signed out.
+     */
+    phase: cp.currentCredential() === null && !nativeHydrating() ? "signed_out" : "loading",
+    host: null,
     me: null,
     machines: [],
     rootsByMachine: new Map(),
@@ -1171,6 +1192,27 @@ class AppStore implements StreamSink {
      * links from `null` until it lands.
      */
     void this.loadConfig();
+
+    /*
+     * **After `loadConfig` and before the credential check, and both halves of that
+     * placement matter.**
+     *
+     * After, because the ⚠ above is about `loadConfig` being the first statement and
+     * that is still true — and because `loadConfig` is safe to fire before a server
+     * is known: with none chosen the host refuses the call, and this method's own
+     * bare catch is already the right behaviour for that.
+     *
+     * Before, because the early return below is the path that leads to `SignIn`, and
+     * in the shell the credential that decides it has not been read yet. `await`ed
+     * rather than raced: it is one IPC round trip, it is the only thing between a
+     * launch and knowing whether somebody is signed in, and in a browser it is an
+     * already-resolved `null`.
+     */
+    const boot = await hostReady;
+    if (boot !== null) {
+      cp.adoptHydratedCredential(boot.credential);
+      this.patch({ host: boot });
+    }
 
     if (cp.currentCredential() === null) {
       this.patch({ phase: "signed_out" });

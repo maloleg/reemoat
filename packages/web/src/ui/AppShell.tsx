@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { installCommand } from "../enrollment";
+import { controlPlaneOrigin } from "../native";
 import { keyOf } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
 import type { Route } from "../router";
@@ -253,7 +254,7 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
                 copy of this pair is inside its own `lg:hidden`, so at every width
                 exactly one of the two is on screen. */}
             <div className="w-full max-w-lg text-left">
-              <CommandLine command={installCommand(location.origin)} />
+              <CommandLine command={installCommand(controlPlaneOrigin())} />
               <MachineOffer config={state.config} me={state.me} />
             </div>
           </>

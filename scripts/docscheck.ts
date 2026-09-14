@@ -144,12 +144,43 @@ const SOURCE_DIRS = ["src", "scripts", "deploy", "packages", ".github", "plugins
  * toolchain — so the only executable half of the reference plugin would otherwise
  * be invisible to the symbol check while its manifest was not.
  */
-const SOURCE_EXT = /\.(ts|tsx|js|sql|sh|yml|yaml|json|in|md)$/;
+/*
+ * `rs` is in this list for the native shell, and it is safe **only** because
+ * `SKIP_DIR` one comment down skips `target`.
+ *
+ * `packages/native/src-tauri/src` is TypeScript's peer there: it is where the
+ * control-plane proxy, the keyring keying rule and the navigation rule live, so a
+ * decision citing one of their symbols has to be able to resolve. Added with the
+ * skip rather than before it — a corpus that reached a Rust build tree would read
+ * every vendored crate in it, which is assertion 4 switched off in the direction
+ * that reads as passing.
+ *
+ * Not `toml`, and not by oversight. `Cargo.toml` is a manifest of dependency
+ * names and `Cargo.lock` is a larger one, which is the `pnpm-lock.yaml` hazard
+ * `ROOT_FILES` already refuses two comments down.
+ */
+const SOURCE_EXT = /\.(ts|tsx|js|rs|sql|sh|yml|yaml|json|in|md)$/;
 // `.gstack` is not part of this repository — it is a local agent-tooling
 // directory that some contributors have in their checkout. Skipped so a walk
 // never descends into somebody's private tooling and reports citations from it;
 // harmless on a clone that has none.
-const SKIP_DIR = /^(node_modules|dist|\.git|\.gstack)$/;
+//
+// `target` and `gen` are the native shell's, and `target` is the one that matters:
+// **measured at 2.9 GB after a single `cargo check`** on this checkout, thousands
+// of `.json` fingerprint files, all of it under `packages/` where this walk goes.
+// Left in, it makes this driver slow enough to stop being one and — worse — puts
+// every dependency's build metadata into `corpus`, where assertion 4's
+// `corpus.includes(s)` would start answering `true` for stale symbols. That is the
+// `pnpm-lock.yaml` failure `ROOT_FILES` refuses below, arriving by a different
+// door and a thousand times larger.
+//
+// `gen` is skipped by name rather than by path because everything under
+// `src-tauri/gen` is generated — `gen/schemas` on every compile, `gen/android` and
+// `gen/apple` once by `tauri android init` / `tauri ios init` — and a rule scoped
+// at generated output is a rule about something nobody edits. The cost is stated:
+// a `paths:` glob naming anything under `gen` would be a dead glob and fail below,
+// which is the correct answer to writing one.
+const SKIP_DIR = /^(node_modules|dist|target|gen|\.git|\.gstack)$/;
 
 /**
  * The repository root's own files, which no walk of `SOURCE_DIRS` ever reached.
@@ -332,6 +363,13 @@ const citers: Array<[string, string]> = [
    * is exactly the silent kind of gap this driver exists for.
    */
   ["docs/RELEASING.md", read("docs/RELEASING.md")],
+  /*
+   * And `docs/NATIVE.md`, by the same argument and added in the same commit as the
+   * file: a second document under `docs/` citing decisions with nothing checking
+   * that they resolve is the gap above repeating itself, and the only reason it did
+   * not is that the list was one entry long.
+   */
+  ["docs/NATIVE.md", read("docs/NATIVE.md")],
   ...ROOT_FILES.filter((f) => existsSync(join(ROOT, f))).map((f) => [f, read(f)] as [string, string]),
   ...ruleFiles.map((f) => [`.claude/rules/${f}`, readFileSync(join(RULES_DIR, f), "utf8")] as [string, string]),
   ...sourceFiles

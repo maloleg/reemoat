@@ -6,6 +6,7 @@ import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "
 import { setTelegramBack } from "./telegram";
 import { sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
+import { ChooseServer } from "./ui/ChooseServer";
 import { ForcedPasswordChange } from "./ui/ForcedPasswordChange";
 import { Gate } from "./ui/gate/Gate";
 import { StartSheet } from "./ui/NewSession";
@@ -195,6 +196,25 @@ export function App(): ReactNode {
       document.title = PAGE_TITLE;
     };
   }, [blocked]);
+
+  /*
+   * **Which server this is, above everything — including the mailed links below.**
+   *
+   * `state.host` is non-null only in the native shell, and `server === null` only
+   * until somebody has said which control plane this installation talks to. So this
+   * branch is **structurally unreachable in the web build**: there is no flag, no
+   * env var and no route that reaches it, because in a browser the server is the
+   * origin that served this page.
+   *
+   * Above the documents and above the gate, because nothing on any screen below can
+   * be fetched until this is answered. `App` waits on `state.config` for a document
+   * route and `config` comes from `GET /v1/instance`, which needs a server — so
+   * below this, `/terms` in a freshly installed app would spin for ever.
+   *
+   * Below every hook, which is the ⚠ two docblocks up: a render taking this arm must
+   * run exactly as many hooks as one that does not.
+   */
+  if (state.host !== null && state.host.server === null) return <ChooseServer />;
 
   /*
    * **A URL somebody was mailed, above every phase.**

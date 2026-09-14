@@ -2,6 +2,7 @@ import { Bell, Check, ChevronRight, Folder as FolderIcon, Layers, ListFilter, Pi
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
 import { installCommand } from "../enrollment";
+import { controlPlaneOrigin } from "../native";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
 import { folderLabel } from "../paths";
 import { navigate, newPath, sessionPath } from "../router";
@@ -296,7 +297,7 @@ export function SessionBrowser({
                 <div className="lg:hidden">
                   <p className="mt-3 text-xs text-muted">Run this on the machine you want to use:</p>
                   <div className="text-left">
-                    <CommandLine command={installCommand(location.origin)} />
+                    <CommandLine command={installCommand(controlPlaneOrigin())} />
                   </div>
                   {/* ⚠ **Inside `lg:hidden`, with the command.** At `lg` the pane
                       draws both instead, and an offer hoisted out of this div

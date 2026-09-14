@@ -61,7 +61,11 @@ belongs in the `[key]` effect beside `busy` and `applying`. `webcheck` asserts t
 ## The web UI
 
 `packages/web` is a plain React + Vite + Tailwind SPA, built by `pnpm web:build`
-and served by the control plane at `/`. No Electron, no service worker, no push.
+and served by the control plane at `/`. No service worker and no push — and **one
+bundle, two shells**: `packages/native` is a Tauri window around this same
+`dist`, so every screen here runs in a browser and in a native app with no second
+copy and no branch at a call site. `native-shell.md` is that area, and Q3.605 is
+why "no Electron" is narrowed rather than reversed.
 It is **adaptive**: below `lg` one screen at a time, list → detail; at `lg` and
 above the list becomes a permanent left rail. `AppShell` is the only place that
 knows, and it knows **in CSS** — no breakpoint state in JavaScript, so a resized

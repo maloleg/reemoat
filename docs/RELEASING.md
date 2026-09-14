@@ -82,6 +82,21 @@ The `VERSION` literal is the one worth not forgetting. It is served as the AGPL
 section 13 source offer, so a release that moves the tag and not the literal
 publishes an offer naming a version whose source nobody can fetch.
 
+## Signing the native app
+
+Not a version question, and deliberately not here: `packages/native` carries two
+`version` fields and **neither is a release site** — `tauri.conf.json` names a
+*path* to the root manifest and `Cargo.toml` is pinned inert at `0.0.0`, both
+asserted by `pnpm nativecheck`. So the six above stay six and a native build needs
+no line in step 1.
+
+What a *signed* build needs is entirely environment — an Apple Developer ID
+certificate, the notarization variables, and a separate minisign keypair if updates
+are ever wanted — so no file in this repository changes to produce one.
+`docs/NATIVE.md` carries the three signatures, which of them are which, and the one
+step that has to happen before a first public build. Nothing about the native app is
+built, signed or published by a tag today.
+
 **No `Q<n>.<m>` citations in `CHANGELOG.md`.** Everywhere else a decision can be
 cited by number and `docscheck` proves it resolves; that file is deliberately
 outside the corpus, so a citation there is the one kind nothing checks.

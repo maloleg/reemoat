@@ -39,17 +39,20 @@ Node >= 24, ESM, TypeScript strict. Everything in `src/`, `scripts/` and
 thing here that compiles anything.
 
 **No test framework.** `typecheck`, `authcheck`, `daemoncheck`, `relaycheck`,
-`webcheck`, `pincheck`, `deploycheck`, `docscheck`, `imagecheck` and `harness`
-are the whole automated safety net, and they are drivers rather than unit tests
-on purpose. Eight run offline in one process with no fleet, no agent and no
-deploy — `docscheck` is the newest and the only one whose subject is prose: it
+`webcheck`, `nativecheck`, `pincheck`, `deploycheck`, `docscheck`, `imagecheck` and
+`harness` are the whole automated safety net, and they are drivers rather than unit
+tests on purpose. Nine run offline in one process with no fleet, no agent and no
+deploy — `docscheck` is the one whose subject is prose: it
 holds this file to a budget, because the last time it was cut nothing checked
-the result and it was larger six days later.
+the result and it was larger six days later. `nativecheck` is the newest and its
+subject is a *shell configuration*, which is the one thing no other driver can see:
+`typecheck` compiles no Rust, `webcheck` is scoped to `packages/web`, and the
+`cargo` build that would catch the rest is a separate job.
 `harness` drives a real agent and needs a login CI cannot hold. `imagecheck`
 builds and starts a container, so it is a separate CI job — and it earns that:
 the control plane reaches into the repository root for a file list written down
 **twice**, in `.dockerignore` and in `deploy/docker/Dockerfile`'s COPY lines, and
-an import missing from either passes `typecheck` and all seven other drivers while
+an import missing from either passes `typecheck` and all eight other drivers while
 breaking only the image. Measured while adding `src/http.ts`: missing from
 `.dockerignore` it fails at COPY with `"/src/http.ts": not found` (the build
 context never carried it), and missing from the Dockerfile it fails later with
@@ -57,7 +60,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 932 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 939 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -187,6 +190,16 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   happens — latch the launch version, wipe the fragment
                                      #   the way a navigation does, then ask. Both drivers were
                                      #   green for months over code no phone could reach
+pnpm nativecheck                     # packages/native: that the frontend is a path inside the
+                                     #   binary and not a URL, that OS file drops still reach the
+                                     #   webview (the assertion with no other symptom), that the
+                                     #   capability list is empty and no plugin the Rust side drives
+                                     #   is reachable from the page, the command census in both
+                                     #   directions, the scheme allowlist against `links.ts`'s own,
+                                     #   the CSP's directives against the ones the control plane
+                                     #   sends, the two version fields that are **not** release
+                                     #   sites, and the one workspace line three deploy behaviours
+                                     #   depend on. Offline, and deliberately **no cargo**
 pnpm pincheck                        # every place a version is written down. The agents':
                                      #   three copies each, and the adapters actually installed.
                                      #   And five of this release's six — the root and both
@@ -229,6 +242,16 @@ pnpm cp                              # the control plane + relay in one process 
                                      #   the deployed shape is two containers, see compose.sh below
 pnpm web                             # the web UI in dev; Vite proxies /v1 to the control plane
 pnpm web:build                       # → packages/web/dist, which `pnpm cp` then serves at /
+
+pnpm --dir packages/native install   # the native shell's own node_modules. **The root install does
+                                     #   not do this** — `packages/native` is under `packages/` and
+                                     #   excluded from the workspace, so the Tauri CLI never lands on
+                                     #   a daemon host and a Tauri bump never moves the root lockfile
+pnpm native                          # tauri dev: Vite on 5173, the window over it
+pnpm native:build                    # → a .app and a .dmg with packages/web inside the binary.
+                                     #   Ad-hoc signed: no identity is committed, and none is needed
+                                     #   for a development build. arm64 only on a checkout with no
+                                     #   rustup; `docs/NATIVE.md` has the rest
 ```
 
 State lives in one SQLite file (`REEMOAT_DB`, default `~/.reemoat/reemoat.db`)
@@ -385,6 +408,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
 | `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |
 | `telegram-mini-app.md` | `packages/web/src/telegram.ts`, `main.tsx`, `index.css` | Why the bridge is hand-written and must stay so · what a `navigate` destroys and what is latched against it · the one control Telegram draws · the three places its chrome can be, and why only Telegram knows |
+| `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server's origin · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
 | `plugin-contributions.md` | `src/plugins/contributions.ts`, `manifest.ts`, `src/acp/`, `src/runtime/local.ts`, `packages/web/src/ui/agentCard.ts` | A plugin that adds an *agent* or a *provider* · which id is checked for membership and which only for shape, and what each costs to get wrong · where a base URL may point now · what a machine's ceiling is and why it is a refusal |

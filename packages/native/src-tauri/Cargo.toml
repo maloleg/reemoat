@@ -1,0 +1,68 @@
+[package]
+name = "reemoat-native"
+edition = "2021"
+rust-version = "1.85"
+description = "The Reemoat native shell."
+license = "AGPL-3.0-only"
+publish = false
+
+# **Inert, and asserted inert by `pnpm nativecheck`.**
+#
+# This release is written down in six places and `tauri.conf.json` names a *path*
+# to the root manifest rather than a number, so this crate adds no seventh. Cargo
+# requires the field to exist, so it exists and says nothing: a bump here in
+# sympathy with a release would create exactly the site that was avoided, which is
+# why `nativecheck` asserts both that it is `0.0.0` and that it differs from the
+# version the root manifest carries.
+version = "0.0.0"
+
+[lib]
+name = "reemoat_native_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-opener = "2.5.5"
+tauri-plugin-dialog = "2.7.3"
+tauri-plugin-clipboard-manager = "2.3.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+url = "2.5.8"
+# A filename rides to `host_save_file` in an IPC header beside the raw bytes, and
+# a header value is ASCII. One dependency rather than a hand-rolled decoder,
+# because a filename is the one field a person definitely did not type in ASCII.
+percent-encoding = "2.3.2"
+
+# **The default feature is named rather than taken**, because the whole value of
+# this dependency is *which* backend it picks and the default set has moved
+# between majors. `v1` is macOS Keychain, Windows Credential Manager and the
+# freedesktop Secret Service — and a default that silently became a memory store
+# would compile, run, and forget, which is the failure that reads as working.
+# `credential::probe` is the second half of that guard and the one that catches a
+# backend that accepts a write and loses it.
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
+
+# `default-tls` is native-tls, which means the **operating system's** trust store:
+# Security.framework on macOS, schannel on Windows, OpenSSL on Linux. That is the
+# right default here rather than a bundled root set, because a self-hosted control
+# plane behind a private CA is an ordinary deployment for this software — with
+# webpki roots alone it would be refused here while the same URL worked in a
+# browser, and the failure would read as the server being down.
+#
+# `gzip` because `gzipResponses` is the first middleware in both services and
+# answers gzip over 8 KiB. No `json`: this client carries a body it never parses.
+reqwest = { version = "0.13.5", default-features = false, features = [
+  "default-tls",
+  "charset",
+  "http2",
+  "system-proxy",
+  "gzip",
+] }
+
+[features]
+# Consumed by `tauri build` to switch the asset protocol on. Nothing else reads it.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

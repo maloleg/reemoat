@@ -4,6 +4,36 @@ packages:
   # own database, and because nothing in the daemon may ever import from it —
   # the dependency runs one way, at enrollment, over HTTP.
   - 'packages/*'
+  # **The native shell is a directory under `packages/` and deliberately not a
+  # member of this workspace**, which is a stranger shape than it looks and is
+  # three measurements rather than a preference.
+  #
+  # `deploy/bootstrap.sh` and `deploy/deploy.sh` both run `pnpm install
+  # --frozen-lockfile` at the repository root, **unfiltered**, on every machine
+  # in the fleet — and `deploy.sh`'s `INSTALL_DEPS` matches
+  # `^packages/[^/]+/package\.json$`, so a native-only edit re-runs it. As a
+  # member, `@tauri-apps/cli` and the one platform binary pnpm picks for the host
+  # would install on every daemon host, to be run by none of them. That is
+  # Q4.114's argument again at a smaller number, and it has the same answer.
+  #
+  # Second: `deploy.sh`'s `RELAY_INPUTS` matches `^pnpm-lock\.yaml$`, because the
+  # lockfile decides which `tsx` the relay runs. A member writes that file on
+  # every Tauri bump, so **every tunnel in the fleet would drop** for a change no
+  # relay contains. Out of the workspace, the root lockfile never moves for it.
+  #
+  # Third: the build context for the control plane's image is deny-first, and
+  # `deploy/docker/Dockerfile`'s `--frozen-lockfile` verifies the lockfile against
+  # *every* importer before installing the filtered subset. A member would be an
+  # importer the context cannot see, and the image would stop building — caught
+  # only by `imagecheck`, which is a separate CI job needing docker.
+  #
+  # The cost is stated rather than hidden: `packages/native` has its own
+  # `node_modules` and its own lockfile, `pnpm install` at the root does not
+  # install it, and `pnpm --filter @reemoat/native` does not resolve — the root
+  # scripts say `pnpm --dir packages/native` instead. `pnpm nativecheck` asserts
+  # this exclusion is still here, because deleting one line quietly undoes all
+  # three.
+  - '!packages/native'
 
 allowBuilds:
   # esbuild's install script links its prebuilt platform binary; tsx needs it.

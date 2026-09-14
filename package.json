@@ -30,7 +30,7 @@
     "harness": "tsx scripts/harness.ts",
     "daemon": "UV_THREADPOOL_SIZE=${UV_THREADPOOL_SIZE:-64} tsx scripts/daemon.ts",
     "client": "tsx scripts/client.ts",
-    "check": "pnpm typecheck && pnpm authcheck && pnpm daemoncheck && pnpm relaycheck && pnpm webcheck && pnpm pincheck && pnpm deploycheck && pnpm docscheck",
+    "check": "pnpm typecheck && pnpm authcheck && pnpm daemoncheck && pnpm relaycheck && pnpm webcheck && pnpm nativecheck && pnpm pincheck && pnpm deploycheck && pnpm docscheck",
     "typecheck": "tsc --noEmit && pnpm --filter @reemoat/web typecheck",
     "authcheck": "tsx scripts/authcheck.ts",
     "daemoncheck": "tsx scripts/daemoncheck.ts",
@@ -40,10 +40,13 @@
     "pincheck": "tsx scripts/pincheck.ts",
     "imagecheck": "tsx scripts/imagecheck.ts",
     "webcheck": "tsx packages/web/scripts/webcheck.ts",
+    "nativecheck": "tsx scripts/nativecheck.ts",
     "cp": "pnpm --filter @reemoat/control-plane cp",
     "cpctl": "pnpm --filter @reemoat/control-plane cpctl",
     "web": "pnpm --filter @reemoat/web dev",
-    "web:build": "pnpm --filter @reemoat/web build"
+    "web:build": "pnpm --filter @reemoat/web build",
+    "native": "pnpm --dir packages/native run dev",
+    "native:build": "pnpm --dir packages/native run build"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.73.0",

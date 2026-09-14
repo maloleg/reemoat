@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 131 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 133 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 350 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 351 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 56 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 67 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 134 | `###` |
-| | | **932** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 136 | `###` |
+| | | **939** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 932 rather than the 472
+dividers. So the count is over **both** depths, and it says 939 rather than the 478
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3739,6 +3739,86 @@ driver throws `ReferenceError` at call time, and four flat fixtures gain a field
 
 **Status.** Current
 
+### Q1.639 — Which leg of the native client leaves the webview, and why only one
+
+**Question.** The native shell bundles `packages/web` and loads it from
+`tauri://localhost`. Which of this client's three conversations — control plane,
+relay, daemon — has to move into the host process?
+
+**Measured, 2026-09-14.** `grep -rn "hono/cors" packages/control-plane/src/`
+returns nothing, and `grep -rn "access-control-allow" packages/control-plane/src/`
+finds only prose. The **control plane mounts no CORS middleware at all.** The
+daemon does (`src/server.ts`, `origin: "*"`, `allowHeaders: ["authorization",
+"content-type"]`, `credentials: false`) and so does the relay
+(`relay/proxy.ts`, the same `corsHeaders()`). `packages/web/vite.config.ts` records
+why the control plane has none: `/v1` is proxied in dev *"instead of making dev the
+one place a CORS rule has to exist for the control plane"*.
+
+**Decision.** Exactly one leg moves, and it is `/v1/*`. `cpSend` in
+`packages/web/src/native.ts` is `fetch(path, init)` in a browser and one `host_cp`
+call in the shell; the relay, the daemon and the WebSocket stay on the webview's own
+`fetch`, `XMLHttpRequest` and `WebSocket`, unchanged.
+
+**Why the others may not move, four reasons and any one is sufficient.**
+`sendWithProgress` is `XMLHttpRequest` because `fetch` reports no upload progress
+and a streamed body is Chromium-only, and a Rust client has no progress events.
+`withTimeout` composes an outer `AbortSignal` which `request` threads through, and
+an `invoke` cannot be aborted. `isTransportFailure` is a **negation** — anything
+that is not an `ApiError` — so a second definition of "the request was never
+answered" eventually disagrees, and the two ways it can disagree are *every subway
+tunnel signs the fleet out* and *nobody is ever signed out*. And `reemoat-enc` is a
+per-stream seam: a daemon leg in Rust would give an encrypted stream two
+decryptors.
+
+**Rejected.** Adding a CORS layer to the control plane — it would put a header on
+the one service that has never needed one, to serve a client that does not need it
+either. And `tauri-plugin-http` for everything, which fails on the first reason
+above.
+
+**Status.** Current. `pnpm nativecheck` asserts the control plane does **not**
+appear in the shell's `connect-src`: if it does, the split has stopped being one.
+
+### Q1.640 — What a native client keys its credential on, and what it may not keep
+
+**Question.** In a browser the control-plane credential lives in `localStorage`
+under `reemoat.credential`, and the origin scopes it. A native shell has one
+webview origin for every server somebody might point it at. What scopes it there?
+
+**Decision.** The operating system's credential store, with the **server's origin as
+the lookup key** — `credential#<origin>`. So a credential cannot be *read* for a
+server it was not issued by: structurally, rather than because some code path
+remembered to clear it on a change. `host_set_server` also erases the previous
+origin's entry in the same act, so nothing is retained for a server this app is no
+longer going to present to.
+
+`#` as the delimiter because a URL origin cannot contain one, which makes the rule
+unambiguous with no escaping and makes a later `credential#<origin>#<account>` an
+extension of the shape rather than a migration away from it.
+
+**Why not keep it only in the host process**, which is stronger on the face of it:
+`cpFetch` attributes a 401 by comparing `credential === sent` **by identity**, and
+its docblock records the exact ten-second race that rule defends. A handle the page
+could not compare would lose it silently. So the value lives in the page's memory
+exactly as it does in a browser, in the keyring at rest, and **never** in
+`localStorage` — `setSession`'s native arm returns before the storage writes rather
+than beside them, and `webcheck` asserts the absence under all three names,
+including the two `LEGACY_STORAGE` ones a later launch would otherwise adopt.
+
+**What is never stored.** The person's password: `POST /v1/me/password` asks for the
+current one whichever credential presents, so a stored one would make that a
+formality. And any daemon credential — `REEMOAT_TOKEN` reaches a daemon with no
+grant at all, and a machine token is 300 seconds long and derived, so it belongs at
+`ensureToken` and nowhere near a keyring.
+
+**Durability is a probe, not a `cfg!`.** `credential::probe` writes a canary, reads
+it back, compares it and erases it, because a store that accepts a write and loses
+it is the failure that reads as working — a Linux box with no D-Bus session
+compiles and runs fine. A `false` draws **the sentence `cp.ts` already has** for a
+browser with storage disabled; two spellings of one state is a defect this
+repository has shipped before.
+
+**Status.** Current.
+
 ## Session lifecycle, questions and attachments
 
 ### Q2.1 — What happens to a live session when the daemon restarts?
@@ -7135,7 +7215,12 @@ the regression driver for the terminal, but it is no longer the only way in.
 remaining job is to be a reference implementation of the token and replay logic
 that the browser mirrors.
 
-**Status.** Current
+**Status.** Current — and **narrowed by Q3.605**, which is where to read before
+concluding anything from the "no Electron" clause. There is a native shell now
+(`packages/native`, a Tauri window); what that clause was actually refusing — a
+second copy of the product with its own runtime and its own drift — is still
+refused, and there is exactly one bundle. The service worker and the push are
+untouched.
 
 #### Q3.2 — How does the screen answer "does anything anywhere need me"?
 
@@ -20634,6 +20719,38 @@ whole of its job. 256, the same number and the same argument as
 **Status.** Current
 
 
+#### Q3.605 — Whether a native shell reverses Q3.1's "no Electron"
+
+**Question.** Q3.1 says `packages/web` is *"a plain React + Vite + Tailwind SPA…
+There is no Electron, no service worker and no push."* `packages/native` is a Tauri
+2 window around that same bundle. Is that clause now false?
+
+**Position.** It is **narrowed rather than reversed**, and the narrowing is worth
+stating because the clause reads as covering this and does not.
+
+What Q3.1 refuses is a second copy of the product: an Electron app is its own
+runtime with its own version of the UI, its own update channel and its own set of
+bugs, and the argument was that one screen shared by a browser and a phone is worth
+more than two clients that drift. That argument is **kept**, and it is what decides
+the shape here: there is exactly one bundle, `frontendDist` points at
+`packages/web/dist`, no module in `packages/web` imports a `@tauri-apps` package,
+and `pnpm nativecheck` asserts both halves of that from the two sides that could
+each break it alone. A native build is a *window*, not a fork.
+
+The other two clauses are untouched and stay refused. There is still no service
+worker — `tauri://localhost` cannot register one, WebKit refusing a script URL whose
+scheme is not `http(s)` — and still no push. What the shell adds is a credential
+store, one CORS-shaped transport, a save panel and a link handler, which is four
+platform facts and no new product surface.
+
+**Rejected.** Amending Q3.1 in place. It is a record of what was decided in
+2026-07 and the clause was true of the tree for every release since; rewriting it
+would hide that a native client arrived and make the entry a description of the
+present rather than of a decision.
+
+**Status.** Reversed an earlier decision, in part. `.claude/rules/native-shell.md`
+is the area; Q1.639 and Q4.116 are the two halves that actually cost something.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -22491,6 +22608,101 @@ pass, `scripts/daemon.ts`'s two readers, the bootstrap's flag, call, `set_env` w
 its call line, dated usage and refusal, and the example's commented assignment.
 `daemoncheck` holds `agentChannelFrom`'s spellings and the flag's place in the
 argument list.
+
+### Q4.116 — Where the native shell goes, and why it is not a workspace member
+
+**Question.** `packages/native` is a directory under `packages/`, which
+`pnpm-workspace.yaml` globs. Should it be a member of the workspace like the other
+two?
+
+**Measured, 2026-09-14.** Three things depend on the answer, and none of them is
+visible from the package:
+
+- `deploy/bootstrap.sh` and `deploy/deploy.sh` both run `pnpm install
+  --frozen-lockfile` at the repository root, **unfiltered**, on every machine in the
+  fleet — and `INSTALL_DEPS` matches `^packages/[^/]+/package\.json$`, so a
+  native-only edit re-runs it. As a member, `@tauri-apps/cli` and the one platform
+  binary pnpm picks for the host would install on every daemon host, to be run by
+  none of them.
+- `RELAY_INPUTS` matches `^pnpm-lock\.yaml$`, because the lockfile decides which
+  `tsx` the relay runs. As a member, every Tauri bump would rewrite that file and
+  **recreate the relay container**, dropping every tunnel in the fleet for a change
+  no relay contains.
+- `deploy/docker/Dockerfile`'s own comment states the third: `--frozen-lockfile`
+  *"verifies pnpm-lock.yaml against **every** importer in pnpm-workspace.yaml
+  before it installs the filtered subset"*, and the build context is deny-first. As
+  a member it would be an importer the context cannot see, so the control plane's
+  image would stop building — caught only by `imagecheck`, a separate CI job needing
+  docker.
+
+**Decision.** Under `packages/` for the location and **excluded from the
+workspace** with `- '!packages/native'`. All three consequences disappear: the root
+lockfile never moves for it, the Dockerfile and `.dockerignore` need no line, and
+the fleet installs nothing extra.
+
+**Measured again, immediately.** Exclusion alone is not enough. pnpm resolves a
+workspace root by searching **upwards**, so `pnpm install` run inside
+`packages/native` found the repository's root, installed the three projects it lists
+and left this one with no `node_modules` at all — silently, exit 0, *"Already up to
+date"*. `packages/native/pnpm-workspace.yaml`, listing `'.'` and nothing else, is
+the marker that stops the walk.
+
+**Rejected.** A top-level `native/`, which is lower friction still — the root
+`tsconfig.json` would not reach it and `docscheck` would not walk it. Refused
+because the directories that driver walks do not include such a name, so every
+`paths:` glob in a rule scoped to it would be *dead* and fail — and its own docblock
+names a rule that silently never arrives as the one failure it has with no symptom.
+Widening that walk for one package is a change to what the whole corpus is;
+`packages/` already is that.
+
+**Cost, stated rather than hidden.** A second lockfile, a second `node_modules`,
+`pnpm --filter @reemoat/native` does not resolve (the root scripts say
+`pnpm --dir packages/native`), and `pnpm install` at the root does not set the
+package up. `pnpm nativecheck` asserts the exclusion, the inner root marker and the
+absence of an importer in the root lockfile, because one deleted line undoes all
+three.
+
+**Status.** Current.
+
+### Q4.117 — What a Rust build tree does to the documentation driver
+
+**Question.** `docscheck` walks a fixed list of source directories, `packages/`
+among them, reads every file whose extension is in its own list and concatenates
+them into one string that assertion 4 tests with `corpus.includes(symbol)`. A Rust
+package under `packages/` builds into `src-tauri/target/`. What does that do?
+
+**Measured, 2026-09-14.** `target/` is **2.9 GB** after a single `cargo check` on
+this checkout, thousands of `.json` fingerprint files among them — and `json` is in
+`SOURCE_EXT`. `SKIP_DIR` was `node_modules|dist|\.git|\.gstack`, so the walk
+descended into all of it.
+
+**Two failures, and the second is the serious one.** The driver stops being one —
+it is supposed to run offline in one process in seconds. And assertion 4 **inverts**:
+a corpus carrying every dependency's build metadata starts answering `true` for
+stale symbols, so the ratchet that catches a broken pointer in this file passes
+because the corpus grew rather than because the pointer was fixed. That is the
+`pnpm-lock.yaml` hazard the driver's own root-file docblock refuses, arriving by a
+different door and a thousand times larger.
+
+**Decision.** `SKIP_DIR` gains `target` and `gen`. `gen` by name rather than by
+path, because everything under `src-tauri/gen` is generated — `gen/schemas` on every
+compile, `gen/android` and `gen/apple` once by `tauri android init` / `tauri ios
+init` — and a rule scoped at generated output is a rule about something nobody
+edits. The cost is stated: a `paths:` glob naming anything under `gen` is a dead
+glob and fails, which is the correct answer to writing one.
+
+**And the extension list gains `rs` in the same edit, only because of it.**
+`src-tauri/src` is where the control-plane proxy, the keyring keying rule and the
+navigation rule live, so a decision citing one of their symbols has to be able to
+resolve. Added *after* the skip rather than before: a corpus that reached a Rust
+build tree would read every vendored crate in it.
+
+**Rejected.** `toml`. `Cargo.toml` is a manifest of dependency names and
+`Cargo.lock` is a larger one, which is the same hazard one file over.
+
+**Status.** Current. `pnpm nativecheck` asserts `SKIP_DIR` still names both trees
+and that the extension list still reads `rs` and still refuses `toml`, from the side
+that knows why each of the three is there.
 
 ## Invariants — rules that were defects first
 
@@ -30747,3 +30959,78 @@ transactional message, one of which goes nowhere useful, is one link too many."*
 The named seam, so it is not invented twice, is a line in `HelpButton`'s popover.
 
 **Status.** Deliberate non-goal
+
+### Q7.135 — Whether the native client should reach a local daemon directly
+
+**Question.** The app often runs on a machine that is itself in the fleet. Should it
+talk to that daemon over loopback instead of out to the relay and back?
+
+**Measured, 2026-09-14.** It would work. `REEMOAT_HOST` defaults to `127.0.0.1` and
+`REEMOAT_PORT` to `7887`; `deploy/install.sh` writes `REEMOAT_AUTH=signed` for an
+enrolled daemon, and `src/auth.ts` verifies a control-plane token offline against a
+key captured at enrollment — it asks the control plane nothing, so a token minted by
+`POST /v1/tokens` whose `aud` matches is accepted at the loopback port. The daemon's
+CORS is `*`, so even a webview `fetch` from `tauri://localhost` reaches it.
+
+**Position — not built, and this is not a latency judgement.**
+`packages/web/src/machine.ts`'s `Route` docblock records that the direct path was
+**deleted rather than disabled**, and the reason is in `cp-accounts.md`: the relay
+reads live user, machine and grant rows *before a byte enters the tunnel*, so
+revoking a grant takes effect on the **next request**. On a direct path none of
+`revokeMachine`, a grant removal, a disable or the machine-limit switch-off reaches
+the daemon at all, because a daemon makes exactly one control-plane request ever. The
+window becomes the token's: 300 s plus 60 s of leeway either way, ~360 s.
+
+Three more costs, in descending order. The machine id has no cheap sound discovery:
+the unauthenticated `GET /health` answers `instanceId`, which `scripts/daemon.ts`
+regenerates from `randomBytes` on every start, so it cannot even be cached — the only
+sound method is minting a token per machine and trying each against loopback, which
+is safe (the `aud` check refuses a token for another machine) and costs N
+control-plane mints per wake, on the one path `refetchRoute` explicitly refuses to
+spend. A `shared_secret` daemon is unreachable this way regardless, and reaching it
+would mean a second credential kind in the client with no server-side revoke. And
+the payoff is unmeasured: nobody has timed the relay on a LAN.
+
+**The seam, and it is already complete.** `probeRoute` returns one answer and used
+to return two; `settleRoute` is the single publisher and already takes `Route |
+null`, `forgetRoute` already drops the memo, and `streamUrl` already maps
+`http:`→`ws:` correctly for a loopback base. Nothing is pre-built.
+
+**What would have to be true.** Loopback only — never a LAN address or a hostname,
+since loopback binding is the lever the deletion rests on. The machine established
+by the `aud` check and by nothing else, or the two paths disagree about what
+addresses a machine. The ~360 s gap stated where the **sharer** reads it, because
+they are the party who loses the guarantee. A `forgetRoute` status rule the relay
+candidate must not get, since a 401 from a re-enrolled local daemon genuinely means
+"this is not that machine any more". And opt-in per machine, off by default, so a
+fleet that never enables it is byte-identical.
+
+**Status.** Deliberate non-goal.
+
+### Q7.136 — How far the native secret store goes toward device identity
+
+**Question.** The shell has to keep a credential in the operating system's store.
+Device identity, signed updates and end-to-end encryption all want a key in the same
+place. How much of that should the abstraction anticipate?
+
+**Position.** The seam and nothing else. `credential.rs` declares a `SecretStore`
+trait with three methods and one implementation, and `CREDENTIAL` is a named set with
+one member — so adding a second secret is a visible edit in one place. The trait
+exists now because it costs nothing and because it is what a mobile arm forces:
+`keyring`'s Android support is behind its own feature with a different API, and iOS
+reaches the Apple keychain by a third path, so `Entry::new(…)` scattered through the
+commands is exactly what would make that expensive later. It is `SessionRuntime`'s
+argument one process over.
+
+**Three properties, each a refusal.** `read` and `write` carry a `String`, which is
+what says at the interface that a private key may not use them — a key this process
+can read is a key it can leak, so the future shape is a `sign(key, bytes)` that never
+returns one, backed by the Secure Enclave or a TPM. There is no `list`, because
+enumerating is what a key rotation would want and shipping the verb is shipping the
+feature. And there is **no device id**: a value generated at first run and persisted
+*is* device identity arriving by accident, and it would be a new fact about a person
+that nothing in this fleet has agreed to record.
+
+**Status.** Deliberate non-goal. `docs/NATIVE.md` carries what turning on signed
+updates would take, including the one step that has to happen before a first public
+build.
