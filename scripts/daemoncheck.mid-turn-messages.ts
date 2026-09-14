@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import type { AgentId, AgentLaunchConfig } from "../src/acp/agents.js";
-import { MemoryEventStore } from "../src/events.js";
+import { MemoryEventStore, type SessionEvent, type StoredEvent } from "../src/events.js";
 import { MAX_QUEUED_PROMPTS, SessionRegistry, stoppedBeforeDelivery } from "../src/registry.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
@@ -101,6 +101,27 @@ process.stdout.write("\na message sent while the agent is working\n");
      */
     readonly holdsSteer?: boolean;
 
+  }
+
+  /**
+   * An event store that refuses exactly one `prompt` append.
+   *
+   * ⚠ **The only way to reach `safeAppend`'s `null`, which is a real state and not
+   * a hypothetical**: it catches whatever the store throws and answers `null`, and
+   * `recordPrompt` turns that into `seq === 0`. Every *successful* append is above
+   * zero, so a seq-0 entry is a message the log could not record — and ordering the
+   * queue by seq put it ahead of every message accepted before it. Nothing else in
+   * this repository can produce one, which is why the defect was invisible.
+   */
+  class RefusingStore extends MemoryEventStore {
+    refuseNextPrompt = false;
+    override append(sessionId: string, event: SessionEvent): StoredEvent {
+      if (this.refuseNextPrompt && event.type === "prompt") {
+        this.refuseNextPrompt = false;
+        throw new Error("the store refused this append");
+      }
+      return super.append(sessionId, event);
+    }
   }
 
   const standUp = async (options: StubOptions, warnings?: string[]) => {
@@ -272,8 +293,9 @@ process.stdout.write("\na message sent while the agent is working\n");
       }
     }
 
+    const events = new RefusingStore();
     const registry = new SessionRegistry(
-      new MemoryEventStore(),
+      events,
       null,
       undefined,
       new MidTurnRuntime(),
@@ -295,6 +317,8 @@ process.stdout.write("\na message sent while the agent is working\n");
       registry,
       app,
       managed,
+      /** Make the next `prompt` append fail, so the next message carries `seq === 0`. */
+      events,
       /** Make every later `session/resume` fail, as a broken agent's would. */
       refuseResume: () => {
         resumeRefused.on = true;
@@ -877,13 +901,36 @@ process.stdout.write("\na message sent while the agent is working\n");
       answers.filter((a) => a.body?.error?.code === "prompt_queue_full").length,
       overshoot - MAX_QUEUED_PROMPTS,
     );
+    /*
+     * ⚠ **And each of those leaving the conversation untouched, which is a
+     * correction to what this block used to assert.**
+     *
+     * It asserted one `error` per refusal, *"since it was already written there"*
+     * — true while the concurrent overshoot slipped past the entry check and was
+     * caught only after `recordPrompt` had run, which is the defect the slot
+     * reservation closed. The reservation is weighed at the entry check, before
+     * anything is written, so these three are now refused with nothing to
+     * explain: no `prompt` event, and therefore no `error` owed for one. That is
+     * the ordering `sendMidTurn`'s own docblock demands — *"the bound is checked
+     * before anything is written ... a recorded prompt nobody will ever deliver
+     * is precisely the shape Q2.218 calls a message that reached no model"* — so
+     * the stronger property is asserted here rather than the weaker one being
+     * repaired.
+     *
+     * Both halves, because either alone is silent: no `error` could also mean the
+     * refusals stopped saying anything about a prompt they *did* write, and the
+     * prompt count is what rules that out.
+     */
+    const written = managed.log.read(0, 1000, 1 << 20).map((stored) => stored.event);
     check(
-      "each of those saying so in the conversation, since it was already written there",
-      managed.log
-        .read(0, 1000, 1 << 20)
-        .map((stored) => stored.event)
-        .filter((event) => event.type === "error" && /already waiting/.test(event.message)).length,
-      overshoot - MAX_QUEUED_PROMPTS,
+      "the refused ones wrote nothing into the conversation to have to explain",
+      written.filter((event) => event.type === "error" && /already waiting/.test(event.message)).length,
+      0,
+    );
+    check(
+      "and left no prompt behind either, which is what makes that silence right",
+      written.filter((event) => event.type === "prompt").length,
+      1 + MAX_QUEUED_PROMPTS,
     );
   }
 
@@ -918,6 +965,57 @@ process.stdout.write("\na message sent while the agent is working\n");
       "and the code is built from that, not from the raw kind",
       /`session_\$\{kind\}`/.test(api),
       true,
+    );
+  }
+
+  /*
+   * A message the log could not record goes to the back of the queue, not the front.
+   *
+   * ⚠ **The queue is ordered by acceptance and never by the log seq, and this is
+   * the case that forces the distinction.** Ordering by `seq` reads as the same
+   * thing — the two agree on every healthy append — until `safeAppend` catches a
+   * store fault and answers `null`, which `recordPrompt` turns into `seq === 0`.
+   * Every real entry is above zero, so `findIndex(q => q.seq > seq)` answered `0`
+   * for it and the message was spliced to the **head**: handed to the agent before
+   * every message accepted earlier, which is verbatim the reversal the ordering
+   * exists to prevent, reached through a narrower door and under a comment
+   * asserting it was closed.
+   *
+   * Driven on the plain agent because that path has no awaits at all, so what is
+   * being asserted is the ordering key and nothing about steer timing.
+   */
+  {
+    steersSeen.length = 0;
+    promptsSeen.length = 0;
+    const { app, managed, events, finishTurn } = await standUp({ advertises: false, answers: null });
+    await post(app, managed.id, "start the long thing");
+    await quiesce();
+
+    await post(app, managed.id, "first, and recorded");
+    events.refuseNextPrompt = true;
+    await post(app, managed.id, "second, and the store refuses it");
+    await quiesce();
+
+    const waiting = managed.snapshot().queuedPrompts;
+    check("both messages are waiting", waiting.length, 2);
+    check(
+      "the one the log could not record carries the seq that says so",
+      waiting.map((entry) => entry.seq > 0),
+      [true, false],
+    );
+    check(
+      "and it is behind the message taken before it, not in front of it",
+      waiting.map((entry) => entry.id),
+      ["q_1", "q_2"],
+    );
+    // The delivery order is the queue order, so this is the half that actually
+    // reaches the agent — the assertion above is only where they sit.
+    finishTurn();
+    await quiesce();
+    check(
+      "so the agent is handed them in the order they were taken",
+      promptsSeen.slice(1),
+      ["first, and recorded"],
     );
   }
 

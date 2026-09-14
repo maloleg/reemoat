@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { AGENT_IDS } from "../src/acp/agents.js";
+import { AIR_ASYNC_TASKS_CAPABILITY, AIR_CLIENT_CAPABILITY } from "../src/acp/asynctasks.js";
 
 /**
  * The regression driver for a number written down more than once.
@@ -283,6 +284,50 @@ if (!installed) {
     // runs, so a lockfile resolving 0.62.x under a `package.json` reading 0.63.0
     // passed all of them.
     check(`the installed ${adapter.agent} adapter is the pinned one`, installedAdapter, pinned.get(adapter.name));
+  }
+
+  /*
+   * ⚠ **The one thing this daemon sends whose rejection has no symptom.**
+   *
+   * `clientCapabilities._meta.jetbrains.air` is how claude is asked to report
+   * background work, and `AIR_CLIENT_CAPABILITY` is a **literal** because the
+   * adapter's own `AIR_EXTENSION_VERSION` is module-private and absent from its
+   * `.d.ts`, so there is nothing importable to compare against. What is
+   * importable is the *gate*: `clientSupportsAirCapability` is exported, and it
+   * wants a finite integer version of at least its own and the capability named
+   * in a list.
+   *
+   * So this asserts behaviour rather than agreement between two constants — it
+   * asks the vendor's real code whether the object we really send is accepted.
+   * That is the only shape that catches the failure this extension has: a rename
+   * or a version bump drops the fleet back to silence, with **no error on any
+   * wire** and every other driver still green. Q5.114's failure mode exactly, an
+   * assertion that matches nothing and passes.
+   *
+   * The negative is half the value: it says the gate is a gate. Without it a
+   * future adapter whose `clientSupportsAirCapability` answered `true` for
+   * anything would satisfy the row above while telling us nothing.
+   */
+  const air: unknown = await import("@agentclientprotocol/claude-agent-acp/dist/air-extension.js").catch(
+    () => null,
+  );
+  const gate = (air as { clientSupportsAirCapability?: (caps: unknown, capability: string) => boolean } | null)
+    ?.clientSupportsAirCapability;
+  const named = (air as { AIR_ASYNC_TASKS_CAPABILITY?: unknown } | null)?.AIR_ASYNC_TASKS_CAPABILITY;
+  if (gate === undefined) {
+    check("the installed claude adapter still has an AIR capability gate to ask", gate !== undefined, true);
+  } else {
+    check(
+      "the adapter accepts the background-task capability this daemon actually sends",
+      gate({ _meta: AIR_CLIENT_CAPABILITY }, AIR_ASYNC_TASKS_CAPABILITY),
+      true,
+    );
+    check("and it is still spelled the way this daemon spells it", named, AIR_ASYNC_TASKS_CAPABILITY);
+    check(
+      "while a declaration with no version is refused, which is why the version is asserted",
+      gate({ _meta: { jetbrains: { air: { capabilities: [AIR_ASYNC_TASKS_CAPABILITY] } } } }, AIR_ASYNC_TASKS_CAPABILITY),
+      false,
+    );
   }
 }
 

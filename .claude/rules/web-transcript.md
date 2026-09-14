@@ -2,6 +2,8 @@
 paths:
   - packages/web/src/ui/tail.ts
   - packages/web/src/ui/EventList.tsx
+  - packages/web/src/ui/TaskPanel.tsx
+  - packages/web/src/tasks.ts
   - packages/web/src/ui/Markdown.tsx
   - packages/web/src/ui/DiffView.tsx
   - packages/web/src/ui/AskCard.tsx
@@ -68,6 +70,54 @@ stays off, because it is untrusted text quoting an untrusted repository.
   else on this wire: legible, and never a guess. What is drawn changed and nothing
   else did — `taskFloor` still keys on `stopReason !== "end_turn"` alone, and
   `showsInTranscript` on that plus the `agent_error` exception one bullet down.
+
+- **A run of agent text is keyed on `messageId`, not only on `role` and
+  `thought`.** A run joins its parts with **no separator** — right for the
+  streamed fragments of one message, wrong for two messages in a row. ACP's own
+  rule: *"a change in `messageId` indicates a new message has started."*
+  - **⚠ The spec alone does not close it.** `claude-agent-acp` publishes its
+    `**Task stopped by user:** <name>.` line as a *bare* update with no id, so
+    twenty stops drew as one paragraph of twenty run-together sentences. The
+    daemon therefore numbers what the agent did not: the first id latches, and
+    after it an unnumbered message gets a `~`-prefixed id of its own. An agent
+    that numbers nothing keeps `null` and joins exactly as it does today — that
+    arm is what the driver protects. Q3.604.
+
+- **Background work is drawn on one surface, and the transcript's foot is a way
+  in rather than a copy.** `WaitingFoot` counts both sources and opens
+  `TaskPanel`; it holds no list of its own and claims no region under it
+  (`aria-haspopup="dialog"`, never `aria-expanded`). The panel's own decisions —
+  the section order and labels, the chip table over the five states, the duration
+  and token formatters, the four-cell meter — are `tasks.ts`, so `webcheck` drives
+  them with no DOM. Every string and rule there is Claude Code's
+  `background-tasks-dialog`, read out of the installed binary; **where this app
+  departs it is because the wire has no such field**, and each departure is named
+  at the code. Q3.603.
+  - **Two placements, one element, and the breakpoint is answered only in CSS.**
+    A bottom sheet below `xl`, docked right at `xl` with `SessionView` taking
+    `TASK_PANEL_GUTTER` — the other half of `TASK_PANEL_WIDTH`, declared beside it
+    so `webcheck` can assert the two are one length, which nothing could do while
+    each was a literal in its own file. It **portals** — `fixed` only means the
+    viewport where no ancestor carries a `transform` or `backdrop-filter`, and the header and
+    composer here are one hop from one — and it is **`menu`** in `overlay.ts`,
+    never `sheet`: `sheet` puts `inert` on `#root`, which at `xl` would switch off
+    the conversation it is docked *beside*, and making that conditional is
+    breakpoint state in JavaScript.
+  - **⚠ A workflow's agents are not on this wire and the panel says nothing about
+    them.** The adapter marks every `local_agent` task `ignored` before publishing,
+    and no payload carries a phase, a fraction, a model or a count. So `Phases` is
+    one phase titled `Agents` — Claude Code's own fallback — with no fraction
+    (their rule for a zero total) and **no rows**. An empty table under a heading
+    would be a claim about ten agents that are running.
+  - **⚠ `No tasks currently running` is gated on `reportsBackgroundTasks`.** It is
+    true for claude and false for the other three, and an ungated copy is a
+    sentence about kimi's backgrounded shells that is simply wrong.
+  - **⚠ Elapsed time comes from `startedAt`/`endedAt`, never `usage.durationMs`.**
+    The agent's duration rides a *progress* frame and the adapter drops both the
+    final `usage` and `end_time`, so a finished task's own number is stale and a
+    quiet one has none. This is also the one place in this app that schedules a
+    render for a clock, and it is affordable only because it is scoped to a
+    surface somebody opened.
 
 - **A link is drawn only where there is somewhere to go.** `openableHref` in
   `ui/links.ts` allows `http`, `https` and `mailto`, answers `null` for everything

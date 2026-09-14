@@ -367,6 +367,10 @@ const FOREIGN = new Set([
   "API_KEY_INVALID", // gemini's error string, quoted in the session/authenticate entry
   "AvailableCommandInput", // the ACP schema's own type name, quoted from the spec
   "CLAUDE_CONFIG_DIR", // claude's own env var, named as the remedy for a bypassed permission path
+  "CLAUDE_JOB_DIR", // claude's own env var, the gate on its exit handoff for background work
+  "isSubagentTask", // `claude-agent-acp`'s own predicate, the reason a backgrounded subagent is announced as nothing
+  "replaySessionHistory", // `claude-agent-acp`'s own method, named for what it does *not* replay
+  "toolUseId", // claude's own field on a background task record
   "PreToolUse", // a Claude Code hook name
   "TodoWrite", // claude's own tool
   "WINDOW_UPDATE", // an HTTP/2 frame type

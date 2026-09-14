@@ -343,12 +343,50 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
    *
    * Asserted as an *absence*, so switching it on has to be deliberate and fails
    * loudly here rather than quietly doubling what a delegate costs.
+   *
+   * ⚠ **This was "no `_meta` at all" and is not any more.** That was the same
+   * assertion while this client declared nothing there; it stopped being one the
+   * moment `asyncTasks` was declared, and an absence test would have had to be
+   * deleted rather than narrowed — taking the subagent guarantee with it. So the
+   * bag is now asserted **whole**, which keeps the old claim (nothing else is in
+   * it) and adds the two below.
    */
-  check("no capability metadata is advertised at all", allowed.caps["_meta"], undefined);
+  check("exactly one capability extension is advertised, and it is named", allowed.caps["_meta"], {
+    jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } },
+  });
   check(
     "so a subagent's transcript is never forwarded",
     (allowed.caps["_meta"] as Record<string, unknown> | undefined)?.["subagent-transcript"],
     undefined,
+  );
+
+  /*
+   * The two halves of the AIR declaration, each on its own row.
+   *
+   * **The version is not decoration.** The adapter's gate wants a finite integer
+   * at least 1 *and* the capability named in a list, and a declaration it refuses
+   * switches the whole lifecycle off with no error on any wire — no rejection, no
+   * log line, just a client that is never told about background work and a
+   * `parkable` clause that never fires. There is no second signal that would
+   * catch it, which is what makes asserting the object we send worth a row.
+   *
+   * **And `nativeSubagentSessions` is refused here too**, in the namespace that
+   * would carry it, because it is the obvious thing to add for symmetry with the
+   * capability beside it. Its two costs are the paragraph above (every subagent's
+   * text forwarded) and a worse one: a permission raised inside a subagent is then
+   * addressed to the child session id, which `AcpClient.route` answers
+   * `invalidParams` for — a subagent's approval dying on the floor.
+   */
+  const air = (
+    (allowed.caps["_meta"] as Record<string, unknown> | undefined)?.["jetbrains"] as
+      | Record<string, unknown>
+      | undefined
+  )?.["air"] as { version?: unknown; capabilities?: unknown } | undefined;
+  check("the extension version is an integer the adapter's gate accepts", air?.version, 1);
+  check(
+    "and background work is the only thing asked for",
+    air?.capabilities,
+    ["asyncTasks"],
   );
 }
 

@@ -321,6 +321,35 @@ export interface TextEvent {
   role: "agent" | "user";
   thought: boolean;
   text: string;
+  /**
+   * Which message this chunk belongs to, or `null` where nothing said.
+   *
+   * ACP's own boundary primitive, and the spec states what it is for in as many
+   * words: *"All chunks belonging to the same message share the same `messageId`.
+   * A change in `messageId` indicates a new message has started."* Without it a
+   * client has no way to tell a streamed fragment of one message from a complete
+   * message of its own — both arrive as `agent_message_chunk` with a `text` block
+   * and nothing else — so a transcript joins them, which is right for tokens and
+   * wrong for messages.
+   *
+   * ⚠ **The failure this exists for, measured against `claude-agent-acp` 0.73.0
+   * and written down in full at Q3.604:** stopping twenty background tasks makes
+   * the adapter publish twenty `agent_message_chunk`s reading `**Task stopped by
+   * user:** <name>.`, each a whole message, none ending in a newline and — this
+   * is the part no reading of the spec fixes — **none carrying a `messageId` at
+   * all**, because `AsyncTaskRuntime` publishes a bare update while every path
+   * through `toAcpNotifications` calls `applyMessageId`. Joined, they render as a
+   * single paragraph of twenty run-together sentences; Q3.604 quotes two of them.
+   *
+   * So the daemon numbers what the agent did not: once a connection has been seen
+   * to use message ids, a chunk arriving without one is a message of its own and
+   * is given a `~`-prefixed id here. The tilde is not a value any agent can send
+   * — it is not in the id space of any of the four — so a client can tell the two
+   * apart, and a client that does not care simply compares for equality. An agent
+   * that never numbers anything (kimi, codex, opencode) keeps `null` throughout
+   * and every chunk joins exactly as it does today.
+   */
+  messageId: string | null;
 }
 
 export interface ToolCallEvent {
@@ -430,6 +459,27 @@ export interface ToolCallUpdateEvent {
    * first-non-null and never let a later `null` reset it.
    */
   parentToolCallId: string | null;
+  /**
+   * This call handed its work to something that outlives it.
+   *
+   * A backgrounded Bash call returns as soon as the command is detached, so the
+   * card reaches `completed` while the command runs on for minutes — and ACP has
+   * no tool-call status for *still running elsewhere*, which is exactly why the
+   * agent marks the update instead. A client reads this and stops drawing the
+   * card as finished work.
+   *
+   * ⚠ **The second field ever projected out of `_meta`**, and the precedent is
+   * `customAnswerFor` → `alternativeTo` (Q3.592): a declaration the agent makes
+   * about its own payload, taken as one scalar, with the rest of `_meta` still
+   * dropped at ingest. `acp/asynctasks.ts` holds the shape and the argument.
+   *
+   * `false` on every agent but claude, and on claude only where this client
+   * declared `asyncTasks` — the adapter puts the marker in the AIR namespace
+   * precisely so that a client which never asked for the task lifecycle is not
+   * promised a card state it could never resolve. So the honest reading is *"the
+   * agent said so"*, never *"it did not background anything"*.
+   */
+  backgrounded: boolean;
 }
 
 /**
@@ -1721,8 +1771,10 @@ function locationBytes(locations: readonly FileLocation[]): number {
  */
 export function estimateBytes(event: SessionEvent): number {
   switch (event.type) {
+    // The id is charged because it is agent-chosen, unlike the flat constant the
+    // rest of this record fits inside. Bounded at ingest all the same.
     case "text":
-      return 64 + event.text.length;
+      return 64 + event.text.length + (event.messageId?.length ?? 0);
     case "prompt":
       return 64 + event.text.length + attachmentBytes(event.attachments);
     case "agent_log":
@@ -1752,7 +1804,9 @@ export function estimateBytes(event: SessionEvent): number {
       // was honest while the event carried no payload. It carries two now, and an
       // unaccounted one is an event that walks past the per-event cap unnoticed —
       // which is exactly what `locations` then did, for as long as this comment
-      // stood above a sum that did not include it.
+      // stood above a sum that did not include it. `backgrounded` is not a term
+      // for the `tool_call` arm's reason one case up: it is a boolean, so it is
+      // inside the constant rather than proportional to anything an agent chose.
       return (
         192 +
         (event.title?.length ?? 0) +
@@ -1850,11 +1904,104 @@ export function estimateBytes(event: SessionEvent): number {
  * event, and had a byte-identical copy of this plus its own second declaration of
  * `TRUNCATION_NOTE_BYTES`. Two truncation notes in one vocabulary is how a
  * transcript ends up saying the same thing two ways.
+ *
+ * ⚠ **The `Buffer` round trip is what makes every bound built on this one a
+ * bound on memory rather than only on display, and it may not be simplified back
+ * to a bare `value.slice(0, kept)`.** In V8 a slice of a long string is a
+ * `SlicedString` that retains the *whole parent*, and neither a template literal
+ * nor `+` copies it out — they build a `ConsString` whose left operand is still
+ * that slice, so the parent stays reachable through the clipped result. Measured
+ * 2026-09-14 on this tree under **node v26.3.0** (`node --expose-gc`, this
+ * function and the bare-slice version it replaces run side by side, heap read as
+ * a delta over a settled baseline): eight 4 MiB task descriptions clipped at a
+ * budget of 538 — `kept` = 506 — retained **32.0 MiB with only the clipped
+ * strings alive**, released only by dropping those strings themselves. Copying
+ * the kept characters out through a `Buffer` and back yields a fresh, independent
+ * string, and the same probe then measures **0.0 MiB**. ⚠ The engine is part of
+ * the measurement and not decoration: `SlicedString`/`ConsString` retention is a
+ * V8 implementation behaviour, and v26.3.0 is what was on this machine — the
+ * `>=24` floor in `package.json` is the *supported* range and has not been
+ * measured here. Without it, every bound built on
+ * this clips what a reader sees and none of what the heap holds, and an agent
+ * exhausts the daemon with notifications that merely *display* short — that is
+ * `truncateEvent`, `session.ts`'s tool-output bound and its task prose, and
+ * `registry.ts`'s resume-error, exit-detail and elicitation-answer clips. ⚠ The
+ * pending-permission snapshot is **not** one of them and must not be listed as
+ * one: its `rawInput` and `content` go through `clampBlob`, and its title and
+ * options are *refused* at ingest rather than clipped — `daemoncheck` pins that
+ * as one 8 KiB weighing, and `clampBlob`'s own note below says why it needs none
+ * of this.
+ *
+ * The copy costs in proportion to what is *kept*, never to what arrived — which
+ * is the property that lets it sit on the truncation path at all. Measured
+ * 2026-09-14 against this function under `tsx` on node v26.3.0 at `kept` = 1024,
+ * 200k calls after a 20k-call warm-up: ~320ns per call over a 64 KiB source and
+ * ~323ns over a 16 MiB one, against ~12ns and ~11ns for the retaining version at
+ * those same two sizes. So the whole of the cost is the ≤1 KiB copy,
+ * a source three orders of magnitude larger does not move it, and it is paid only
+ * on the branch that actually clips — an under-budget value returns above,
+ * untouched and not copied.
+ *
+ * One consequence of the round trip, and one change made *alongside* it. They are
+ * separable and are written apart on purpose, because a reader may want the
+ * retention fix without the second. The round trip's own consequence is that a
+ * lone surrogate already *inside* the kept region — ill-formed input that cannot
+ * be encoded as UTF-8 at all — comes back as U+FFFD instead of passing through,
+ * so what leaves **the truncating branch** is well-formed UTF-16 rather than
+ * something the relay, `JSON.stringify` and SQLite each have a different opinion
+ * about. The change made alongside it is the `kept` back-off. It is *not* forced
+ * by the round trip: measured on
+ * `"a".repeat(1023) + "\u{1F600}" + "b".repeat(4000)` at budget 1056, the round
+ * trip with no back-off already returns a well-formed 1047-unit string ending in
+ * U+FFFD. The back-off drops the whole character instead, so a transcript loses a
+ * glyph rather than gaining a replacement one, and the note's count moves with
+ * `kept`.
+ *
+ * ⚠ **That repair is one *code unit* wide either way, and that is the only
+ * counter it leaves alone.** `estimateBytes` charges every string this function
+ * touches by `String.length`, so it does not move. `JSON.stringify` does: it
+ * writes a lone surrogate as the six-character escape `\udXXX` and U+FFFD as one
+ * character and three bytes, so **both** `jsonSize` and `jsonBytes` fall.
+ * Measured on `clip("ab\uD83Dcd" + "z".repeat(200), 40)`: `.length` 30 both ways,
+ * `jsonSize` 37 → 32, `jsonBytes` 39 → 36. Every shift is downward, so no
+ * `…_BYTES` refusal is loosened by it — but `jsonBytes` exists precisely because
+ * a UTF-8 bound may not be built on a code-unit count, and neither of those two
+ * may be described here as unmoved.
+ *
+ * ⚠ **Only the truncating branch, and this is not a sanitiser.** The first line
+ * returns an under-budget value untouched — ill-formed surrogates and all — which
+ * is the common path by far, so nothing downstream may skip its own handling on
+ * the strength of having called this. Verified: `clip("ab\uD83Dcd", 100)` returns
+ * the argument identically and its `isWellFormed()` is `false`.
+ *
+ * **How far the equivalence with the old bare-slice version actually goes was
+ * checked rather than assumed**, because the sentence that used to stand here —
+ * "for every well-formed input the result is byte-identical" — is false, and the
+ * paragraph above it says why in its own words. Nothing offline pins this: it is
+ * a pure function two drivers use and none exercises, so the corpus is the
+ * record. Run 2026-09-14 against `HEAD:src/events.ts`'s `clip` (the bare slice,
+ * which is still what is committed): 968 **well-formed** inputs — ASCII, a mixed
+ * `héllo — 日本語 🎉` string and an all-astral string, each at every budget from 0
+ * up, plus 64 budgets below `TRUNCATION_NOTE_BYTES` — printed 809 identical, 159
+ * differing, and that every one of the 159 is a cut landing between the halves of
+ * a surrogate pair. The below-note cases were identical to the last byte, which
+ * is the `kept` = 0 branch where `charCodeAt(-1)` is `NaN` and the back-off
+ * cannot fire. So the claim, in the only form it holds: byte-identical to what
+ * this returned before for every well-formed input **whose cut does not fall
+ * between the halves of a surrogate pair**, and for the ones whose cut does, a
+ * deliberate and visible change — one fewer kept code unit, one more byte in the
+ * note. The case above at budget 1056 was 1047 units ending
+ * `\ud83d…[truncated 4001 bytes]` (`isWellFormed()` false) and is now 1046 ending
+ * `…[truncated 4002 bytes]`.
  */
 export function clip(value: string, budget: number): string {
   if (value.length <= budget) return value;
-  const kept = Math.max(budget - TRUNCATION_NOTE_BYTES, 0);
-  return `${value.slice(0, kept)}…[truncated ${value.length - kept} bytes]`;
+  let kept = Math.max(budget - TRUNCATION_NOTE_BYTES, 0);
+  // `charCodeAt` of -1 is NaN, which fails this the same way a non-surrogate does.
+  const last = value.charCodeAt(kept - 1);
+  if (last >= 0xd800 && last <= 0xdbff) kept -= 1;
+  const head = Buffer.from(value.slice(0, kept), "utf8").toString("utf8");
+  return `${head}…[truncated ${value.length - kept} bytes]`;
 }
 
 function shrink(value: unknown): unknown {
@@ -1869,6 +2016,12 @@ function shrink(value: unknown): unknown {
  * different idea of what truncation looks like. A client already has to handle
  * `{truncated: true, bytes}` in `rawInput`; making it handle a different shape
  * elsewhere would be gratuitous.
+ *
+ * This one needs no equivalent of `clip`'s `Buffer` round trip, and the reason
+ * is worth writing down so nobody adds one: it never slices. Either the value is
+ * under budget and passes through exactly as it arrived, retaining only itself,
+ * or it is replaced wholesale by a size stand-in holding no reference to it at
+ * all. There is no shape here that keeps a small piece of something large alive.
  */
 export function clampBlob(value: unknown, maxBytes: number): unknown {
   if (value === null || value === undefined) return null;
@@ -1886,6 +2039,10 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
   if (estimateBytes(event) <= maxBytes) return event;
 
   switch (event.type) {
+    // `messageId` is spread through untouched, for `parentToolCallId`'s reason: a
+    // clipped id is not a shorter id, it is a boundary between two messages that
+    // were one — and it is bounded at ingest, so it is never what makes an event
+    // too big.
     case "text":
       return { ...event, text: clip(event.text, maxBytes) };
     case "prompt": {

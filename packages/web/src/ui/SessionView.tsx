@@ -20,15 +20,31 @@ import {
   humanRequests,
   isBuiltinAgentId,
   mayStillReport,
+  backgroundTasksOf,
   queuedSeqs,
   showsWorking,
   waitingCount,
+  type BackgroundTask,
   type SessionSnapshot,
 } from "../wire";
 import { agentLabel } from "./agentCard";
 import { Composer } from "./Composer";
 import { EventList } from "./EventList";
 import { FileAccessContext, type FileAccess } from "./files";
+import { saveBlob } from "./download";
+import { Header } from "./Header";
+import { ElicitationCard } from "./ElicitationCard";
+import { PermissionCard } from "./PermissionCard";
+import { RenameField, resumeSession, SessionMenu } from "./SessionMenu";
+import { toast } from "./Toast";
+import { TASK_PANEL_GUTTER } from "./TaskPanel";
+import {
+  COLUMN,
+  Icon,
+  TranscriptSkeleton,
+  sessionLabel,
+  sessionNotice,
+} from "./bits";
 
 /**
  * What `QueuedContext` holds for a session with no snapshot yet.
@@ -41,19 +57,17 @@ import { FileAccessContext, type FileAccess } from "./files";
  * on a steerable agent, and every session on a daemon too old to have a queue.
  */
 const EMPTY_QUEUE: ReadonlySet<number> = new Set();
-import { saveBlob } from "./download";
-import { Header } from "./Header";
-import { ElicitationCard } from "./ElicitationCard";
-import { PermissionCard } from "./PermissionCard";
-import { RenameField, resumeSession, SessionMenu } from "./SessionMenu";
-import { toast } from "./Toast";
-import {
-  COLUMN,
-  Icon,
-  TranscriptSkeleton,
-  sessionLabel,
-  sessionNotice,
-} from "./bits";
+
+/**
+ * No background work, as one identity.
+ *
+ * The same idiom as {@link EMPTY_QUEUE} for a weaker reason — this feeds a prop
+ * rather than a context — and worth having anyway: it is the answer on every
+ * session with no agent, on every session on an agent that does not report, and
+ * on every daemon too old to send the field, which between them is most of the
+ * fleet most of the time.
+ */
+const EMPTY_TASKS: readonly BackgroundTask[] = [];
 
 export function SessionView({ state, sessionRef }: { state: AppState; sessionRef: SessionRef }): ReactNode {
   const key = keyOf(sessionRef);
@@ -174,6 +188,26 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
     [pendingAsk, events],
   );
 
+  /*
+   * Whether the background-tasks panel is open, and it is held **here** rather
+   * than beside the list it draws.
+   *
+   * Two reasons, and only the second is structural. It is a property of this
+   * screen rather than of the transcript — the panel covers the composer and the
+   * header too. And at `xl` the panel docks against the right edge, so this column
+   * is what has to stop being the full width; a state held one level down could
+   * draw the panel but could not move anything out from under it.
+   *
+   * Reset when the session changes under a mounted pane, which is the desktop
+   * two-pane case where this component is not remounted: a panel listing what the
+   * *previous* conversation left running, over a conversation that did not open
+   * it, is the same defect `atBottom` is reset for two hundred lines down.
+   */
+  const [tasksOpen, setTasksOpen] = useState(false);
+  useEffect(() => setTasksOpen(false), [key]);
+  const openTasks = useCallback(() => setTasksOpen(true), []);
+  const closeTasks = useCallback(() => setTasksOpen(false), []);
+
   if (row === undefined) {
     /*
      * **Four answers, and `loading` is the one that used to be missing.**
@@ -250,12 +284,29 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
   const reconnecting = stream?.phase === "waiting";
   const stale = stream === null || stream.phase !== "live";
 
+
   return (
     /* `flex-1` and not `h-full`: this stretches inside `AppShell`'s `main`
        rather than asking for a percentage of it — see the note there. `min-h-0`
        so the transcript inside can actually scroll instead of forcing this
-       column taller than the viewport. */
-    <div className="flex min-h-0 flex-1 flex-col">
+       column taller than the viewport.
+
+       ⚠ **`TASK_PANEL_GUTTER` is how the docked panel gets its room, and it is
+       on this column rather than on `AppShell`'s `main` on purpose.** The panel is
+       `position: fixed` — it has to be, because `fixed` only means the viewport
+       when no ancestor carries a `transform` or a `backdrop-filter`, and both the
+       header and the composer here are one hop from one — so it is out of flow and
+       displaces nothing by itself. Padding this element moves the header, the
+       transcript and the composer together, which is the whole screen and exactly
+       what should move. Below `xl` the panel is a sheet over all of it and the
+       padding is not applied, which is the only thing that decides the two
+       layouts: no breakpoint is read in JavaScript here, as `AppShell` requires.
+
+       The padding used to be written out here as `xl:pr-[26rem]`, four hundred
+       lines from the `xl:w-[26rem]` it has to equal and in another file. It is
+       imported now — the pair and the reason it cannot be one string are at
+       `TASK_PANEL_WIDTH`, beside its other half. */
+    <div className={`flex min-h-0 flex-1 flex-col ${tasksOpen ? TASK_PANEL_GUTTER : ""}`}>
       <Header
         title={
           <>
@@ -414,6 +465,9 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
           tailRequest={tailRequest}
           stale={stale}
           askHeight={askHeight}
+          tasksOpen={tasksOpen}
+          onOpenTasks={openTasks}
+          onCloseTasks={closeTasks}
         />
 
         {/*
@@ -735,6 +789,9 @@ function Transcript({
   tailRequest,
   stale,
   askHeight,
+  tasksOpen,
+  onOpenTasks,
+  onCloseTasks,
 }: {
   sessionRef: SessionRef;
   state: AppState;
@@ -778,6 +835,10 @@ function Transcript({
    * `max` of the two, so there is one number rather than two that add up.
    */
   askHeight: number;
+  /** The background-tasks panel's state, held by `SessionView` — see it there. */
+  tasksOpen: boolean;
+  onOpenTasks: () => void;
+  onCloseTasks: () => void;
 }): ReactNode {
   const key = keyOf(sessionRef);
   /*
@@ -844,6 +905,58 @@ function Transcript({
     () => (snapshot === null ? EMPTY_QUEUE : queuedSeqs(snapshot)),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
     [queuedKey],
+  );
+
+  /*
+   * Work this agent said it left running.
+   *
+   * Read straight off the snapshot rather than memoised, unlike `queued` above,
+   * and the asymmetry is deliberate: that one feeds a **context** past a memoised
+   * row, where an unstable identity costs a re-render of every bubble in the
+   * conversation. This is one prop on one component at the foot, and the array is
+   * already a fresh copy per snapshot on the daemon's side — memoising it would
+   * buy a key comparison over a list that is empty on almost every session and
+   * changes only when the agent says something.
+   */
+  const background = snapshot === null ? EMPTY_TASKS : backgroundTasksOf(snapshot);
+
+  /*
+   * Stopping one of them, or nothing at all.
+   *
+   * `null` where there is no session to ask, which is what keeps the control off
+   * a row it could not act on. A daemon too old to have the route answers `404`,
+   * and that lands in the row's own sentence rather than a toast — the row is
+   * what somebody pressed.
+   */
+  const onStopTask = useCallback(
+    async (task: BackgroundTask): Promise<void> => {
+      const daemon = store.daemonFor(sessionRef.machineId);
+      if (daemon === undefined) throw new Error("this machine is not reachable");
+      const result = await daemon.stopBackgroundTask(sessionRef.sessionId, task.id);
+      /*
+       * The snapshot is applied so the row redraws from the daemon rather than from
+       * what the press assumed — but ⚠ **it does not, in the ordinary case, carry
+       * the transition this press asked for.** `ManagedSession.stopBackgroundTask`
+       * asks the agent and mutates no task; the set is fed only from the agent's
+       * own edges, and `acp/asynctasks.ts` names the transition arm *"the only arm
+       * that can end one"*. So a successful stop usually answers with the task
+       * still `running`, and the edge that ends it lands on a later frame. Applying
+       * the snapshot here is still right — it is the freshest the daemon has — it
+       * simply is not the answer to *did this stop work*.
+       *
+       * ⚠ **`result.stopped` is deliberately not read, and it is not the same
+       * thing as the request having failed.** It is `false` — under a **200** —
+       * when the work finished on its own between the tap and the request, which
+       * the daemon's route calls the ordinary race `/cancel` loses at `no_turn`.
+       * Nothing here can act on that, because the thing worth acting on is the
+       * state change, which arrives on its own frame; `TaskCard` waits for exactly
+       * that and says so where the flag lives. What must *not* happen is the card
+       * treating a resolved promise as "the task is now stopping" — it means "your
+       * request was answered" and nothing more.
+       */
+      store.applySnapshot(sessionRef, result.session);
+    },
+    [sessionRef],
   );
 
   /*
@@ -1165,6 +1278,12 @@ function Transcript({
               reporting={reporting}
               stale={stale}
               turnElapsedMs={turnElapsedMs}
+              background={background}
+              reportsTasks={snapshot?.reportsBackgroundTasks ?? false}
+              tasksOpen={tasksOpen}
+              onOpenTasks={onOpenTasks}
+              onCloseTasks={onCloseTasks}
+              onStopTask={onStopTask}
               onResized={remeasure}
             />
           </FileAccessContext.Provider>

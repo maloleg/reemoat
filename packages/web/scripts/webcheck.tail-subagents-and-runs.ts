@@ -75,6 +75,55 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     check("a spawn that reported finishing is not", outstandingTasks(finished.rows).length, 0);
 
     /*
+     * ⚠ **A card that says `completed` about work that has not finished, and the
+     * one flag that contradicts it.**
+     *
+     * A Bash call that detaches returns the instant the command is handed off, so
+     * the update carrying `completed` is about the *handoff*. ACP has no tool-call
+     * status for "still running elsewhere", which is why the agent marks the update
+     * instead — and this is the fold that has to survive the completion arriving
+     * **after** the mark, which is the order it really comes in.
+     *
+     * ⚠ **Sticky, and that is the opposite rule from `subagent` one field over.**
+     * claude *drops* the subagent flag on a spawn's completing update, so that one
+     * is read from the call and never merged; this one only ever *appears* on an
+     * update, so it is merged and never reset. Both rules exist because the agent
+     * is inconsistent in opposite directions about two flags in the same bag, and
+     * a fold that treated them alike would be wrong about one of them.
+     */
+    seq = 0;
+    const backgrounded = buildTail(
+      [
+        toolCall("bash", "Bash"),
+        ev({ type: "tool_call_update", toolCallId: "bash", title: null, status: null, locations: [], rawInput: null, content: null, parentToolCallId: null, backgrounded: true }),
+        done("bash"),
+      ],
+      [],
+    );
+    check(
+      "a call that detached is still marked after its completing update lands",
+      (backgrounded.rows[0] as { backgrounded: boolean; status: string }).backgrounded,
+      true,
+    );
+    check(
+      "and the status it was sent is kept rather than rewritten",
+      (backgrounded.rows[0] as { status: string }).status,
+      "completed",
+    );
+    /*
+     * And the negative, because the whole value of the flag is that it is rare: an
+     * ordinary call must not pick it up from anywhere. An older daemon sends the
+     * field on nothing at all, which is this row.
+     */
+    seq = 0;
+    const ordinary = buildTail([toolCall("bash", "Bash"), done("bash")], []);
+    check(
+      "an ordinary completed call is not marked",
+      (ordinary.rows[0] as { backgrounded: boolean }).backgrounded,
+      false,
+    );
+
+    /*
      * Counted, therefore not descended into. Nested delegation is measured to be
      * flat — every call comes back parented to the outermost spawn — so "a task
      * inside a task" is one thing you are waiting on, and `2 tasks` has to mean two.
@@ -324,6 +373,425 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       line: "last seen working · waiting for 2 tasks",
       spoken: "last seen working, not connected, waiting for 2 tasks",
     });
+
+    /*
+     * The second source, and the three answers the sentence can give.
+     *
+     * ⚠ **Delegations alone keep today's words**, which is why every assertion
+     * above this one still means what it meant: the foot had one source for its
+     * whole life, and a change that reworded the common case would be a change
+     * nobody asked for wearing a feature's clothes.
+     *
+     * Claude Code's own vocabulary is lifted for the second source, including the
+     * canonical fallback — **`N background tasks` whenever the kinds are mixed, or
+     * whenever delegations and background work are outstanding together.** The
+     * alternative to a fallback is a foot line that lists, and a foot line that
+     * lists is a panel drawn one row too high.
+     */
+    const task = (id: string, taskType: string, state: string): unknown => ({
+      id,
+      name: id,
+      taskType,
+      description: "",
+      state,
+      summary: null,
+      lastToolName: null,
+      usage: null,
+      canStop: true,
+      showInTranscript: false,
+      outputFilePath: null,
+      toolCallId: null,
+      startedAt: 0,
+      endedAt: null,
+    });
+    const bg = (...tasks: unknown[]): never[] => tasks as never[];
+
+    check(
+      "one shell of its own is named as one",
+      footSays(false, 0, null, false, bg(task("a", "shell", "running")))?.line,
+      "waiting for 1 shell",
+    );
+    check(
+      "and several of one kind take that kind's plural",
+      footSays(false, 0, null, false, bg(task("a", "shell", "running"), task("b", "shell", "running")))?.line,
+      "waiting for 2 shells",
+    );
+    check(
+      "a monitor is a monitor and a workflow says which kind it is",
+      [
+        footSays(false, 0, null, false, bg(task("a", "monitor", "running")))?.line,
+        footSays(false, 0, null, false, bg(task("a", "workflow", "running")))?.line,
+      ],
+      ["waiting for 1 monitor", "waiting for 1 background dynamic workflow"],
+    );
+    check(
+      "two kinds fall to the canonical noun rather than listing",
+      footSays(false, 0, null, false, bg(task("a", "shell", "running"), task("b", "monitor", "running")))?.line,
+      "waiting for 2 background tasks",
+    );
+    /*
+     * ⚠ **A kind this client has never heard of is drawn, not hidden.** The
+     * adapter humanises `taskType` before it sends, so a fourth word is a word it
+     * added — and falling to the canonical noun keeps the count honest where a
+     * lookup that answered nothing would drop the row out of the sentence.
+     */
+    check(
+      "and so does a kind this client has no noun for",
+      footSays(false, 0, null, false, bg(task("a", "cron", "running")))?.line,
+      "waiting for 1 background task",
+    );
+    /*
+     * **The two sources add**, which is safe because they are disjoint by
+     * construction: a delegation is a transcript row and a background task comes
+     * off the snapshot, and the adapter never announces a backgrounded *subagent*
+     * as a task at all. If that ever stops being true the fix is upstream, not a
+     * `Set` here — see `outstandingSays`.
+     */
+    check(
+      "delegations and background work together take the canonical noun",
+      footSays(false, 1, null, false, bg(task("a", "shell", "running")))?.line,
+      "waiting for 2 background tasks",
+    );
+    /*
+     * ⚠ **Finished work is not work anybody is waiting for**, and the panel keeps
+     * a `Completed` section — so the array the foot is handed legitimately holds
+     * rows that must not be counted. Asserted as the pair: a terminal task alone
+     * says nothing at all, and a terminal task beside a live one counts one.
+     */
+    check(
+      "a finished task is not counted, and on its own says nothing",
+      [
+        footSays(false, 0, null, false, bg(task("a", "shell", "completed"))),
+        footSays(false, 0, null, false, bg(task("a", "shell", "completed"), task("b", "shell", "running")))?.line,
+      ],
+      [null, "waiting for 1 shell"],
+    );
+    check(
+      "and a paused one is, because paused work is still there",
+      footSays(false, 0, null, false, bg(task("a", "shell", "paused")))?.line,
+      "waiting for 1 shell",
+    );
+
+    /*
+     * The chip table, as a **total** mapping over the five states.
+     *
+     * Written as an exhaustive sweep rather than five hand-picked rows, because
+     * the failure this guards is a sixth state added on the daemon's side with no
+     * row here — which draws nothing at all beside a live task, on the one row
+     * whose job is saying whether the work is over.
+     *
+     * ⚠ **The list below is a hand-written copy, not the daemon's union**, and a
+     * driver cannot import one. So this sweep proves the five rows exist and are
+     * right; it does **not** catch a sixth state added in `src/acp/asynctasks.ts`.
+     * What would catch that is reading `STATES` out of that file as source text,
+     * the way `webcheck.plugin-protocol.ts` reads the daemon's interfaces — until
+     * then these five words live in four places (`STATES` and `TERMINAL` in
+     * `asynctasks.ts`, `AsyncTaskState` in `wire.ts`, `taskFinished`'s re-derived
+     * terminal three, and this literal) with nothing comparing any pair.
+     */
+    const { TASK_CHIPS, TASK_SECTIONS, TASK_NOUNS } = await import("../src/tasks.js");
+    const states = ["running", "paused", "completed", "failed", "stopped"] as const;
+    check(
+      "every state a task can be in has a chip, and each is parenthesised",
+      states.map((state) => TASK_CHIPS[state]?.[0] ?? null),
+      ["(running)", "(paused)", "(done)", "(error)", "(stopped)"],
+    );
+    /*
+     * ⚠ **And the tone carries the meaning, which is this app's rule for a status
+     * word: the distinction is a colour, never a size.** The three that are over
+     * are three different colours because they mean three different things — it
+     * finished, it broke, somebody stopped it — and the two that are not share
+     * one, because *going* and *paused* are the same news to a reader deciding
+     * whether to wait.
+     */
+    check(
+      "and the two states that are not over share one tone while the three that are do not",
+      [
+        TASK_CHIPS.running?.[1] === TASK_CHIPS.paused?.[1],
+        new Set([TASK_CHIPS.completed?.[1], TASK_CHIPS.failed?.[1], TASK_CHIPS.stopped?.[1]]).size,
+      ],
+      [true, 3],
+    );
+
+    /*
+     * The sections, in Claude Code's own order, and the rule that a kind with no
+     * section of its own still lands somewhere.
+     *
+     * Driven through the predicates rather than by reading their source, because
+     * what matters is that the three of them **partition** — a task in two
+     * sections is a row drawn twice, and a task in none is a row drawn nowhere
+     * while the foot line above still counts it.
+     */
+    check(
+      "the sections are the ones Claude Code names, with workflows lifted to the front",
+      TASK_SECTIONS.map(([label]) => label),
+      ["Dynamic workflows", "Shells", "Monitors"],
+    );
+    const placed = (taskType: string): string[] =>
+      TASK_SECTIONS.filter(([, holds]) => holds(task("a", taskType, "running") as never)).map(([label]) => label);
+    check(
+      "every kind lands in exactly one section, an unknown one included",
+      [placed("shell"), placed("monitor"), placed("workflow"), placed("cron")],
+      [["Shells"], ["Monitors"], ["Dynamic workflows"], ["Shells"]],
+    );
+    /*
+     * ⚠ **The noun table and the section table are two lists of the same three
+     * kinds, and they have to agree.** They are separate because one names a
+     * sentence and the other names a heading — `background dynamic workflow`
+     * against `Dynamic workflows` — so neither can be derived from the other, and
+     * a kind in one and not the other is a row that counts under a noun its own
+     * section never uses.
+     */
+    check(
+      "and the kinds with a noun of their own are the kinds with a section of their own",
+      Object.keys(TASK_NOUNS).length,
+      TASK_SECTIONS.length,
+    );
+
+    /* ----------------------------------------------------------------
+     * The panel itself: what it computes, and where it is.
+     *
+     * ⚠ **Every formatter here is Anthropic's, reproduced from the installed
+     * `claude` binary, and the reason to drive them rather than eyeball them is
+     * that all three have a carry or a rounding rule that looks like decoration
+     * until it is wrong.** `1m 60s` is what the seconds arm produces without the
+     * normalisation; `8.0k` is what the token arm produces without the strip.
+     * ---------------------------------------------------------------- */
+    const {
+      dotCells,
+      taskDuration,
+      taskElapsedMs,
+      taskKindLabel,
+      taskSections,
+      taskTitle,
+      taskTokens,
+    } = await import("../src/tasks.js");
+
+    check(
+      "a duration is Claude Code's spaced form at every scale",
+      [0, 8_000, 59_999, 87_000, 7_503_000, 102_600_000].map(taskDuration),
+      ["0s", "8s", "59s", "1m 27s", "2h 5m 3s", "1d 4h 30m"],
+    );
+    /*
+     * ⚠ **The carry, which is the whole reason this is not three template
+     * literals.** Seconds are *rounded* above a minute, so 119.6s is 2m rather
+     * than `1m 60s`, and the same carry has to run all the way up — 3599.6s is an
+     * hour rather than `59m 60s`, and 86399.6s is a day rather than `23h 60m 0s`.
+     */
+    check(
+      "and a rounded second carries instead of printing sixty",
+      [119_600, 3_599_600, 86_399_600].map(taskDuration),
+      ["2m 0s", "1h 0m 0s", "1d 0h 0m"],
+    );
+    /* And nothing under a minute is zero-padded: `08s` is not a form either
+       formatter in that binary produces, and a leading zero here would be this
+       app inventing one. */
+    check("and a short duration is never zero-padded", taskDuration(8_000).startsWith("0"), false);
+
+    check(
+      "a token count is compact, lowercase, and drops a trailing .0",
+      [0, 999, 8_000, 429_700, 1_200_000].map(taskTokens),
+      ["0", "999", "8k", "429.7k", "1.2m"],
+    );
+
+    /*
+     * Elapsed time comes from this daemon's two stamps and never from the agent.
+     *
+     * ⚠ **The finished case is the one that earns the field.** `usage.durationMs`
+     * is the only duration on the wire, it rides a *progress* frame, and the
+     * adapter drops both the SDK's final `usage` and its `end_time` — so a
+     * completed task's own number is stale by however long its last leg ran, and a
+     * quiet task never sent one at all. Without `endedAt` a finished card counts
+     * up for ever, which is a card claiming work is still going.
+     */
+    const running = { ...(task("a", "shell", "running") as object), startedAt: 1_000 } as never;
+    const ended = {
+      ...(task("a", "shell", "completed") as object),
+      startedAt: 1_000,
+      endedAt: 61_000,
+    } as never;
+    check(
+      "a running task measures against now and a finished one stops where it stopped",
+      [taskElapsedMs(running, 31_000), taskElapsedMs(ended, 900_000)],
+      [30_000, 60_000],
+    );
+    /* A clock that went backwards between two renders is under a minute, not
+       `−2m`: the same direction `elapsedSays` already picks one file over. */
+    check("and a clock that went backwards says nothing worse than zero", taskElapsedMs(running, 0), 0);
+
+    /*
+     * The meter, and the case that is the only one this app can ever draw.
+     *
+     * A workflow's agents are `local_agent` tasks and the adapter marks every one
+     * of them `ignored` before publishing, so nothing on this wire ever counts
+     * them: `total` is always zero here. Claude Code's own arithmetic already
+     * answers for that — `Xe > 0 ? … : 0` — and the answer is one moving cell,
+     * which is what *something is going and nobody is saying how far* should look
+     * like. The other rows are driven so the arithmetic stays theirs rather than
+     * collapsing to the one case we exercise.
+     */
+    check(
+      "the meter is four cells, and an uncounted run still says it is going",
+      [
+        dotCells(0, 0, true).join(" "),
+        dotCells(0, 0, false).join(" "),
+        dotCells(5, 10, true).join(" "),
+        dotCells(10, 10, false).join(" "),
+        dotCells(10, 10, true).join(" "),
+      ],
+      [
+        "live empty empty empty",
+        "empty empty empty empty",
+        "full full live empty",
+        "full full full full",
+        "full full full live",
+      ],
+    );
+
+    /*
+     * The sections, as the panel partitions them — and `Completed` is a state
+     * rather than a kind, so a finished shell must appear once, under it.
+     */
+    const sectioned = taskSections([
+      task("live", "shell", "running") as never,
+      task("mon", "monitor", "running") as never,
+      task("flow", "workflow", "running") as never,
+      task("old", "shell", "completed") as never,
+    ]);
+    check(
+      "the panel's sections are the three kinds and then Completed, workflows first",
+      sectioned.map((section) => `${section.label}:${section.tasks.length}`),
+      ["Dynamic workflows:1", "Shells:1", "Monitors:1", "Completed:1"],
+    );
+    check(
+      "a finished task appears once, under Completed and not under its kind",
+      sectioned.flatMap((section) => section.tasks.map((row) => row.id)).filter((id) => id === "old").length,
+      1,
+    );
+    check("and a section with nothing in it is absent rather than empty", taskSections([]), []);
+
+    /*
+     * ⚠ **A title is read off a different field per kind, because the adapter
+     * fills them differently.** `name` is the workflow script's own `meta.name`
+     * and is set *only* for a workflow; for everything else the adapter sets it to
+     * the description, so leading with `description` is what puts a backgrounded
+     * shell's command line on the card rather than a repeat of it.
+     */
+    const titled = (id: string, taskType: string, name: string, description: string): string =>
+      taskTitle({ ...(task(id, taskType, "running") as object), name, description } as never);
+    check(
+      "a workflow is named by its script and everything else by what it ran",
+      [
+        titled("w", "workflow", "spec", "10 agents each wait"),
+        titled("s", "shell", "sleep 900", "sleep 900"),
+        titled("m", "monitor", "", "watching the build"),
+        titled("x", "shell", "", ""),
+      ],
+      ["spec", "sleep 900", "watching the build", "x"],
+    );
+    check(
+      "and a kind names itself as Claude Code's own default does",
+      ["shell", "workflow", "monitor", "cron", ""].map(taskKindLabel),
+      ["Shell", "Workflow", "Monitor", "Cron", "Task"],
+    );
+
+    /* ----------------------------------------------------------------
+     * Placements, read off disk, positive **and** negative — nothing typed can
+     * hold one, and every rule below has a plausible edit that undoes it while
+     * `typecheck` and every other assertion here stay green.
+     * ---------------------------------------------------------------- */
+    const panelSrc = stripComments(
+      readFileSync(new URL("../src/ui/TaskPanel.tsx", import.meta.url), "utf8"),
+    );
+    const viewSrc = stripComments(
+      readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"),
+    );
+    const eventListSrc = stripComments(
+      readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8"),
+    );
+
+    check("the panel was found at all", panelSrc.length > 0 && viewSrc.length > 0 && eventListSrc.length > 0, true);
+    /*
+     * ⚠ **It portals and it is not a `Sheet`, and the pair is the whole design.**
+     * `fixed` only means the viewport where no ancestor carries a `transform` or a
+     * `backdrop-filter`, and this screen's header and composer are one hop from
+     * one — so it has to leave the layout. But `Sheet` puts `inert` on `#root`,
+     * which at `xl` would switch off the conversation this thing is docked
+     * *beside*, and there is no way to make that conditional without asking
+     * JavaScript what the breakpoint is.
+     */
+    check("the panel leaves the layout", /createPortal\(/.test(panelSrc), true);
+    check("and it is not the app's modal pop-up", /\bSheet\b/.test(panelSrc), false);
+    check('and it is "menu" in the overlay stack rather than "sheet"', [
+      /useDismissible\("menu"/.test(panelSrc),
+      /useDismissible\("sheet"/.test(panelSrc),
+    ], [true, false]);
+    /*
+     * ⚠ **The breakpoint is answered only in CSS, on both halves.** `AppShell`'s
+     * rule, and the failure it prevents is a resized window drawing a docked panel
+     * over a conversation that never made room for it — or dimming one it is
+     * sitting beside.
+     */
+    check("the panel docks at the wide breakpoint", /xl:right-0/.test(panelSrc), true);
+    /*
+     * ⚠ **The two halves are read and compared, where this used to grep one
+     * literal in one file.** It asserted `xl:pr-[26rem]` appeared in
+     * `SessionView` — so the *gutter* was watched and the panel's own width was
+     * watched by nothing, which is the direction that could drift in silence. The
+     * two are `TASK_PANEL_WIDTH` and `TASK_PANEL_GUTTER` on adjacent lines now,
+     * and what is asserted is the property that actually matters: the same length
+     * on both. A Tailwind class only exists if it survives a source scan as a
+     * literal, so neither can be derived from the other and a comparison is the
+     * only thing that can hold them together.
+     */
+    const widthRem = /TASK_PANEL_WIDTH = "xl:w-\[([\d.]+)rem\]"/.exec(panelSrc)?.[1] ?? "width missing";
+    const gutterRem = /TASK_PANEL_GUTTER = "xl:pr-\[([\d.]+)rem\]"/.exec(panelSrc)?.[1] ?? "gutter missing";
+    check("the panel's width and the conversation's gutter are one length", [widthRem, gutterRem], [widthRem, widthRem]);
+    check("and the conversation makes room at the same breakpoint", /TASK_PANEL_GUTTER/.test(viewSrc), true);
+    check("and the scrim stops where the docking starts", /xl:hidden/.test(panelSrc), true);
+    check(
+      "and no breakpoint is read in JavaScript",
+      /matchMedia|innerWidth|clientWidth/.test(panelSrc),
+      false,
+    );
+    /*
+     * ⚠ **One surface lists them, and the transcript's foot is a way in rather
+     * than a second copy.** Two surfaces drawing one set is how they come to
+     * disagree, and the inline fold could not hold a card without pushing the
+     * composer down the screen every time an agent backgrounded a shell.
+     */
+    const footAt = eventListSrc.indexOf("function WaitingFoot");
+    const footBody = footAt < 0 ? "" : eventListSrc.slice(footAt, eventListSrc.indexOf("\n}\n", footAt));
+    check("the foot's own component was found", footAt >= 0 && footBody.length > 0, true);
+    check("the foot opens the panel", /aria-haspopup="dialog"/.test(footBody), true);
+    check("and no longer claims a region under it", /aria-expanded/.test(footBody), false);
+    check("and draws no task rows of its own", /function TaskRow\(|function TaskHeading\(/.test(eventListSrc), false);
+    /*
+     * ⚠ **The footer sentence lives on the surface it is about**, and exactly
+     * once: it explains why there is no per-task view, and a copy left at the foot
+     * of the transcript would be explaining the absence of a thing that is now one
+     * tap away.
+     */
+    const footer = "Each task&apos;s output reaches the transcript when it finishes";
+    check("the sentence about output is on the panel and nowhere else", [
+      panelSrc.includes(footer),
+      eventListSrc.includes(footer),
+    ], [true, false]);
+    /*
+     * ⚠ **`No tasks currently running` is Claude Code's sentence and it is a
+     * *claim*.** True for claude, false for the other three agents — kimi
+     * backgrounds shells, agents and cron jobs and reports none of it — so it is
+     * gated on the agent having said it would tell us, and the ungated arm says
+     * something weaker. A driver cannot render this, so the gate is read: the
+     * claim and the field must appear together.
+     */
+    const empty = panelSrc.slice(panelSrc.indexOf("No tasks currently running") - 200, panelSrc.indexOf("No tasks currently running"));
+    check("the empty state that makes a claim is gated on the agent reporting", /reports\s*$|reports\s*\n?\s*\?\s*$/.test(empty.trimEnd() + "\n") || /reports\s*\?/.test(empty), true);
+    check(
+      "and the other arm says what it cannot know rather than that nothing is running",
+      /doesn't report background work/.test(panelSrc),
+      true,
+    );
     /*
      * ⚠ **The spoken half says "not connected" rather than "reconnecting", and the
      * change of word is the fix rather than a rewording.** This arm is reached with
@@ -416,14 +884,24 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
      * because the cancelled-turn row draws a third, unrelated `WorkingMark still`
      * and a file-wide count would be satisfied by either arm plus that one.
      */
-    const listSrc = stripComments(readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8"));
-    const waitingFootAt = listSrc.indexOf("function WaitingFoot");
-    const waitingFoot = waitingFootAt < 0 ? "" : listSrc.slice(waitingFootAt, listSrc.indexOf("\n}\n", waitingFootAt));
+    const footSrc = stripComments(readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8"));
+    const waitingFootAt = footSrc.indexOf("function WaitingFoot");
+    const waitingFoot = waitingFootAt < 0 ? "" : footSrc.slice(waitingFootAt, footSrc.indexOf("\n}\n", waitingFootAt));
     check("the foot's own component was found", waitingFootAt >= 0, true);
+    /*
+     * ⚠ **It was "all four arguments" and it is five now, which is the point of
+     * pinning the call rather than the signature.** `footSays` gives both of the
+     * newest two a default, so a caller that stops passing one compiles clean and
+     * silently reverts this line to what it said before the argument existed —
+     * which is how the elapsed time and the frozen tense shipped unasserted in the
+     * first place. The fifth is the background set, and dropping it would leave
+     * the foot counting delegations alone on a session whose only outstanding work
+     * is a build.
+     */
     check(
-      "the caller threads all four arguments, and both of its arms stop the mark",
+      "the caller threads all five arguments, and both of its arms stop the mark",
       [
-        /footSays\(working, tasks\.length, elapsedSays\(turnElapsedMs\), stale\)/.test(listSrc),
+        /footSays\(working, tasks\.length, elapsedSays\(turnElapsedMs\), stale, background\)/.test(footSrc),
         (waitingFoot.match(/WorkingMark still=\{stale\}/g) ?? []).length,
       ],
       [true, 2],
@@ -443,9 +921,9 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     check(
       "the elapsed time is floored in one place, and the floor is a judgement rather than a unit",
       [
-        /const ELAPSED_FLOOR_MS = 120_000;/.test(listSrc),
-        /return turnElapsedMs < ELAPSED_FLOOR_MS \? null : shortDuration\(turnElapsedMs\);/.test(listSrc),
-        /if \(turnElapsedMs === null\) return null;/.test(listSrc),
+        /const ELAPSED_FLOOR_MS = 120_000;/.test(footSrc),
+        /return turnElapsedMs < ELAPSED_FLOOR_MS \? null : shortDuration\(turnElapsedMs\);/.test(footSrc),
+        /if \(turnElapsedMs === null\) return null;/.test(footSrc),
       ],
       [true, true, true],
     );
@@ -462,7 +940,7 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       "and they are measured against the row's two clocks rather than against ours",
       [
         /const turnElapsedMs = row === null \|\| turnStartedAt === null \? null : elapsedSince\(row, turnStartedAt\);/.test(foot),
-        /Date\.now\(\) - turnStartedAt/.test(foot + listSrc),
+        /Date\.now\(\) - turnStartedAt/.test(foot + footSrc),
       ],
       [true, false],
     );
@@ -1179,10 +1657,10 @@ process.stdout.write("\na run of tool calls, folded into one row\n");
      * Pinned on the derived expression itself rather than on a rendering, since
      * `webcheck` has no DOM.
      */
-    const listSrc = readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8")
+    const footSrc = readFileSync(new URL("../src/ui/EventList.tsx", import.meta.url), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/\/\/[^\n]*/g, "");
-    const derived = /const open = override \?\? ([^;]+);/.exec(listSrc)?.[1] ?? "(not found)";
+    const derived = /const open = override \?\? ([^;]+);/.exec(footSrc)?.[1] ?? "(not found)";
     check("a folded run starts collapsed, whatever it is doing", derived, "false");
 
     /*
@@ -1191,7 +1669,7 @@ process.stdout.write("\na run of tool calls, folded into one row\n");
      * failure, in the direction this repo names it for. It is spent on the collapsed
      * row's pulse now; if that goes, those three assertions go with it.
      */
-    check("and liveness still inks the row it no longer opens", /node\.live/.test(listSrc), true);
+    check("and liveness still inks the row it no longer opens", /node\.live/.test(footSrc), true);
   }
 
   {

@@ -40,8 +40,9 @@ the same standing this claim had for codex before it was exercised.
 
 **A restart is no longer the only way an agent goes with nobody deciding.** A session
 quiet for `REEMOAT_IDLE_PARK_MINUTES` is stopped `parked`, its process released and
-all else kept; the next **message** brings one back. Four invariants, no compiler
-behind any: the precondition is `status === "idle"` **and nothing else**; `parked` is
+all else it can keep; the next **message** brings one back. Four invariants, no
+compiler behind any: the precondition is `status === "idle"` plus what derivation
+cannot see — a `/clear`, a queued message, live background work (Q2.228); `parked` is
 **not** a `DAEMON_EXIT_REASON`, so the boot pass leaves it — and it therefore needs
 its own `SessionStatus`, or `status`'s `default:` answers `exited`; the prune reads
 the wider `keepsItsConversation`, since the narrow one made every parked row
@@ -49,9 +50,10 @@ deletable; and **a message is the only way back**, an exclusion rather than an
 omission, `canResume` being satisfied by both its clauses. It draws as an ordinary `idle`
 session and says nothing — explicitly, since the fallthrough says `ended` — but
 **Stop stays offered**: `stop()` memoises, so without an override a person
-pressing it got `200` and no change. Its **controls stay live too** — parking is
-the one stop that keeps `agentConfigState`, so a tap is *recorded* and applied by
-`doResume`, never a wake. Q2.224.
+pressing it got `200` and no change. Its **controls and its `/` menu stay live** —
+parking is the one stop keeping `agentConfigState` *and* `agentCommands`, so a tap
+is *recorded* and applied by `doResume`, never a wake, and no empty command menu
+gives it away. Q2.224, Q2.228.
 
 **The rule is `autoResumable`, a `switch` over `ExitReason` with no `default`
 arm**, so adding a reason is a compile error rather than a silent `false`:
@@ -280,7 +282,9 @@ Recording them would put an unbounded stderr stream into a per-session log that 
 deliberately `Infinity`/`Infinity`, make `REEMOAT_LOG_EVENTS` actively harmful, charge
 against the tab's 16 MiB ceiling and bury a reattaching phone behind
 `ATTACH_REPLAY_MAX`. Neither is drawn anywhere, and the last 20 stderr lines are
-already on `Session.recentLogs()`. Q2.44.
+already on `Session.recentLogs()`. ⚠ Dropped from the log, **not from the
+clock**: both move `lastEventAt`, the only defence agents that cannot report
+background work have. Q2.44, Q2.228.
 
 **What is deliberately not done.** `status` is untouched and this adds no
 `SessionStatus` member: a clock in `status` would break *"Status is derived, never
@@ -297,21 +301,15 @@ the tail rather than the snapshot, since `showsWorking` reads `turn` and the
 delegations outlive it. `pending` counts, because a Task spawn sits there for 13–14s
 and reaches `completed` without ever being `in_progress`; `mayStillReport` excludes
 terminal and `stopping`, the two states where a spawn can never complete.
-⚠ **It reads 0 for work behind a call that already reported `completed`** — no ACP
-message describes background shell work, so the drain is the fix and this is the only
-honest client-side signal there is. Q2.44.
-
-⚠ **A backgrounded subagent is the measured case, and half of it *is* observable —
-which is exactly why nothing was built.** The spawn arrives with
-`rawInput.run_in_background: true` and is on the wire verbatim; then the same call
-reaches `completed` **at launch**, carrying "Async agent launched successfully", and
-that is the last the ACP stream ever says about it. Measured over the whole live
-log: no later event names the agent it started, and every `turn_end` is followed by
-`status`, a `prompt` or `agent_config` — the drain carries no return. So a box could
-be drawn when the work starts and nothing could honestly take it down; every
-candidate for "it finished" is a guess, and a row claiming work is still running
-four minutes after it stopped is worse than the silence it replaces. Deliberate
-non-goal, with the numbers, at Q7.113.
+⚠ **Shell, workflow and monitor work is on the wire now** — three `async_task_*`
+variants behind a declared `_meta.jetbrains.air` capability, held on the snapshot,
+and what `parkable` refuses to release an agent over. The published SDK rejects all
+three at two parse sites, so `splitAsyncTaskUpdates` takes them off the byte
+stream below it and forwards the rest untouched. **A backgrounded
+subagent is still invisible**, which was the measured case: the adapter marks it
+`ignored`, the spawn reaches `completed` **at launch** and no later event ever
+names it. So `outstandingTasks` still reads 0 for that, and every margin bought
+for it stays. Q7.113, Q2.228.
 
 ## Invariants
 
@@ -443,7 +441,7 @@ non-goal, with the numbers, at Q7.113.
 | Event log | **Unbounded per session.** 128 KiB per event (truncated visibly at the store boundary). What bounds the database is whole sessions, `prune()` at startup — the next row, every id reported. Q2.222. That bounds **rows**; bytes, by `reclaim()`, which `VACUUM`s once a quarter of the file is free |
 | Sessions on disk | Inactive — ended by a person or the agent, never started, or given up on; never a live, daemon-ended or **parked** row (Q2.224) — idle 7 days / 200 of them; never under 50. `GET /sessions` unbounded by default, takes `?limit=`, reorders blocked-first so a cut drops only rows nobody waits on |
 | Sessions running | **64 live, and 16 creations then one per 2 min.** Both are needed: the ceiling bounds what is running, the burst bounds create-and-stop, which walks past a ceiling while still writing the rows the prune deletes. **It releases rather than refuses** — a wake *or* a create takes the least recently used **idle** slot, by need rather than by the sweep's age; with none to take a wake goes one over, a create answers `429` before the cwd is resolved. So it counts **agents resident**. In memory; `REEMOAT_MAX_LIVE_SESSIONS` moves it. Q2.100, Q2.224 |
-| Idle agents | **Released after 30 min of quiet**, on by default. `REEMOAT_IDLE_PARK_MINUTES` moves it, `0` switches off the sweep *and* the eviction. Swept once a minute. Q2.224. A value saved on the machine's settings screen (`PATCH /settings`) **overrides** the variable, without a restart: config is still env only, this is the narrower class the *user* owns. Q2.225 |
+| Idle agents | **Released after 30 min of quiet**, on by default — never while claude reports live background work (Q2.228). `REEMOAT_IDLE_PARK_MINUTES` moves it, `0` switches off the sweep *and* the eviction. Swept once a minute. Q2.224. A value saved on the machine's settings screen (`PATCH /settings`) **overrides** the variable, without a restart: config is still env only, this is the narrower class the *user* owns. Q2.225 |
 | WS outbound queue | 8000 events / 16 MiB, with **`ATTACH_REPLAY_MAX` 2000** under the *event* half only — at 128 KiB an event a full replay is 250 MiB, so the byte ceiling still collapses an attach and reports the same `lagged{backlog}` rather than `slow_consumer`. The socket is bounded, the transcript is not |
 | `Session.EventQueue` | 2000, evicting only `agent_log`/`other`. Never drop-oldest: dropping `text` or `file_change` yields a contiguous log missing content. **What it bounds is narrow**: a `ManagedSession` attaches a reader between turns, so the unread window is the gap between `adopt` and `onStarted`, plus any bare `Session` (`harness`, the Session-level drivers) where nothing drains between turns at all. Q2.104 |
 | Timeouts | start 45s, shutdown budget 20s, cancel-send 1s, session/close 2s, cancel grace 5s **on a dispose** and 1.5s on a turn somebody stopped (what follows the first is SIGKILL, and what follows the second is nothing), exit grace 3s, WS ping 20s, enrollment 15s |

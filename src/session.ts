@@ -7,6 +7,18 @@ import {
   type NotificationListener,
   type SessionHandlers,
 } from "./acp/client.js";
+import type { AsyncTaskEdge, BackgroundTask } from "./acp/asynctasks.js";
+import {
+  ASYNC_TASK_UPDATES,
+  MAX_ASYNC_TASK_NAME_CHARS,
+  MAX_ASYNC_TASK_PATH_CHARS,
+  MAX_ASYNC_TASK_TEXT_CHARS,
+  MAX_ASYNC_TASK_TYPE_CHARS,
+  MAX_TRACKED_ASYNC_TASKS,
+  isTerminalAsyncTaskState,
+  readAsyncTaskEdge,
+  readBackgroundedMarker,
+} from "./acp/asynctasks.js";
 import { MAX_PARENT_ID_CHARS, toolCallLineage } from "./acp/subagents.js";
 import { sessionMetaFor } from "./acp/agents.js";
 import type { AgentRouting } from "./acp/systems.js";
@@ -129,6 +141,34 @@ const CLOSE_TIMEOUT_MS = 2_000;
  * and it did not fire.
  */
 const STEER_METHOD = "_session/steering";
+
+/**
+ * How one background task is stopped without ending the turn that started it.
+ *
+ * A second ACP **extension**, the underscore being the protocol's own mark for
+ * one, served by the agent exactly as `_session/steering` is. The adapter's
+ * docblock says what makes it worth having rather than reusing `session/cancel`:
+ * *"Stops one Claude background task without cancelling the parent prompt turn"*
+ * — and, on the runtime that owns it, *"prompt cancellation intentionally does
+ * not finish it because background work may outlive a prompt."*
+ *
+ * Answers `{stopped: boolean}`, and **`false` is not a failure**: the task
+ * finished on its own between the tap and the request. See `ManagedSession.
+ * stopBackgroundTask`.
+ */
+const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
+
+/**
+ * How long that stop may take.
+ *
+ * `STEER_TIMEOUT_MS`' number and its argument: both adapters answer their
+ * extensions in single-digit milliseconds, so ten seconds means the pipe is not
+ * being read at all rather than that the work is slow to stop. Unlike a steer
+ * there is nothing to degrade to — the caller gets a failure and the row says so
+ * — which is the whole reason the control draws `· stopping…` optimistically and
+ * can take it back.
+ */
+const ASYNC_TASK_STOP_TIMEOUT_MS = 10_000;
 /**
  * Ceiling on the steer request, which writes to the agent's stdin like every
  * other RPC here.
@@ -176,8 +216,9 @@ const NEW_SESSION_TIMEOUT_MS = 15_000;
  *
  * ⚠ **These two were the hole in "every RPC that writes to agent stdin is
  * bounded"**, and the rule reads as absolute, so nothing was looking. Every other
- * stdin write in this file goes through `withDeadline`; the two on the launch
- * path did not, and they are the ones whose failure is worst.
+ * stdin write in this file goes through `withDeadline` or the abandoning sibling
+ * beside it; the two on the launch path went through neither, and they are the
+ * ones whose failure is worst.
  *
  * What an unbounded launch cost: an agent that completes `initialize` and then
  * stops reading its pipe — a wedged tool, a full pipe buffer, a dead inner
@@ -667,6 +708,32 @@ export class Session {
    */
   private usage: ContextUsage | null = null;
   private readonly usageListeners = new Set<(usage: ContextUsage) => void>();
+  /** Latched by the first `messageId` this connection sends. See {@link messageIdFor}. */
+  private agentNumbersMessages = false;
+  /** Counts the messages this daemon had to number itself. See {@link messageIdFor}. */
+  private unnumberedMessages = 0;
+  /**
+   * Work the agent started that outlives the call that started it.
+   *
+   * Held out of band exactly like `usage` above, and for the strongest version of
+   * that reason yet: this is **state with one current version** — the adapter
+   * supersedes a task's row rather than appending to it — and it belongs to the
+   * agent *process* rather than to any turn. Routing it through `EventQueue`
+   * would put it behind a reader that only exists during a turn, and these
+   * arrive between turns by definition.
+   *
+   * ⚠ **Recording it would also break the thing it exists for.** Everything that
+   * reaches `ManagedSession.record` moves `lastEventAt`, which is what `parkable`
+   * measures age against — so a logged lifecycle would defer the sweep by
+   * accident for a task that chatters and not at all for a `sleep 600` that says
+   * nothing. The guard has to be a clause about the set, not a side effect of
+   * writing to a log, and keeping this out of band is what makes that true.
+   *
+   * Empty until the agent says, and empty for ever on three of the four agents.
+   * `AcpClient.supportsAsyncTasks` is what tells those two states apart.
+   */
+  private readonly asyncTasks = new Map<string, BackgroundTask>();
+  private readonly asyncTaskListeners = new Set<(tasks: readonly BackgroundTask[]) => void>();
   /**
    * What the agent says it will answer to a leading slash.
    *
@@ -760,7 +827,7 @@ export class Session {
    * and answering, so it is closed where the agent supports it, or one is leaked
    * per clear.
    */
-  async clearContext(): Promise<{ previous: string; next: string }> {
+  async clearContext(): Promise<{ previous: string; next: string; abandonedTasks: number }> {
     const previous = this.sessionId;
     const opened = await withDeadline(
       this.client.agent.request(acp.methods.agent.session.new, {
@@ -782,6 +849,44 @@ export class Session {
     this.unregister?.();
     this.sessionId = next;
     this.unregister = this.client.registerSession(next, this.handlers());
+
+    /*
+     * ⚠ **The task set belongs to the conversation that has just been abandoned,
+     * so it goes with it — and leaving it made a session immortal.**
+     *
+     * `AcpClient` routes an update by `sessionId`, and the old id has just been
+     * unregistered, so every later edge about one of these tasks — including the
+     * terminal one — is dropped on the floor. A row left behind therefore stays
+     * `running` for the life of the process: `hasLiveBackgroundWork` answers true
+     * for ever, `parkable` refuses at its first clause, the idle sweep can never
+     * take the session and neither can `releaseOneSlot`, so a machine that has
+     * cleared a few conversations mid-build answers `429 too_many_sessions` at the
+     * ceiling with no way out but a manual stop. `stopAsyncTask` cannot repair it
+     * either: it addresses `this.sessionId`, which is now the *new* id, so the
+     * panel's Stop control could only ever answer `stopped: false`.
+     *
+     * Cleared **after** the re-key rather than before, for `clearContext`'s own
+     * reason: `session/new` can throw, and until it has not, the old conversation
+     * is still the live one and its tasks are still real.
+     *
+     * The count goes back to the caller rather than being announced here, because
+     * the transcript is the registry's to write.
+     *
+     * ⚠ **And the sentence it writes must not claim the work was killed.** The
+     * close below is both conditional and best-effort — `supportsSessionClose()`
+     * gates it, and it is a `.catch(() => {})` — so on an agent that does not
+     * offer the method, or one that refuses it, the old conversation's shells may
+     * still be running with nothing here able to report or stop them. That is why
+     * `clearedWithBackgroundWork` says the work *was still running in the
+     * conversation this cleared* rather than that it ended: the same discipline
+     * `stoppedWithBackgroundWork` states one function over, for the same reason —
+     * claim what was observed, never the likely.
+     */
+    const abandonedTasks = [...this.asyncTasks.values()].filter(
+      (task) => !isTerminalAsyncTaskState(task.state),
+    ).length;
+    this.asyncTasks.clear();
+    this.announceAsyncTasks();
 
     const wanted = this.config;
     this.config = {
@@ -807,7 +912,7 @@ export class Session {
     }
 
     await this.restoreConfig(wanted);
-    return { previous, next };
+    return { previous, next, abandonedTasks };
   }
 
   /**
@@ -920,6 +1025,39 @@ export class Session {
   onUsageChanged(listener: (usage: ContextUsage) => void): () => void {
     this.usageListeners.add(listener);
     return () => this.usageListeners.delete(listener);
+  }
+
+  /**
+   * Background work this agent has announced and not reported the end of.
+   *
+   * Ordered as the panel draws it: **running first, then newest-started first**,
+   * one comparator for the whole list. Sorted here rather than at the reader
+   * because the registry mirrors this array onto a snapshot and two sorts of one
+   * list is how the transcript and the panel come to disagree about which task is
+   * first.
+   *
+   * Terminal rows are **kept**, not dropped — Claude Code's own dialog has a
+   * `Completed` section, and a panel that empties itself cannot answer *did that
+   * build finish*.
+   */
+  get backgroundTasks(): readonly BackgroundTask[] {
+    return [...this.asyncTasks.values()].sort((a, b) => {
+      const liveA = isTerminalAsyncTaskState(a.state) ? 1 : 0;
+      const liveB = isTerminalAsyncTaskState(b.state) ? 1 : 0;
+      if (liveA !== liveB) return liveA - liveB;
+      return b.startedAt - a.startedAt;
+    });
+  }
+
+  /** Whether this agent said it reports background work at all. See `AcpClient.supportsAsyncTasks`. */
+  get reportsBackgroundTasks(): boolean {
+    return this.client.supportsAsyncTasks();
+  }
+
+  /** Fires whenever a task is announced, moves, or ends. Guarded like every other fan-out here. */
+  onBackgroundTasksChanged(listener: (tasks: readonly BackgroundTask[]) => void): () => void {
+    this.asyncTaskListeners.add(listener);
+    return () => this.asyncTaskListeners.delete(listener);
   }
 
   /**
@@ -1538,6 +1676,230 @@ export class Session {
   }
 
   /**
+   * Which message a chunk belongs to — the agent's own answer, or one of ours.
+   *
+   * ACP's `messageId` is the only boundary a client gets: the spec says *"All
+   * chunks belonging to the same message share the same `messageId`. A change in
+   * `messageId` indicates a new message has started."* Everything else about a
+   * streamed fragment and a whole message is identical on the wire.
+   *
+   * ⚠ **Two of the four agents send nothing here, and one of them sends nothing
+   * on some of its messages, which is the case this function exists for.**
+   * Measured in `claude-agent-acp` 0.73.0 and recorded at Q3.604, which quotes
+   * the output: every path through `toAcpNotifications` calls `applyMessageId`,
+   * but `AsyncTaskRuntime` publishes its `**Task stopped by user:** <name>.` line
+   * as a bare update — so stopping twenty tasks produces twenty whole messages,
+   * none numbered and none ending in a newline, which a transcript joining on
+   * absence renders as one paragraph of twenty run-together sentences.
+   *
+   * So: the *first* id seen proves this connection numbers its messages, and from
+   * then on a chunk arriving without one is a message of its own and gets a
+   * `~`-prefixed id here. Before that first id — and for ever, on an agent that
+   * never sends one — the answer is `null` and a client joins exactly as it does
+   * today. **The latch never clears**, because "this agent stopped numbering" is
+   * not a thing that happens; what does happen is a new process after a resume,
+   * where the replay restates ids within the first few updates.
+   *
+   * The tilde is why this can share one field with the agent's own value rather
+   * than needing a second. Three of the four send no id at all, so only claude's
+   * space is in question, and it is written down in this tree after all — in the
+   * adapter this repository pins: `messageIdForGrouping` in claude-agent-acp
+   * 0.73.0 (`dist/acp-agent.js:6752`) answers the Anthropic message id (`msg_…`)
+   * where the assistant message carries one and the SDK message `uuid` otherwise.
+   * Neither can begin with `~`, so the two spaces cannot collide. The second
+   * argument stands on its own as well: a reader that looks for the `~` can tell
+   * a daemon-made id
+   * from an agent's, and a reader that only compares for equality is right either
+   * way, because these ids are generated per connection and counted from one, so
+   * two of ours are equal exactly when they name the same message.
+   */
+  private messageIdFor(sent: unknown): string | null {
+    const given = typeof sent === "string" ? sent.slice(0, MAX_MESSAGE_ID_CHARS) : "";
+    if (given.length > 0) {
+      this.agentNumbersMessages = true;
+      return given;
+    }
+    if (!this.agentNumbersMessages) return null;
+    this.unnumberedMessages += 1;
+    return `~${this.unnumberedMessages}`;
+  }
+
+  /**
+   * Fold one task update into the live set, and tell anybody watching.
+   *
+   * **Bounds are applied here, where the record is built**, exactly as
+   * `boundToolCallId` bounds a call id at ingest: the reader in
+   * `acp/asynctasks.ts` owns the *refusals* — an unreadable id, an unreadable
+   * state — because those are facts about the wire, and this owns the *clips*,
+   * because `clip` is the vocabulary's and leaves the loss visible.
+   *
+   * ⚠ **An update about a task nobody announced is dropped.** The adapter creates
+   * a row from a spawn and never from a progress or a state, and so does this: a
+   * task synthesized out of a terminal edge would appear in the panel already
+   * finished, having never been seen running, which is a row about nothing. The
+   * exception that proves it is the one the adapter itself documents — a Bash
+   * result can arrive *after* the terminal edge — and that is the adapter's
+   * problem, solved on its side by an unannounced tombstone, before any of this
+   * reaches us.
+   *
+   * ⚠ **A terminal state is not final.** The adapter closes a task it stops
+   * seeing in the CLI's level with `stopped`, and the real edge can land after —
+   * so a row may go `stopped → completed`, and nothing here may refuse the
+   * second one on the grounds that it already had a terminal word.
+   */
+  private applyAsyncTaskEdge(edge: AsyncTaskEdge): void {
+    if (edge.kind === "spawned") {
+      /*
+       * Past the cap a new id is not tracked — but **only once the finished rows
+       * have been spent**, and that order is the correction rather than a
+       * refinement.
+       *
+       * `MAX_TRACKED_ASYNC_TASKS`' argument for refusing is that *"the set is
+       * already non-empty, so the session is already deferring"*, and the map
+       * keeps terminal rows on purpose so the panel can answer *did that build
+       * finish*. Those two together made the argument false: after
+       * `MAX_TRACKED_ASYNC_TASKS` shells had merely **completed**, `size` was at
+       * the cap with nothing live in it, so the next genuinely running task was
+       * dropped, `hasLiveBackgroundWork` answered false, and the sweep released
+       * an agent mid-build — the one failure this whole feature exists to
+       * prevent. The cap has to bound *live* work for its own justification to
+       * hold, so a finished row is given up before a running one is refused, and
+       * the refusal is reached only when all of them are still going.
+       */
+      if (
+        !this.asyncTasks.has(edge.asyncTaskId) &&
+        this.asyncTasks.size >= MAX_TRACKED_ASYNC_TASKS &&
+        !this.evictFinishedTask()
+      ) {
+        return;
+      }
+      /*
+       * ⚠ **A second spawn for an id already held is not a new task.** The
+       * adapter creates a row from a spawn and never from anything else, so it is
+       * also the one update that can arrive about a row that has already ended —
+       * and writing the record below unconditionally would take a `completed` row
+       * back to `running`, drop its `summary` and `usage`, and restart its clock.
+       * One such frame puts `hasLiveBackgroundWork` back to true and re-arms the
+       * deferral over work that is over. The state arm below reasons carefully in
+       * the other direction (*"a terminal state is not final"*); this is the same
+       * care pointed the other way, so the lifecycle — `state`, `startedAt`,
+       * `endedAt` — is kept and only what the spawn describes is refreshed.
+       */
+      const known = this.asyncTasks.get(edge.asyncTaskId);
+      if (known !== undefined) {
+        this.asyncTasks.set(edge.asyncTaskId, {
+          ...known,
+          name: clip(edge.name, MAX_ASYNC_TASK_NAME_CHARS),
+          taskType: clip(edge.taskType, MAX_ASYNC_TASK_TYPE_CHARS),
+          description: clip(edge.description, MAX_ASYNC_TASK_TEXT_CHARS),
+          canStop: edge.canStop,
+          showInTranscript: edge.showInTranscript,
+          outputFilePath:
+            (edge.outputFilePath && clip(edge.outputFilePath, MAX_ASYNC_TASK_PATH_CHARS)) ??
+            known.outputFilePath,
+          toolCallId: (edge.toolCallId && clip(edge.toolCallId, MAX_PARENT_ID_CHARS)) ?? known.toolCallId,
+        });
+        this.announceAsyncTasks();
+        return;
+      }
+      this.asyncTasks.set(edge.asyncTaskId, {
+        id: edge.asyncTaskId,
+        name: clip(edge.name, MAX_ASYNC_TASK_NAME_CHARS),
+        taskType: clip(edge.taskType, MAX_ASYNC_TASK_TYPE_CHARS),
+        description: clip(edge.description, MAX_ASYNC_TASK_TEXT_CHARS),
+        state: "running",
+        summary: null,
+        lastToolName: null,
+        usage: null,
+        canStop: edge.canStop,
+        showInTranscript: edge.showInTranscript,
+        outputFilePath: edge.outputFilePath && clip(edge.outputFilePath, MAX_ASYNC_TASK_PATH_CHARS),
+        toolCallId: edge.toolCallId && clip(edge.toolCallId, MAX_PARENT_ID_CHARS),
+        startedAt: Date.now(),
+        endedAt: null,
+      });
+      this.announceAsyncTasks();
+      return;
+    }
+
+    const held = this.asyncTasks.get(edge.asyncTaskId);
+    if (held === undefined) return;
+
+    // Newest-non-null, field by field: an update carries only what changed, and
+    // an absent field is the agent declining to restate rather than clearing.
+    const merged: BackgroundTask = {
+      ...held,
+      outputFilePath:
+        (edge.outputFilePath && clip(edge.outputFilePath, MAX_ASYNC_TASK_PATH_CHARS)) ??
+        held.outputFilePath,
+      toolCallId: (edge.toolCallId && clip(edge.toolCallId, MAX_PARENT_ID_CHARS)) ?? held.toolCallId,
+      summary: (edge.summary && clip(edge.summary, MAX_ASYNC_TASK_TEXT_CHARS)) ?? held.summary,
+    };
+    if (edge.kind === "progress") {
+      merged.description =
+        (edge.description && clip(edge.description, MAX_ASYNC_TASK_TEXT_CHARS)) ?? held.description;
+      merged.lastToolName =
+        (edge.lastToolName && clip(edge.lastToolName, MAX_ASYNC_TASK_TYPE_CHARS)) ?? held.lastToolName;
+      merged.usage = edge.usage ?? held.usage;
+    } else {
+      merged.state = edge.state;
+      /*
+       * The end is stamped here because nothing on the wire carries one.
+       *
+       * `held.endedAt ?? Date.now()` rather than a fresh stamp: the adapter's
+       * `stopped → completed` correction is two terminal edges about one end, and
+       * the second is a *relabelling* — it must not push the time out. A
+       * correction the other way, back to `running` or `paused`, clears it: a row
+       * that is running again did not end, and a kept stamp would freeze its
+       * elapsed time at a moment it has since passed.
+       */
+      merged.endedAt = isTerminalAsyncTaskState(edge.state) ? (held.endedAt ?? Date.now()) : null;
+    }
+
+    this.asyncTasks.set(edge.asyncTaskId, merged);
+    this.announceAsyncTasks();
+  }
+
+  /**
+   * Give up the longest-finished task so a running one can be tracked.
+   *
+   * Terminal rows are kept for the panel's `Completed` section rather than for
+   * their own sake, so they are exactly what there is to spend when the cap is
+   * reached — and the oldest end is the one a reader is least likely to still be
+   * asking about. Ordered by `endedAt`, falling back to `startedAt` for the row
+   * that somehow reached a terminal state without one.
+   *
+   * `false` means every tracked row is still live, which is the only state in
+   * which {@link MAX_TRACKED_ASYNC_TASKS}' own argument for refusing holds: the
+   * session really is already deferring, and a further id would extend a deferral
+   * rather than create one.
+   */
+  private evictFinishedTask(): boolean {
+    let oldest: BackgroundTask | null = null;
+    for (const task of this.asyncTasks.values()) {
+      if (!isTerminalAsyncTaskState(task.state)) continue;
+      const ended = task.endedAt ?? task.startedAt;
+      if (oldest === null || ended < (oldest.endedAt ?? oldest.startedAt)) oldest = task;
+    }
+    if (oldest === null) return false;
+    this.asyncTasks.delete(oldest.id);
+    return true;
+  }
+
+  private announceAsyncTasks(): void {
+    const tasks = this.backgroundTasks;
+    for (const listener of this.asyncTaskListeners) {
+      try {
+        listener(tasks);
+      } catch {
+        // `updateUsage`'s guard, for `updateUsage`'s reason: this runs inside the
+        // agent's notification handler and one broken subscriber must not cost
+        // the others their update.
+      }
+    }
+  }
+
+  /**
    * Sends a prompt and streams the turn's events.
    *
    * The iterator ends on `turn_end` or `error`. Events produced outside a turn
@@ -1757,6 +2119,15 @@ export class Session {
    * refusal rather than a guess: a timeout answers `unsupported`, so the caller
    * queues. {@link STEER_TIMEOUT_MS} carries what that costs.
    *
+   * ⚠ **And the bound abandons.** It used to race a bare timer, which stopped
+   * this daemon waiting and told the agent nothing: every steer the pipe swallowed
+   * left one request outstanding in the SDK for the life of the connection, still
+   * holding the whole prompt payload, while the caller queued the same text and
+   * the person typed the next one. {@link withAbandonableDeadline} carries the
+   * measurement. The timeout arm and the refusal arm are now one `catch` because
+   * they always answered the same string — merging them is what lets the deadline
+   * carry a cancellation out with it.
+   *
    * An outcome string this daemon does not know degrades to `injected`, which is
    * `compatibility.md`'s "fail toward keep working" pointed at the one direction
    * that matters here: the request succeeded, so the agent took the message, and
@@ -1766,34 +2137,33 @@ export class Session {
   async steer(text: string, extra: readonly acp.ContentBlock[] = []): Promise<SteerOutcome> {
     if (!this.supportsSteering) return "unsupported";
 
-    let timer: NodeJS.Timeout | undefined;
-    const expired = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), STEER_TIMEOUT_MS);
-    });
-
     let answer: unknown;
     try {
-      answer = await Promise.race([
-        this.client.agent.request<unknown, unknown>(STEER_METHOD, {
-          sessionId: this.sessionId,
-          // The same block-building rule `prompt` states: no empty text block,
-          // because a message that is only a screenshot is legitimate and an
-          // empty string is a turn the agent has to interpret.
-          prompt: text.length === 0 ? [...extra] : [{ type: "text", text }, ...extra],
-          _meta: { steering: { idleBehavior: "promptRequired" } },
-        }),
-        expired,
-      ]);
+      answer = await withAbandonableDeadline(
+        (options) =>
+          this.client.agent.request<unknown, unknown>(
+            STEER_METHOD,
+            {
+              sessionId: this.sessionId,
+              // The same block-building rule `prompt` states: no empty text block,
+              // because a message that is only a screenshot is legitimate and an
+              // empty string is a turn the agent has to interpret.
+              prompt: text.length === 0 ? [...extra] : [{ type: "text", text }, ...extra],
+              _meta: { steering: { idleBehavior: "promptRequired" } },
+            },
+            options,
+          ),
+        STEER_TIMEOUT_MS,
+        `${this.client.config.displayName} taking a message into the running turn`,
+      );
     } catch {
       // An agent that advertised the method and then refused the call — `-32601`
-      // from one that lied, or anything else. Both mean the same thing to the
-      // caller, which is that this message needs the other route.
+      // from one that lied, or anything else — and the deadline, which used to be
+      // a separate arm returning this same string. All of them mean the one thing
+      // to the caller, which is that this message needs the other route.
       return "unsupported";
-    } finally {
-      clearTimeout(timer);
     }
 
-    if (answer === "timeout") return "unsupported";
     const outcome =
       answer !== null && typeof answer === "object"
         ? (answer as Record<string, unknown>)["outcome"]
@@ -1801,6 +2171,47 @@ export class Session {
     if (outcome === "startedNewTurn") return "started_new_turn";
     if (outcome === "promptRequired") return "prompt_required";
     return "injected";
+  }
+
+  /**
+   * Ask the agent to stop one piece of background work.
+   *
+   * **`false` is an ordinary answer and never an error.** The adapter answers it
+   * for a task it no longer holds, which is exactly what losing a race with the
+   * work finishing looks like — `cancelTurn`'s `no_turn` judgement, one method
+   * over. A thrown error is different and is left to throw: it means the agent
+   * refused or could not be reached, and the row has a sentence for that.
+   *
+   * Not gated on the agent having advertised anything, unlike `steer`. The only
+   * way a caller has an `asyncTaskId` at all is that this agent announced the
+   * task, so the capability question was already answered by the id existing —
+   * and an agent that then refuses the method answers `-32601`, which is the
+   * failure the caller is told about rather than one worth pre-empting.
+   *
+   * ⚠ **The deadline abandons the request rather than only stopping the wait**,
+   * and this method is the one it was argued for: nothing gates a second tap on
+   * the first one's silence, and `stopBackgroundTask` is deliberately reachable
+   * mid-turn, so twenty taps at a wedged agent are twenty live requests. The
+   * probe behind that — 20 `_session/async_task/stop` calls against a peer that
+   * never answers, leaving 20 entries in the SDK's pending map under a bare
+   * deadline — was taken at the `Connection` level rather than through this
+   * method, and is written up at {@link withAbandonableDeadline}, along with what
+   * the cancellation does and does not buy.
+   */
+  async stopAsyncTask(asyncTaskId: string): Promise<boolean> {
+    const answer = await withAbandonableDeadline(
+      (options) =>
+        this.client.agent.request<unknown, unknown>(
+          ASYNC_TASK_STOP_METHOD,
+          { sessionId: this.sessionId, asyncTaskId },
+          options,
+        ),
+      ASYNC_TASK_STOP_TIMEOUT_MS,
+      `${this.client.config.displayName} stopping a background task`,
+    );
+    return (
+      answer !== null && typeof answer === "object" && (answer as Record<string, unknown>)["stopped"] === true
+    );
   }
 
   private sendCancel(): Promise<void> {
@@ -2024,6 +2435,22 @@ export class Session {
     // Everything that is not a tool-call update ends any run in progress, so the
     // held block cannot arrive after an event that was emitted later than it.
     if (update.sessionUpdate !== "tool_call_update") this.flushToolDraft();
+    /*
+     * Background work, out of band and before the switch.
+     *
+     * **Before, because these three cannot be `case`s.** They are a draft ACP
+     * extension the published SDK's `SessionUpdate` union does not carry, so a
+     * `case "async_task_spawned"` does not typecheck — the same reason
+     * `supportsSteering` reads `_meta` by hand one file over. Reaching the
+     * `default:` arm instead would make each an `other` event, which the idle
+     * drain drops from the log and which nothing would ever have folded into a
+     * set.
+     */
+    if (ASYNC_TASK_UPDATES.includes(update.sessionUpdate)) {
+      const edge = readAsyncTaskEdge(update);
+      if (edge !== null) this.applyAsyncTaskEdge(edge);
+      return;
+    }
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
       case "agent_thought_chunk":
@@ -2033,6 +2460,7 @@ export class Session {
           role: update.sessionUpdate === "user_message_chunk" ? "user" : "agent",
           thought: update.sessionUpdate === "agent_thought_chunk",
           text: renderContentBlock(update.content),
+          messageId: this.messageIdFor(update.messageId),
         });
         return;
 
@@ -2095,6 +2523,11 @@ export class Session {
           // flag on a spawn's completing update, so carrying it here would say
           // "not a subagent any more" about the call that just finished being one.
           parentToolCallId: toolCallLineage(update).parentToolCallId,
+          // The one marker that says this card's work is not over. Read here
+          // rather than merged from the task set, because it is a fact the agent
+          // stated about *this update* — the same discipline `parentToolCallId`
+          // follows one line up, and the reason neither is derived from the other.
+          backgrounded: readBackgroundedMarker(update._meta),
         };
         /*
          * The arguments being typed. Held, not pushed — see `toolDraft`.
@@ -2589,6 +3022,30 @@ function withTimeout(promise: Promise<unknown>, timeoutMs: number): Promise<void
  * The sibling above is for teardown, where the only thing that matters is that
  * control comes back; this one is for a request a person is waiting on, where
  * silently resolving would report a mode change that never happened.
+ *
+ * ⚠ **Giving up on the answer is all it does.** The request stays outstanding in
+ * the SDK for as long as the peer keeps quiet. {@link withAbandonableDeadline} is
+ * the third sibling, for the two callers that also tell the agent to drop it, and
+ * carries the argument and the reason the choice is opt-in.
+ *
+ * **Whether a residual here matters is a per-call-site question, and all seven
+ * were walked rather than waved at.** Three are reclaimed because the connection
+ * itself goes: `session/new` and `session/resume` on the launch path, and
+ * `providers/set` inside `applySystem` — which is called from those same two
+ * launches, each inside a `try` whose `catch` is `await client.close()`, and
+ * whose own local `catch` rethrows as `SystemRoutingError` rather than
+ * swallowing. Four are not, because their connection deliberately stays live, and
+ * they divide again. `session/new (clear)` and `session/close (clear)` are argued
+ * at {@link withAbandonableDeadline}: abandoning cannot un-open a conversation
+ * and buys nothing on a best-effort close, so each clear leaves one open
+ * residual. `session/set_config_option` and `session/set_mode` are the two a
+ * person is tapping, and what bounds them is not this helper but `queueConfig`:
+ * every public config change is a link on `configChain`, and a link fires only
+ * once its predecessor settles. A deadline settles it, so a wedged agent accrues
+ * at most one pending entry per `SET_CONFIG_TIMEOUT_MS` — 15s — however fast the
+ * control is tapped. That is a bound rather than a fix, and it is the same
+ * residual {@link withAbandonableDeadline}'s last ⚠ names: closing it for good
+ * is a door in `acp/client.ts`, not a choice between these three helpers.
  */
 function withDeadline<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -2596,6 +3053,137 @@ function withDeadline<T>(promise: Promise<T>, timeoutMs: number, what: string): 
     timer = setTimeout(() => reject(new Error(`${what} did not answer within ${timeoutMs / 1000}s`)), timeoutMs);
   });
   return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * {@link withDeadline}, for a request the agent must also be *told* to drop.
+ *
+ * ⚠ **A deadline that only stops waiting leaves the request outstanding for
+ * ever.** Probed 2026-09-14 against the installed SDK — `@agentclientprotocol/
+ * sdk` 1.3.0, node v26.3.0 — by standing a `Connection` on a stream pair whose
+ * peer accepts `_session/async_task/stop` and never answers, firing 20 of them
+ * under this file's own two wrappers and reading `pendingResponses` directly.
+ * Bare `withDeadline`: 20 of 20 deadlines expired, `pendingResponses.size` 20,
+ * and **zero** `$/cancel_request` frames written. `Promise.race` settles *this*
+ * daemon's promise and says nothing to anybody else — so somebody tapping stop
+ * on a wedged agent adds one permanently pending entry per tap, each retaining
+ * the params it was sent with, and a steer that times out and is queued instead
+ * leaves its whole prompt payload behind the same way.
+ *
+ * What this adds is the one lever the SDK offers: `SendRequestOptions.
+ * cancellationSignal`, aborted the instant the timer wins, which makes the
+ * connection send `$/cancel_request` for that id — the same probe under this
+ * wrapper wrote 20 of them. A peer that honours it answers — normally
+ * `RequestError.requestCancelled()` — and it is the *answer* that deletes the
+ * map entry, and the abort listener with it, in `Connection.handleResponse`.
+ * That half was measured too, on a second pass where the probe pushed an error
+ * response back for the cancelled id: `pendingResponses.size` went 1 → 0. So
+ * against a cooperative adapter the accumulation is gone, and the agent
+ * additionally stops doing work nobody is waiting for.
+ *
+ * ⚠ **It is cooperative, and the residual is real** — which the same probe shows
+ * rather than merely warns about: against the peer that never answers, this
+ * wrapper left `pendingResponses.size` at 20 too. The 20 cancellations went out
+ * and nothing came back, so nothing was reclaimed. The SDK says as much in its
+ * own words — *"the returned promise is still settled by the peer's eventual
+ * response"* — and `Connection` offers no way to forget a request: the map is
+ * private, and only a response or `close()` removes an entry. Closing is not the
+ * remedy here, because the connection is shared with the live conversation: a
+ * timed-out background stop would end the very turn that method exists in order
+ * not to touch.
+ *
+ * ⚠ **And the residual is the mainline case here rather than an exotic tail, which
+ * is the honest reading of the two constants that feed this.**
+ * `ASYNC_TASK_STOP_TIMEOUT_MS` says ten seconds *"means the pipe is not being read
+ * at all rather than that the work is slow to stop"*, and `STEER_TIMEOUT_MS` says
+ * the same of its own. A peer that has stopped reading its pipe cannot process a
+ * `$/cancel_request` sent down that pipe — and the cancellation goes out through
+ * the same write queue that is not draining, so each timed-out tap now also leaves
+ * one unflushed notification behind a write that will never complete. So what this
+ * buys is narrower still than *cooperative*: against a merely **slow** adapter the
+ * entry is reclaimed — but by the adapter answering in its own time, not by the
+ * cancellation, because ⚠ **neither pinned adapter observes it** (see below). The
+ * work is therefore not stopped on either agent this repository ships against;
+ * *"stops doing work nobody is waiting for"* is what a cooperative adapter would
+ * do and is not true of claude-agent-acp 0.73.0 or codex-acp 1.8.0.
+ * The accumulation the probe measured —
+ * repeated taps at a wedged agent — is **not** bounded by this, and is still
+ * bounded only by a door in `acp/client.ts`: a request wrapper owning its own id,
+ * or `pendingResponses` behind a method. That is a different file and a different
+ * change, and it is the one that would actually close it.
+ *
+ * ⚠ **What the two adapters do with a cancel on an *extension* request is
+ * answered by reading them, and the answer is: nothing at all.** Both call sites
+ * are extensions — `_session/steering` and `_session/async_task/stop` — so on
+ * every timeout a `$/cancel_request` goes out naming a method this repository did
+ * not define. The SDK's server half aborts **that one request's**
+ * `AbortController` and touches no other request and no session; the question was
+ * whether an adapter might wire that signal to the *session* instead, which would
+ * let a timed-out steer end the live turn — precisely what
+ * {@link ASYNC_TASK_STOP_METHOD} exists in order not to do. Neither pin does.
+ * claude-agent-acp 0.73.0 registers both as
+ * `.onRequest(STEER_METHOD, { parse: parseSteerRequest }, (ctx) => agent.steer(ctx.params))`
+ * and the same shape for the stop (`dist/acp-agent.js`) — `ctx.signal` is passed
+ * to neither, and neither `steer` nor `stopAsyncTask` takes a second argument.
+ * codex-acp 1.8.0 is the sharper answer: across its whole bundle `ctx.signal`
+ * appears **once**, on `.onRequest(methods.agent.session.prompt, (ctx) =>
+ * getAgent().prompt(ctx.params, ctx.signal))` — the core method, and no extension
+ * handler beside it gets one. So the controller
+ * the SDK aborts is consulted by nobody, the feared coupling does not exist on
+ * either pin, and that is also why the paragraph above says the work is not
+ * actually stopped.
+ *
+ * What reading cannot settle is a *future* adapter version wiring that signal up.
+ * `pincheck` is where that would be caught, since it already drives the pinned
+ * adapters' own code rather than comparing constants.
+ *
+ * Opt-in rather than folded into {@link withDeadline}, because four of the callers
+ * already there have an *effect* that outlives the answer, and they split two and
+ * two.
+ *
+ * `session/new` and `session/resume` on the **launch** path are reclaimed: a
+ * `session/new` this daemon gave up on at 60s may have opened a conversation
+ * anyway and telling the agent to forget the request does not close one, but both
+ * handlers `await client.close()` in their `catch`, and that reclaims the whole
+ * process. Abandoning would trade a reclaimed leak for an ambiguous one.
+ *
+ * ⚠ **The two on the `clearContext` path are not reclaimed, and saying so is what
+ * stops the next reader assuming they are.** `session/new (clear)` and
+ * `session/close (clear)` run on a connection that deliberately stays live — the
+ * whole point of a clear is that the process carries on, and the close is already
+ * best-effort with a `.catch(() => {})`. Nothing ever removes their entries. They
+ * are left on {@link withDeadline} because abandoning a `session/new` cannot
+ * un-open a conversation and abandoning a best-effort `session/close` buys
+ * nothing, so what each leaves is an open residual — one per clear, holding its
+ * whole payload — rather than something this helper would fix.
+ */
+function withAbandonableDeadline<T>(
+  send: (options: acp.SendRequestOptions) => Promise<T>,
+  timeoutMs: number,
+  what: string,
+): Promise<T> {
+  const abandon = new AbortController();
+  const sent = send({ cancellationSignal: abandon.signal });
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      // Aborted *before* the reject, so the cancellation is enqueued ahead of the
+      // rejection and can never be ordered behind a caller's reaction to the
+      // deadline. ⚠ **Enqueued, not sent** — `abort()` runs the SDK's `cancel()`
+      // synchronously, but that ends in `sendWireMessage`, which only appends to
+      // `Connection.writeQueue` and returns the chained promise. Probed against
+      // sdk 1.3.0: zero frames had reached the stream when `abort()` returned,
+      // one had after a turn of the event loop. In the wedged case — the only
+      // case that reaches this line — none ever will, and that is the residual
+      // the docblock's third ⚠ is about. Only on this path, never on a settled
+      // one: by then the entry is already gone, and a `$/cancel_request` for an
+      // id the peer has answered is a frame about nothing, sent into somebody
+      // else's code.
+      abandon.abort();
+      reject(new Error(`${what} did not answer within ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+  });
+  return Promise.race([sent, expired]).finally(() => clearTimeout(timer));
 }
 
 function hasRpcCode(error: unknown, code: number): boolean {
@@ -2992,6 +3580,26 @@ function toConfigOptions(options: acp.SessionConfigOption[] | null | undefined):
     choices: option.type === "select" ? toChoices(option.options) : [],
   }));
 }
+
+/**
+ * How long an agent's `messageId` may be before this daemon stops carrying it.
+ *
+ * **Clipped rather than refused**, which is the opposite call to
+ * `MAX_ASYNC_TASK_ID_CHARS` next door and for the reason that one states: a task
+ * id round-trips to the agent in `_session/async_task/stop`, so a clipped one
+ * names nothing; this id never leaves this fleet — it is compared to the previous
+ * chunk's and nothing else — so a clipped one still separates two messages, which
+ * is the whole of its job. The same number as `MAX_PARENT_ID_CHARS` because it is
+ * the same kind of quantity — an agent-chosen id no spec bounds — and because two
+ * numbers for one kind of thing is how a pair drifts apart, which is the argument
+ * that constant already makes about sharing itself with `toolCallId`. ⚠ **Its
+ * "measured ids are under 40 characters" is *not* inherited with the number**:
+ * that was measured on claude's and kimi's **tool call** ids, and no `messageId`
+ * length has been measured in this tree. So 256 here is a ceiling picked for
+ * consistency, not a headroom figure anybody checked — which costs nothing, since
+ * the clip is lossless for this field's only job.
+ */
+const MAX_MESSAGE_ID_CHARS = 256;
 
 /**
  * Flattens and bounds ACP's command list.

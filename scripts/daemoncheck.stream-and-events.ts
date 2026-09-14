@@ -241,7 +241,7 @@ check("an id that exists nowhere is refused, over a real upgrade", await attach(
    */
   const many = registry.get("s_three");
   for (let n = 1; n <= 3_000; n += 1) {
-    many?.log.append({ type: "text", role: "agent", thought: false, text: `w${n}` });
+    many?.log.append({ type: "text", role: "agent", thought: false, text: `w${n}`, messageId: null });
   }
   const lastSeq = many?.log.stats().lastSeq ?? 0;
 
@@ -327,7 +327,7 @@ process.stdout.write("\nan attach that is both evicted and behind\n");
   // two thousand replayed.
   const managed = lagRegistry.get("s_lag");
   for (let n = 1; n <= 6_000; n += 1) {
-    managed?.log.append({ type: "text", role: "agent", thought: false, text: `w${n}` });
+    managed?.log.append({ type: "text", role: "agent", thought: false, text: `w${n}`, messageId: null });
   }
   const stats = managed?.log.stats() ?? { firstSeq: 0, lastSeq: 0, count: 0, dropped: 0, approxBytes: 0 };
   // The positive control. Without it every assertion below is about a session
@@ -429,7 +429,7 @@ process.stdout.write("\nan attach too large to replay down a socket\n");
   const managed = fatRegistry.get("s_fatreplay");
   const fat = "b".repeat(48 * 1024);
   for (let n = 1; n <= 400; n += 1) {
-    managed?.log.append({ type: "text", role: "agent", thought: false, text: fat });
+    managed?.log.append({ type: "text", role: "agent", thought: false, text: fat , messageId: null });
   }
   const stats = managed?.log.stats() ?? { firstSeq: 0, lastSeq: 0, count: 0, dropped: 0, approxBytes: 0 };
   // The precondition, said as a measurement rather than as a restatement of the
@@ -531,7 +531,7 @@ process.stdout.write("\nthe events page\n");
   // clamp is what bounds a page here and the byte cap is measured separately, on
   // `s_fat`.
   for (let n = 1; n <= pageCap + 1_000; n += 1) {
-    store.events.append("s_page", { type: "text", role: "agent", thought: false, text: `p${n}` });
+    store.events.append("s_page", { type: "text", role: "agent", thought: false, text: `p${n}`, messageId: null });
   }
   /*
    * And large enough that five hundred cannot fit: a `text` event is accounted
@@ -542,7 +542,7 @@ process.stdout.write("\nthe events page\n");
    */
   const fat = "f".repeat(8 * 1024);
   for (let n = 1; n <= 600; n += 1) {
-    store.events.append("s_fat", { type: "text", role: "agent", thought: false, text: fat });
+    store.events.append("s_fat", { type: "text", role: "agent", thought: false, text: fat , messageId: null });
   }
 
   const pageRegistry = new SessionRegistry(store.events, store.sessions);

@@ -101,7 +101,14 @@ the `fs` gate this one changes what the *model* does. Q2.18.
 third way: `promptCapabilities.image` is a declared boolean (`=== true`),
 `sessionCapabilities.resume` an empty-object marker (`!= null`), and
 `ElicitationCapabilities.form` a marker with **no `false`** — the key must be
-omitted entirely, and `{form: false}` is `TS2559`.
+omitted entirely, and `{form: false}` is `TS2559`. Steering's top-level `_meta`
+boolean is the fourth. ⚠ **The fifth is the first this client *declares* in
+`_meta` rather than reads out of one**: `_meta.jetbrains.air = {version,
+capabilities: [...]}`, a vendor extension carrying a version *and* a list, whose
+gate wants a finite integer and refuses silently — a declaration the adapter will
+not take switches the whole background-task lifecycle off with no error on any
+wire, which is why `pincheck` asks the installed adapter whether it accepts the
+object we really send. Q2.228.
 
 **`url` mode and request scope are refused**, both `invalidParams` and never
 `methodNotFound`, which would claim the whole capability is absent. Opening a URL
@@ -257,6 +264,7 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
 | File | Holds |
 |---|---|
 | `src/acp/agents.ts` | How each agent is launched, how each logs in, how to ask whether it already has. Strips the parent's session env and everything `REEMOAT_*`. The only place PATH is walked |
+| `src/acp/asynctasks.ts` | Background work an agent started and has not finished. The one place `_meta.jetbrains.air` is known, **both directions** — the capability sent and the three draft `async_task_*` updates read back. Unlike `claudeCode`'s two halves this is one conversation, so it is one file |
 | `src/acp/subagents.ts` | Which tool call a tool call ran inside. One of the **two** places claude's `_meta.claudeCode` shape is known — this is the inbound one, projected to two scalars; `acp/agents.ts`'s `sessionMetaFor` is the outbound one |
 | `src/acp/client.ts` | JSON-RPC over an agent's stdio, routed by `sessionId`. Takes an `AgentProcess` rather than spawning — which is what lets a driver stand two `PassThrough`s in for an agent |
 | `scripts/pincheck.ts` | Each ACP adapter's version: exact, agreed across files, and matching what is *actually installed* — and that the CLI platform packages each adapter declares are the ones `pnpm-workspace.yaml` excludes, since no CLI is vendored (Q4.114). A loop over a list, because written around one constant it pinned the second adapter nowhere |

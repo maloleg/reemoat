@@ -460,6 +460,27 @@ export class DaemonClient {
   }
 
   /**
+   * Stop one piece of background work, leaving the turn alone.
+   *
+   * The pair to `cancelTurn` and deliberately not the same verb: that one ends
+   * what the agent is doing *now*, this one ends something the agent handed off
+   * and which the adapter's own docblock says prompt cancellation intentionally
+   * does not finish, *"because background work may outlive a prompt"*.
+   *
+   * `stopped: false` is a **success** for `cancelTurn`'s reason: the task
+   * finished on its own between the tap and the request, which is losing an
+   * ordinary race. A `404` is the different answer — this session never announced
+   * that task — and a daemon too old to have the route answers it too, which is
+   * the honest degradation: the control simply reports it could not.
+   */
+  stopBackgroundTask(id: SessionId, taskId: string): Promise<{ stopped: boolean; session: SessionSnapshot }> {
+    return this.machine.request(
+      `/sessions/${encodeURIComponent(id)}/async-tasks/${encodeURIComponent(taskId)}/stop`,
+      { method: "POST" },
+    );
+  }
+
+  /**
    * 202 on success, carrying the seq at which the prompt landed in the log.
    *
    * **Three landings, one status code, one `seq`.** A message sent while the

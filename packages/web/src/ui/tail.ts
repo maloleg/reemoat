@@ -196,6 +196,25 @@ export interface ToolNode {
    */
   subagent: boolean;
   /**
+   * This call handed its work to something that outlives it.
+   *
+   * ⚠ **Read sticky-true off the *updates*, which is the opposite end of the
+   * same problem as `subagent` directly above it, and neither rule is taste.**
+   * `subagent` is read from the `tool_call` and never merged because claude drops
+   * it on the spawn's own completing update (Q6.3), so a last-wins fold turns
+   * every subagent false at the end. This one cannot be read there at all: the
+   * marker rides `_meta.jetbrains.air`'s `backgrounded` on the **tool result's own
+   * update** — see `readBackgroundedMarker` in `src/acp/asynctasks.ts` — and a
+   * call does not know at announcement time that it is about to detach, so the
+   * `tool_call` carries nothing to read. Two adjacent flags, each with the one
+   * fold rule the agent's own behaviour leaves room for.
+   *
+   * Never reset by a later update: a card that said it backgrounded does not stop
+   * having done so, and the completing update that follows is precisely the one
+   * this exists to contradict.
+   */
+  backgrounded: boolean;
+  /**
    * The files this call changed, claimed from the log by `toolCallId`.
    *
    * Claimed the same way `updates` are and for the same reason: a `file_change`
@@ -289,7 +308,17 @@ export interface GroupNode {
    * the collapse. A refusal is never in here; it stays a row of its own.
    */
   approved: number;
-  /** Something in the run has not finished, so the run is what is happening now. */
+  /**
+   * Something in the run has not finished, so the run is what is happening now.
+   *
+   * ⚠ **Answerable from the log alone, and that is a property of what may be in
+   * here rather than of this field.** It is {@link stillRunning} over the
+   * children, which reads the status the agent sent — so a row whose liveness is
+   * decided somewhere else may not join a run at all. Two are excluded for that
+   * reason and `foldable` names both: a delegation, and a **backgrounded** call,
+   * whose work outlives the `completed` it was sent and which only the snapshot's
+   * task rows can speak for.
+   */
   live: boolean;
 }
 
@@ -436,6 +465,13 @@ export function sameNode(a: TailNode, b: TailNode): boolean {
         a.status === other.status &&
         a.rawInput === other.rawInput &&
         a.subagent === other.subagent &&
+        // `backgrounded` drives the tone, the `Terminal` glyph and the
+        // `Running in the background` span, and a `tool_call_update` can carry
+        // the AIR marker without moving `status`, `latest` or `output` — so
+        // leaving it out of this comparison is a row that flips to backgrounded
+        // and never redraws. The dangerous direction for this function, as its
+        // own header says, is answering `true` when something did change.
+        a.backgrounded === other.backgrounded &&
         a.steps === other.steps &&
         a.omitted === other.omitted &&
         a.latest === other.latest &&
@@ -575,6 +611,8 @@ export interface PendingUpdate {
   content: readonly string[] | null;
   images?: readonly StoredFileRef[] | null;
   parentToolCallId?: string | null;
+  /** See {@link ToolNode.backgrounded}. Optional: an older daemon never projected it. */
+  backgrounded?: boolean;
 }
 
 export interface MergedUpdate {
@@ -599,6 +637,18 @@ export interface MergedUpdate {
    * into the transcript, intermittently.
    */
   parentToolCallId: string | null;
+  /**
+   * Any update said this call detached its work into the background.
+   *
+   * Sticky across the fold rather than last-wins — the second field here whose
+   * merge rule is about *direction* rather than degree, `parentToolCallId` one
+   * member up being the first, and the two lean opposite ways: that one keeps the
+   * **earliest** answer, this one keeps the **only** answer there ever is. See
+   * {@link ToolNode.backgrounded}. The completing update that follows a detach is
+   * exactly the update this flag exists to contradict, so letting it win would
+   * make the flag unreachable in the only case it is ever set.
+   */
+  backgrounded: boolean;
   /**
    * `ts` of the update that carried the newest *status*, which is where elapsed
    * comes from.
@@ -719,6 +769,7 @@ export function mergeUpdates(
     content: [],
     images: [],
     parentToolCallId: null,
+    backgrounded: false,
     statusTs: null,
   };
   for (const update of updates) {
@@ -750,6 +801,9 @@ export function mergeUpdates(
     merged.images.push(...(update.images ?? []));
     // First non-null only — see `MergedUpdate.parentToolCallId`.
     merged.parentToolCallId ??= update.parentToolCallId ?? null;
+    // Sticky, never last-wins — see `ToolNode.backgrounded`. `=== true` because
+    // the field is optional in the mirror and absent means "did not say".
+    if (update.backgrounded === true) merged.backgrounded = true;
   }
   /*
    * Last, because the arguments this drops against arrive **after** the copies of
@@ -1384,6 +1438,29 @@ function sameTally(a: RunTally, b: RunTally): boolean {
  * straight to `completed` 13–14 seconds later, receiving **no** `in_progress`
  * update in between — only title-only ones. Keyed on `in_progress` alone this
  * answers `false` for the entire life of every delegation there is.
+ *
+ * ⚠ **A backgrounded call is deliberately *not* running here, and that is the
+ * opposite of what the card two files over decides about the same node.** A call
+ * that detached reads `status: "completed"` — the update is about the handoff —
+ * and `EventList`'s `ToolCall` refuses to believe it. Widening this predicate to
+ * match was the obvious fix and is wrong twice over:
+ *
+ *   this function is **pure over the log**, and the log cannot say whether
+ *     detached work has since ended. Only the snapshot's task rows can, and the
+ *     card joins against them by `toolCallId`. A predicate that answered "running"
+ *     from `backgrounded` alone would claim live work for ever on a replayed
+ *     transcript whose daemon restarted — that in-memory task set comes back empty
+ *     — which is precisely the defect the join exists to close.
+ *   `outstandingTasks` reads this, and a backgrounded **subagent** arrives
+ *     `completed` at launch with the adapter announcing it as no task at all. So a
+ *     widening here would put it back in the foot's waiting count with nothing on
+ *     any wire that could ever take it down again, which is exactly what Q7.113
+ *     declined to build.
+ *
+ * What keeps the card and the group from disagreeing is therefore structural
+ * rather than shared: `foldable` refuses a backgrounded call the way it refuses a
+ * delegation, so no `GroupNode` ever stands for one and `GroupNode.live` is never
+ * asked a question this predicate cannot answer.
  */
 export function stillRunning(node: ToolNode): boolean {
   return node.status === "pending" || node.status === "in_progress";
@@ -1451,6 +1528,12 @@ export interface OutstandingTask {
  *     names it again. Counting the starts is a line of code; taking the row down
  *     again has no signal at all, and a row claiming work is still running four
  *     minutes after it stopped is worse than saying nothing. Q7.113.
+ *     ⚠ **Half of that is answered now and this list is still right.** Shells,
+ *     workflows and monitors report their own end and come off the *snapshot*, not
+ *     from here — `WaitingFoot` draws them beside this list and `outstandingSays`
+ *     adds the two counts, which is safe because the adapter marks a backgrounded
+ *     subagent `ignored` and announces it as no task at all. So the case measured
+ *     above is exactly as invisible as it was, and this walk is unchanged. Q2.228.
  *   anything the agent never announced as a tool call. There is no ACP message for
  *     "I am waiting", so silence and completion are one shape on the wire.
  *   the daemon's own backlog, if one ever forms again: a task's *completing* update
@@ -1518,6 +1601,34 @@ export function outstandingTasks(rows: readonly TailNode[], floor = 0): Outstand
  *     and its answer *are* the conversation rather than machinery about it.
  *   a subagent — its card is already a summary of N steps with its own tree, so
  *     folding it would hide a delegation behind a sentence about it.
+ *   a **backgrounded** call, and this one is the newest. It reads
+ *     `status: "completed"` while its work runs on somewhere else, so
+ *     {@link stillRunning} answers `false` for it and `live` on the group it
+ *     joined therefore said the run had finished — the pending dot went, and the
+ *     `Terminal` glyph and `Running in the background` went behind the fold with
+ *     the row. That is this feature's own defect ("the card said the build was
+ *     done while it was still compiling") reached through the collapse. It is
+ *     excluded rather than taught to `stillRunning` because only the *card* can
+ *     answer the question: liveness here is the snapshot's task row joined by
+ *     `toolCallId`, which no pure walk over the log can see. So the row stays a
+ *     row, draws its own reconciled state, and the group is never asked.
+ *     ⚠ **The exclusion is permanent, and scoping it to "while the work is still
+ *     live" is the obvious repair and is refused.** `backgrounded` is sticky, so
+ *     this refuses the run for ever: an agent that detaches five shells in a row
+ *     draws five cards rather than one folded run, long after every one of them
+ *     has finished and the card above has gone back to a plain tick. That cost is
+ *     paid for two reasons, and only the first is about this file. **Run
+ *     membership is a property of the log alone**, because a group's key is
+ *     `r<first seq>` and its open state is component state hanging off it — so a
+ *     row becoming foldable later merges two groups into one under the reader,
+ *     remounting the card they had open and moving the rows either side of it,
+ *     which is the transcript re-writing itself behind a finished conversation.
+ *     And **the snapshot would have to come in here to ask**: `foldRuns` runs
+ *     inside `buildTail`, which is memoised on the log, so threading task states
+ *     through would re-fold every row of the conversation on every 4s snapshot
+ *     push. A permanently unfoldable row is the smaller cost, and it is the
+ *     *honest* one — a walk over the log genuinely cannot tell a shell still
+ *     compiling from one that finished an hour ago.
  *   an orphaned failed update — already the minimal row for "something broke up
  *     there", and it is the only trace of it.
  *   text, a plan, a prompt, a gap, a turn end, an error, a cleared marker — none of
@@ -1539,7 +1650,7 @@ export function outstandingTasks(rows: readonly TailNode[], floor = 0): Outstand
  */
 function foldable(node: TailNode, decisions: ReadonlyMap<string, PermissionOptionKind>): boolean {
   if (node.kind === "change") return true;
-  if (node.kind === "tool") return !isDelegation(node);
+  if (node.kind === "tool") return !isDelegation(node) && !node.backgrounded;
   if (node.kind !== "event") return false;
   const event = node.stored.event;
   if (event.type !== "permission_resolved" || event.outcome !== "selected") return false;
@@ -1734,7 +1845,14 @@ export function buildTail(
    * suppressed.
    */
   let planFloor = -1;
-  let run: { seq: number; role: string; thought: boolean; parts: string[] } | null = null;
+  let run: {
+    seq: number;
+    role: string;
+    thought: boolean;
+    /** The message these parts belong to — see the boundary note at the merge. */
+    messageId: string | null;
+    parts: string[];
+  } | null = null;
 
   const updates = new Map<
     string,
@@ -1884,7 +2002,26 @@ export function buildTail(
         flush();
         continue;
       }
-      if (run !== null && run.role === event.role && run.thought === event.thought) {
+      /*
+       * ⚠ **The message boundary, and it is the third thing a run is keyed on.**
+       *
+       * ACP says a change in `messageId` starts a new message, and a run joins
+       * its parts with no separator — so without this, two whole messages the
+       * agent sent one after another come out as one paragraph with the first's
+       * full stop against the second's first word. Measured: stopping twenty
+       * background tasks produces twenty `**Task stopped by user:** <name>.`
+       * messages, and the transcript drew them as a single run-on line — Q3.604
+       * holds that log line for line, and the agent publishing those with no id at
+       * all is why the daemon numbers what the agent did not.
+       *
+       * `??` on both sides rather than a bare `===`, because the field is
+       * optional on this mirror: a daemon too old to send it answers `undefined`
+       * for every chunk, which must compare equal to itself and join as it always
+       * did, and must never look like a boundary against a `null` from a newer
+       * one.
+       */
+      const sameMessage = (run?.messageId ?? null) === (event.messageId ?? null);
+      if (run !== null && sameMessage && run.role === event.role && run.thought === event.thought) {
         // `push`, not `unshift` — see `flush`, which reverses once. The walk is
         // backwards, so this arrives newest-first and is put back in order there.
         run.parts.push(event.text);
@@ -1894,7 +2031,13 @@ export function buildTail(
         continue;
       }
       flush();
-      run = { seq: stored.seq, role: event.role, thought: event.thought, parts: [event.text] };
+      run = {
+        seq: stored.seq,
+        role: event.role,
+        thought: event.thought,
+        messageId: event.messageId ?? null,
+        parts: [event.text],
+      };
       continue;
     }
 
@@ -1922,6 +2065,7 @@ export function buildTail(
         // optional — and it has to be, since an older daemon sends none.
         images: event.images ?? null,
         parentToolCallId: event.parentToolCallId ?? null,
+        backgrounded: event.backgrounded,
       });
     }
 
@@ -2395,6 +2539,7 @@ function nodeFor(
       // `=== true` and not `??`: the field is optional in this mirror because an
       // older daemon does not send it, and absent means "did not say".
       subagent: event.subagent === true,
+      backgrounded: merged?.backgrounded === true,
       changes: claimedChanges ?? [],
       children: [],
       steps: 0,

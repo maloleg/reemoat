@@ -185,6 +185,35 @@ function sendable(text: string, list: readonly PendingAttachment[], refused: boo
   return canSend(text, list, refused) && !stalled(list);
 }
 
+/**
+ * Why Send is dead while `/clear` sits in the box mid-turn — **one string, drawn
+ * and spoken**.
+ *
+ * ⚠ **A refusal that lives only in an `aria-label` is silence on a phone.**
+ * `IconButton` puts `label` on both `aria-label` and `title`, and a `title` is a
+ * *hover* tooltip: a coarse pointer has no hover, and `IconButton` additionally
+ * carries `disabled:pointer-events-none`, so a disabled control never shows one on
+ * any pointer. The placeholder cannot carry it either — the box has text in it by
+ * construction, that text being the whole condition — and no chip in the row is
+ * about what is in the box. So the phone-first case, which is this app's case, got
+ * an inert Send and nothing at all, while the docblock at `clearRefused` claimed
+ * the sentence was being carried.
+ *
+ * The line below the field is the sighted half and this constant is what makes the
+ * two halves one claim rather than two strings that drift. The *heard* half stays
+ * on Send's `aria-label`, which is read even though the control is dead — that is
+ * the third arm the send slot's own comment argues for, and it is why the visible
+ * line is deliberately **not** also a live region: it would announce the same
+ * sentence a second time on the way to the button it is about.
+ *
+ * The remedy is in the sentence because a refusal without one is furniture: both
+ * ways out — stop the agent, or send the command after the turn — are named.
+ * Drawn in sans, like the command names in `CommandMenu` this sentence quotes: a
+ * mono run inside a sans line takes the step below it (`web-typography.md`), and
+ * one word of a hint is not worth a second type size at 390px.
+ */
+const CLEAR_REFUSAL = "/clear waits for the turn to end — stop the agent, or send it after";
+
 /** Distinguishes chips within one session. Never leaves the client. */
 let uploadSeq = 0;
 
@@ -850,8 +879,18 @@ export function Composer({
    *
    * A refusal of its own rather than folded into `sessionRefused`, because the
    * remedy is different and the slot has to say so: this one is about what is in
-   * the box, so the box keeps a **disabled Send** carrying the sentence, where a
-   * session-level refusal hands the slot back to Stop.
+   * the box, so the box keeps a **disabled Send** where a session-level refusal
+   * hands the slot back to Stop.
+   *
+   * ⚠ **The disabled Send is not what says so, and this comment claimed it was
+   * from the commit that added the refusal until the line below the field
+   * existed** — never in a release, `clearRefused` having landed after v0.8.0 was
+   * cut. A dead button carries an `aria-label` and a `title`, and the
+   * `title` is a hover tooltip that a coarse pointer never sees and that
+   * `disabled:pointer-events-none` suppresses anyway — so the whole explanation was
+   * inaudible to everybody looking at it. {@link CLEAR_REFUSAL} is the sentence,
+   * drawn in the box under the field and spoken by Send, and its docblock carries
+   * the mechanics.
    */
   const clearRefused = !revising && session.turn !== null && text.trim() === "/clear";
   const sendRefused = sessionRefused || clearRefused;
@@ -915,10 +954,31 @@ export function Composer({
    * Three states reach it: an attachment still going up, one that failed, and
    * `/clear` typed mid-turn. In all three the daemon would take a message — this
    * message just is not one it can take yet — and the remedy is in the box, so
-   * the answer is the **disabled Send** with its own sentence, which is what the
-   * idle case already draws and which is otherwise unreachable. Letting Stop take
-   * the slot there put a destructive control under a thumb aimed at Send, and
-   * then swapped it back on its own when the upload landed.
+   * the answer is the **disabled Send**, which is what the idle case already
+   * draws and which is otherwise unreachable. Letting Stop take the slot there
+   * put a destructive control under a thumb aimed at Send, and then swapped it
+   * back on its own when the upload landed.
+   *
+   * ⚠ **What this predicate decides is which control holds the slot, and nothing
+   * about what says why.** It said "the disabled Send with its own sentence", and
+   * a disabled Send does not carry a sentence anybody can see: `IconButton` puts
+   * `label` on `aria-label` and on a `title`, and a `title` is a hover tooltip
+   * that a coarse pointer never gets and that `disabled:pointer-events-none`
+   * suppresses on every pointer. So the sighted half is somewhere else in each of
+   * the three, and they do not agree:
+   *
+   * - an upload still in flight has no sentence at all, here or on Send —
+   *   `sendRefusal` is `null`, the label reads "Send", and the spinner in the
+   *   chip is the whole of it, which is what the send slot's own comment argues;
+   * - one that failed answers with the danger-toned chip carrying the daemon's
+   *   message and the Retry at its head, and `sendRefusal` adds the audible half
+   *   on Send;
+   * - `/clear` is the one with no chip and no row of its own, so
+   *   {@link CLEAR_REFUSAL} is drawn under the field — gated on `sendDrawn`,
+   *   because it is about a button — and spoken by Send.
+   *
+   * The slot being Send rather than Stop is what the rest of this block argues;
+   * where the words are is `sendRefusal`'s docblock and {@link CLEAR_REFUSAL}'s.
    *
    * `!sessionRefused` and not `!sendRefused` is the whole of the distinction. A
    * session-level refusal — a daemon too old to take a mid-turn message — keeps
@@ -928,7 +988,46 @@ export function Composer({
    */
   const draftAnswerable = !sessionRefused && !slotSends && (text.trim().length > 0 || attachments.length > 0);
   const stoppable = canCancelTurn(session) && !revising && !slotSends && !draftAnswerable;
+  /*
+   * The one sentence Send is refusing under, or `null` when it is not refusing.
+   *
+   * ⚠ **Computed once so that "drawn and spoken" is a property of the code rather
+   * than a claim in a docblock.** This was a ternary written inline in `label`, and
+   * the obvious way to give it a sighted half is a second expression under the
+   * field gated on `clearRefused`. The two would agree only by inspection, and
+   * they do not agree: `clearRefused` is one arm of three, and the `stopping` arm
+   * is tested *first*, so a session whose status is `stopping` with a turn still
+   * open and `/clear` in the box satisfies both — the line would read *"/clear
+   * waits for the turn to end"* under a button reading *"This session is
+   * stopping"*. That state is reachable and draws Send: `sessionRefused` holds, so
+   * `slotSends` is false and `draftAnswerable` true, which takes `stoppable` away,
+   * and `canCancelTurn` excludes `stopping` in any case. Two strings for one state,
+   * and the visible one would be the wrong advice. One expression cannot diverge
+   * from itself.
+   */
+  const sendRefusal = sendRefused
+    ? session.status === "stopping"
+      ? "This session is stopping — it cannot take a message"
+      : clearRefused
+        ? CLEAR_REFUSAL
+        : "Wait for the agent — this machine's daemon cannot take a message yet"
+    : stalled(attachments)
+      ? "An attachment did not upload — retry it or remove it"
+      : null;
   const pendingCancel = cancelInFlight(session);
+  /*
+   * Whether Send is the control the slot is actually drawing.
+   *
+   * ⚠ **The refusal line under the field is about a button, so it may not outlive
+   * one.** The slot has four arms and Send is the last; `busy` and a pending cancel
+   * each take it with a spinner, and `stoppable` takes it with Stop. All three are
+   * reachable with `/clear` in the box — most plainly against a daemon too old to
+   * take a mid-turn message at all, which `compatibility.md` calls the ordinary
+   * fleet state between a release and the last `deploy.sh`: there `sessionRefused`
+   * holds, Stop owns the slot, and the line was advising somebody to press a Send
+   * that was not on screen.
+   */
+  const sendDrawn = !busy && !((stopping || pendingCancel) && !slotSends) && !stoppable;
 
   const reconnecting = waitingForDaemon(session) || resumeStalled(session);
 
@@ -1818,6 +1917,74 @@ export function Composer({
         />
 
       {/*
+       * **The one refusal this box explains in words, and the only one that can
+       * be.** {@link CLEAR_REFUSAL} carries why it exists and why it is not a live
+       * region; what belongs here is where it sits and what it costs.
+       *
+       * In flow rather than a `bottom-full` overlay: the menu, the chip panels and
+       * the `…` popover all open upward into the conversation, and a refusal about
+       * the text under a menu that may be open over the same space is a sentence
+       * behind a panel. Under the field is also where somebody typing already is.
+       *
+       * ⚠ **In flow costs the other half of that, and it is displacement rather
+       * than occlusion.** `CommandMenu` is `absolute inset-x-0 bottom-full` against
+       * this `<form>`'s own `relative`, and the box is pinned to the bottom of the
+       * screen — so the panel rides the form's *top* edge, and a line added inside
+       * the form moves the whole open menu by its own height. That height is
+       * arithmetic off the tokens rather than a measurement: `pt-1` is 4px on
+       * Tailwind's default `--spacing` (nothing here overrides it) and
+       * `--text-2xs--line-height` is `1.125rem` in `index.css`, so 22px.
+       * And the menu is open in exactly the state that draws this: `slashQuery`
+       * answers a query for `/clear` with the caret at the end, and
+       * `filterCommands` still holds the `clear` row, so `menuOpen` is true and the
+       * row somebody is about to tap jumps 22px at the keystroke that completes the
+       * word.
+       *
+       * Accepted, and the reason is the schedule again rather than the amount.
+       * This line is derived synchronously from `text`, so it cannot arrive
+       * *between* keystrokes: the move lands on the keystroke that caused it and
+       * never under a thumb already travelling to a row. The panel is moving on
+       * those keystrokes anyway — `filterCommands` narrows `matches` as the query
+       * grows and the panel is anchored at its bottom edge, so every row that drops
+       * out moves the rest — and somebody typing a command name is not aiming at a
+       * row that is holding still. The one move that is *not* a keystroke is the
+       * line going away: `clearRefused` falls when the turn ends and `sendDrawn`
+       * falls when a cancel lands, both on the daemon's clock, and the panel drops
+       * back 22px. That is this sentence's own subject ending, in a window that
+       * needs a command menu held open across it.
+       *
+       * The two ways to buy the stillness were weighed and cost more. Reserving the
+       * 22px whenever the menu is open puts a blank strip under the field for every
+       * `/` in a running session — the trade the control row below already refused
+       * once, as "16px of permanent blank under every composer to avoid a shift
+       * most people never reach". Drawing it in the menu's own footer
+       * beside the `dropped` line puts a refusal about the composer inside a
+       * component that is about completion, and inside a panel that vanishes on
+       * Escape while the refusal it carried is still true.
+       *
+       * ⚠ **It is not one of the three hint lines the control row's comment says
+       * are never coming back, and the distinction is the schedule.** Those three
+       * mounted on every focus, on every turn, or on a reconnect — heights that
+       * moved between the box and the transcript on a clock nobody set. This one is
+       * conditioned on a string somebody typed, against a turn they can see
+       * running: it appears only in the state it describes — which now means the
+       * state *and* the arm, since it is gated on Send being the control the slot
+       * drew — it is the only thing on screen answering "why is Send dead", and it
+       * goes with the next keystroke. The other three arms still have no sighted
+       * half, and they do not need one: each has a chip, a spinner or a Stop that
+       * says what is happening.
+       *
+       * `text-muted` (7.75:1) and not `text-danger`: nothing failed and nothing was
+       * lost — the draft is untouched and both ways out are in the sentence — so
+       * danger colours would be the loudest thing in the composer for a state that
+       * resolves itself when the turn ends. It is the tone the chips rest at, which
+       * is what the quiet half of this box is for.
+       */}
+      {sendDrawn && sendRefusal === CLEAR_REFUSAL && (
+        <p className="px-2 pt-1 text-2xs text-muted">{CLEAR_REFUSAL}</p>
+      )}
+
+      {/*
        * **The control row, inside the box and below the text.**
        *
        * It is `Composer`'s rather than `AgentConfigBar`'s now, and the paperclip
@@ -1840,6 +2007,15 @@ export function Composer({
        * own bottom edge is 6px above" is this gap. Anything under it puts a chip's
        * target on the textarea's last pixel row, which is a tap aimed at the end of
        * a draft opening a model menu.
+       *
+       * ⚠ **Read that as "6px above whatever is directly over this row", which is
+       * the textarea in every state but one.** {@link CLEAR_REFUSAL}'s line sits
+       * between them when it is drawn, so there the 4px grow reaches into 22px of
+       * inert text and the textarea's own edge is 28px up. The margin this
+       * arithmetic protects only ever *widens*, and what the grow lands on is a
+       * `<p>` with nothing to activate — so the conclusion holds and only the
+       * distance changes. It would not hold if anything tappable were ever put in
+       * that slot.
        *
        * Three hint lines used to live in this space and none is coming back.
        * "Enter to send · Shift+Enter for a new line" appeared under the box on
@@ -2059,18 +2235,17 @@ export function Composer({
                * with the Retry that clears this at its head. The uploading case gets no
                * arm because it clears itself, and a spinner in a chip is already the
                * sentence.
+               *
+               * ⚠ **The `clearRefused` arm has a sighted half too now, and it did
+               * not.** It is the one arm with no chip and no row of its own to fall
+               * back on — the refusal is about the text in the box — so from the
+               * commit that added it until the line under the field existed it was
+               * this `aria-label` alone, which on a phone is nothing at all. (Never
+               * in a release: `clearRefused` landed after v0.8.0 was cut.)
+               * {@link CLEAR_REFUSAL} is that same string drawn under the field;
+               * this arm is its audible half rather than the whole of it.
                */
-              label={
-                sendRefused
-                  ? session.status === "stopping"
-                    ? "This session is stopping — it cannot take a message"
-                    : clearRefused
-                      ? "/clear waits for the turn to end — stop the agent, or send it after"
-                      : "Wait for the agent — this machine's daemon cannot take a message yet"
-                  : stalled(attachments)
-                    ? "An attachment did not upload — retry it or remove it"
-                    : "Send"
-              }
+              label={sendRefusal ?? "Send"}
               tone="primary"
               size="chip"
               shape="round"

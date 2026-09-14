@@ -188,11 +188,24 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
      */
     const systemsSrc = readFileSync(new URL("../../../src/acp/systems.ts", import.meta.url), "utf8");
     const askSrc = readFileSync(new URL("../../../src/agentask.ts", import.meta.url), "utf8");
+    /*
+     * ⚠ **And a fourth time, for `BackgroundTask` and `AsyncTaskUsage`.** Both are
+     * declared in `src/acp/asynctasks.ts` — which is where they have to live, since
+     * a record carrying an `AsyncTaskState` must sit beside the definition of which
+     * states are terminal — and that file was not in this list, so both fell through
+     * the `continue` exactly as the three above did. Measured: 52 interfaces compared
+     * without it, 54 with. The pair was named correctly on both sides the whole time;
+     * a matching name buys nothing unless the file declaring it is read here.
+     */
+    const asyncTasksSrc = readFileSync(
+      new URL("../../../src/acp/asynctasks.ts", import.meta.url),
+      "utf8",
+    );
     const mirrored = [...new Set([...clientSrc.matchAll(/export interface (\w+)/g)].map((one) => one[1] ?? ""))];
     const behind: string[] = [];
     let compared = 0;
     for (const name of mirrored) {
-      const theirs = [registrySrc, eventsSrc, daemonSrc, systemsSrc, askSrc]
+      const theirs = [registrySrc, eventsSrc, daemonSrc, systemsSrc, askSrc, asyncTasksSrc]
         .map((src) => fieldsOf(src, name))
         .find((one) => one !== null);
       if (theirs === undefined || theirs === null) continue;
@@ -350,11 +363,13 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
       "Child extends Base",
     ]);
     /*
-     * ⚠ **49, raised from 48 when `MachineSettingsView` started being compared at
-     * all.** Measured: 44 interfaces before `systems.ts` and `agentask.ts` were
-     * sources at all, 47 with them, 50 with the two a contributed harness and
-     * provider put on the wire, **51** once the machine-settings mirror was named
-     * the way the daemon names it. The floor is the count less the slack the last
+     * ⚠ **52, raised from 49 when `asynctasks.ts` became a source.** Measured: 44
+     * interfaces before `systems.ts` and `agentask.ts` were sources at all, 47 with
+     * them, 50 with the two a contributed harness and provider put on the wire,
+     * **51** once the machine-settings mirror was named the way the daemon names
+     * it, 52 with `QueuedPrompt`, and **54** once `BackgroundTask` and
+     * `AsyncTaskUsage` stopped falling through the `continue`. The floor is the
+     * count less the slack the last
      * raise chose, and it moves *with* the corpus — a floor left where it was is
      * one that goes on passing over a whole group deleted, which is the exact
      * silence this number exists to break.
@@ -378,7 +393,7 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
      * sharper version of it in the same week — its corpus tripled against an
      * unmoved floor, which would have passed with an entire check group removed.
      */
-    report("there are mirrored interfaces to compare at all", compared >= 49, `${compared} interfaces`);
+    report("there are mirrored interfaces to compare at all", compared >= 52, `${compared} interfaces`);
     check("and the session snapshot is one of them", fieldsOf(registrySrc, "SessionSnapshot") !== null, true);
     check("no interface this client mirrors knows less than the daemon's own", behind, []);
 

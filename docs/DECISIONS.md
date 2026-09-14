@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 131 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 85 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 348 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 350 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 67 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 134 | `###` |
-| | | **929** | |
+| | | **932** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 929 rather than the 471
+dividers. So the count is over **both** depths, and it says 932 rather than the 472
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -6474,13 +6474,24 @@ the worktree, the branch and the title do not. The next message starts an agent 
 carries on over the same `session/resume` the daemon already performs after each of
 its own restarts.
 
+⚠ **That sentence was one case too wide, and the case is now guarded.** Work the
+agent left running in the background dies with the process — the CLI kills what it
+backgrounded when it is shut down, and a resumed agent is told nothing about it —
+and `parkable` could not see it, because a session whose turn has ended reports
+`idle` honestly. Measured on this machine: `s_5d26f98e` released 60m14s after its
+last event with nothing moving the clock in between. A clause refuses over work
+claude *reports*, and the rest of the fleet is still covered only by the margins.
+Q2.228.
+
 Almost none of this is new machinery, which is the argument for doing it this way.
 `terminal` is `exitRecord !== null`, so a stopped session already holds no process,
 is already skipped by `liveSessionCount`, already keeps its conversation and already
 comes back through `resume()`. Parking is `stop("parked")` plus a rule about when it
 returns.
 
-1. **The preconditions are one comparison: `status === "idle"`.** The three states
+1. **The preconditions are one comparison: `status === "idle"`.** (Three clauses
+   have been added beside it since — a `/clear`, a queued message, and live
+   background work, each a state `status` reports as an honest `idle`.) The three states
    parking must never interrupt — a turn in flight, an unanswered permission, an
    unanswered question — are exactly the ones the derivation reports as something
    else, along with the two where there is nothing to release yet or already. A
@@ -6536,7 +6547,11 @@ returns.
    doing; the count answers what the *machine* is doing, and parking is the case
    that separates them.
 
-7. **Its controls stay live, and a tap is a choice rather than a wake.** Every
+7. **Its controls stay live, and a tap is a choice rather than a wake.** (⚠ And
+   its **command list** stays too, which this point missed and Q2.228 repaired: the
+   same argument applies word for word, and withdrawing it left a parked session
+   with a working model picker and an empty `/` menu under a composer reading *Type
+   / for commands* — 111 commands live, 0 parked, measured.) Every
    other stop clears `agentConfigState`, which is right — the options describe a
    process that is gone. Parking keeps them, because the process is coming back to
    the same conversation, and clearing them made the strip fall to the client's own
@@ -6888,6 +6903,221 @@ pinning both halves: *"the session itself still refuses a prompt mid-restart"* a
 *"but the route waits and sends it"*. This is the same division one state over.
 
 **Status.** Current
+
+
+### Q2.228 — Parking is advertised as lossless. Is it?
+
+**Question.** Q2.224 shipped parking on the claim that *"the process goes; the
+transcript, the `agent_session_id`, the worktree, the branch and the title do
+not"*, and `.env.example` says the same thing in four words: *"the process is
+killed; nothing else is"*. Somebody asked whether that survives an agent with
+background work running. It does not.
+
+**Measured 2026-09-11, the development machine, against `~/.reemoat/reemoat.db`
+and the installed binaries.**
+
+*The hazard is real and has already fired.* Five sessions carry `exit.reason =
+"parked"`. One of them is `s_5d26f98e` — Q7.113's own measured session — released
+at 17:34:25, **60 m 14 s** after its last event, against a saved
+`machine_settings.idleReleaseMinutes` of 60. Nothing moved the idle clock in that
+hour.
+
+*Why `parkable` could not see it.* `status === "idle"` is honest for a session
+whose turn has ended, and Q2.44's own rule is that *the turn ending is not the
+agent stopping*. Background work is that rule's sharpest case: the daemon holds
+`running`, `blocked`, `starting`, `stopping` and the terminal states, and there
+has never been a state for *the agent handed something off*.
+
+*What a park does to that work, traced link by link.* `stop("parked")` →
+`doStop` → `Session.dispose` sends `session/cancel`, then `session/close`, then
+`AcpClient.close`: stdin EOF, 3 s, **SIGTERM to the process group**, 3 s,
+**SIGKILL to the process group**. Every Bash tool call the CLI makes is spawned
+`detached: true`, i.e. `setsid()` — confirmed live, a background `sleep` ran at
+`pgid == pid`, state `Ss`, parented to the CLI — so the daemon's group kill does
+not reach it directly. The CLI kills them itself: its `SIGTERM` handler runs the
+shutdown sweep, which group-SIGKILLs every backgrounded shell and records each as
+`"stopped"` with its `toolUseId`. That record goes nowhere this daemon reads. On
+the SIGKILL rung, and whenever the adapter dies outright, the shells instead
+**survive as orphans** reparented to launchd, still writing to
+`/private/tmp/claude-<uid>/<cwd-slug>/<sessionId>/tasks/<taskId>.output`, with
+nothing able to report or stop them.
+
+*And nothing comes back.* `session/resume` replays no task state; the Agent SDK
+states outright that the background-task set is per-process and that nothing is
+emitted at startup; the adapter's `replaySessionHistory` has a subagent replay
+pass and no async-task equivalent, and its only teardown is a bare `tasks.clear()`
+that emits no terminal update. The one durable registry —
+`~/.claude/jobs/<short8>/adopt.json` — is gated on `CLAUDE_JOB_DIR`, which this
+daemon does not set: `~/.claude/jobs` does not exist on this machine.
+
+*Two partial mitigations already existed and neither is enough.*
+`CEILING_PARK_FLOOR_MS` is two minutes on the **ceiling path only**, and its own
+docblock concedes the gap — *"two minutes is not a judgement about background
+work; nothing here can make one"*. And out-of-turn `agent_log`/`other` events move
+`lastEventAt` without being logged, which landed 2026-09-10 inside a commit titled
+*"legal docs added"* with no entry here at all. The 60-minute park above is the
+measurement that it does not fire for a quiet agent.
+
+**Driven against a real claude, 2026-09-11** — `pnpm harness --agent claude --raw`
+under 2.1.268 / claude-agent-acp 0.73.0, three runs. What the wire actually does,
+rather than what the adapter's source suggested:
+
+- *The spawn is first and it is thin.* `async_task_spawned` carries `taskType:
+  "shell"`, `showInTranscript: false`, `canStop: true`, and `name` equal to
+  `description` — and **neither `outputFilePath` nor `toolCallId`**. Both arrive on
+  separate `async_task_progress` updates a moment later, so a fold that merged only
+  on the spawn would carry neither, ever.
+- *The spawn precedes the lying card.* It lands **before** the Bash
+  `tool_call_update` that reports `status: "completed"`, and that update carries
+  `_meta.jetbrains.air = {version: 1, asyncTasks: {backgrounded: true}}` beside
+  `claudeCode.toolName: "Bash"` — the marker read as `ToolCallUpdateEvent.
+  backgrounded`, confirmed against real bytes rather than against the adapter's
+  `dist/`.
+- *There is no heartbeat.* Both progress updates are correlation and arrive at
+  once; a `sleep 45` produced nothing further for its whole life. **That is the
+  measurement the staleness bound was waiting on, and it settles it against:** a
+  quiet task is indistinguishable from a stopped one by time alone, so a bound on
+  last-heard-from would kill quiet work and spare chatty work.
+- *The end arrives during the turn, as two updates.* Backgrounding a `sleep 5`
+  inside a turn held open by a foreground `sleep 30`: `state: "stopped"` first —
+  the adapter closing a task it stopped seeing in the CLI's level — then `state:
+  "completed"` behind it. So **a terminal state is not final**, and a fold that
+  refused a second terminal word would label every finished shell `(stopped)`,
+  which reads as *somebody stopped it* about a build that succeeded.
+- *The output path is what containment refuses.*
+  `/private/tmp/claude-<uid>/<cwd-slug>/<sessionId>/tasks/<taskId>.output` —
+  outside the workspace, which is why there is no detail view to build and why the
+  panel's footer says so rather than leaving an absence unexplained.
+
+**What changed underneath Q7.113.** That entry closed on one sentence: *"what
+would close it is an ACP message for 'I am waiting' … neither exists, and neither
+is ours to add."* The first of the two now exists, in the **pinned** adapter
+(`claude-agent-acp` 0.73.0), and is one client capability away — three
+`session/update` variants (`async_task_spawned`, `async_task_progress`,
+`async_task_state_update`), an `AsyncTaskState` of five words with three of them
+terminal, a stop verb `_session/async_task/stop`, and a marker on the detaching
+Bash `tool_call_update` saying its card is not finished. All of it gated on
+`clientCapabilities._meta.jetbrains.air = {version: 1, capabilities: ["asyncTasks"]}`,
+which this client did not send.
+
+**Decision. Declare the capability, refuse to park over live work, and draw it.**
+
+1. **A live task blocks parking, with no timeout.** One clause in `parkable`,
+   placed with the two other clauses `status` cannot express — `clearing ||
+   restarting` and a non-empty prompt queue — because all three are *a session
+   that owes somebody something while `status` honestly reads `idle`*. The
+   ceiling inherits it through `parkCandidates` with nothing threaded, so at
+   `MAX_LIVE_SESSIONS` with nothing takeable `create` answers `429
+   too_many_sessions`: a session somebody does not get, so that a build somebody
+   is running survives.
+2. **Claude only, and not even all of claude.** kimi backgrounds fully and maps
+   `background.task.terminated` nowhere, codex's `unified_exec` PTY outlives its
+   call with no push, opencode cannot background at all — and within claude the
+   adapter marks a backgrounded **subagent** `ignored`, which is Q7.113's own
+   measured case. So `CEILING_PARK_FLOOR_MS` and the stderr clock stay: they are
+   what stands for everything the clause cannot see, which is most of the fleet.
+   A margin bought for a case that is still real must not be spent because a
+   neighbour got a signal.
+3. **The set rides the snapshot and is never logged.** `applyContextUsage`'s rule,
+   reached by a sharper road: everything that hits `record` moves `lastEventAt`,
+   so a logged lifecycle would defer the sweep **by accident** for a task that
+   chatters and not at all for a `sleep 600` — the guard would be strongest
+   exactly where it is least needed. It is fanned out with
+   `reportsBackgroundTasks` beside it, because an empty list from kimi means
+   *nobody asked* and an empty list from claude means *nothing is running*, and a
+   count has no spare value to say which.
+4. **A stop clears the set and says so once.** `contextUsageState = null`'s
+   argument at its strongest: a parked session keeping the map would claim
+   `running` about process groups that are gone, on every snapshot, for ever —
+   verbatim the failure Q7.113 refused to ship a feature over. The sentence is
+   `dropQueuedUndelivered`'s precedent, one row for one act, and it says the work
+   was *still running* rather than that it was killed, because the SIGKILL rung
+   leaves orphans and this daemon watched neither.
+
+**⚠ The blocker the plan did not predict, and it is worth the paragraph.** The
+published SDK refuses these notifications, and no hook reaches the refusal.
+`zSessionUpdate` is a closed `z.union` in both 1.3.0 and 1.4.0 with no arm for any
+of the three, and **two** places parse it: `registerAppNotification`, which a
+custom parser can replace, and `ClientApp`'s constructor, which installs a
+`SessionUpdateRouter` parsing every `session/update` unconditionally. The second
+is not reachable from any option — a client built with `acp.client()` cannot
+receive one of these however it registers its handler, and the notification is
+rejected `-32602` and logged below anything this daemon can see.
+`AcpClient.splitAsyncTaskUpdates` takes those three off the byte stream before the
+SDK reads it, and forwards everything else untouched so that every known variant
+keeps the validation it has today. The hot path is **one `indexOf` per line** —
+`usage_update` arrives on essentially every output token, so a `JSON.parse` per
+line would have been a real cost. Found by declaring the capability and driving a
+real notification through the driver's rig; reading the schema first would have
+been the cheaper order, and that is the lesson rather than the fix.
+
+**⚠ Two things gave a parked session away, and both were found by looking at the
+screen rather than at a driver.** Q2.224 decided parking shows *nothing*, and:
+
+- *The `/` menu was empty.* `doStop` withdraws the command list on every stop, and
+  point 7 of that entry had kept `agentConfigState` for a reason that applies to the
+  command list word for word — the process is coming back to the same conversation.
+  So the model picker worked and `/` opened nothing, under a composer whose
+  placeholder is literally `Type / for commands`. Measured on a real daemon: 111
+  commands live, **0** parked. It is kept now, with no revision bump, because the
+  list did not change; the resume replaces it through `applyAgentCommands` in the
+  ordinary way.
+- *This feature's own new row.* The `error` a stop writes when it ends live
+  background work said *"when this session ended"* — and `doStop` is reached by
+  `daemon_shutdown` and by `restartAgent`'s `config_changed`, so a deploy or an
+  ultracode toggle wrote that into a conversation that had not ended. The noun is
+  the agent now, which is true in every arm, and a **park writes nothing at all**:
+  it should be unreachable (`parkable` refuses over live work), and the one way to
+  reach it is a guard that failed — which must not announce itself in somebody's
+  transcript.
+
+**Alternatives taken out.**
+
+- *A staleness bound on each task's own last update.* The elegant answer, and
+  unsafe on an unmeasured premise: if a quiet task emits no `async_task_progress`
+  the bound kills quiet work and spares chatty work, which is this entry's own
+  defect inverted. It becomes available the day the progress rate is measured.
+- *A hard cap on how long background work may defer parking (~6 h).* Argued for,
+  and the argument is real — `MAX_LIVE_SESSIONS` only became a memory budget
+  because `idlepark.ts` bounds the population from the other end, so an unbounded
+  clause un-bounds it again at ~397 MB per pinned session. Declined on the owner's
+  word, because a cap with no measurement behind it is a number dressed as a
+  judgement and the asymmetry runs the other way: too large costs memory, too
+  small costs work. The seam is one constant beside `CEILING_PARK_FLOOR_MS`.
+- *A manual lever — a pinned session never parks.* Works for all four agents and
+  needs no signal, and was declined because parking is deliberately invisible
+  (Q2.224 point 6) and a control that makes it visible is a decision about
+  housekeeping somebody cannot otherwise influence.
+- *Declaring `nativeSubagentSessions` for symmetry.* It sets the adapter's
+  `forwardSubagentText`, which Q6.4 refused on budget — and a permission raised
+  inside a subagent is then addressed to the **child** session id, which
+  `AcpClient.route` answers `invalidParams` for. That is a subagent's approval
+  dying on the floor.
+- *Reading the CLI's own task files.* Q7.113 rejected it and the rejection
+  stands: vendor private state at an undocumented path, and the path is outside
+  the workspace, which containment refuses anyway.
+
+**Driven.** `daemoncheck.restart-and-resume.ts`: that the `_meta` this daemon
+sends is exactly the AIR object, which is the one row with no second signal
+behind it; the negative first, a session with nothing running still released
+beside one that is not; a session with live work not released *at any age*; that
+the refusal is the task rather than the fixture, by completing it and sweeping
+again; each terminal word releasing and `paused` not; the ceiling refusing a
+`create` rather than taking the agent, with the floor faked away so the refusal is
+the task; the stop route's three answers with `stopped: false` a success; an id
+the session never announced refused before the agent is asked; and that a stop
+says what it was still running, once, and then claims nothing. Seven of them go
+red under a one-line mutation of the clause. `webcheck`: the foot line over both
+sources including the mixed-kind fallback and that a finished task is not counted;
+the chip table as a total mapping over all five states with the three terminal
+ones three distinct tones; the sections as a partition, an unknown kind included;
+and the `backgrounded` fold surviving the completing update that follows it.
+`pincheck`: the installed adapter's own `clientSupportsAirCapability` accepting
+the literal this daemon sends, plus the negative that says the gate is a gate —
+because `AIR_EXTENSION_VERSION` is module-private and there is nothing to compare
+constants against.
+
+**Status.** Fixed, 2026-09-11.
 
 
 ## The web client
@@ -20254,6 +20484,155 @@ is stopping the session, which says so in the transcript (Q2.226).
 
 **Status.** Current
 
+#### Q3.603 — Where is background work drawn, and what does this app refuse to draw about it?
+
+**Behaviour.** Q2.228 put a background task's lifecycle on the wire and drew it as
+an inline fold at the foot of the transcript. That fold was the wrong shape twice
+over: it listed the same set the foot line already counted, so two surfaces could
+disagree about it, and it grew the transcript's own column — a workflow that
+backgrounds ten shells pushed the composer down the screen every time one landed.
+
+**Decision.** One surface, taken from Claude Code's `background-tasks-dialog`, and
+the transcript's foot becomes a way into it rather than a copy of it.
+
+**The frame.** Title `Background`, empty state `No tasks currently running`, the
+row label `description || name` with `· stopping…` in flight, `Couldn't stop it:
+{msg}` on a failure, and the closing sentence *"Each task's output reaches the
+transcript when it finishes; a per-task view isn't sent to this app"* — all
+Anthropic's, one word changed. Sections in their order with their labels
+(`Agents`, `Shells`, `Monitors`, `Dynamic workflows`, `Completed`), their
+suppression rule (a single populated group draws no heading), and their chip table
+over the five states. `taskDuration` and `taskTokens` are their `Lt` and `Un`,
+carry arithmetic and `.0`-strip included; `dotCells` is their `Ct`.
+
+**Two placements, one element, and the breakpoint is answered only in CSS.** Below
+`xl` it is a bottom sheet over the conversation — the geometry the settings pop-up
+already uses on a phone, which is what was asked for. At `xl` it docks to the right
+edge and `SessionView` takes `xl:pr-[26rem]`, so the header, the transcript and the
+composer move together. Nothing in JavaScript reads the breakpoint, which is
+`AppShell`'s standing rule (Q3.204): a resized window cannot end up drawing a docked
+panel over a conversation that never made room for it.
+
+**It portals, and it is `menu` in the overlay stack rather than `sheet`.** It
+portals because `fixed` only means the viewport where no ancestor carries a
+`transform` or a `backdrop-filter`, and this screen's header and composer are one
+hop from one. It is not a `sheet` because `sheet` puts `inert` on `#root`, which at
+`xl` would switch off the conversation this thing is docked *beside* — and making
+that conditional is exactly the breakpoint-in-JavaScript the paragraph above
+refuses. So Escape closes the topmost layer as everywhere else, the ask card's digit
+shortcuts stand down as under any open menu, and nothing behind it is switched off.
+
+**⚠ What this app cannot draw, measured rather than assumed.** Claude Code's own
+dialog shows, for a workflow, an agent count, a `0/10` phase fraction and a
+per-agent table of model, tokens and time. **None of it is on the AIR wire.** Read
+in `@agentclientprotocol/claude-agent-acp` 0.73.0: `isSubagentTask` marks every
+`local_agent` task `ignored` before a byte is published, so a workflow's ten agents
+never leave the CLI; `async_task_spawned`, `async_task_progress` and
+`async_task_state_update` carry no phase, no fraction, no model and no count, and
+`grep` for `phase` in `async-tasks.js` and `acp-subagents.d.ts` returns nothing.
+The `Phases` block is therefore **one phase, titled `Agents`** — which is Claude
+Code's own fallback when a run reports none (`ddn`) — with **no fraction**, which
+is their own rule for a phase whose total is zero, and **no rows at all** where
+their table would be. An empty table under a heading would be a sentence about ten
+agents that are running; a silence is the only honest thing this wire can say.
+
+**⚠ The elapsed time is this daemon's two stamps, never the agent's.** The adapter
+carries a duration only inside `usage`, only on a progress frame, and drops both
+`task_notification.usage` — the one guaranteed final total — and
+`task_updated.patch.end_time`. So a completed task's own number is stale by its
+whole final leg, and a quiet task (a `sleep`, a build that calls nothing) never
+sent one. `BackgroundTask.endedAt` is stamped at the terminal edge, kept across the
+`stopped → completed` correction so a relabelling does not push the time out, and
+cleared if a task goes live again. Without it a finished card counts up for ever,
+which is a card claiming work is still going.
+
+**⚠ The empty state is gated on the agent, because it is a claim.** `No tasks
+currently running` is true for claude and false for the other three — kimi
+backgrounds shells, agents and cron jobs and reports none of it, codex leaves a PTY
+running behind an ordinary tool call, opencode cannot background at all. It is
+drawn only where `reportsBackgroundTasks` is true; the other arm says what it
+cannot know instead. This is `contextUsage`'s `null`-means-cannot-tell rule one
+field over (Q7.26).
+
+**Three owner calls on the drawing, after the first version was seen.**
+
+1. **Workflows first**, against Claude Code's own order, which puts
+   `Dynamic workflows` last. A workflow is the one kind here that *spawns* the
+   others — the run this was built from is one workflow and the ten shells it
+   started — so last put the thing somebody opened the panel for under ten rows of
+   its own consequences. Labels, counts and the suppression rule stay theirs.
+2. **No total beside the title.** Every section already carries its own count, and
+   a figure over them answers a question nobody has: `Agents` and `Completed` are
+   in it, so it is not *how much is running*, and it is not any section's number
+   either. Claude Code puts a *subtitle* in that slot naming the live kinds, never
+   a total.
+3. **A card is a typographic hierarchy, not a row of facts at one size.** The
+   first version drew title, kind, duration, tokens and chip as one `text-2xs` line
+   joined by `·` — which is the shape of a transcript row, and a row is what this
+   deliberately is not. Four bands, each a step quieter: the title (the only thing
+   at `text-xs` and full `fg`; mono at the step below for a shell, because its
+   title *is* a command line); what it is and how long (`muted` kind, `faint`
+   clock); what the run cost, where the **numbers** are `muted` and their nouns
+   `faint` so a glance lands on `429.7k` rather than on `tokens`; and what it said
+   it was doing, `faint`. No `·` between bands — the separator was doing the work a
+   line break should.
+
+**Also fixed here.** The chip table shipped with `text-success` and `text-warning`,
+which are not tokens in this palette — Tailwind v4 emits no rule for a utility whose
+variable does not exist (Q3.204's own measurement), so `(done)` and `(stopped)` were
+drawn in the row's ambient colour and were indistinguishable from `(running)`. The
+retired-colour sweep does not catch them: its pattern ends `warn\b`, and `\b` fails
+against the `i` of `warning`. They are `add-ink` and `offer-ink` now.
+
+**Status.** Current
+
+#### Q3.604 — When may the transcript join two pieces of agent text, and what does ACP give it to decide with?
+
+**Behaviour.** Stopping twenty background tasks from the panel produced one
+paragraph of twenty run-together sentences: `**Task stopped by user:** wait for
+random number output.**Task stopped by user:** sleep 300 && echo $RANDOM.` …
+
+**Why.** `AsyncTaskRuntime` publishes each of those as its own
+`agent_message_chunk` — a whole message, with no trailing newline. The transcript
+joins consecutive agent text with **no separator**, which is correct and
+load-bearing for the streamed fragments of one message and wrong for two messages
+in a row. Nothing else on the wire distinguishes them: both are
+`agent_message_chunk` carrying a `text` block.
+
+**Decision.** Read ACP's `messageId`, which is the protocol's own answer and says
+so: *"All chunks belonging to the same message share the same `messageId`. A
+change in `messageId` indicates a new message has started."* It becomes a field on
+`TextEvent`, is mirrored optionally on `wire.ts` (`cancelRequestedAt`'s rule, so an
+older daemon joins exactly as it always did), and `buildTail` keys a run on it
+beside `role` and `thought`.
+
+**⚠ And the spec alone does not fix it, which is the measurement that shaped this.**
+In `claude-agent-acp` 0.73.0 every path through `toAcpNotifications` calls
+`applyMessageId` — but `AsyncTaskRuntime` publishes a **bare** update, so those
+twenty messages carry no id at all. Per spec, no change of id is no boundary, and
+they would still join. So the daemon numbers what the agent did not: the first id
+seen latches `agentNumbersMessages`, and from then on a chunk arriving without one
+is a message of its own and gets a `~`-prefixed id. **An agent that never numbers
+anything — kimi, codex, opencode — keeps `null` throughout and every chunk joins
+as it does today**, which is the arm the driver exists to protect.
+
+The tilde is why this shares one field with the agent's own value rather than
+needing a second: it is outside the id space of all four, so a reader that looks
+can tell them apart, and a reader that only compares for equality is right either
+way. The latch never clears — *"this agent stopped numbering"* is not a thing that
+happens; a new process after a resume is, and the replay restates ids within the
+first few updates.
+
+**Bounded at ingest, and clipped rather than refused** — the opposite call to
+`MAX_ASYNC_TASK_ID_CHARS` next door, and for that constant's own reason: a task id
+round-trips to the agent in `_session/async_task/stop`, so a clipped one names
+nothing; this id never leaves the fleet — it is compared to the previous chunk's
+and nothing else — so a clipped one still separates two messages, which is the
+whole of its job. 256, the same number and the same argument as
+`MAX_PARENT_ID_CHARS`.
+
+**Status.** Current
+
 
 ## Deployment, packaging and code layout
 
@@ -29472,6 +29851,19 @@ a backgrounded *subagent*. It would not close this.
 **What would close it** is an ACP message for "I am waiting", or an agent that
 reports its background work as an ordinary tool call with an ordinary completing
 update. Neither exists, and neither is ours to add.
+
+⚠ **The first of those now exists, and this entry is superseded in half.**
+`claude-agent-acp` 0.73.0 publishes three `async_task_*` updates behind a declared
+`_meta.jetbrains.air` capability, with three terminal states — so *when to stop
+counting* has an answer for shells, workflows and monitors. Q2.228 takes it, and
+uses it for something this entry did not ask about: refusing to release an agent
+that is still running something.
+
+⚠ **The half measured here is untouched.** `isSubagentTask` marks anything
+carrying `subagent_type` — which is exactly `s_5d26f98e` above — as `ignored`, so a
+backgrounded **subagent** is announced as no task at all. Everything in this entry
+about it is still true, `outstandingTasks` still reads 0 for it, and the margins
+bought for it (`CEILING_PARK_FLOOR_MS`, the drain's clock) are not spent.
 
 **Status.** Deliberate non-goal
 

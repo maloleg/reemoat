@@ -490,6 +490,58 @@ process.stdout.write("\nthe tail is built backwards\n");
   }
 
   /*
+   * ⚠ **A change of `messageId` starts a new run, and this is the rule that
+   * stops twenty whole messages rendering as one paragraph.**
+   *
+   * ACP: *"A change in `messageId` indicates a new message has started."* A run
+   * joins its parts with **no separator**, which is right for the streamed
+   * fragments of one message and wrong for two messages in a row — measured as a
+   * bug: stopping twenty background tasks makes `claude-agent-acp` publish twenty
+   * `**Task stopped by user:** <name>.` messages, none ending in a newline, and
+   * the transcript drew them as one run-on line. Driven as the whole partition,
+   * because the case that must **not** change is the older-daemon one: a mirror
+   * where the field is absent everywhere has to join exactly as it always did.
+   */
+  {
+    const idTxt = (text: string, messageId: string | null | undefined): never =>
+      ({ seq: (seq += 1), ts: seq * 1000, event: { type: "text", role: "agent", thought: false, text, messageId } }) as never;
+    seq = 0;
+    check(
+      "chunks of one message are one run",
+      buildTail([idTxt("he", "m1"), idTxt("llo", "m1")], []).rows.map((r) => r.key),
+      ["t1"],
+    );
+    seq = 0;
+    check(
+      "and two messages are two, however they run together",
+      buildTail([idTxt("**Stopped:** a.", "m1"), idTxt("**Stopped:** b.", "m2")], []).rows.map((r) => r.key),
+      ["t1", "t2"],
+    );
+    seq = 0;
+    check(
+      "a daemon too old to say joins exactly as it always did",
+      buildTail([idTxt("he", undefined), idTxt("llo", undefined)], []).rows.map((r) => r.key),
+      ["t1"],
+    );
+    /* And the two spellings of "nothing said" are one answer, not a boundary —
+       a mirror's `undefined` against a daemon's `null` is the same silence. */
+    seq = 0;
+    check(
+      "and an absent id is the same silence as a null one",
+      buildTail([idTxt("he", undefined), idTxt("llo", null)], []).rows.map((r) => r.key),
+      ["t1"],
+    );
+    /* The daemon's own numbering reaches here as ordinary ids: nothing in this
+       file parses the `~`, it only compares. */
+    seq = 0;
+    check(
+      "an id the daemon assigned separates two messages like any other",
+      buildTail([idTxt("a.", "~1"), idTxt("b.", "~2")], []).rows.map((r) => r.key),
+      ["t1", "t2"],
+    );
+  }
+
+  /*
    * An image the tool returned reaches the card — driven from a real event
    * through `buildTail`, not handed straight to `mergeUpdates`.
    *

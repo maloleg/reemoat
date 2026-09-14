@@ -1353,18 +1353,39 @@ async function main(): Promise<void> {
       const text = positionals.slice(2).join(" ");
       if (!id || !text) fail("prompt requires a session id and some text");
       try {
-        const result = await api<{ turn?: number; seq: number; cleared?: boolean }>(
-          `/sessions/${id}/prompt`,
-          { method: "POST", body: JSON.stringify({ text }) },
-        );
-        // A clear starts no turn — the daemon carries it out itself rather than
-        // forwarding it — so there is a seq to point at and nothing to wait for.
+        const result = await api<{
+          turn?: number | null;
+          seq: number;
+          cleared?: boolean;
+          steered?: boolean;
+          queued?: boolean;
+          position?: number;
+        }>(`/sessions/${id}/prompt`, { method: "POST", body: JSON.stringify({ text }) });
+        /*
+         * Four landings, not two. A clear starts no turn — the daemon carries it
+         * out itself rather than forwarding it — so there is a seq to point at and
+         * nothing to wait for. The other two are this route's `202`s: a message
+         * *steered* into a turn already running names that turn, and a *queued* one
+         * carries no turn at all, which is why printing `turn ${result.turn}` for
+         * it read `turn undefined` against kimi and opencode.
+         */
         out(
           result.cleared === true
             ? `context cleared  seq ${result.seq}`
-            : `accepted  turn ${result.turn}  seq ${result.seq}`,
+            : result.queued === true
+              ? `queued  ${result.position ?? 0} ahead  seq ${result.seq}`
+              : result.steered === true
+                ? `steered into turn ${result.turn}  seq ${result.seq}`
+                : `accepted  turn ${result.turn}  seq ${result.seq}`,
         );
       } catch (error) {
+        if (error instanceof ApiError && error.status === 429) {
+          // The queue is full. Time does not fix it — somebody has to be answered
+          // — so this carries the limit rather than a retry-after.
+          const limit = (error.body as { error?: { detail?: { limit?: number } } }).error?.detail?.limit;
+          warn(limit === undefined ? error.message : `${error.message} (limit ${limit})`);
+          process.exit(1);
+        }
         if (error instanceof ApiError && error.status === 409) {
           const detail = (error.body as { error?: { detail?: { pendingPermissions?: PendingPermissionSnapshot[] } } })
             .error?.detail;

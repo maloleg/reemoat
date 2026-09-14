@@ -217,6 +217,25 @@ export interface TextEvent {
   role: "agent" | "user";
   thought: boolean;
   text: string;
+  /**
+   * Which message this chunk belongs to, or `null` where nothing said.
+   *
+   * ACP's own boundary: *"A change in `messageId` indicates a new message has
+   * started."* A run in the transcript joins its parts with **no separator**,
+   * which is right for streamed tokens and wrong for whole messages — so this is
+   * what keeps twenty `**Task stopped by user:** …` lines from rendering as one
+   * paragraph of twenty run-together sentences.
+   *
+   * A `~`-prefixed value is one the **daemon** assigned, to a message an agent
+   * that otherwise numbers its messages sent without one. Nothing here needs to
+   * tell the two apart — this is compared for equality and never parsed — and the
+   * prefix exists so that a reader who does look can.
+   *
+   * Optional on the mirror, `cancelRequestedAt`'s rule: a daemon too old to send
+   * it leaves every chunk `undefined`, which compares equal and joins exactly as
+   * that daemon's transcript always did.
+   */
+  messageId?: string | null;
 }
 
 export interface ToolCallEvent {
@@ -311,6 +330,21 @@ export interface ToolCallUpdateEvent {
    * "this update did not say", never "top level".
    */
   parentToolCallId?: string | null;
+  /**
+   * This call handed its work to something that outlives it.
+   *
+   * A backgrounded Bash call returns the moment the command detaches, so the card
+   * reaches `completed` while the command runs on — and ACP has no tool-call
+   * status for *still running elsewhere*, which is why the agent marks the update
+   * instead. A card reading this stops claiming the work is finished.
+   *
+   * Optional for this file's usual reason, and read as `?? false`: an older
+   * daemon never projected it, and `false` is exactly what such a transcript drew
+   * before. ⚠ **`false` means "nothing said so"**, never "this did not
+   * background anything" — three agents out of four never mark anything, so a
+   * client may not infer the absence of background work from it.
+   */
+  backgrounded?: boolean;
 }
 
 export interface FileChangeEvent {
@@ -668,9 +702,16 @@ export function hasLiveAgent(status: SessionStatus): boolean {
  * counterpart hits its `continue` and is never compared. Its floor is a floor on
  * how many pairs were compared, so a pair that was skipped does not lower it —
  * which makes the miss invisible in both directions. This was `MachineSettings`
- * for one release and the sweep covered none of it; the docblock over that
- * `continue` already records the same failure for three other types, one release
- * earlier. Renaming either side without the other switches the guard off silently.
+ * here while `registry.ts` already called it `MachineSettingsView`, and for that
+ * whole span the sweep covered none of it. ⚠ **Checked rather than remembered,
+ * because the first version of this sentence said "for one release" and that is
+ * not what happened**: `git log --all -S'export interface MachineSettings {' --
+ * packages/web/src/wire.ts` gives 29e38ff and 45ecb6e one day apart, both
+ * ancestors of `v0.8.0`, and `git show v0.8.0:packages/web/src/wire.ts` already
+ * carries the suffixed name — so no tag ever shipped the broken spelling and the
+ * window was a day of `dev`. The docblock over that `continue` records the same
+ * failure for three other types. Renaming either side without the other switches
+ * the guard off silently.
  */
 export interface MachineSettingsView {
   /** Minutes a conversation may sit untouched before its agent is shut down. `0` never does. */
@@ -959,15 +1000,111 @@ export interface ElicitationResolvedEvent {
  * each interface here up in `src/` **by name** and takes its `continue` when the
  * lookup misses, so a `…Snapshot` suffix would make this a mirror nothing
  * compares — and the floor cannot say so, because a skipped pair does not lower
- * `compared`, it merely fails to raise it. Measured while this shipped suffixed:
- * 51 interfaces compared with this pair invisible, 52 under the daemon's own
- * name. Third time that `continue` has swallowed a whole feature; the rule is
- * stated where the mirror is declared.
+ * `compared`, it merely fails to raise it.
+ *
+ * ⚠ **The suffixed spelling never shipped, and the sentence here used to say it
+ * did.** `git log --all -S'QueuedPromptSnapshot'` is empty and every line of this
+ * feature arrived in one commit, so the 51-against-52 reading this docblock used
+ * to quote was taken in a working tree and is not a fact about any release. The
+ * mechanism is the part worth keeping and it is re-takeable on demand: `npx tsx
+ * packages/web/scripts/webcheck.plugin-protocol.ts` prints its own
+ * `N interfaces` line, and a pair the `continue` skips is missing from that N
+ * with nothing anywhere saying which one. Third time that `continue` had
+ * swallowed a whole feature — the driver's own docblocks number them, and count
+ * {@link BackgroundTask} below as the fourth. The rule is stated where the mirror
+ * is declared.
  */
 export interface QueuedPrompt {
   id: string;
   seq: number;
   at: number;
+}
+
+/**
+ * What a task is doing, in the five words the agent's own adapter uses.
+ *
+ * ⚠ **Mirrored, never re-derived, and the terminal three are the reason.**
+ * `completed`, `failed` and `stopped` are over; `running` and `paused` are not.
+ * The daemon decides which of those defers parking, so a second opinion here
+ * about what "finished" means would draw a row the daemon is still holding an
+ * agent for — or, worse, a finished row over work the daemon thinks is live.
+ *
+ * ⚠ **And that is a rule this file states rather than a property anything holds:
+ * the split *is* copied by hand, in {@link taskFinished}, and nothing compares the
+ * two copies.** The drift sweep in `webcheck.plugin-protocol.ts` reads
+ * `src/acp/asynctasks.ts` — it was added there for `BackgroundTask` — but it
+ * enumerates `export interface` only, so this alias and the three words below it
+ * are invisible to it, and its count floor cannot notice what it never looked at.
+ * `taskFinished` carries what would catch it.
+ */
+export type AsyncTaskState = "running" | "paused" | "completed" | "failed" | "stopped";
+
+/** Per-task counters the agent reports. Numbers only. */
+export interface AsyncTaskUsage {
+  totalTokens: number;
+  toolUses: number;
+  durationMs: number;
+}
+
+/**
+ * One piece of background work, as the daemon holds it.
+ *
+ * ⚠ **Named `BackgroundTask` because `acp/asynctasks.ts` names it that**, under
+ * the rule stated above `QueuedPrompt`: the drift guard looks each interface up in
+ * `src/` **by name**, and a rename here makes this a mirror nothing compares while
+ * the floor stays silent about it.
+ *
+ * ⚠ **`outputFilePath` is drawn nowhere in this app, and on one of the three
+ * routes that carry this record it is not sent either — so `null` here means two
+ * different things and the type cannot say which.** The daemon keeps the field:
+ * `acp/asynctasks.ts` clips it at `MAX_ASYNC_TASK_PATH_CHARS` rather than dropping
+ * it, on the argument that a field dropped at ingest because today's screen has no
+ * use for it is a field that has silently stopped existing, and the path itself is
+ * unreadable anyway — it names
+ * `/private/tmp/claude-<uid>/…/tasks/<id>.output`, outside the workspace, which
+ * `files-paths-git.md` containment refuses to open. That is why there is no detail
+ * view to build and why the panel's footer says so in a sentence instead.
+ *
+ * Egress is where keeping it stopped being free. `ManagedSession.snapshot` in
+ * `src/registry.ts` takes a `listing` option, and the one route that passes it —
+ * `GET /sessions`, the polled many-session read — rewrites this field to `null` on
+ * every task. The clip allows 1024 characters and `MAX_TRACKED_ASYNC_TASKS` is 32,
+ * so that is a bound of ~32 KiB of paths *per session* on a response that repeats
+ * every four seconds over a relay, for a value nothing draws; it is an upper bound
+ * from the two constants rather than a frame anybody has seen. The WS `snapshot`
+ * frame and `GET /sessions/:id` pass no `listing` and carry it whole.
+ *
+ * ⚠ **So a reader may not take `null` off the listing as an answer.** Off the
+ * socket or off `GET /sessions/:id` it means *this task has no output file*; off
+ * `GET /sessions` it means *this route does not carry one*. Nothing in
+ * `packages/web` reads the field today, which is the only reason that is
+ * survivable — a reader added later has to take its value from the socket or the
+ * single-session read, never from the list. `snapshot`'s own docblock in
+ * `src/registry.ts` is the other half of this sentence, and the two have to move
+ * together: the cut is the daemon's and the consequence is this file's.
+ */
+export interface BackgroundTask {
+  id: string;
+  name: string;
+  taskType: string;
+  description: string;
+  state: AsyncTaskState;
+  summary: string | null;
+  lastToolName: string | null;
+  usage: AsyncTaskUsage | null;
+  canStop: boolean;
+  showInTranscript: boolean;
+  outputFilePath: string | null;
+  toolCallId: string | null;
+  startedAt: number;
+  /**
+   * When it reached a terminal state, or `null` while it runs — the daemon's clock.
+   *
+   * The agent sends no end time (the adapter drops the SDK's `end_time` and the
+   * final `usage`), so this is stamped at the terminal edge. It is what stops a
+   * finished card's elapsed time counting up for ever.
+   */
+  endedAt: number | null;
 }
 
 export interface SessionSnapshot {
@@ -1015,6 +1152,34 @@ export interface SessionSnapshot {
    * {@link queuedSeqs} so `undefined` behaves as `[]` in one place.
    */
   queuedPrompts?: QueuedPrompt[];
+  /**
+   * Work the agent started that outlives the call that started it.
+   *
+   * Optional for `cancelRequestedAt`'s reason — an older daemon does not send it
+   * — and every reader goes through {@link backgroundTasksOf}, so `undefined`
+   * behaves as `[]` in one place and a daemon that cannot say draws exactly what
+   * it drew before any of this existed.
+   *
+   * ⚠ **Empty is not an answer on its own.** Read it with
+   * {@link reportsBackgroundTasks}: three agents out of four never report
+   * background work at all, so an empty list from kimi means *nobody asked* and
+   * an empty list from claude means *nothing is running*. Drawing the first as
+   * the second is the one way this panel can lie.
+   */
+  backgroundTasks?: BackgroundTask[];
+  /**
+   * Whether this session's agent reports background work at all.
+   *
+   * ⚠ **Read, and it is what keeps the panel's empty state honest.** It travels
+   * `SessionView` → `EventList` → `TaskPanel`, which draws `No tasks currently
+   * running` when it is true and `This agent doesn't report background work` when
+   * it is false. That is the whole reason the field exists: the first sentence is
+   * a *claim*, and on three agents out of four it would simply be false — an empty
+   * list from kimi means *nobody asked*, not *nothing is running*. `WaitingFoot`
+   * is no longer the passive row this paragraph used to describe either; it is the
+   * control that opens that panel.
+   */
+  reportsBackgroundTasks?: boolean;
   /**
    * What this session does with a message sent while a turn is running.
    *
@@ -1402,6 +1567,63 @@ const NOTHING_WAITING: ReadonlySet<number> = new Set();
 export function queuedSeqs(session: SessionSnapshot): ReadonlySet<number> {
   const waiting = session.queuedPrompts ?? [];
   return waiting.length === 0 ? NOTHING_WAITING : new Set(waiting.map((entry) => entry.seq));
+}
+
+/** The one place {@link SessionSnapshot.backgroundTasks} stops being optional. */
+const NO_BACKGROUND_TASKS: readonly BackgroundTask[] = [];
+
+export function backgroundTasksOf(session: SessionSnapshot): readonly BackgroundTask[] {
+  return session.backgroundTasks ?? NO_BACKGROUND_TASKS;
+}
+
+/**
+ * Whether this state means the work is over.
+ *
+ * The pair to {@link AsyncTaskState}, written here because a client asks it per
+ * row and must give the daemon's answer: `parkable` defers on exactly the
+ * complement of this set, so a client that disagreed would draw a finished row
+ * over an agent the daemon is still holding.
+ *
+ * ⚠ **This list is a hand-written copy of `TERMINAL` in `src/acp/asynctasks.ts`,
+ * and calling it a mirror is the honest description rather than a reassurance.**
+ * `packages/web` may not import from `src/` — the standing reason this whole file
+ * exists — so there is no way to *ask* the daemon which states are terminal, and
+ * `isTerminalAsyncTaskState` is the function these three words are transcribed
+ * from. Both docblocks name the risk in the same sentence (*"a hand-written list
+ * of 'the finished ones' is exactly what goes out of step when a sixth word is
+ * added"*) and neither one of them stops it: the two lists agree today because
+ * somebody typed them the same, and a sixth state landing on the daemon's side as
+ * non-terminal would leave this answering `false` for a state it has never heard
+ * of — which is the safe direction — while a sixth *terminal* one would leave
+ * every client here drawing running rows over work that is over.
+ *
+ * **What would catch it is a text comparison in
+ * `packages/web/scripts/webcheck.plugin-protocol.ts`, and only that.** The
+ * interface sweep in that file already reads `src/acp/asynctasks.ts`, but it
+ * matches `export interface` and these are a `type` alias and a function body, so
+ * both pass under it silently — a skipped pair does not lower the `compared`
+ * floor, it merely fails to raise it, which is the `continue` that has now
+ * swallowed four features. The assertion wanted is the one already written for
+ * `PluginScope`: read both files off disk, take the quoted words out of
+ * `export type AsyncTaskState =` on each side and require the two sets equal, then
+ * take them out of `TERMINAL`'s declaration and out of this function's body and
+ * require *those* equal. Until that exists, this comment is the guard.
+ */
+export function taskFinished(state: AsyncTaskState): boolean {
+  return state === "completed" || state === "failed" || state === "stopped";
+}
+
+/**
+ * Whether this session has background work still going.
+ *
+ * ⚠ **Not the same question as "is the list empty".** An agent that does not
+ * report answers `false` here and would answer `false` to an emptiness test too,
+ * which is why every sentence drawn from this has to be about *what the agent
+ * said* rather than about what is running on the machine. See
+ * {@link SessionSnapshot.reportsBackgroundTasks}.
+ */
+export function backgroundWorkRunning(session: SessionSnapshot): boolean {
+  return backgroundTasksOf(session).some((task) => !taskFinished(task.state));
 }
 
 /**

@@ -2762,7 +2762,11 @@ export function createApp(options: ServerOptions): AppBundle {
    * complete.
    */
   app.get("/sessions", read, (c) => {
-    const all = registry.list().map((session) => session.snapshot());
+    // `listing`, which is what takes `outputFilePath` off every background-task
+    // row: this is the four-second poll the paragraph above is about, and that
+    // field is the largest thing in a record no client draws. The socket and
+    // `GET /sessions/:id` still carry it — see `ManagedSession.snapshot`.
+    const all = registry.list().map((session) => session.snapshot({ listing: true }));
     const limitParam = c.req.query("limit");
     const limit = limitParam === undefined ? null : Math.max(0, boundedInt(limitParam, 0));
 
@@ -3193,6 +3197,42 @@ export function createApp(options: ServerOptions): AppBundle {
         return jsonError(c, 409, "session_busy", "this session's context is being cleared", {
           status: result.status,
         });
+      case "not_ready":
+        return jsonError(c, 409, "session_not_ready", "the agent has not finished starting", {
+          status: result.status,
+        });
+      case "terminal":
+        return jsonError(c, 409, "session_terminal", "this session has ended", {
+          status: result.status,
+          exit: result.exit,
+        });
+    }
+  }));
+
+  /*
+   * Stop one piece of background work, without touching the turn.
+   *
+   * **The task id is a path parameter and is looked up in the set this session
+   * announced** — never a method name from a body, which is the rule the login
+   * command table states and the reason there is nothing here a caller could aim
+   * at a program of their choosing. `ManagedSession.stopBackgroundTask` does the
+   * lookup; this route only maps its answers.
+   *
+   * `stopped: false` is a **200**, deliberately: the task finished on its own
+   * between the tap and the request, which is losing an ordinary race — the same
+   * judgement `/cancel`'s `no_turn` makes, and for the same reason. A `404` is
+   * kept for an id this session never announced, which is a different sentence:
+   * not "you lost a race" but "there is no such task here".
+   */
+  app.post("/sessions/:id/async-tasks/:taskId/stop", write, withSession(async (c, managed) => {
+    const result = await managed.stopBackgroundTask(c.req.param("taskId"));
+    switch (result.kind) {
+      case "answered":
+        return c.json({ stopped: result.stopped, session: managed.snapshot() });
+      case "no_task":
+        return jsonError(c, 404, "task_not_found", "this session has no such background task");
+      case "failed":
+        return jsonError(c, 502, "agent_error", `the agent could not stop it: ${result.detail}`);
       case "not_ready":
         return jsonError(c, 409, "session_not_ready", "the agent has not finished starting", {
           status: result.status,
@@ -4502,7 +4542,14 @@ function guardedInjectWebSocket(inject: (server: Server) => void): (server: Serv
 
 type QueueItem =
   | { kind: "event"; stored: StoredEvent; bytes: number }
-  | { kind: "control"; frame: unknown; bytes: number };
+  /**
+   * ⚠ **Encoded at enqueue rather than at send, and that is what makes `bytes`
+   * the truth.** A control frame carries a whole `SessionSnapshot`, and there is
+   * no way to ask how large one will be without building the string — so the
+   * choice was either to serialize twice or to keep the string. It is kept; see
+   * {@link controlItem}.
+   */
+  | { kind: "control"; payload: string; bytes: number };
 
 /**
  * One attached client.
@@ -4679,19 +4726,25 @@ class StreamConnection {
     this.enqueue({ kind: "event", stored, bytes: estimateBytes(stored.event) + 64 }, replaying);
   }
 
+  /** Queue one control frame, weighed rather than guessed — see {@link controlItem}. */
   private control(frame: unknown): void {
     if (this.closed) return;
-    this.enqueue({ kind: "control", frame, bytes: 512 });
+    this.enqueue(controlItem(frame));
   }
 
   private enqueue(item: QueueItem, replaying = false): void {
-    this.queue.push(item);
-    this.queuedBytes += item.bytes;
+    this.push(item);
     if (this.queue.length > MAX_QUEUE_EVENTS || this.queuedBytes > MAX_QUEUE_BYTES) {
       this.collapse(replaying ? "backlog" : "slow_consumer");
       return;
     }
     this.flush();
+  }
+
+  /** The half of {@link enqueue} that is not the ceiling. See {@link collapse}. */
+  private push(item: QueueItem): void {
+    this.queue.push(item);
+    this.queuedBytes += item.bytes;
   }
 
   /**
@@ -4714,16 +4767,21 @@ class StreamConnection {
     this.queue.length = 0;
     this.queuedBytes = 0;
 
+    /*
+     * Weighed like every other frame now — the snapshot below is the largest
+     * control frame this socket ever sends and was the one charged at 512 bytes —
+     * but pushed rather than `enqueue`d, because these two frames **are** the
+     * response to the ceiling. Routing the recovery back through the check that
+     * just fired is a `collapse` inside a `collapse`, and the queue it would be
+     * measuring is the one this method emptied two statements ago. The count is
+     * still kept, so the socket's next `enqueue` sees what is really waiting.
+     */
     if (head >= from) {
-      this.enqueue({
-        kind: "control",
-        bytes: 512,
-        frame: { type: "lagged", from, to: head, dropped: head - from + 1, reason },
-      });
+      this.push(controlItem({ type: "lagged", from, to: head, dropped: head - from + 1, reason }));
     }
     this.cursor = head;
     this.lastSentSeq = head;
-    this.enqueue({ kind: "control", bytes: 512, frame: { type: "snapshot", session: this.managed.snapshot() } });
+    this.push(controlItem({ type: "snapshot", session: this.managed.snapshot() }));
 
     // Only a real slow consumer is counted towards the disconnect. A backlog is a
     // statement about how much history was asked for, so recording it here would
@@ -4751,7 +4809,9 @@ class StreamConnection {
     if (head.kind === "control") {
       this.queue.shift();
       this.queuedBytes -= head.bytes;
-      payload = safeStringify(head.frame);
+      // Already encoded, by `controlItem`, which is where the byte count came
+      // from. Encoding it again here is what that arrangement exists to avoid.
+      payload = head.payload;
     } else {
       const events: StoredEvent[] = [];
       let bytes = 0;
@@ -4896,6 +4956,35 @@ function parseElicitationAnswer(body: Record<string, unknown>): ElicitationAnswe
   if (isObject) return { content: content as Record<string, ElicitationContentValue> };
   if (body["decline"] === true) return { decline: true };
   return { cancel: true };
+}
+
+/**
+ * One control frame, encoded and weighed.
+ *
+ * ⚠ **The encoding happens here, at enqueue, and that is what makes `bytes` the
+ * truth rather than a guess.** This used to be a flat `bytes: 512` while `emit`
+ * beside it charged `estimateBytes(event) + 64` — so a `snapshot` frame carrying
+ * `MAX_TRACKED_ASYNC_TASKS` background tasks, around 93 KB on the wire, was
+ * accounted at 512 bytes: 180x under. `MAX_QUEUE_BYTES` exists to stop a client
+ * that has stopped reading from holding this daemon's heap, and under-counting by
+ * that factor lets `MAX_QUEUE_EVENTS` frames queue while `queuedBytes` still
+ * reads a few MiB — hundreds of megabytes retained before the ceiling that exists
+ * for exactly this ever trips. A phone behind a relay on LTE is the ordinary way
+ * to get there.
+ *
+ * There is no way to ask how large a frame will be without building the string,
+ * so the string is **kept**: `flush` sends it verbatim rather than encoding it a
+ * second time. What it costs is a frame `collapse()` later throws away having
+ * been encoded for nothing, which is the case this bound exists to make rare.
+ *
+ * `+ 64` for the frame overhead, the same term `emit` adds, and `length` is
+ * UTF-16 code units rather than bytes — `jsonSize` measures the event side the
+ * same way, and a ceiling on retained heap wants the string this process is
+ * holding rather than what the socket will put on the wire.
+ */
+function controlItem(frame: unknown): QueueItem {
+  const payload = safeStringify(frame);
+  return { kind: "control", payload, bytes: payload.length + 64 };
 }
 
 function safeStringify(value: unknown): string {

@@ -17,17 +17,22 @@ import { ImagePreview } from "./ImagePreview";
 import { formatLocation } from "../permission";
 import { transcriptNotice, type Gap, type Transcript, type TranscriptNotice } from "../store";
 import type {
+  AsyncTaskState,
+  BackgroundTask,
   PermissionOptionKind,
   PermissionResolvedEvent,
   ElicitationResolvedEvent,
   PromptEvent,
   SessionEvent,
 } from "../wire";
+import { taskFinished } from "../wire";
+import { TASK_NOUNS } from "../tasks";
 import type { PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
 import { Markdown } from "./Markdown";
 import { COLUMN, Dot, Empty, Icon, Badge, shortDuration, TAP_GROW_Y, TranscriptSkeleton } from "./bits";
 import { WorkingMark } from "./Mark";
+import { TaskPanel } from "./TaskPanel";
 import { ChangeCounts, DiffView } from "./DiffView";
 import {
   buildTail,
@@ -50,7 +55,6 @@ import {
   type ChangeNode,
   type EventNode,
   type GroupNode,
-  type OutstandingTask,
   type TailNode,
   type ToolNode,
 } from "./tail";
@@ -123,6 +127,12 @@ export function EventList({
   stale,
   echo,
   queued,
+  background,
+  reportsTasks,
+  tasksOpen,
+  onOpenTasks,
+  onCloseTasks,
+  onStopTask,
 }: {
   transcript: Transcript;
   /**
@@ -215,6 +225,51 @@ export function EventList({
    * memoises it on the seqs; see the context.
    */
   queued: ReadonlySet<number>;
+  /**
+   * `backgroundTasksOf(session)`, resolved by the caller for `working`'s reason.
+   *
+   * ⚠ **Not gated on `reporting`, unlike the delegation list above.** That gate
+   * exists because a delegation is a transcript row nothing will ever complete
+   * once the session is terminal — this is snapshot state the daemon clears at
+   * `doStop`, so an ended session already has an empty array and a second gate
+   * would only hide a `Completed` section somebody may still want to read.
+   */
+  background: readonly BackgroundTask[];
+  /**
+   * Whether this agent reports background work at all — see {@link TaskPanel}.
+   *
+   * It rides through this component untouched: the panel is rendered from here
+   * because this is where both of its sources already are — the delegations are
+   * derived from the tail two lines above, and deriving them a second time in
+   * `SessionView` would be the same walk over the same conversation to answer the
+   * same question twice.
+   */
+  reportsTasks: boolean;
+  /** Whether the panel is open. Held in `SessionView`, which makes room for it. */
+  tasksOpen: boolean;
+  /** Opens the background-tasks panel, which is where they are drawn now. */
+  onOpenTasks: () => void;
+  onCloseTasks: () => void;
+  /**
+   * Stop one of them, or `null` where nothing can.
+   *
+   * ⚠ **Nullable in the type and never `null` in practice, which is worth saying
+   * because the obvious reading of this prop is the opposite.** `SessionView`
+   * builds it as an unconditional `useCallback`, so the stop control is drawn
+   * wherever the task's own `canStop` is set, and a daemon too old to have the
+   * route answers `404` **into the card's own sentence** rather than into a
+   * toast — the row is what somebody pressed. That is a deliberate call and not
+   * this app's usual "a control has to be true in the state it is drawn in": the
+   * client cannot tell an old daemon from a current one without asking, and
+   * hiding the control on a guess costs more than one legible refusal does.
+   *
+   * The `null` arm therefore stands for a caller that does not exist yet rather
+   * than for a state this app reaches — `TaskCard`'s `offerable` reads it
+   * (`onStop !== null && task.canStop && !finished`) and is the half that already
+   * works. Implementing the rest means gating the callback in `SessionView` and
+   * correcting what is said here and on `TaskPanel`'s own prop for it.
+   */
+  onStopTask: ((task: BackgroundTask) => Promise<void>) | null;
 }): ReactNode {
   /*
    * The whole loaded transcript, cut only at the agent's own `/clear`.
@@ -301,7 +356,79 @@ export function EventList({
     () => (reporting ? outstandingTasks(rows, taskFloor) : []),
     [reporting, rows, taskFloor],
   );
-  const foot = footSays(working, tasks.length, elapsedSays(turnElapsedMs), stale);
+  /*
+   * The background set: one key per render, and everything read off it either
+   * memoised on that key or walked without allocating.
+   *
+   * ⚠ **The win is the context's identity, and the allocation arithmetic is
+   * written out here so nobody re-derives it wrongly from the shape.** Three
+   * places in this file have to know how much of `background` is still live — the
+   * foot's words, the foot's count and the row's `outstanding` prop — and this
+   * component re-renders on every arriving chunk, so answering each of them with
+   * `background.filter((task) => !taskFinished(task.state))` is three arrays per
+   * token for one question. None of the three does: `footSays` reduces to a
+   * number and hands `outstandingSays` the raw list, which walks it without a
+   * `Set` or a mapped array, and the memo below is the third. What that costs
+   * instead is `taskKey`, rebuilt **unconditionally** one line down — an array,
+   * N template strings and a join per render on any session that has a task at
+   * all. That is the price of a stable identity for the context and it is not
+   * zero; what it buys is below.
+   *
+   * ⚠ **Keyed on the tasks' own ids and states rather than on `background`**, which
+   * is `queuedKey`'s arrangement in `SessionView` and is here for the sharper of
+   * its two reasons: `taskStates` feeds a **context**, so a fresh `Map` on every
+   * token would re-render every tool card in the conversation on every token — the
+   * exact cost `DecisionsContext`'s docblock was written about. The snapshot is
+   * rebuilt on every logged event, so `background` is a new array per token on any
+   * session that has a task at all; this key changes only when a task actually
+   * says something. `toolCallId` is in it because it is merged newest-non-null on
+   * the daemon and so can arrive after the row it belongs to.
+   */
+  const taskKey = background.map((task) => `${task.id}:${task.state}:${task.toolCallId ?? ""}`).join(",");
+  const liveBackground = useMemo(
+    () => background.reduce((live, task) => (taskFinished(task.state) ? live : live + 1), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    [taskKey],
+  );
+  const taskStates = useMemo(
+    () => callStates(background),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    [taskKey],
+  );
+  const foot = footSays(working, tasks.length, elapsedSays(turnElapsedMs), stale, background);
+  /*
+   * What the foot says once nothing is outstanding and there is still a record.
+   *
+   * ⚠ **Deliberately not an arm of `footSays`, and the split is the rule rather
+   * than an accommodation.** That function answers *what is outstanding*, and
+   * finished work is not outstanding — a terminal row alone makes it say nothing,
+   * which is correct and is asserted as such. This is a different sentence about a
+   * different thing: the panel keeps a `Completed` section, so there is something
+   * to read, and the foot is the **only** way into it. Without this line the one
+   * door disappears at exactly the moment the history becomes worth opening, and
+   * the `role="status"` region below falls silent in the same frame — so a
+   * completion is never announced to a reader who cannot see the panel.
+   *
+   * The words stay keyed on the *live* count everywhere else, which is why this is
+   * reached only where `footSays` answered `null`: nothing here inflates
+   * `waiting for N` with rows nobody is waiting for.
+   *
+   * ⚠ **It says `background task` where `outstandingSays` would have said `shell`,
+   * and that is a deliberate exception to the noun rule one function over rather
+   * than an oversight.** That rule gives an all-of-one-kind *live* set its kind's
+   * noun because the reader is being told what they are waiting for, and the kind
+   * is the useful half — `2 shells` is a different wait from `2 monitors`. This
+   * sentence is a door into a history, where the kind has stopped deciding
+   * anything and the count is the whole of what it has to say; the canonical noun
+   * is also the only one that stays honest as the panel's `Completed` section
+   * fills with rows of several kinds, which is the ordinary case for it and the
+   * minority case for the line above.
+   */
+  const retained = background.length;
+  const history =
+    foot === null && retained > 0 ? `${retained} background task${retained === 1 ? "" : "s"} finished` : null;
+  const footLine = foot?.line ?? history;
+  const footSpoken = foot?.spoken ?? history;
 
   return (
     /*
@@ -474,9 +601,11 @@ export function EventList({
           {notice?.kind === "skeleton" && <TranscriptSkeleton />}
           <DecisionsContext.Provider value={decisions}>
             <QueuedContext.Provider value={queued}>
-              {rows.map((node) => (
-                <TailRow key={node.key} node={node} files={files} />
-              ))}
+              <TasksContext.Provider value={taskStates}>
+                {rows.map((node) => (
+                  <TailRow key={node.key} node={node} files={files} />
+                ))}
+              </TasksContext.Provider>
             </QueuedContext.Provider>
           </DecisionsContext.Provider>
           {/*
@@ -549,8 +678,41 @@ export function EventList({
            * inaudible as well as invisible. `noticeSays` is the fix and is shared with
            * the lines above, so the two cannot part company again.
            */}
+          {/*
+           * ⚠ **`footSpoken` and not `foot?.spoken`, so a completion is
+           * announced.** `footSays` answers `null` the instant the last task
+           * reaches a terminal state on an idle session, so `foot?.spoken` swaps
+           * this region straight back to the notice — usually the empty string —
+           * and the one event a reader might be waiting for is the one thing never
+           * said. `footSpoken` falls through to the same sentence the visible row
+           * draws, which keeps the pair that cannot disagree.
+           *
+           * ⚠ **Both sentences, joined — and it may not be `footSpoken ??
+           * noticeSays`, which silences the truncation notice for good.** That
+           * form reads as "the newest thing wins", and it is not: `footSpoken`
+           * falls back to `history`, which is non-null for as long as the session
+           * holds a single finished background row — and `Session.backgroundTasks`
+           * **keeps** terminal rows by decision, so that is the rest of the
+           * session, short of the daemon restarting and coming back with an empty
+           * set. So on exactly those sessions
+           * a `??` would outrank the notice permanently, and the notice is the one
+           * string whose whole reason for existing (see the block above) is that a
+           * truncated conversation was *inaudible as well as invisible*. Nothing
+           * would report it either: `webcheck` has no DOM, so this region is
+           * pinned as **source text** — a regex looking for `noticeSays` between
+           * `role="status"` and the closing tag — and `footSpoken ?? noticeSays`
+           * satisfies that regex exactly as this line does, while announcing one
+           * of the two.
+           *
+           * The notice stays **last** rather than first, which is the order the
+           * paragraph above already argued for and the only part unchanged by the
+           * join: it is already a visible `<p>` above the rows and is a standing
+           * condition, while a task finishing is a change that just happened, and a
+           * live region is for changes. Empty strings drop out, so an ordinary
+           * session with nothing truncated says exactly what it said before.
+           */}
           <p role="status" aria-live="polite" className="sr-only">
-            {foot?.spoken ?? noticeSays}
+            {[footSpoken ?? "", noticeSays].filter((said) => said !== "").join(". ")}
           </p>
           {/*
            * The foot is what the *agent* is doing, and nothing else.
@@ -561,9 +723,27 @@ export function EventList({
            * is happening in the conversation, and the other end says why the
            * conversation does not start at its beginning.
            */}
-          {foot !== null && (
-            <WaitingFoot line={foot.line} working={working} stale={stale} tasks={tasks} />
+          {footLine !== null && (
+            <WaitingFoot
+              line={footLine}
+              working={working}
+              stale={stale}
+              outstanding={tasks.length + liveBackground}
+              retained={retained}
+              onOpenTasks={onOpenTasks}
+            />
           )}
+          {/* Portaled, so where it is mounted decides nothing about where it is
+              drawn — and it is mounted here because this is the only component
+              holding both of its sources. */}
+          <TaskPanel
+            background={background}
+            onClose={onCloseTasks}
+            onStopTask={onStopTask}
+            open={tasksOpen}
+            reports={reportsTasks}
+            tasks={tasks}
+          />
         </div>
       </ResizedContext.Provider>
     </div>
@@ -607,6 +787,67 @@ const DecisionsContext = createContext<ReadonlyMap<string, PermissionOptionKind>
  * is one shared frozen `Set`.
  */
 const QueuedContext = createContext<ReadonlySet<number>>(new Set());
+
+/** The one identity a session with no background work ever puts on `TasksContext`. */
+const NO_TASK_STATES: ReadonlyMap<string, AsyncTaskState> = new Map();
+
+/**
+ * What the daemon last said about the work behind each tool call, by `toolCallId`.
+ *
+ * ⚠ **The card cannot tell "still running in the background" from "finished
+ * minutes ago" out of the log, so it may not be asked to.**
+ * `ToolNode.backgrounded` is sticky by design — a call that detached does not stop
+ * having detached — so `backgrounded && status === "completed"` is *"this call
+ * handed its work off"* and never *"that work is still going"*. A card drawing the
+ * `Terminal` glyph and `Running in the background` off that pair alone says *this
+ * call detached* for the life of the tab, which is a claim about the past worn as
+ * a claim about now. The join that fixes it was already on the wire and unread:
+ * the daemon carries `BackgroundTask.toolCallId` on every task and mirrors it
+ * **for exactly this**, and nothing in this file, `TaskPanel` or `tasks.ts` asked
+ * for it. Without it the panel row reaching `Completed` and the card two inches
+ * above it would be two surfaces disagreeing about one piece of work.
+ *
+ * The worse case is not that pair disagreeing, it is a **restart**:
+ * `backgroundTasksState` is in memory, so it comes back empty, and every
+ * historically-backgrounded card in a replayed transcript would assert running
+ * work on a conversation from days ago — with no panel row beside it and nothing
+ * that could ever clear it. That is the case `ToolCall`'s "no matching row means
+ * NOT running" arm is decided by.
+ *
+ * A context for `DecisionsContext`'s two reasons, with the identity question
+ * answered the way `QueuedContext`'s is: the value is memoised on the tasks' own
+ * ids and states, so it changes when a task says something and never merely
+ * because a snapshot arrived. Unlike those two this is read from *every* tool
+ * card rather than from one row kind, which is affordable only because of that
+ * key — a fresh `Map` per token would re-render the whole transcript's machinery
+ * on every chunk.
+ */
+const TasksContext = createContext<ReadonlyMap<string, AsyncTaskState>>(NO_TASK_STATES);
+
+/**
+ * The snapshot's task rows, indexed by the call that started them.
+ *
+ * A task with no `toolCallId` is dropped rather than kept under a placeholder: it
+ * is work with no card — a workflow, a monitor, anything the agent started without
+ * a tool call of its own — and it is drawn in the panel, which reads the list
+ * itself.
+ *
+ * ⚠ **A live row outranks a terminal one on the same id**, which is the only
+ * tie-break here and is the safe direction: one call id carrying two tasks means
+ * the agent re-used it, and answering "finished" over work that is running is the
+ * defect this map exists to fix, while answering "running" over a finished row for
+ * one more update is a marker that clears itself.
+ */
+function callStates(background: readonly BackgroundTask[]): ReadonlyMap<string, AsyncTaskState> {
+  const out = new Map<string, AsyncTaskState>();
+  for (const task of background) {
+    if (task.toolCallId === null) continue;
+    const held = out.get(task.toolCallId);
+    if (held !== undefined && !taskFinished(held)) continue;
+    out.set(task.toolCallId, task.state);
+  }
+  return out.size === 0 ? NO_TASK_STATES : out;
+}
 
 /**
  * Tell the transcript a row changed its own height.
@@ -726,6 +967,58 @@ function elapsedSays(turnElapsedMs: number | null): string | null {
   return turnElapsedMs < ELAPSED_FLOOR_MS ? null : shortDuration(turnElapsedMs);
 }
 
+/**
+ * How the foot names what is outstanding, over both of its sources.
+ *
+ * **The two sources are structurally disjoint** — delegations come from the
+ * transcript and carry `subagent` or steps, background tasks come from the
+ * snapshot, and the daemon never announces a backgrounded *subagent* as a task at
+ * all, because the adapter marks it `ignored`. So these two counts can be added
+ * without a `Set` to be safe, and the next person to reach for one should read
+ * this sentence and `isDelegation`'s instead.
+ *
+ * Three answers, in the order they are decided:
+ *
+ * * Delegations alone keep **today's words**, so every assertion written about
+ *   this line before background work existed goes on meaning what it meant.
+ * * Background work alone, all of one known kind, gets that kind's noun.
+ * * Anything mixed — two kinds, or delegations beside background work — falls to
+ *   the canonical `N background tasks`. That is Claude Code's own fallback, and
+ *   it is the honest one here too: the alternative is a sentence that lists, and
+ *   a foot line that lists is a panel drawn one row too high.
+ *
+ * ⚠ **It is handed the snapshot's list, terminal rows included, and decides for
+ * itself which of them are live** — and that is a correctness decision that a
+ * performance one nearly took away. The draft of this took the pre-filtered array
+ * `footSays` builds one line above the call, on the ground that filtering twice
+ * per token is an allocation this component cannot afford. True about the
+ * allocation and wrong about the signature: it turned an exported function that
+ * could not be misused into one whose answer depends on what a caller remembered
+ * to do, in a repository with no unit tests, where `outstandingSays(0, [one
+ * finished shell])` would have answered `1 shell`. The walk below skips terminal
+ * rows and allocates **nothing** — no `Set`, no mapped array — so the guarantee
+ * costs less than the array it replaced, and the caller's own count is the same
+ * walk rather than a second rule.
+ */
+export function outstandingSays(tasks: number, background: readonly BackgroundTask[]): string {
+  let live = 0;
+  let only: string | undefined;
+  let mixed = false;
+  for (const task of background) {
+    if (taskFinished(task.state)) continue;
+    live += 1;
+    if (only === undefined) only = task.taskType;
+    else if (only !== task.taskType) mixed = true;
+  }
+  const total = tasks + live;
+  if (live === 0) return `${tasks} task${tasks === 1 ? "" : "s"}`;
+  if (tasks === 0 && !mixed) {
+    const noun = only === undefined ? undefined : TASK_NOUNS[only];
+    if (noun !== undefined) return `${live} ${live === 1 ? noun[0] : noun[1]}`;
+  }
+  return `${total} background task${total === 1 ? "" : "s"}`;
+}
+
 export function footSays(
   working: boolean,
   tasks: number,
@@ -751,6 +1044,16 @@ export function footSays(
    * measurement and the reason the banner keeps the narrower question.
    */
   stale: boolean = false,
+  /**
+   * Work the agent said it left running, from the snapshot.
+   *
+   * Optional for `elapsed`'s reason, and `[]` is what every existing assertion is
+   * about — a daemon that cannot say, or an agent that does not report. Terminal
+   * rows are in here too and are filtered by {@link outstandingSays}: the panel
+   * keeps a `Completed` section, and a finished task is not something anybody is
+   * waiting for.
+   */
+  background: readonly BackgroundTask[] = [],
 ): { line: string; spoken: string } | null {
   /*
    * **`working` is a claim about now, and with nothing streaming this has no way
@@ -786,8 +1089,22 @@ export function footSays(
     : shown === null || !working
       ? "agent is working"
       : `agent is working, ${shown}`;
-  if (tasks === 0) return working ? { line: runs, spoken: said } : null;
-  const many = `${tasks} task${tasks === 1 ? "" : "s"}`;
+  // Counted rather than filtered, which is what lets `outstandingSays` stay
+  // self-defending: both walks skip terminal rows and neither allocates, so this
+  // one and the sentence below cannot disagree about which rows are live, and
+  // nothing here builds an array per token to answer a question about a number.
+  const live = background.reduce((count, task) => (taskFinished(task.state) ? count : count + 1), 0);
+  const outstanding = tasks + live;
+  /*
+   * ⚠ **`null` on an idle session with only finished rows, and that stays true.**
+   * This function answers *what is outstanding*, and terminal rows are not: the
+   * panel keeps a `Completed` section precisely because a finished task is
+   * something to read rather than something to wait for. The foot is still
+   * pressable in that state — `EventList` draws its own sentence for it and
+   * `WaitingFoot` takes `retained` — so the door does not close with this answer.
+   */
+  if (outstanding === 0) return working ? { line: runs, spoken: said } : null;
+  const many = outstandingSays(tasks, background);
   if (!working) return { line: `waiting for ${many}`, spoken: `waiting for ${many}` };
   return { line: `${runs} · waiting for ${many}`, spoken: `${said}, waiting for ${many}` };
 }
@@ -825,25 +1142,64 @@ export function footSays(
  * one", which was true when this shipped and stopped being true when it was
  * rewritten.
  *
- * Not a `button` when there is nothing to open: with no tasks this is the old
- * paragraph, `aria-hidden` and inert, because a disclosure whose body is empty is a
- * control that lies about having something behind it.
+ * Not a `button` when there is nothing to open: with no task rows at all this is
+ * the old paragraph, `aria-hidden` and inert, because a disclosure whose body is
+ * empty is a control that lies about having something behind it.
+ *
+ * ⚠ **"Nothing to open" is not "nothing outstanding", and reading it as such shuts
+ * the one door this row is.** The panel keeps every task it was told about,
+ * `Completed` section included, so a session whose background work has all
+ * finished still has rows to draw — and keyed on the live count this row would go
+ * back to being a paragraph at exactly the moment somebody would want to know how
+ * the build ended. `retained` is the question it asks; `outstanding` is left
+ * deciding the mark, which is the thing it is right about.
  */
 function WaitingFoot({
   line,
   working,
   stale,
-  tasks,
+  outstanding,
+  retained,
+  onOpenTasks,
 }: {
   line: string;
   working: boolean;
   /** Nothing is streaming this session — see the note above on why the mark stops. */
   stale: boolean;
-  tasks: readonly OutstandingTask[];
+  /**
+   * How many things are outstanding **now**, over both sources.
+   *
+   * A count rather than the lists themselves, because this row no longer draws
+   * them, and `footSays` has already turned the same two sources into the words
+   * beside it. ⚠ **It decides the mark and no longer decides the disclosure** —
+   * see `retained`, which is what that question moved to.
+   */
+  outstanding: number;
+  /**
+   * How many task rows the panel is still holding, finished ones included.
+   *
+   * ⚠ **This is what makes the row pressable, and it had to stop being
+   * `outstanding`.** The panel keeps a `Completed` section, and this row is the
+   * only way into it — so keyed on the live count the one door would disappear at
+   * the instant the retained history became worth reading, and a reader who had
+   * watched a build go into the background could never see how it ended.
+   *
+   * ⚠ **The two numbers are not complements over one set, and reading them as a
+   * partition is wrong in both directions.** `retained` is `background.length`,
+   * the snapshot's task rows and nothing else, finished ones included;
+   * `outstanding` is delegations from the *transcript* plus the live half of that
+   * same list. So `outstanding` counts rows `retained` holds (every live one) and
+   * also rows it never holds (every delegation), and `retained` counts rows
+   * `outstanding` drops (every finished one). What the pair is actually for is one
+   * disjunction: the row is pressable when either is non-zero, and the only state
+   * that draws the inert paragraph is the one where the panel has nothing in it at
+   * all — which holds because `tasks` and `outstanding` move together.
+   */
+  retained: number;
+  /** Opens the panel that draws them. */
+  onOpenTasks: () => void;
 }): ReactNode {
-  const [open, setOpen] = useState(false);
-  const onResized = useContext(ResizedContext);
-  if (tasks.length === 0) {
+  if (outstanding === 0 && retained === 0) {
     return (
       <p aria-hidden={true} className="flex h-5 items-center gap-2 text-2xs text-faint">
         <WorkingMark still={stale} />
@@ -852,59 +1208,50 @@ function WaitingFoot({
     );
   }
   return (
-    <div>
-      <button
-        onClick={() => {
-          setOpen(!open);
-          onResized();
-        }}
-        aria-expanded={open}
-        /* 20px of ink, 44px of target, and the growth is **downward only** — which
-           is free here and nowhere else in this file. This is the last row in the
-           transcript's column, and that column ends in `pb-12`: 48 pixels that hold
-           nothing pressable and exist so the conversation never sits flush against
-           the composer. So 24px of `::after` lands entirely in padding, overlaps no
-           neighbour's face, and adds nothing to `scrollHeight`. `TAP_GROW_Y` is the
-           wrong constant rather than the wrong idea — it is calibrated for a 32px
-           box and reaches 32px from this one — and growing symmetrically would put
-           this target 12px into a `space-y-1.5` gap and onto the card above, which
-           is itself a disclosure somebody aims at. The box stays `h-5`, so the row
-           is the same height whether or not a task is outstanding. */
-        className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint after:absolute after:inset-x-0 after:top-0 after:-bottom-6 after:content-[''] hover:bg-raised hover:text-fg"
-      >
-        {working ? <WorkingMark still={stale} /> : <Dot tone="pending" />}
-        <span className="min-w-0 flex-1 truncate">{line}</span>
-        <span className="shrink-0">
-          <Icon as={open ? ChevronDown : ChevronRight} size={11} />
-        </span>
-      </button>
-      {/* The transcript's only nesting idiom, as everywhere else that something
-          belongs to the row above it. */}
-      {open && (
-        <div className="mt-1 ml-3 space-y-1 border-l-2 border-edge pl-2">
-          {tasks.map((task) => (
-            <p key={task.key} className="flex items-center gap-2 text-2xs">
-              <span className="shrink-0 text-muted">
-                <Icon as={Bot} size={11} />
-              </span>
-              <span className="min-w-0 flex-1 truncate text-fg/85">
-                {task.title}
-                {task.latest !== null && <span className="ml-1.5 text-faint">{task.latest}</span>}
-              </span>
-              {task.steps > 0 && (
-                <span className="shrink-0 text-faint">
-                  {task.steps} step{task.steps === 1 ? "" : "s"}
-                </span>
-              )}
-            </p>
-          ))}
-          {/* The whole semantics of the count, in four words, where somebody who
-              wanted to know *what* will read it. The collapsed row keeps the
-              reader's own words; this is the qualifier. */}
-          <p className="text-faint">started, and not reported finished</p>
-        </div>
-      )}
-    </div>
+    /*
+     * ⚠ **A way into the panel, and no longer a fold of its own.**
+     *
+     * This was a disclosure that drew the same list inline. Two surfaces listing
+     * one set is how they come to disagree — and the inline one could not grow the
+     * card the panel needs without pushing the composer down the screen every time
+     * an agent backgrounded a shell. So the rows moved out and this row kept the
+     * one job it was always good at: saying, in the conversation, that something is
+     * still going, and being pressable.
+     *
+     * `aria-haspopup` rather than `aria-expanded`: there is nothing under this row
+     * to expand any more, and a control that claims a region it does not own is
+     * read out as a lie. `ResizedContext` went with the fold — nothing here changes
+     * this element's height now, so there is no scroll anchor to correct.
+     */
+    <button
+      aria-haspopup="dialog"
+      onClick={onOpenTasks}
+      /* 20px of ink, 44px of target, and the growth is **downward only** — which
+         is free here and nowhere else in this file. This is the last row in the
+         transcript's column, and that column ends in `pb-12`: 48 pixels that hold
+         nothing pressable and exist so the conversation never sits flush against
+         the composer. So 24px of `::after` lands entirely in padding, overlaps no
+         neighbour's face, and adds nothing to `scrollHeight`. `TAP_GROW_Y` is the
+         wrong constant rather than the wrong idea — it is calibrated for a 32px
+         box and reaches 32px from this one — and growing symmetrically would put
+         this target 12px into a `space-y-1.5` gap and onto the card above, which
+         is itself a disclosure somebody aims at. The box stays `h-5`, so the row
+         is the same height whether or not a task is outstanding. */
+      className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint after:absolute after:inset-x-0 after:top-0 after:-bottom-6 after:content-[''] hover:bg-raised hover:text-fg"
+    >
+      {/* Three marks for three claims, and the third is the new one. `Dot
+          tone="off"` is the hollow **static** dot, which is what this app already
+          means by "there is a thing here and nothing is happening to it" — the
+          state this row is in when every task has finished and the row is left
+          standing as a way back into the record. Drawing `pending` there would be
+          a pulse over work that ended, which is the same lie one shape smaller
+          that `WorkingMark still` exists to stop. */}
+      {working ? <WorkingMark still={stale} /> : outstanding > 0 ? <Dot tone="pending" /> : <Dot tone="off" />}
+      <span className="min-w-0 flex-1 truncate">{line}</span>
+      <span className="shrink-0">
+        <Icon as={ChevronRight} size={11} />
+      </span>
+    </button>
   );
 }
 
@@ -1789,8 +2136,56 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
     changes: node.changes.length,
     titleClipped: shownTitle.clipped,
   });
+  /*
+   * ⚠ **A backgrounded call reads `completed` and is not**, which is the one
+   * place this card may not believe the status it was sent.
+   *
+   * A Bash call that detaches returns the instant the command is handed off, so
+   * the update carrying `completed` is about the *handoff* — and ACP has no
+   * tool-call status for "still running elsewhere", which is exactly why the
+   * agent marks the update instead. Drawing the tick there is the lie this whole
+   * feature exists to stop: the card said the build was done while it was still
+   * compiling, and the transcript below it said nothing at all.
+   *
+   * `failed` still outranks it. A detach that then failed is a failure, and the
+   * marker is about where the work went rather than about how it ended.
+   *
+   * ⚠ **And the log is only half the answer: the snapshot decides whether the
+   * work is still going.** `backgrounded` is sticky by design — see
+   * `ToolNode.backgrounded`, where never resetting it is the whole point — so on
+   * its own it says *this call detached*, which stays true for ever, and a row
+   * keyed on it alone would read `Running in the background` for the rest of the
+   * tab's life. The daemon carries `toolCallId` on every background task for this
+   * join; `TasksContext` is that index, and `taskFinished` is asked here so the
+   * card and the panel read one rule out of one function.
+   *
+   * ⚠ **No matching row means NOT running, and that is a decision rather than a
+   * fallback.** The two absences are one answer on purpose: after a daemon
+   * restart the task set is empty (it is in memory), so every historically
+   * backgrounded card in a replayed transcript would otherwise claim live work on
+   * a conversation from last week, with no panel row and nothing that could ever
+   * clear it. It is also the only *defensible* answer — the marker rides the
+   * `jetbrains.air` extension and the adapter sends it only to a client that
+   * declared `asyncTasks`, precisely because without the lifecycle behind it the
+   * flag promises a card state nothing can resolve. So the pairing is by
+   * construction, and a card with no row behind it is a card that has not been
+   * told, which is not the same as a card that knows.
+   *
+   * The cost, stated: between the detaching update arriving on the socket and the
+   * snapshot that carries the new task row, the card shows the tick it was sent.
+   * That window is one push — `applyBackgroundTasks` touches the session, so a
+   * spawn is fanned out at once — and it errs in the recoverable direction: a card
+   * that says done and then says running is a correction, while one that says
+   * running for ever is the defect.
+   */
+  const backgroundState = useContext(TasksContext).get(node.toolCallId);
+  const running =
+    node.backgrounded &&
+    status === "completed" &&
+    backgroundState !== undefined &&
+    !taskFinished(backgroundState);
   const tone =
-    status === "failed" ? "text-fg" : status === "completed" ? "text-muted" : "text-fg";
+    status === "failed" ? "text-fg" : status === "completed" && !running ? "text-muted" : "text-fg";
 
   return (
     /*
@@ -1859,13 +2254,19 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
             as={
               status === "failed"
                 ? X
-                : status === "completed"
-                  ? Check
-                  : status === "in_progress"
-                    ? Loader
-                    : Download
+                : running
+                  ? Terminal
+                  : status === "completed"
+                    ? Check
+                    : status === "in_progress"
+                      ? Loader
+                      : Download
             }
             size={12}
+            /* Deliberately not spun. `Mark.tsx`'s own rule: one thing in this
+               transcript may say "right now" and it is the working mark — a
+               second spinner over work nobody is waiting a turn for reads as a
+               stall in the conversation, which it is not. */
             className={status === "in_progress" ? "animate-spin" : ""}
           />
         </span>
@@ -1923,6 +2324,19 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
             </span>
           )}
         </span>
+        {/* Claude Code's own sentence, verbatim, in prose rather than mono: it is
+            a state and not a command. Its `(↓ to manage)` becomes nothing here —
+            a key chord is not a thing on a phone, and the panel it points at is
+            reached from the foot of this same transcript, one tap away and always
+            on screen while anything is running.
+
+            ⚠ **And it stays text rather than becoming the second way in**, which
+            is not a preference: this whole row *is* the card's disclosure button,
+            so a control here would be a `button` inside a `button` — invalid, and
+            a tap target that resolves to whichever one the browser felt like. The
+            foot row is the one control, which is also what keeps *this* row's tap
+            doing what every other tool card's does. */}
+        {running && <span className="shrink-0 text-2xs text-faint">Running in the background</span>}
         {/* Survives collapse, like a machine section's blocked count: the number
             is the whole reason to open this. Deliberately not a token count —
             claude reports one on the spawn's completing update, but only there,

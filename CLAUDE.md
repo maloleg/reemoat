@@ -57,7 +57,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 929 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 932 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -447,9 +447,11 @@ short version of what is knowingly not built: no sandbox (the seam is
 `SessionRuntime`), no end-to-end
 encryption through the relay (the seam is `reemoat-enc: none` on the CONNECT
 handshake), no fleet rollout, no access log on the control plane, and
-no `@file` mentions, and **nothing says a background task is still running** — the
-spawn is on the wire (`run_in_background`) and its *end* is on no wire at all, so
-counting the starts would buy a row nothing could honestly take down (Q7.113).
+no `@file` mentions, and **a background task's end is on the wire for one agent
+only** — claude reports it behind a declared capability, which is what stops the
+sweep releasing an agent mid-build; the other three still say nothing, and so does
+claude about a backgrounded *subagent*, which was the measured case (Q2.228,
+Q7.113).
 **The daemon still has no registry** — it discovers nothing and polls
 nothing — but there *is* a market, and the half of Q7.104 that survived is which
 process reads it: a catalogue on its own host, read **by the browser**, with

@@ -61,8 +61,12 @@ entirely.
 turns up in a `switch` — and compared no **interface** at all. A field added to
 `SessionSnapshot` on the daemon and not copied into `wire.ts` compiles on both
 sides, ships, and is `undefined` at runtime on the screen that reads it. The sweep
-is over every interface declared in both, currently 50 with a floor of 48 that
-`webcheck` moves *with* the corpus, and asserts **`daemon ⊆
+is over every interface declared in `wire.ts` **whose daemon declaration lives in
+one of the files the sweep reads** — not simply every interface declared in both:
+a mirrored type from a file absent from that list hits the sweep's `continue` and
+is never compared, which has now swallowed a feature four times. Adding a mirrored
+type from a new daemon file means adding that file to the source list. Currently 54
+with a floor of 52 that `webcheck` moves *with* the corpus, and asserts **`daemon ⊆
 client`, never equality**: a field added after the first release is *optional* on
 this side on purpose, because an older daemon does not send it. What is refused is
 the client knowing *less* than the daemon says. ⚠ Its first run reported two

@@ -1880,7 +1880,7 @@ process.stdout.write("\nrefusing to remove a worktree on a count nobody could ta
 process.stdout.write("\nthe transcript on disk\n");
 {
   const evPath = join(sandbox, "events", "reemoat.db");
-  const text = (n: number): SessionEvent => ({ type: "text", role: "agent", thought: false, text: `e${n}` });
+  const text = (n: number): SessionEvent => ({ type: "text", role: "agent", thought: false, text: `e${n}`, messageId: null });
 
   {
     const store = openStores({ path: evPath, instanceId: "i_ev" });
@@ -1982,7 +1982,7 @@ process.stdout.write("\nthe transcript on disk\n");
     const store = openStores({ path: keepPath, instanceId: "i_keep" });
     const padding = "x".repeat(2_048);
     for (let n = 1; n <= 6_000; n += 1) {
-      store.events.append("s_keep", { type: "text", role: "agent", thought: false, text: `e${n}${padding}` });
+      store.events.append("s_keep", { type: "text", role: "agent", thought: false, text: `e${n}${padding}`, messageId: null });
     }
 
     const stats = store.events.stats("s_keep");
@@ -2109,7 +2109,7 @@ process.stdout.write("\nthe transcript on disk\n");
      */
     const bigPath = join(sandbox, "big", "reemoat.db");
     const store = openStores({ path: bigPath, instanceId: "i_big", maxEventBytes: 2048 });
-    const stored = store.events.append("s_big", { type: "text", role: "agent", thought: false, text: "x".repeat(20_000) });
+    const stored = store.events.append("s_big", { type: "text", role: "agent", thought: false, text: "x".repeat(20_000) , messageId: null });
     const kept = (stored.event as { text: string }).text;
     check("an oversized event is clipped rather than refused", kept.length < 20_000, true);
     check("and says so, with this repo's own marker", /\[truncated \d+ bytes\]$/.test(kept), true);

@@ -13,6 +13,13 @@ paths:
   - packages/web/src/ui/DiffView.tsx
   - packages/web/src/ui/Markdown.tsx
   - packages/web/src/ui/ImportCode.tsx
+  # The background panel is where this release's sharpest mono-vs-prose call is
+  # made — one card title drawn in mono or in sans by the *kind* of work it
+  # names, with mono as the fallback. `tasks.ts` decides every string it draws,
+  # so the two arrive together or the call is read with half its argument
+  # missing.
+  - packages/web/src/ui/TaskPanel.tsx
+  - packages/web/src/tasks.ts
   - packages/web/src/ui/settings/*
   - packages/web/scripts/webcheck.typography.ts
 ---
@@ -75,6 +82,26 @@ Every path drawn in mono is `text-2xs`: `DiffView`'s header, the picker's crumbs
 and the two that inherit a `text-2xs` line already (the session header's subtitle,
 via `Header`, and the import sheet's footer). **12px is the floor**, so a path can
 never be the thing a reader's eye lands on first.
+
+**A background task's title changes family by the *kind* of work it names, and
+mono is the fallback rather than the exception.** The condition at the call site is
+`task.taskType !== "workflow" && task.taskType !== "monitor"`, so a shell is
+`font-mono text-2xs`, a workflow and a monitor are `text-xs font-medium`, and
+**anything else a later adapter sends lands in mono**. That default is the same
+partition `tasks.ts` files an unknown `taskType` under `Shells` by, and for the
+same reason: the fallback kind is *a thing the agent ran*, and a backgrounded
+shell's title **is** its command line — the adapter recovers it from the Bash tool
+result. The two named exceptions are the kinds whose title is a name somebody
+wrote, a workflow's coming from the script's `meta.name`. ⚠ **The `monitor` arm is
+a call about the kind, not a measured claim about the strings in it**: `monitor` is
+also the adapter's bucket for `mcp`, and `taskTitle` gives every non-workflow kind
+its `description` first, so an mcp task's title is whatever that description is and
+nothing in this tree has seen one. One ternary at one call site decides all of it,
+which is what keeps a card from becoming two components that disagree, and the mono
+half takes the step below the sans half for the reason the session row proved
+twice. The card is also where `break-words` beats `truncate`: it is not a row, and
+the part of `python3 -c "impo…"` a `truncate` would cut is the part somebody opened
+the panel to read.
 
 **Everything that names a path goes through `displayCwd` or `pathCrumbs`**
 (`paths.ts`), never through a local helper. The import sheet had its own,
@@ -150,10 +177,37 @@ constants, two of them byte-identical local `const label` declarations in two fi
 that never imported from each other. Nothing had ever swept for the idiom, so the
 second wave was invisible until somebody counted. Q5.115.
 
-Three sites are outside the constants **on purpose**, and each says so at the code:
-`SessionBrowser`'s waiting-elsewhere band (`text-fg`, louder than its rows),
-`MachineSection`'s `RETIRE_HEADING` (`text-danger`), and `MachineOffer`'s `or` (no
-`font-semibold` — the word between two doors is not a heading).
+Four sites spend the idiom outside the constants **on purpose**, and every one of
+them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
+louder than its rows), `MachineSection`'s `RETIRE_HEADING` (`text-danger`),
+`MachineOffer`'s `or` (no `font-semibold` — the word between two doors is not a
+heading), and `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
+rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why).
+`webcheck.typography.ts` already names the last two in the same breath. The sweep
+that finds them is `grep -rn 'tracking-wider' packages/web/src` less `ui/bits.tsx`;
+`SettingField`'s hit is `FIELD_LABEL`, i.e. one of the three constants rather than
+an exception to them.
+
+**The background panel carries three heading treatments at once, and exactly one
+of them is a constant.** `PanelHeading` — `Agents (2)`, `Dynamic workflows (1)`,
+`Shells (10)`, `Completed (3)` — is `SETTINGS_HEADING`, because a band naming a
+section over the rows it holds is the whole of what that constant is for, and
+`text-muted` is the right tone for a label a reader scans past to reach a card.
+The panel's own `Background` is a dialog title and takes `text-lg font-semibold`,
+the step every other sheet head draws (`Sheet.tsx`'s `<h1>`), not a caps band — it
+was `text-sm` once, two steps under it, and `TaskPanel`'s `PanelHead` docblock
+records why that was wrong: a quieter title is a claim that this pop-up is a lesser
+one, which was not argued anywhere and is not true of it. And `Phases` is not an exception to
+the constants at all — it is outside the **idiom**: `text-2xs font-medium text-fg`,
+with no `tracking-wider` and no `uppercase`, so the sweep above does not even reach
+it. It is louder than the box beneath it and sits over a frame rather than at the
+head of a list, where a caps band would read as a second card's header — and its
+own comment in `TaskPanel.tsx` makes exactly that argument, naming these three
+constants and declining the idiom itself, so it says so at the code the way the
+four above do. Choosing between the three caps
+constants stays a colour decision, because they are one idiom at three tones;
+choosing the dialog title or `Phases` instead is not — those differ in size, weight
+and case as well, and that is a different treatment rather than a different tone.
 
 **⚠ A colour cannot be appended to one of these.** `` `${SETTINGS_HEADING}
 text-danger` `` is a silent no-op: two members of one family, resolved by Tailwind's

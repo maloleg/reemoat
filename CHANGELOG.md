@@ -42,12 +42,70 @@ it — so a citation here would be the one kind nothing checks.
   `409 turn_in_flight`. A daemon that has not been updated still answers the
   `409`, and the web client keeps its old behaviour against one.
 
+- **Work an agent leaves running after the turn that started it is visible, and
+  can be stopped.** A backgrounded shell, a monitor or a workflow used to end
+  with the tool call that started it — the card read `completed` while the
+  command ran on for minutes, and nothing in the app could say what was still
+  going. The transcript's still-working row is a control now, and it opens a
+  `Background` panel: a bottom sheet over the conversation on a phone, docked
+  against the right edge on a wide screen, with a card per task carrying what it
+  is, how long it has been going, what it has spent, and Stop wherever the agent
+  says the task may be stopped. A tool call that detached says `Running in the
+  background` instead of reading as finished.
+
+  It rides `jetbrains.air`, which is a **vendor `_meta` extension rather than
+  core ACP** — the draft surface for `agent-client-protocol#1992` — declared on
+  `initialize` and answered by claude alone. Measured 2026-09-11 against claude
+  2.1.268 under claude-agent-acp 0.73.0; **the other three agents send nothing
+  here.** kimi backgrounds shells, agents and cron jobs and maps its own
+  terminated event nowhere, codex's `unified_exec` PTY outlives the call it was
+  made in with no push at all, and opencode's `bash` tool has no background flag.
+  So an empty panel says *which* emptiness it is: `No tasks currently running` is
+  only sayable about an agent that would have told us, and the other three get a
+  sentence naming the silence instead.
+
+  Three limits, stated because each of them is somebody's build. A session
+  **claude reports live work in** is not parked by the idle sweep and is not the
+  one released when a machine hits its ceiling — the work outlives the turn, so
+  the half-hour that is enough for an idle conversation is not enough for this
+  one. That protection is exactly as wide as the signal it rides: the other three
+  agents report nothing, and even under claude a backgrounded *subagent* is
+  announced as nothing at all, so for those the only thing standing between a
+  build and a released agent is still the floor on how young a session may be and
+  still be taken at the ceiling — two minutes. **Nothing here survives a daemon
+  restart**: a resumed session starts with an empty set, and the transcript
+  carries a row saying how many tasks were running when the agent was shut down,
+  because the tasks themselves went with the process. And a `/clear` closes the
+  ACP session those tasks belonged to, which is what ends the shells it was
+  holding — a rung below that nothing here can see, so the transcript claims only
+  that the work was going and that this daemon can no longer say anything about
+  it. The rows go with the conversation, and a row of its own says how many were
+  going, since otherwise the only trace of a build somebody was waiting on
+  vanishes with the panel.
+
+- `POST /sessions/:id/async-tasks/:taskId/stop`, and `backgroundTasks` and
+  `reportsBackgroundTasks` on the session snapshot. Stopping answers `200` with
+  `stopped: false` when the task ended on its own between the tap and the request
+  — that is an ordinary lost race, not an error — `404` for an id this session
+  never announced, which is a different sentence, and `502` where the agent could
+  not be asked at all, which is *nobody knows* rather than *it was already over*;
+  the card says so where it was pressed. Both snapshot fields are optional on the
+  wire, so a client reading a daemon that has not been updated draws exactly what
+  it drew before any of this existed.
+
 ### Changed
 
 - **The composer's send slot follows what you have typed rather than what the
   agent is doing.** With the box empty it is Stop, as before; with anything in it
   worth sending it is Send. Whitespace does not count, so a stray space or tab
   leaves Stop where it was.
+- **The transcript's "still working" row opens the background panel rather than
+  unfolding a list beneath itself.** It used to be a disclosure drawing the
+  agent's outstanding delegations inline; two surfaces listing one set is how
+  they come to disagree, and the inline one could not grow to hold a task card
+  without pushing the composer down the screen every time an agent backgrounded
+  a shell. The row keeps the job it was always good at — saying, in the
+  conversation, that something is still going — and is pressable.
 
 ## [0.8.0] - 2026-09-11
 

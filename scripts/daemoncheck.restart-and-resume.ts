@@ -9,7 +9,13 @@ import {
   type SessionExit,
   type SessionStore,
 } from "../src/events.js";
-import { SessionRegistry, autoResumable, resumeBackoffMs, MAX_IDLE_RELEASE_MINUTES, SessionLimitError } from "../src/registry.js";
+import { SessionRegistry, autoResumable, resumeBackoffMs, MAX_IDLE_RELEASE_MINUTES, SessionLimitError, stoppedWithBackgroundWork, clearedWithBackgroundWork } from "../src/registry.js";
+import {
+  MAX_ASYNC_TASK_ID_CHARS,
+  MAX_ASYNC_TASK_NAME_CHARS,
+  MAX_ASYNC_TASK_TEXT_CHARS,
+  MAX_TRACKED_ASYNC_TASKS,
+} from "../src/acp/asynctasks.js";
 import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentProcess } from "../src/runtime/types.js";
@@ -201,6 +207,26 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     disposed: () => number;
     /** What `session/set_config_option` was actually asked for, in order. */
     configSets: () => { id: string; value: unknown }[];
+    /**
+     * The `clientCapabilities` this daemon declared, whole.
+     *
+     * `declaredFileIo` above is one projected boolean and this is the bag it came
+     * out of, kept separately rather than replacing it: the existing cases assert
+     * a *change* in the fs half across a retry, and a deep object would make every
+     * one of them read worse for no gain. This is here for the capability that has
+     * no second signal at all — see the AIR block below.
+     */
+    caps: () => Record<string, unknown>;
+    /**
+     * Push a `session/update` from the agent, out of turn.
+     *
+     * The only way to drive background work: the three task updates arrive
+     * between turns by definition, so nothing this rig answers can produce one.
+     * `null` before any agent has launched.
+     */
+    notify: (sessionId: string, update: Record<string, unknown>) => void;
+    /** What `_session/async_task/stop` was asked to stop, in order. */
+    stops: () => { sessionId: string; asyncTaskId: string }[];
   }
 
   /**
@@ -242,6 +268,28 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * an option to offer in the first place.
      */
     config?: boolean;
+    /**
+     * What `_session/async_task/stop` answers.
+     *
+     * `true` and `false` are both ordinary answers on that method — `false` means
+     * the task had already finished — and `"error"` is the third thing an agent
+     * can do, which is the one the row has a sentence for. Default `true`.
+     */
+    stopAnswer?: boolean | "error";
+    /**
+     * What the agent answers about the AIR extension on `initialize`.
+     *
+     * Four shapes, because `agentAdvertisesAsyncTasks` is a gate with four ways
+     * through and `reportsBackgroundTasks` — the field that tells *nothing is
+     * running* from *nobody asked* — was `false` in every driver in this
+     * repository, so neither direction of it was ever exercised. `true` answers
+     * the shape claude-agent-acp 0.73.0 really sends; `undefined`/`false` answer
+     * no `_meta` at all, which is kimi's; `"old"` answers a version below ours;
+     * `"unnamed"` answers the right version with `asyncTasks` missing from the
+     * list. The last two are the arms a version bump or a rename would break, and
+     * nothing could reach them.
+     */
+    advertisesTasks?: boolean | "old" | "unnamed";
   }): Rig => {
     let launched = 0;
     let opened = 0;
@@ -252,6 +300,20 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     const fileIoAtResume: boolean[] = [];
     const resumes: { sessionId: string; cwd: string; mcpServers: unknown }[] = [];
     const configSets: { id: string; value: unknown }[] = [];
+    const stops: { sessionId: string; asyncTaskId: string }[] = [];
+    let caps: Record<string, unknown> = {};
+    /*
+     * How to push into each agent, keyed by the conversation it holds.
+     *
+     * ⚠ **Per session and not per launch**, which is a correction rather than
+     * thoroughness: this rig makes a fresh pair of pipes per agent, so a single
+     * captured `send` is whichever agent started *last*, and a case that resumes
+     * two sessions then pushes into the first one addresses the second one's
+     * connection — where the id is not registered and the update is dropped on
+     * the floor with no error anywhere. Recorded where the agent learns which
+     * conversation it is holding, which is `session/resume` and `session/new`.
+     */
+    const pushes = new Map<string, (message: unknown) => void>();
     /*
      * ACP's wire shape — `type`/`currentValue`/`options` — and **not** this
      * daemon's own `kind`/`value`/`choices`. Written the internal way first, which
@@ -286,6 +348,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
         const send = (message: unknown): void => {
           toClient.write(`${JSON.stringify(message)}\n`);
         };
+
         let buffer = "";
         toAgent.on("data", (chunk: Buffer) => {
           buffer += chunk.toString("utf8");
@@ -297,6 +360,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
             const id = message["id"];
             switch (message["method"]) {
               case acp.methods.agent.initialize:
+                caps = ((message["params"] as any)?.clientCapabilities ?? {}) as Record<string, unknown>;
                 declaredFileIo =
                   (message["params"] as any)?.clientCapabilities?.fs?.readTextFile === true;
                 send({
@@ -309,6 +373,22 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                     // rather than `=== true` for that reason.
                     agentCapabilities: options.resume ? { sessionCapabilities: { resume: {} } } : {},
                     authMethods: [],
+                    // The mirror of the object this daemon sends, read back by
+                    // `agentAdvertisesAsyncTasks`. Absent by default, which is
+                    // what three of the four real agents send.
+                    ...(options.advertisesTasks === undefined || options.advertisesTasks === false
+                      ? {}
+                      : {
+                          _meta: {
+                            jetbrains: {
+                              air: {
+                                version: options.advertisesTasks === "old" ? 0 : 1,
+                                capabilities:
+                                  options.advertisesTasks === "unnamed" ? ["somethingElse"] : ["asyncTasks"],
+                              },
+                            },
+                          },
+                        }),
                   },
                 });
                 break;
@@ -317,6 +397,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
               // through `session/new` rather than `session/resume`.
               case acp.methods.agent.session.new:
                 opened += 1;
+                pushes.set(`conv_${opened}`, send);
                 send({
                   jsonrpc: "2.0",
                   id,
@@ -341,6 +422,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
               }
               case acp.methods.agent.session.resume: {
                 const params = message["params"] as Record<string, any>;
+                pushes.set(String(params["sessionId"]), send);
                 fileIoAtResume.push(declaredFileIo);
                 resumes.push({
                   sessionId: String(params["sessionId"]),
@@ -379,6 +461,22 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                 if (options.stallPrompt === true) break;
                 send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
                 break;
+              // Written out rather than left to `default`, which answers `{}` —
+              // and `{}` is `stopped: false`, i.e. the one answer that looks like
+              // a successful race rather than like a rig that was never asked.
+              case "_session/async_task/stop": {
+                const params = message["params"] as Record<string, any>;
+                stops.push({
+                  sessionId: String(params["sessionId"]),
+                  asyncTaskId: String(params["asyncTaskId"]),
+                });
+                if (options.stopAnswer === "error") {
+                  send({ jsonrpc: "2.0", id, error: { code: -32603, message: "task is not stoppable" } });
+                } else {
+                  send({ jsonrpc: "2.0", id, result: { stopped: options.stopAnswer ?? true } });
+                }
+                break;
+              }
               default:
                 if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
             }
@@ -410,6 +508,15 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
       peak: () => peak,
       disposed: () => ended,
       configSets: () => configSets,
+      caps: () => caps,
+      stops: () => stops,
+      notify: (sessionId, update) => {
+        pushes.get(sessionId)?.({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: { sessionId, update },
+        });
+      },
     };
   };
 
@@ -634,12 +741,16 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * all, and saying so is the point rather than a nuisance.**
      *
      * `releaseOneSlot` will not take a session that has only *just* gone idle —
-     * `CEILING_PARK_FLOOR_MS`, two minutes — because `parkable` cannot see a
-     * backgrounded build (Q7.113: the spawn is on the wire and its end is on no
-     * wire at all), so an agent whose turn ended seconds ago is the one it must
-     * not kill for a slot. Every fixture here resumes and reaches the ceiling in
-     * the same millisecond, which is exactly that shape, so the floor is faked to
-     * zero for the eviction cases and asserted for real in the block below.
+     * `CEILING_PARK_FLOOR_MS`, two minutes — because an agent whose turn ended
+     * seconds ago may be running something it did not say it was running. Every
+     * fixture here resumes and reaches the ceiling in the same millisecond, which
+     * is exactly that shape, so the floor is faked to zero for the eviction cases
+     * and asserted for real in the block below.
+     *
+     * ⚠ The margin is no longer the *only* defence — `parkable` refuses outright
+     * over work claude reports (Q2.228), driven in its own block further down —
+     * but it is still the whole of what stands for kimi, codex, opencode and for
+     * claude's backgrounded subagents, which the adapter marks `ignored`. Q7.113.
      */
     own.setSessionLimits({ live: 1, ceilingFloorMs: 0 });
 
@@ -667,9 +778,9 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * somebody is asking — but it used to ignore the clock *entirely*, asking for
      * candidates at `idleMs: 0`. That made the age clause vacuously true, so a
      * create or a wake could take an agent whose turn had ended seconds earlier,
-     * which is the one thing `parkable` cannot rule out: a session running a
-     * backgrounded build reports `idle`, its spawn is on the wire and its end is
-     * on no wire at all (Q7.113). So the ceiling keeps a two-minute margin.
+     * which is the case `parkable` can only partly rule out: a session running a
+     * backgrounded build reports `idle`, and only claude says so (Q2.228, Q7.113).
+     * So the ceiling keeps a two-minute margin for the rest.
      *
      * Driven by putting the floor back and asserting the *refusal*: `s_live` was
      * resumed moments ago, so it is inside the margin and must not be taken, and
@@ -934,6 +1045,842 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     check("but a message does bring it back, which is the other half of that arm", autoResumable(quiet?.exit ?? null, quiet?.agentSessionId ?? null, "prompt"), true);
 
     await own.shutdown();
+  }
+
+  /*
+   * Work the agent left running, and the one thing parking must not take.
+   *
+   * **The whole feature is that `status` cannot see this.** A session running a
+   * backgrounded build reports `idle` honestly — the turn ended — so before the
+   * clause below, the sweep released it and the agent's own shutdown group-killed
+   * every shell it had backgrounded. Measured on the development machine's live
+   * log: `s_5d26f98e` was parked 60m14s after its last event, with nothing having
+   * moved the idle clock in between. Q2.228.
+   *
+   * Driven through the real registry and a real `session/update`, never by
+   * calling `parkable` on a hand-built object: the precondition is a *derived*
+   * status plus a set fed from the wire, and a fixture that assigns either is
+   * asserting against the thing under test.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([
+      interruptedRow("s_bg", "daemon_restarted", "a_bg"),
+      interruptedRow("s_plain", "daemon_restarted", "a_plain"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+
+    /*
+     * ⚠ **First, the thing the daemon *sends* — and it is the only assertion here
+     * with no second signal behind it.**
+     *
+     * The adapter's gate wants a finite integer version of at least 1 *and* the
+     * capability named in a list. A declaration it refuses switches the whole
+     * lifecycle off with **no error on any wire**: no rejection, no log line, just
+     * a client that is never told about background work and a clause that never
+     * fires. Every other row below would go on passing, because they drive the
+     * updates by hand. This is the one that would not.
+     */
+    check("the daemon asks to hear about background work", rig.caps()["_meta"], {
+      jetbrains: { air: { version: 1, capabilities: ["asyncTasks"] } },
+    });
+
+    /*
+     * **The negative, first, so every "was not released" below means something.**
+     * A clause implemented as "claude never parks" satisfies all of them.
+     */
+    rig.notify("a_bg", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "task_1",
+      name: "sleep 600",
+      taskType: "shell",
+      description: "running the build",
+      showInTranscript: false,
+      canStop: true,
+    });
+    await settle();
+    const bg = own.get("s_bg");
+    check("the agent announced work and the session says so", bg?.snapshot().backgroundTasks.map((task) => [task.id, task.state]), [["task_1", "running"]]);
+    check("and still reads as an ordinary quiet session", bg?.status, "idle");
+
+    /*
+     * **The negative, so every "was not released" below means something.** A
+     * clause implemented as "claude never parks" satisfies all of them, and so
+     * does one that switched the sweep off. The two sessions are identical bar
+     * the announcement.
+     */
+    check("the one with nothing running is still released", await own.parkIdleSessions(now + 31 * 60_000), ["s_plain"]);
+
+    /*
+     * ⚠ **However long it has been quiet.** The threshold is about *age* and a
+     * build gets older while it runs, which is exactly why this is a clause rather
+     * than a larger number.
+     */
+    check("a session with work still running is not released", await own.parkIdleSessions(now + 24 * 60 * 60_000), []);
+    check("and it still holds its agent", own.liveSessionCount, 1);
+
+    /*
+     * ⚠ **And the refusal is the task rather than the fixture**, which is the row
+     * that fails loudly if somebody implements this as "an agent that reports
+     * background work never parks".
+     */
+    rig.notify("a_bg", {
+      sessionUpdate: "async_task_state_update",
+      asyncTaskId: "task_1",
+      state: "completed",
+      summary: "build finished",
+    });
+    await settle();
+    check("the work ending is on the wire", bg?.snapshot().backgroundTasks.map((task) => task.state), ["completed"]);
+    check("and the same sweep now releases it", await own.parkIdleSessions(now + 24 * 60 * 60_000), ["s_bg"]);
+    /*
+     * A terminal task is **kept**, not dropped — except that this one was parked,
+     * and parking clears the set outright. Both halves in one line: the session is
+     * released, and a released session claims nothing about processes that are
+     * gone.
+     */
+    check("and a released session claims no running work", own.get("s_bg")?.snapshot().backgroundTasks, []);
+
+    await own.shutdown();
+  }
+
+  /*
+   * ⚠ **The daemon numbers the messages an agent forgot to number, and that is
+   * what keeps twenty of them from becoming one paragraph.**
+   *
+   * ACP's `messageId` is the only boundary a client gets — *"a change in
+   * `messageId` indicates a new message has started"* — and a transcript joins a
+   * run's parts with no separator, which is right for the streamed fragments of
+   * one message and wrong for two messages in a row.
+   *
+   * Measured in `claude-agent-acp` 0.73.0, and this is the case the rule exists
+   * for: every path through `toAcpNotifications` calls `applyMessageId`, but
+   * `AsyncTaskRuntime` publishes its `**Task stopped by user:** <name>.` line as
+   * a **bare** update. Stopping twenty tasks is therefore twenty whole messages,
+   * none numbered and none ending in a newline, which drew as one run-on line.
+   *
+   * So: the first id proves the connection numbers, and from then on an
+   * unnumbered message gets a `~`-prefixed id of its own. Driven as the whole
+   * partition, because the arm that must **not** change is an agent that never
+   * numbers anything — kimi, codex and opencode send nothing here, and every
+   * chunk of theirs has to go on joining.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([
+      interruptedRow("s_num", "daemon_restarted", "a_num"),
+      interruptedRow("s_bare", "daemon_restarted", "a_bare"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 2 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    const say = (agent: string, text: string, messageId?: string): void =>
+      rig.notify(agent, {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text },
+        ...(messageId === undefined ? {} : { messageId }),
+      });
+    const idsOf = (id: string): unknown[] =>
+      (own.get(id)?.log.read(0, 1000, 1024 * 1024) ?? [])
+        .filter((stored) => stored.event.type === "text")
+        .map((stored) => (stored.event as { messageId: string | null }).messageId);
+
+    say("a_num", "he", "m1");
+    say("a_num", "llo", "m1");
+    say("a_num", "**Task stopped by user:** one.");
+    say("a_num", "**Task stopped by user:** two.");
+    say("a_num", "back to prose", "m2");
+    await settle();
+    check(
+      "the agent's own ids are carried, and what it left unnumbered gets a number here",
+      idsOf("s_num"),
+      ["m1", "m1", "~1", "~2", "m2"],
+    );
+
+    say("a_bare", "he");
+    say("a_bare", "llo");
+    await settle();
+    check("while an agent that numbers nothing keeps joining as it always did", idsOf("s_bare"), [
+      null,
+      null,
+    ]);
+    await own.shutdown();
+  }
+
+  /*
+   * ⚠ **A terminal state is not final, and this is measured rather than defensive.**
+   *
+   * Driven against a real claude 2.1.268 under claude-agent-acp 0.73.0, 2026-09-11
+   * — background `sleep 5` inside a turn held open by a foreground `sleep 30` —
+   * the end of one task arrives as **two** updates in this order: `stopped`, then
+   * `completed`. The first is the adapter closing a task it stopped seeing in the
+   * CLI's own background-task level; the second is the real edge landing behind
+   * it. A fold that refused a second terminal word, or that kept the first
+   * because it was terminal already, would leave every finished shell in this
+   * app's `Completed` section labelled `(stopped)` — which reads as *somebody
+   * stopped it* about a build that succeeded.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([interruptedRow("s_fix", "daemon_restarted", "a_fix")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    rig.notify("a_fix", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "t",
+      name: "t",
+      taskType: "shell",
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+    });
+    rig.notify("a_fix", { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: "stopped" });
+    await settle();
+    check("a level-derived close lands first", own.get("s_fix")?.snapshot().backgroundTasks.map((task) => task.state), ["stopped"]);
+    rig.notify("a_fix", { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: "completed" });
+    await settle();
+    check("and the real edge behind it corrects the row", own.get("s_fix")?.snapshot().backgroundTasks.map((task) => task.state), ["completed"]);
+    /*
+     * ⚠ **And the correction must not move the clock.** `endedAt` is this
+     * daemon's own stamp, and it exists because nothing on the wire carries one:
+     * the adapter's `publishState` sends no time at all, drops the SDK's final
+     * `usage` — the one guaranteed `duration_ms` — and reads `end_time` from
+     * nothing. So the panel measures a finished card against this field, and a
+     * second terminal word *relabelling* one end must not push it out: the two
+     * updates above are half a settle apart here and can be minutes apart on a
+     * real agent, which is a completed build whose elapsed time grew after it
+     * finished. Asserted as identity across the pair rather than as a range.
+     */
+    const stampedAt = own.get("s_fix")?.snapshot().backgroundTasks[0]?.endedAt ?? null;
+    check("the end was stamped when it ended", typeof stampedAt === "number" && stampedAt > 0, true);
+    rig.notify("a_fix", { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: "failed" });
+    await settle();
+    check(
+      "and a second terminal word relabels the row without moving its end",
+      own.get("s_fix")?.snapshot().backgroundTasks.map((task) => [task.state, task.endedAt === stampedAt]),
+      [["failed", true]],
+    );
+    /*
+     * The other direction, which is the reason this is not simply "stamp once":
+     * a row that goes live again did not end, and a kept stamp would freeze its
+     * elapsed time at a moment it has since passed.
+     */
+    rig.notify("a_fix", { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: "running" });
+    await settle();
+    check(
+      "while a row that is running again has no end at all",
+      own.get("s_fix")?.snapshot().backgroundTasks.map((task) => [task.state, task.endedAt]),
+      [["running", null]],
+    );
+    rig.notify("a_fix", { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: "completed" });
+    await settle();
+    /*
+     * And the fields that arrive *late*, which is the other half of the same
+     * measurement: the spawn carries neither `outputFilePath` nor `toolCallId`,
+     * and both turn up on a later update. A fold that only merged on a spawn
+     * would carry neither, ever.
+     */
+    rig.notify("a_fix", {
+      sessionUpdate: "async_task_progress",
+      asyncTaskId: "t",
+      toolCallId: "toolu_late",
+      outputFilePath: "/tmp/x/tasks/t.output",
+    });
+    await settle();
+    check(
+      "and correlation that arrives late is merged rather than dropped",
+      own.get("s_fix")?.snapshot().backgroundTasks.map((task) => [task.toolCallId, task.outputFilePath]),
+      [["toolu_late", "/tmp/x/tasks/t.output"]],
+    );
+    await own.shutdown();
+  }
+
+  /*
+   * Each terminal word releases, and `paused` does not.
+   *
+   * Four rows rather than one, because our live test is the complement of the
+   * adapter's `isTerminal` and a hand-written list of "the finished ones" is
+   * precisely what goes out of step when a sixth word is added. `paused` is the
+   * one that looks finished and is not — the work is still there, holding its
+   * files, waiting to be resumed.
+   */
+  {
+    const words = ["completed", "failed", "stopped", "paused"] as const;
+    const released: string[] = [];
+    for (const word of words) {
+      const rig = rigWith({ resume: true });
+      const store = storeOf([interruptedRow(`s_${word}`, "daemon_restarted", `a_${word}`)]);
+      const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+      own.restore({ reapOrphans: false });
+      await own.autoResume({ ...options, concurrency: 1 });
+      const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+      rig.notify(`a_${word}`, {
+        sessionUpdate: "async_task_spawned",
+        asyncTaskId: "t",
+        name: "t",
+        taskType: "shell",
+        description: "",
+        showInTranscript: false,
+        canStop: true,
+      });
+      rig.notify(`a_${word}`, { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: word });
+      await settle();
+      const parked = await own.parkIdleSessions(now + 31 * 60_000);
+      if (parked.length > 0) released.push(word);
+      await own.shutdown();
+    }
+    check("the three terminal words release and paused does not", released, ["completed", "failed", "stopped"]);
+  }
+
+  /*
+   * The ceiling asks the same question, and gets the same answer for free.
+   *
+   * `releaseOneSlot` goes through `parkCandidates` → `parkable`, so the clause
+   * arrives there with nothing threaded — and the consequence is worth driving
+   * rather than assuming: **at the ceiling with nothing takeable, `create`
+   * refuses**, which is a session somebody does not get so that a build somebody
+   * is running survives. `ceilingFloorMs: 0` is faked away so the refusal is the
+   * task rather than the two-minute margin, which is the same trick the block
+   * above this one uses for the opposite purpose.
+   *
+   * The `PathError`-versus-refusal ordering is what says which gate answered:
+   * the cwd does not exist, so a request that gets *past* the ceiling dies on the
+   * path instead.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([interruptedRow("s_only", "daemon_restarted", "a_only")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    own.setSessionLimits({ live: 1, ceilingFloorMs: 0 });
+    const gone = join(users, "u_alice", "no_such_dir_at_all");
+    const refusal = async (cwd: string): Promise<string> =>
+      own.create({ agent: "kimi", cwd }).then(
+        () => "created",
+        (error: unknown) => (error instanceof SessionLimitError ? error.reason : (error as Error).name),
+      );
+
+    check("with nothing running, the one idle agent is still taken for a slot", await refusal(gone), "PathError");
+    check("and that is where the slot came from", own.get("s_only")?.exit?.reason, "parked");
+
+    await own.get("s_only")?.resume();
+    rig.notify("a_only", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "build",
+      name: "build",
+      taskType: "shell",
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+    });
+    await settle();
+    check("but an agent running something is not, and the create is refused", await refusal(gone), "too_many_sessions");
+    check("and it still has its agent", own.get("s_only")?.status, "idle");
+
+    /*
+     * ⚠ **And what a stop does to a set it cannot honour.**
+     *
+     * A person ending this session takes the agent away, and the agent's own
+     * shutdown group-kills what it backgrounded — so the set describes processes
+     * that are gone and every snapshot after this would claim otherwise for ever.
+     * Cleared, and said **once**: one row for one act, on
+     * `dropQueuedUndelivered`'s precedent, rather than one per task.
+     */
+    await own.get("s_only")?.stop("stopped");
+    const said = (own.get("s_only")?.log.read(0, 1000, 1024 * 1024) ?? [])
+      .filter((stored) => stored.event.type === "error")
+      .map((stored) => (stored.event as { message: string }).message);
+    check("a stop says what it was still running, once", said, [stoppedWithBackgroundWork(1)]);
+    check("and the session then claims nothing", own.get("s_only")?.snapshot().backgroundTasks, []);
+    /*
+     * ⚠ **And the sentence names the agent rather than the session**, because
+     * `doStop` is also reached by `daemon_shutdown` and by `restartAgent`'s
+     * `config_changed` — the daemon taking the agent away and bringing it straight
+     * back. It read "when this session ended", so a deploy wrote that into a
+     * conversation that had not ended. Asserted as the words, since the failure is
+     * a true sentence about the wrong noun and nothing else would catch it.
+     */
+    check(
+      "and it is the agent that was shut down, never the session that ended",
+      [stoppedWithBackgroundWork(1).includes("session"), stoppedWithBackgroundWork(2)],
+      [false, "the agent was still running 2 background tasks when it was shut down"],
+    );
+
+    await own.shutdown();
+  }
+
+  /*
+   * ⚠ **A released session is one nobody may be able to tell was released**, and
+   * two things gave it away.
+   *
+   * Q2.224 decided parking shows *nothing*: no mark, no notice, an ordinary quiet
+   * session. Its point 7 then kept `agentConfigState` for that reason — the
+   * process is coming back to the same conversation, so the controls still
+   * describe it. The command list is the same kind of fact and was withdrawn
+   * anyway, so a parked session offered a working model picker and an **empty**
+   * `/` menu. The withdrawn list is literally `{ commands: [], dropped: 0 }`, so
+   * the menu is empty by construction rather than by a count anybody observed —
+   * commands are never persisted, so there is no figure here to re-take.
+   *
+   * ⚠ **And the placeholder moved with it, which is how parking became visible.**
+   * `composing.ts` is `state.hasCommands ? "Type / for commands" : "Message…"` and
+   * `Composer` feeds it `entries.length > 0`, so withdrawing the list does not
+   * leave a stale invitation standing over an empty menu — it rewrites the
+   * placeholder under the cursor of somebody who had touched nothing.
+   *
+   * The second is a row this feature added: a stop that ends live background work
+   * writes one `error` into the transcript, and a park must not — the person did
+   * not ask for it and cannot act on it.
+   */
+  {
+    const rig = rigWith({ resume: true, config: true });
+    const store = storeOf([interruptedRow("s_hush", "daemon_restarted", "a_hush")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    const hush = own.get("s_hush");
+
+    rig.notify("a_hush", {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [{ name: "clear", description: "start over" }],
+    });
+    await settle();
+    const liveCommands = hush?.snapshot().agentConfig;
+    check("a live session publishes its commands", hush?.agentCommands.commands.map((c) => c.name), ["clear"]);
+    const revisionBefore = hush?.snapshot().commandsRevision;
+
+    check("it is released after a quiet spell", await own.parkIdleSessions(now + 31 * 60_000), ["s_hush"]);
+    /*
+     * The three facts that make parking invisible, together — because each of them
+     * alone is satisfied by a session that gives itself away through the other two.
+     */
+    check("and the menu it offers is the one it had", hush?.agentCommands.commands.map((c) => c.name), ["clear"]);
+    check("with no revision bump, since nothing about the list changed", hush?.snapshot().commandsRevision, revisionBefore);
+    check("its controls are still there, which is the rule this follows", hush?.snapshot().agentConfig, liveCommands);
+    check(
+      "and nothing at all was written into the conversation but the status",
+      (own.get("s_hush")?.log.read(0, 1000, 1024 * 1024) ?? [])
+        .filter((stored) => stored.event.type === "error")
+        .map((stored) => (stored.event as { message: string }).message),
+      [],
+    );
+
+    await own.shutdown();
+  }
+
+  /*
+   * The bound on tracked work, and what it is a bound *on*.
+   *
+   * ⚠ **It counts live tasks, not rows, and the difference is a released
+   * build.** `MAX_TRACKED_ASYNC_TASKS` justifies refusing a new id with *"the set
+   * is already non-empty, so the session is already deferring"* — and the map
+   * keeps terminal rows on purpose, so that sentence was false for the case that
+   * matters. Reached by the ordinary use of a coding agent rather than by abuse:
+   * run that many shells, let them all finish, and the next real build was
+   * untracked, `hasLiveBackgroundWork` answered false, and the sweep took the
+   * agent out from under it. Nothing in this repository referenced the constant,
+   * so every driver was green over it.
+   *
+   * Driven through the constant rather than a literal `32`, so raising the cap
+   * cannot quietly stop testing the boundary.
+   */
+  {
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    const spawn = (id: string, extra: Record<string, unknown> = {}) => ({
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: id,
+      name: id,
+      taskType: "shell",
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+      ...extra,
+    });
+    const ended = (id: string, state: string) => ({
+      sessionUpdate: "async_task_state_update",
+      asyncTaskId: id,
+      state,
+    });
+
+    const rig = rigWith({ resume: true });
+    const own = new SessionRegistry(
+      new MemoryEventStore(),
+      storeOf([interruptedRow("s_cap", "daemon_restarted", "a_cap")]),
+      undefined,
+      rig.runtime,
+    );
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+
+    for (let i = 0; i < MAX_TRACKED_ASYNC_TASKS; i += 1) {
+      rig.notify("a_cap", spawn(`done_${i}`));
+      rig.notify("a_cap", ended(`done_${i}`, "completed"));
+    }
+    await settle();
+    const capped = own.get("s_cap");
+    check(
+      "a session fills to the cap with finished work",
+      capped?.snapshot().backgroundTasks.length,
+      MAX_TRACKED_ASYNC_TASKS,
+    );
+    check(
+      "and none of it is still running",
+      capped?.snapshot().backgroundTasks.every((task) => task.state === "completed"),
+      true,
+    );
+    /*
+     * ⚠ **The sweep is not run here, and that is not squeamishness.** At this
+     * point it *would* take the session — which is the hazard — and taking it
+     * disposes the agent, so every notify below would address a session with no
+     * agent and this block would assert nothing. That the sweep releases a session
+     * holding only finished work is already pinned above; what is owned here is
+     * that a live task arriving at the cap still registers.
+     */
+    rig.notify("a_cap", spawn("the_build"));
+    await settle();
+    const after = capped?.snapshot().backgroundTasks ?? [];
+    check(
+      "the next real build is tracked rather than dropped on the floor",
+      after.find((task) => task.id === "the_build")?.state,
+      "running",
+    );
+    check("the oldest finished row was spent to make room, not a live one", after.length, MAX_TRACKED_ASYNC_TASKS);
+    check("and the row given up is the one that ended first", after.some((task) => task.id === "done_0"), false);
+    check(
+      "so the sweep defers over it, which is the whole point of the clause",
+      await own.parkIdleSessions(now + 24 * 60 * 60_000),
+      [],
+    );
+
+    /*
+     * And the refusal still exists — reached only where the cap's own argument is
+     * finally true, which is every tracked row being live. Without this the fix
+     * above would read as "the cap was removed".
+     */
+    for (let i = 0; i < MAX_TRACKED_ASYNC_TASKS; i += 1) rig.notify("a_cap", spawn(`live_${i}`));
+    await settle();
+    const all = capped?.snapshot().backgroundTasks ?? [];
+    check("a set that is entirely live still refuses a further id", all.length, MAX_TRACKED_ASYNC_TASKS);
+    check("and none of what it holds was given up to take it", all.every((task) => task.state === "running"), true);
+
+    await own.shutdown();
+  }
+
+  /*
+   * A second `async_task_spawned` for an id that has already finished.
+   *
+   * The spawn arm is the one update that can arrive about a row that is over —
+   * the adapter creates a row from a spawn and from nothing else — so writing it
+   * unconditionally took a `completed` row back to `running` and restarted its
+   * clock. One such frame re-arms the deferral over work that has ended, which is
+   * the mirror of the failure above: there the sweep ran when it should not have,
+   * here it never runs at all. The state arm reasons carefully that *a terminal
+   * state is not final*; this is the same care pointed the other way.
+   */
+  {
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    const rig = rigWith({ resume: true });
+    const own = new SessionRegistry(
+      new MemoryEventStore(),
+      storeOf([interruptedRow("s_again", "daemon_restarted", "a_again")]),
+      undefined,
+      rig.runtime,
+    );
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const base = {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "t",
+      taskType: "shell",
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+    };
+    rig.notify("a_again", { ...base, name: "first" });
+    rig.notify("a_again", { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: "completed" });
+    await settle();
+    const endedAt = own.get("s_again")?.snapshot().backgroundTasks[0]?.endedAt ?? null;
+    rig.notify("a_again", { ...base, name: "second" });
+    await settle();
+    const row = own.get("s_again")?.snapshot().backgroundTasks[0];
+    check("a repeat spawn does not resurrect a task that ended", row?.state, "completed");
+    check("and does not move the end it was stamped with", row?.endedAt, endedAt);
+    check("what it describes is still taken, since that is news", row?.name, "second");
+    check(
+      "so the sweep is not re-armed over work that is over",
+      await own.parkIdleSessions(now + 24 * 60 * 60_000),
+      ["s_again"],
+    );
+    await own.shutdown();
+  }
+
+  /*
+   * What the reader refuses, and the direction every refusal fails in.
+   *
+   * `readAsyncTaskEdge` drops the **whole** update rather than repairing one, and
+   * its stated safety property is the direction: a task described with a word this
+   * client cannot read stays **live**, is never parked over, and is released when
+   * the agent is disposed. Coercing an unknown word to a terminal state would be
+   * inventing the one fact that gets somebody's build killed — so this drives a
+   * sixth state from an adapter that does not exist yet, and asserts the session
+   * is still deferred over.
+   */
+  {
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    const rig = rigWith({ resume: true });
+    const own = new SessionRegistry(
+      new MemoryEventStore(),
+      storeOf([interruptedRow("s_read", "daemon_restarted", "a_read")]),
+      undefined,
+      rig.runtime,
+    );
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    rig.notify("a_read", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "t",
+      name: "t",
+      taskType: "shell",
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+    });
+    await settle();
+
+    rig.notify("a_read", { sessionUpdate: "async_task_state_update", asyncTaskId: "t", state: "hibernating" });
+    await settle();
+    check(
+      "a state word from a later adapter is refused rather than coerced",
+      own.get("s_read")?.snapshot().backgroundTasks.map((task) => task.state),
+      ["running"],
+    );
+    check(
+      "and the session is still deferred over, which is the direction that matters",
+      await own.parkIdleSessions(now + 24 * 60 * 60_000),
+      [],
+    );
+
+    const before = own.get("s_read")?.snapshot().backgroundTasks.length;
+    rig.notify("a_read", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "x".repeat(MAX_ASYNC_TASK_ID_CHARS + 1),
+      name: "too long",
+      taskType: "shell",
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+    });
+    rig.notify("a_read", { sessionUpdate: "async_task_spawned", name: "no id", taskType: "shell" });
+    await settle();
+    check(
+      "an id past the bound and an update with none create nothing",
+      own.get("s_read")?.snapshot().backgroundTasks.length,
+      before,
+    );
+
+    /*
+     * The clips, on **both** paths. The spawn arm and the merge arm clip
+     * independently, so a clip dropped from one is invisible from the other — and
+     * these rows ride every snapshot, to every attached client, on every edge.
+     */
+    rig.notify("a_read", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "big",
+      name: "n".repeat(MAX_ASYNC_TASK_NAME_CHARS * 2),
+      taskType: "shell",
+      description: "d".repeat(MAX_ASYNC_TASK_TEXT_CHARS * 2),
+      showInTranscript: false,
+      canStop: true,
+    });
+    await settle();
+    const big = own.get("s_read")?.snapshot().backgroundTasks.find((task) => task.id === "big");
+    check(
+      "prose is clipped where the record is built",
+      [
+        (big?.name.length ?? 0) <= MAX_ASYNC_TASK_NAME_CHARS,
+        (big?.description.length ?? 0) <= MAX_ASYNC_TASK_TEXT_CHARS,
+      ],
+      [true, true],
+    );
+    // `clip` leaves the loss visible rather than cutting silently, which is what
+    // keeps the bound honest — and is why the lengths above are at or under the
+    // budget rather than exactly it: the note is inside the budget, not added to it.
+    check("and the cut is counted rather than silent", big?.description.endsWith("bytes]"), true);
+    rig.notify("a_read", {
+      sessionUpdate: "async_task_progress",
+      asyncTaskId: "big",
+      summary: "s".repeat(MAX_ASYNC_TASK_TEXT_CHARS * 2),
+    });
+    await settle();
+    const summary = own.get("s_read")?.snapshot().backgroundTasks.find((task) => task.id === "big")?.summary;
+    check(
+      "and again on the merge path, which clips on its own account",
+      [(summary?.length ?? 0) <= MAX_ASYNC_TASK_TEXT_CHARS, summary?.endsWith("bytes]")],
+      [true, true],
+    );
+    await own.shutdown();
+  }
+
+  /*
+   * Whether the agent said it reports background work at all.
+   *
+   * ⚠ **The field that tells *nothing is running* from *nobody asked*, and it was
+   * `false` in every driver here.** Three agents out of four send no `_meta`, so
+   * an empty list from kimi means nobody asked and an empty list from claude means
+   * nothing is running — and the panel draws a different sentence for each.
+   * `pincheck` asserts the object this daemon *sends* against the adapter's own
+   * gate; nothing asserted this daemon's read of what the agent *answers*, in
+   * either direction, so a regression to always-false would silently have claude
+   * claiming it reports nothing.
+   */
+  {
+    for (const [advertises, want] of [
+      [true, true],
+      [false, false],
+      ["old", false],
+      ["unnamed", false],
+    ] as const) {
+      const id = String(advertises);
+      const rig = rigWith({ resume: true, advertisesTasks: advertises });
+      const own = new SessionRegistry(
+        new MemoryEventStore(),
+        storeOf([interruptedRow(`s_adv_${id}`, "daemon_restarted", `a_adv_${id}`)]),
+        undefined,
+        rig.runtime,
+      );
+      own.restore({ reapOrphans: false });
+      await own.autoResume({ ...options, concurrency: 1 });
+      check(
+        `the agent's own answer decides whether it reports (${id})`,
+        own.get(`s_adv_${id}`)?.snapshot().reportsBackgroundTasks,
+        want,
+      );
+      await own.shutdown();
+    }
+  }
+
+  /*
+   * A `/clear` with work still running, which is the one combination that made a
+   * session immortal.
+   *
+   * `clearContext` re-keys the ACP session and unregisters the old id, so every
+   * later edge about a pre-clear task — including the terminal one — is routed to
+   * an id nobody is listening on and dropped. A row left behind therefore stays
+   * `running` for the life of the process: the sweep can never take the session,
+   * `releaseOneSlot` can never take it either, and a machine that has cleared a
+   * few conversations mid-build answers `429 too_many_sessions` at the ceiling
+   * with no way out but a manual stop. Stop could not repair it either — it
+   * addresses the *new* id, so it could only ever answer `stopped: false`.
+   *
+   * Both halves are asserted, because either alone is silent: the set is empty,
+   * *and* the transcript says what was walked away from.
+   */
+  {
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    const rig = rigWith({ resume: true });
+    const events = new MemoryEventStore();
+    const own = new SessionRegistry(
+      events,
+      storeOf([interruptedRow("s_clr", "daemon_restarted", "a_clr")]),
+      undefined,
+      rig.runtime,
+    );
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    rig.notify("a_clr", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "build",
+      name: "build",
+      taskType: "shell",
+      description: "",
+      showInTranscript: false,
+      canStop: true,
+    });
+    await settle();
+    check(
+      "a live task defers the sweep before the clear",
+      await own.parkIdleSessions(now + 24 * 60 * 60_000),
+      [],
+    );
+
+    const cleared = await own.get("s_clr")?.clearContext("/clear");
+    await settle();
+    check("the clear went through", cleared?.kind, "cleared");
+    check(
+      "the tasks went with the conversation they belonged to",
+      own.get("s_clr")?.snapshot().backgroundTasks,
+      [],
+    );
+    check(
+      "so the session can be released again rather than being held for ever",
+      await own.parkIdleSessions(now + 24 * 60 * 60_000),
+      ["s_clr"],
+    );
+    check(
+      "and the transcript says what was still running, once",
+      (own.get("s_clr")?.log.read(0, 1000, 1024 * 1024) ?? [])
+        .filter((stored) => stored.event.type === "error")
+        .map((stored) => (stored.event as { message: string }).message),
+      [clearedWithBackgroundWork(1)],
+    );
+    await own.shutdown();
+  }
+
+  /*
+   * Stopping one task, over the route, with the three answers it can give.
+   *
+   * ⚠ **`stopped: false` is a 200 and the row that says so is the point.** It
+   * means the work finished on its own between the tap and the request, which is
+   * losing an ordinary race — the same judgement `/cancel`'s `no_turn` makes, and
+   * a red error there makes the control look broken at the moment it got what it
+   * asked for. A `404` is the different sentence: not *you lost a race* but
+   * *there is no such task here*, which is also what a caller reaches by making
+   * the id up.
+   */
+  {
+    for (const [answer, want] of [
+      [true, { status: 200, body: { stopped: true } }],
+      [false, { status: 200, body: { stopped: false } }],
+      ["error", { status: 502, body: null }],
+    ] as const) {
+      const rig = rigWith({ resume: true, stopAnswer: answer });
+      const store = storeOf([interruptedRow(`s_stop_${String(answer)}`, "daemon_restarted", `a_stop_${String(answer)}`)]);
+      const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+      own.restore({ reapOrphans: false });
+      await own.autoResume({ ...options, concurrency: 1 });
+      const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+      rig.notify(`a_stop_${String(answer)}`, {
+        sessionUpdate: "async_task_spawned",
+        asyncTaskId: "t1",
+        name: "t1",
+        taskType: "shell",
+        description: "",
+        showInTranscript: false,
+        canStop: true,
+      });
+      await settle();
+      const result = await own.get(`s_stop_${String(answer)}`)?.stopBackgroundTask("t1");
+      if (want.body === null) {
+        check(`an agent that refuses is reported rather than read as a lost race (${String(answer)})`, result?.kind, "failed");
+      } else {
+        check(`the agent's answer is carried through (${String(answer)})`, [result?.kind, result?.kind === "answered" ? result.stopped : null], ["answered", want.body.stopped]);
+      }
+      check(`and the id reached the agent verbatim (${String(answer)})`, rig.stops(), [
+        { sessionId: `a_stop_${String(answer)}`, asyncTaskId: "t1" },
+      ]);
+      const made = await own.get(`s_stop_${String(answer)}`)?.stopBackgroundTask("never-announced");
+      check(`an id this session never announced is refused before the agent is asked (${String(answer)})`, [made?.kind, rig.stops().length], ["no_task", 1]);
+      await own.shutdown();
+    }
   }
 
   /*

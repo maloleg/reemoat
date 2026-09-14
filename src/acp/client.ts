@@ -1,9 +1,11 @@
 import type { Readable as NodeReadable } from "node:stream";
-import { Readable, Writable } from "node:stream";
+import { PassThrough, Readable, Writable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentHandle, AgentProcess } from "../runtime/types.js";
 import type { AgentLaunchConfig } from "./agents.js";
 import type { AgentRouting } from "./systems.js";
+import { AIR_CLIENT_CAPABILITY, ASYNC_TASK_MARKER, ASYNC_TASK_UPDATES, agentAdvertisesAsyncTasks } from "./asynctasks.js";
 
 /** Callbacks a session registers to receive everything addressed to it. */
 export interface SessionHandlers {
@@ -192,9 +194,69 @@ export class AcpClient {
       for (const listener of router.logListeners) listener(line);
     });
 
+    /*
+     * Everything addressed to a session, delivered once.
+     *
+     * Hoisted out of the notification handler because there are two roads to it
+     * now — the SDK's typed dispatch, and the split below — and a second copy is
+     * how the tap comes to see one of them and not the other.
+     *
+     * Taps first, and deliberately: the line below drops an update for an
+     * unregistered session on the floor (optional chaining, no throw), and a
+     * measurement that cannot see those is measuring the wrong thing. It also
+     * means a session handler that throws does not cost the tap its copy.
+     *
+     * The tap loop is guarded and evicting, exactly as `SessionLog.append` fans
+     * out and for the identical reason: whichever road got here, one broken
+     * listener must not abort routing for the notification that was about to be
+     * delivered, and a listener that throws has stopped being a tap.
+     *
+     * ⚠ **The last line is unguarded on purpose, and which failure that buys
+     * depends on the road — so neither road may be read off the other.** On the
+     * SDK's road this runs inside the agent's own RPC handler, and the SDK
+     * **swallows** a throw rather than closing anything: `processIncomingMessage`
+     * wraps its own handler loop in a `try`, and for a *notification* — which
+     * `session/update` is — the `catch` takes the `else` branch and does
+     * `console.error("Error handling notification", …)` (installed 1.3.0,
+     * `dist/jsonrpc.js:782-792`). The
+     * `processIncomingMessage(message).catch((error) => this.close(error))` at
+     * `dist/jsonrpc.js:434` therefore never fires for one: that promise resolves.
+     * So a broken session handler on that road costs the *update*, is reported
+     * only on the SDK's own stderr, and the connection carries on.
+     * On the split road there is no dispatch above it at all
+     * — it is a `'data'` listener on a Node stream, where a throw is an
+     * `uncaughtException` that the daemon's backstop logs and survives, leaving the
+     * agent's stdout permanently deaf instead — the measurement is at `handOff`.
+     * That road does not rely on this line: it calls `deliver` through `handOff` in
+     * {@link splitAsyncTaskUpdates}, which catches.
+     *
+     * ⚠ **What `handOff` then does is deliberately *harsher* than the SDK road, and
+     * the asymmetry is the decision rather than an oversight.** It calls `giveUp`,
+     * which destroys `onward` — so `AcpClient.closed` fires, the session reads
+     * `interrupted` and the daemon puts an agent back on it. The SDK road instead
+     * loses the one update and carries on. Neither is free, and the choice is
+     * between two silences: a lost update on a connection that keeps working is
+     * invisible until somebody notices the transcript is missing something, while a
+     * closed connection is a state this daemon already has a whole recovery path
+     * for. On *this* road the third option is the one that decides it — an
+     * unguarded throw in a `'data'` listener is an `uncaughtException`, after which
+     * the agent's stdout is permanently deaf with nothing to say so, which is worse
+     * than either.
+     */
+    const deliver = (notification: acp.SessionNotification): void => {
+      for (const listener of router.notificationListeners) {
+        try {
+          listener(notification);
+        } catch {
+          router.notificationListeners.delete(listener);
+        }
+      }
+      router.sessions.get(notification.sessionId)?.onUpdate(notification);
+    };
+
     const stream = acp.ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+      Readable.toWeb(splitAsyncTaskUpdates(child.stdout, deliver)) as ReadableStream<Uint8Array>,
     );
 
     const route = <T>(sessionId: string, pick: (handlers: SessionHandlers) => T): T => {
@@ -210,26 +272,7 @@ export class AcpClient {
 
     const connection = acp
       .client({ name: "reemoat" })
-      .onNotification(acp.methods.client.session.update, (ctx) => {
-        // Taps first, and deliberately: the line below drops an update for an
-        // unregistered session on the floor (optional chaining, no throw), and a
-        // measurement that cannot see those is measuring the wrong thing. It
-        // also means a session handler that throws does not cost the tap its
-        // copy.
-        //
-        // Guarded and evicting, exactly as `SessionLog.append` fans out and for
-        // the identical reason: this runs inside the agent's own RPC handler, so
-        // an unguarded loop would let one broken listener abort routing for the
-        // notification that was about to be delivered.
-        for (const listener of router.notificationListeners) {
-          try {
-            listener(ctx.params);
-          } catch {
-            router.notificationListeners.delete(listener);
-          }
-        }
-        router.sessions.get(ctx.params.sessionId)?.onUpdate(ctx.params);
-      })
+      .onNotification(acp.methods.client.session.update, (ctx) => deliver(ctx.params))
       .onRequest(acp.methods.client.session.requestPermission, (ctx) =>
         route(ctx.params.sessionId, (h) => h.onPermission(ctx.params, ctx.signal)),
       )
@@ -380,6 +423,29 @@ export class AcpClient {
              * `url` is deliberately never declared. See the handler above.
              */
             ...(elicitation ? { elicitation: { form: {} } } : {}),
+            /*
+             * Whether the agent tells us about work it left running.
+             *
+             * **The first thing this client declares in `_meta` rather than reads
+             * out of one**, and therefore a fifth capability shape — a vendor
+             * extension namespace carrying a version and a list of names, where
+             * the four above are a boolean, two markers and a boolean under a
+             * top-level key. `acp/asynctasks.ts` owns the object and the argument
+             * for every part of it, including why `nativeSubagentSessions` is not
+             * in that list.
+             *
+             * ⚠ **Declaring it changes exactly one other thing on the wire, and
+             * this client now projects that change.** The backgrounded Bash
+             * `tool_call_update` gains an AIR marker, and `Session.onUpdate` reads
+             * it through `readBackgroundedMarker` into `ToolCallUpdateEvent.backgrounded`
+             * — which is what stops a detached command's card reaching `completed`
+             * while the command runs on. `toolCallLineage` still reads only
+             * `_meta.claudeCode`; this is the second field ever read out of `_meta`
+             * and it is read somewhere else. Worth saying rather than assuming —
+             * *"declaring a capability changed nothing else"* is the kind of claim
+             * that is true until somebody checks, and here it stopped being true.
+             */
+            _meta: AIR_CLIENT_CAPABILITY,
           },
           clientInfo: { name: "reemoat", version: "0.0.0" },
         }),
@@ -631,6 +697,26 @@ export class AcpClient {
   }
 
   /**
+   * Whether this agent reports the background work it starts.
+   *
+   * Read off the agent's own `initialize` answer rather than off its id, which is
+   * the rule `ultracodeOptionId` already follows — and here it buys a value
+   * nothing else can supply. A count of zero from kimi, which backgrounds fully
+   * and says nothing, is indistinguishable from a count of zero from claude with
+   * nothing running; without this the panel draws an empty list for three agents
+   * out of four and claims it means *nothing is running*. It is `contextUsage`'s
+   * `null`-means-cannot-tell one field over.
+   *
+   * The same top-level `_meta` bag `supportsSteering` reads, which is also where
+   * the adapter publishes the AIR capability list — so the read side already had
+   * a home. `agentAdvertisesAsyncTasks` is the mirror of the gate the adapter
+   * applies to the object we send.
+   */
+  supportsAsyncTasks(): boolean {
+    return agentAdvertisesAsyncTasks(this.initializeResult._meta);
+  }
+
+  /**
    * Shuts the agent down without leaving an orphan.
    *
    * Closing stdin is the graceful path — both adapters treat EOF as "connection
@@ -692,6 +778,395 @@ function withStderr(error: unknown, config: AgentLaunchConfig, lines: string[]):
  * usually the interesting one.
  */
 const MAX_STDERR_LINE_CHARS = 64 * 1024;
+
+/**
+ * The longest single JSON-RPC frame an agent may write to stdout.
+ *
+ * ⚠ **`carry` below had no ceiling, and it sits under every byte all four agents
+ * write.** The shape that grows without stopping is a *live* agent whose single
+ * frame never terminates — a stuck encoder, a frame being streamed faster than any
+ * newline arrives, a hostile child writing `"y"` for ever — and agent stdout is
+ * untrusted input. (A process *dying* mid-write is not that shape and never was:
+ * it writes what it wrote, the pipe hits EOF, and the `end` handler below flushes
+ * the fragment. An earlier draft of this paragraph named it as the motivating case
+ * and it cannot produce the failure.) The SDK underneath is no backstop:
+ * `ndJsonStream`'s `LineBuffer` carries an incomplete line as an unbounded array of
+ * chunks — `#pending = []` in the installed 1.3.0's `dist/line-buffer.js` — so
+ * deleting this split would move the growth rather than bound it. This constant is
+ * the only bound anywhere between the child's pipe and a parsed message.
+ *
+ * **16 MiB, rather than the 64 KiB `MAX_STDERR_LINE_CHARS` gets, because a stderr
+ * line is prose and an ACP frame legitimately carries a whole file.**
+ * `fs/write_text_file` travels agent → client with the new content in
+ * `params.content`, a tool result can quote a file it has just read, and an image
+ * block is base64, which inflates by 4/3. Every cap this daemon owns is on the
+ * *event* made out of a frame — orders of magnitude smaller, and none of it has run
+ * at this point in the pipe — so none of them can stand in for this one.
+ *
+ * ⚠ **No frame from a real claude, kimi, codex or opencode has been measured here,
+ * so this number is argued rather than sampled, and the first draft said 8 MiB on
+ * the strength of "far above the largest frame anybody here has seen".** Nobody had
+ * seen one. 8 MiB is *inside* the range this docblock itself calls legitimate: a
+ * ~6 MB screenshot base64s to ~8 MiB, and over the ceiling the connection dies (see
+ * the block at the check), so that number spent a live session on traffic the
+ * protocol is entitled to carry. 16 MiB is one doubling clear of the largest such
+ * case anyone can name, chosen for the reason the command-hint cap gives: a budget
+ * set to the largest thing you have measured clips the next one. What would replace
+ * the argument with a measurement is a frame histogram off a real fleet — until
+ * then this is a refusal nothing in the tree drives, which is recorded as a gap in
+ * the ceiling block below.
+ *
+ * The cost of the number, stated rather than implied, and measured today (node
+ * v26.3.0, `node --expose-gc`, `v8.getHeapStatistics().used_heap_size` either side
+ * of building an at-ceiling `carry` and then flattening it):
+ *
+ * - A JS string is UTF-16 **unless every code unit is Latin-1**, in which case V8
+ *   keeps it one byte per unit. An at-ceiling ASCII `carry` — which is what JSON,
+ *   base64 and escaped content all are — measured 16.0 MiB; the same length with
+ *   one non-Latin-1 character in it measured 32.0 MiB.
+ * - The chunk that finally *terminates* such a frame doubles that for as long as it
+ *   takes to hand the line on: `carry + piece.slice(from, nl)` is a cons string, and
+ *   `line.includes(ASYNC_TASK_MARKER)` in `diverted` forces V8 to flatten it into a
+ *   fresh flat string while `carry` is still reachable. Measured at the same sizes:
+ *   32.1 MiB peak ASCII, 64.1 MiB non-Latin-1.
+ * - `carry` also overshoots, because the check below runs after the append rather
+ *   than before it: the most it can hold is the ceiling plus whatever one chunk
+ *   carried. That overshoot is the pipe's read size and not anything an agent
+ *   chooses, which is why it is left where it is rather than tested twice.
+ *
+ * So the honest trade is tens of megabytes per agent transiently, on a machine that
+ * runs several agents at once by design, against today's worst case, which is
+ * however much the agent feels like.
+ */
+const MAX_STDOUT_FRAME_CHARS = 16 * 1024 * 1024;
+
+/**
+ * Takes the background-task updates off the stream before the SDK reads it.
+ *
+ * ⚠ **This exists because the published SDK refuses them, and there is no hook
+ * that reaches the refusal.** The three task variants are a *draft* ACP extension
+ * (agent-client-protocol#1992) and `zSessionUpdate` is a closed `z.union` in both
+ * 1.3.0 and 1.4.0 with no arm for any of them. Two separate places parse it:
+ * `registerAppNotification`, which a custom parser *can* replace, and
+ * `ClientApp`'s constructor, which installs a `SessionUpdateRouter` that parses
+ * every `session/update` unconditionally before passing the message on. The
+ * second one is not reachable from any option, so a client using `acp.client()`
+ * cannot receive one of these however it registers its handler — the notification
+ * is rejected `-32602` and logged, and nothing above the transport sees it.
+ * **Measured by declaring the capability and driving a real notification**, which
+ * is what `daemoncheck`'s rig does; reading the schema first would have been the
+ * cheaper order.
+ *
+ * So the split happens below the SDK, and the *only* thing it removes is a
+ * notification the SDK would have thrown on. Everything else is forwarded byte
+ * for byte and keeps every check it has today, which is the whole reason this is
+ * a filter rather than a parser of our own: the alternative was owning the
+ * validation of all thirteen known variants to get three unknown ones.
+ *
+ * **The hot path is one `indexOf` per line.** `usage_update` arrives on
+ * essentially every output token, so a `JSON.parse` per line would be a real
+ * cost; the substring test fails on every line that is not about a task, and the
+ * parse runs only for the handful that could be. A line of agent prose that
+ * happens to contain the marker costs one wasted parse and is then forwarded,
+ * which is the correct answer rather than a near miss.
+ *
+ * ⚠ **Everything this function does happens in a stream `'data'` listener on the
+ * path of every byte of every agent's output, so its failure modes are the
+ * daemon's and not a session's** — an unbounded accumulation, a scan that re-read
+ * it, and a throw, which in a `'data'` listener silences the stream rather than
+ * rejecting a promise somebody is awaiting. All three are answered below, at
+ * `MAX_STDOUT_FRAME_CHARS`, at the loop, and at `handOff`.
+ *
+ * A `StringDecoder` rather than `chunk.toString()`, because a chunk boundary
+ * falling inside a multi-byte character would otherwise corrupt it — and the
+ * corruption would land in somebody's transcript rather than in an error.
+ */
+function splitAsyncTaskUpdates(
+  stdout: NodeReadable,
+  deliver: (notification: acp.SessionNotification) => void,
+): NodeReadable {
+  const decoder = new StringDecoder("utf8");
+  let carry = "";
+  /**
+   * Set once this split has given up on the stream; `onward` is destroyed and
+   * nothing more is read. Two things set it: the ceiling below, and a session
+   * handler that threw out of {@link handOff}.
+   */
+  let over = false;
+  const onward = new PassThrough();
+  /**
+   * Tear the stream down the way every other failure here does.
+   *
+   * One function rather than four lines twice, because the ordering matters and
+   * is not obvious: `over` first so anything already queued on the source is
+   * dropped rather than re-entering the handler, `carry` released because it is
+   * the thing that may be holding a ceiling's worth of string, then the source
+   * paused and only then `onward` destroyed.
+   */
+  const giveUp = (error: Error): void => {
+    over = true;
+    carry = "";
+    stdout.pause();
+    onward.destroy(error);
+  };
+  /**
+   * `deliver`, with a throwing session handler contained.
+   *
+   * ⚠ **There are two roads to `deliver` and neither closes the connection — but
+   * they fail differently, and only one of them fails *quietly*.** On the SDK's
+   * road a throw is caught by `processIncomingMessage`'s own `try`, and because
+   * `session/update` is a notification rather than a request the `catch` logs it
+   * with `console.error("Error handling notification", …)` and returns
+   * (installed 1.3.0, `dist/jsonrpc.js:782-792`) — the `.catch(… => this.close())`
+   * at `:434` is unreachable for one, since that promise resolves. So there the
+   * update is lost, a line lands on the SDK's stderr, and everything else
+   * continues. This road is a `'data'` listener on a
+   * `node:stream` Readable, and there is no dispatch above it at all. `deliver`'s
+   * own guard does not cover the gap either — that guard is around the *tap*
+   * fan-out, and the line under it, `router.sessions.get(...)?.onUpdate(...)`, is
+   * deliberately unguarded there.
+   *
+   * ⚠ **What an unguarded throw costs here is not a crash, which is worse.**
+   * Measured 2026-09-14 on this machine (node v26.3.0), a `'data'` listener over a
+   * `PassThrough` fed `"a\nBOOM\nc\nd\n"` and throwing on `BOOM`: `"a"` is
+   * forwarded, `"c"` and `"d"` are not — the throw leaves the rest of the chunk
+   * unprocessed — and the stream then delivers **nothing ever again**, a later
+   * `write("e\nf\n")` never reaching the listener. `scripts/daemon.ts`'s
+   * `process.on("uncaughtException")` logs `uncaught exception (continuing):` and
+   * the daemon stays up, so the observable result is one agent gone permanently
+   * silent with a live process around it: every later `session/update` lost, and a
+   * `session/prompt` whose response never arrives and whose turn never ends.
+   *
+   * So the catch is here, and it answers with the *same outcome the SDK's road
+   * produces* rather than with a swallow: this agent's connection is destroyed
+   * carrying the handler's error, `AcpClient.closed` resolves, and the registry
+   * leaves the session `interrupted` and puts an agent back on it. A handler that
+   * throws is a bug in this daemon rather than in the agent, and the two roads now
+   * cost it the same visible thing instead of one of them costing a silence.
+   */
+  const handOff = (notification: acp.SessionNotification): void => {
+    try {
+      deliver(notification);
+    } catch (error) {
+      giveUp(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+  stdout.on("data", (chunk: Buffer) => {
+    if (over) return;
+    /*
+     * ⚠ **The scan is over the piece that just arrived, never over the
+     * accumulation, and the first draft of this function scanned the
+     * accumulation.** It was replaced before it landed — this whole function is
+     * new in the change these numbers were taken during, so nothing here ever
+     * reached a release; the figures below are that draft measured against this
+     * one, on the machine it was written on.
+     * `carry += decoder.write(chunk)` followed by `carry.indexOf("\n")` from
+     * index 0 re-reads every byte already carried on every chunk, and V8 has to
+     * flatten the cons string to do it, so a frame that has not ended yet costs
+     * O(n²) in the length of the frame rather than O(n).
+     *
+     * Measured 2026-09-14 on this machine (`node --version` → v26.3.0), both
+     * variants standing in one process, fed 64 KiB chunks with no newline anywhere
+     * in them, best of three per size and the whole thing run twice, so the figures
+     * below are a range across two runs rather than one number each. Accumulating:
+     * 4 MiB cost **10.7–11.6 ms**, 8 MiB **46.8–51.5 ms**, 16 MiB **260–277 ms**
+     * and 32 MiB **1148–1212 ms** — roughly four times the cost for twice the
+     * frame, which is the signature. That last one is over a second of event-loop
+     * time: every session, every HTTP request and every heartbeat on the machine
+     * stalled behind one agent's output, this daemon's whole liveness surface spent
+     * on a line. Scanning the piece instead is flat — **1.4–1.6 ms**, **2.5–3.4 ms**
+     * and **4.0–4.2 ms** for the same three feeds, and the 32 MiB one never
+     * accumulates at all because the ceiling refuses it first (**1.5–1.6 ms** to
+     * reach the refusal). Real ndjson was never the slow case and does not move:
+     * 32 MiB of 512-byte lines measured 14.7–20.0 ms one way and 14.7–15.6 ms the
+     * other, which is the same number inside this rig's noise rather than a win.
+     *
+     * The rewrite was also driven against the old one for equivalence, with a
+     * faithful copy of `diverted` below rather than a stand-in — same corpus (the
+     * three real discriminators, a request-shaped frame carrying an `id`, an
+     * `async_task_`-prefixed kind that is *not* one of the three, prose containing
+     * the marker, an empty line, multi-byte text, a CRLF line and an unterminated
+     * tail), every chunk size from 1 to 64 bytes, so every boundary including
+     * mid-multi-byte. Byte-for-byte identical forwarded output and the identical
+     * three diverted frames at every size.
+     *
+     * It is also the shape the SDK's own `LineBuffer` uses one layer down — read
+     * off the installed 1.3.0's `dist/line-buffer.js`, which scans the chunk it was
+     * handed and pushes only the unterminated tail — so the two halves of the pipe
+     * now split lines the same way rather than one of them quadratically.
+     *
+     * `carry` is emptied on the first line and joined only there, so the common
+     * case — a chunk holding whole frames — concatenates nothing at all.
+     */
+    const piece = decoder.write(chunk);
+    let room = true;
+    let from = 0;
+    for (let nl = piece.indexOf("\n"); nl >= 0; nl = piece.indexOf("\n", from)) {
+      const line = carry + piece.slice(from, nl);
+      carry = "";
+      from = nl + 1;
+      if (!diverted(line, handOff)) room = onward.write(`${line}\n`);
+      // `handOff` sets `over` rather than throwing, so the give-up has to be read
+      // back here: there is nothing left to deliver this chunk's remaining lines
+      // to, and `onward` is already destroyed.
+      if (over) return;
+    }
+    carry += piece.slice(from);
+    if (carry.length > MAX_STDOUT_FRAME_CHARS) {
+      /*
+       * ⚠ **Over the ceiling this agent's connection dies, and that costs the
+       * turn in flight. It is chosen over two quieter answers, and the reasoning
+       * is the whole of why, because nothing in the tree drives this branch.**
+       *
+       * The message is lost in all three answers — a frame that never ended is a
+       * frame that was never sent, whatever is done with its prefix — so the only
+       * real question is what the loss looks like afterwards.
+       *
+       * *Forward the accumulated prefix on as a line of its own*, which is exactly
+       * what `diverted` does with a line it cannot `JSON.parse`. The two cases look
+       * alike and are not: there the line is **complete**, so forwarding is
+       * lossless and the SDK is the right party to answer for bytes the agent
+       * really sent; here the cut is **ours**. A truncated frame is corrupt JSON
+       * however it is read, the remainder becomes a second corrupt line behind it,
+       * and — read off the installed SDK 1.3.0, `dist/stream.js`, where
+       * `enqueueLine`'s `catch` is `console.error("Failed to parse JSON message:",
+       * trimmedLine, err)` and then carries on — forwarding a clipped prefix prints
+       * the whole prefix to this daemon's stderr, a ceiling's worth per occurrence,
+       * repeatable at will by the child. So forwarding is *dropping, plus a log
+       * flood*; it is strictly worse than dropping and is not the live alternative.
+       *
+       * *Drop the frame quietly and resync at the next newline.* This is the real
+       * alternative, and it is the one that loses more. The lost frame may be a
+       * request: the agent is then waiting for a response the SDK will never write,
+       * because the SDK never saw the request, and the turn hangs for ever with
+       * nothing anywhere saying why. A wedged turn that looks like a working one is
+       * the failure this daemon is least able to explain afterwards.
+       *
+       * *Destroy*, which is what happens. It is loud, bounded, and already a road
+       * this file travels: the `stdout.on("error")` line below does the same thing,
+       * the SDK turns it into `controller.error`, `AcpClient.closed` resolves, and
+       * the registry's `agent_exited` leaves the session `interrupted` and puts an
+       * agent back on it. The blast radius is one session — this daemon spawns one
+       * adapter per session, which is the fact {@link AcpClient.setProvider} leans
+       * on for a different reason — so the machine's other agents are untouched.
+       *
+       * ⚠ **What it costs, stated rather than implied: the turn in flight is
+       * gone.** Whatever the agent had done and not yet reported goes with the
+       * connection, the person sees an interrupted session and a fresh agent on it,
+       * and there is no sentence saying a frame was refused: this error reaches the
+       * SDK's reader and no further, and the only reporting channel this file holds
+       * is `router.logListeners`, which carries the agent's *own* stderr lines and
+       * would be lying if this daemon wrote into it. So the operator-visible fact
+       * is the restart rather than the reason — the same as every other `stdout`
+       * error here.
+       *
+       * ⚠ **Nothing drives this.** `daemoncheck` has no case that feeds a
+       * ceiling-breaching frame, so neither the threshold nor the destroy-over-drop
+       * choice is pinned by anything but this comment. The rig that already drives
+       * the async-task notifications in `scripts/daemoncheck.restart-and-resume.ts`
+       * is where it belongs.
+       *
+       * The `pause()` is flood control and is **never resumed**: it stops the
+       * child's next write re-entering this handler while the teardown runs, and
+       * `over` makes that certain for anything already queued. It is not the
+       * backpressure below — see the note there for why a frame still arriving
+       * cannot be backpressured at all, which is the whole reason it needs a
+       * ceiling instead.
+       */
+      giveUp(
+        new Error(
+          // Code units rather than "characters" or bytes: `carry.length` is what
+          // was tested, and the docblock on the constant reasons in both.
+          `agent wrote over ${MAX_STDOUT_FRAME_CHARS} UTF-16 code units with no newline; ` +
+            "the ACP frame cannot be completed",
+        ),
+      );
+      return;
+    }
+    /*
+     * ⚠ **Backpressure is propagated for a frame that has *ended*, and it is the
+     * one property this split could silently have taken away.**
+     * `Readable.toWeb(child.stdout)` used to give the SDK's reader a direct line
+     * to the child, so a slow consumer stopped the agent writing; a `PassThrough`
+     * in between buffers instead, and an agent streaming faster than the daemon
+     * drains would grow it without bound on the hot path. Pausing the *source* is
+     * what puts the pipe back where it was.
+     *
+     * ⚠ **It does not reach a frame that is still arriving, and the first draft
+     * of this comment claimed it did.** `room` is only ever assigned inside
+     * the loop above, so while one enormous line accumulates the loop body never
+     * runs, `room` stays `true` and this `pause()` is unreachable. That is not a
+     * bug to fix here: pausing the source mid-frame would deadlock it, because
+     * nothing drains `carry` except more bytes from the very stream that was
+     * paused. The accumulating half is bounded by `MAX_STDOUT_FRAME_CHARS`
+     * instead, and that division is the arrangement — backpressure for what a
+     * consumer is behind on, a ceiling for what no consumer can be behind on yet.
+     */
+    if (!room) {
+      stdout.pause();
+      onward.once("drain", () => stdout.resume());
+    }
+  });
+  // Forwarded rather than swallowed: the SDK's own reader treats the end of this
+  // stream as the connection closing, and `AcpClient.closed` is what `Session`
+  // watches to notice an agent that went away.
+  stdout.on("end", () => {
+    // Nothing to flush: after `over` the remaining `carry` is the fragment this
+    // split deliberately refused, and forwarding it is precisely what the block at
+    // the ceiling argues must never happen. (An earlier draft gave the reason as
+    // writing to a destroyed stream being "an error event nobody is listening for".
+    // That is false and measured false: `Readable.toWeb(onward)` in
+    // `AcpClient.launch` does listen — destroying this `PassThrough` after it has
+    // been handed to `toWeb` rejects the pending read cleanly with no
+    // `uncaughtException`, and a `write()` afterwards returns without throwing at
+    // all. The refusal is the reason; the stream would have tolerated it.)
+    if (over) return;
+    const rest = carry + decoder.end();
+    if (rest.length > 0 && !diverted(rest, handOff)) onward.write(rest);
+    // `handOff` may have given up on this very line; `onward` is then destroyed and
+    // ending it is neither needed nor meaningful.
+    if (!over) onward.end();
+  });
+  stdout.on("error", (error) => onward.destroy(error));
+  return onward;
+}
+
+/** Whether this line was a task update, and has therefore been handled here. */
+function diverted(line: string, deliver: (notification: acp.SessionNotification) => void): boolean {
+  if (!line.includes(ASYNC_TASK_MARKER)) return false;
+  let message: unknown;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    // Not our business. A line the SDK cannot parse either is the SDK's to
+    // answer for, and answering it here would make this filter the thing that
+    // decides what a malformed message means.
+    return false;
+  }
+  if (typeof message !== "object" || message === null) return false;
+  const envelope = message as { id?: unknown; method?: unknown; params?: unknown };
+  if (envelope.method !== acp.methods.client.session.update) return false;
+  /*
+   * ⚠ **A notification carries no `id` and a request does, and a request is not
+   * ours to swallow.** JSON-RPC 2.0 separates the two on the presence of that
+   * member alone, and `session/update` is *defined* as a notification — but an
+   * agent is untrusted input and is free to send it as a request anyway. Taken
+   * here, the agent then waits for a response nobody will ever write: the SDK is
+   * the thing that produces one, and it only produces it for a frame that reached
+   * it. So a frame carrying an `id` falls through and is forwarded, exactly like
+   * one whose method we do not recognise. `id: null` falls through too — that is
+   * a malformed request rather than a notification, and deciding what a malformed
+   * message means is the same thing this filter declines to do at the
+   * `JSON.parse` above.
+   */
+  if (envelope.id !== undefined) return false;
+  const params = envelope.params as { sessionId?: unknown; update?: { sessionUpdate?: unknown } };
+  if (typeof params?.sessionId !== "string") return false;
+  const kind = params.update?.sessionUpdate;
+  if (typeof kind !== "string" || !ASYNC_TASK_UPDATES.includes(kind)) return false;
+  deliver(params as unknown as acp.SessionNotification);
+  return true;
+}
 
 function pumpStderr(stderr: NodeReadable, onLine: (line: string) => void): void {
   stderr.setEncoding("utf8");
