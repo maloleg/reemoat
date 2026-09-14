@@ -3102,7 +3102,7 @@ export function createApp(options: ServerOptions): AppBundle {
             // 429 rather than 409: nothing about this session is wrong and
             // nothing needs answering first, there is simply a ceiling and the
             // remedy is to wait. The same shape `POST /sessions` uses at its own.
-            return jsonError(c, 429, "prompt_queue_full", "too many messages are already waiting", {
+            return jsonError(c, 429, "prompt_queue_full", "too many messages are already waiting or in flight for this session", {
               limit: mid.limit,
             });
           case "busy":

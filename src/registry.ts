@@ -1682,16 +1682,15 @@ interface QueuedEntry extends QueuedPrompt {
  * and then answers `unsupported` reaches the queue from the steer path on every
  * message, and `daemoncheck.mid-turn-messages.ts` drives exactly that session.
  *
- * ⚠ **One sentence has not caught up, and it is the one a person reads.**
+ * ⚠ **The wire sentence names both causes, because one of them is not a queue.**
  * `server.ts` answers this refusal with `429 prompt_queue_full` and the detail
- * *"too many messages are already waiting"*, which is false in the concurrent-steer
- * case — nothing is waiting. {@link MidTurnResult}'s `queue_full` arm is the same
- * for both causes, so nothing downstream can tell them apart; making it honest is a
- * wire-string change on `src/server.ts` (*"too many messages are already waiting or
- * in flight for this session"*), and it is recorded here rather than left to be
- * rediscovered from a 429 over an empty queue. The log line on the queueing path
- * below is **not** affected: it reads `queuedPrompts` itself, so it can only fire
- * with eight genuinely waiting.
+ * *"too many messages are already waiting or in flight for this session"*. The
+ * shorter *"already waiting"* was false in the concurrent-steer case — nothing is
+ * waiting — and {@link MidTurnResult}'s `queue_full` arm is the same for both
+ * causes, so nothing downstream can tell them apart and correct it. The log line
+ * on the queueing path below is **not** affected and deliberately keeps the
+ * shorter sentence: it reads `queuedPrompts` itself, so it can only fire with
+ * eight genuinely waiting.
  */
 export const MAX_QUEUED_PROMPTS = 8;
 

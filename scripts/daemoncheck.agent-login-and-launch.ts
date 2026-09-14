@@ -16,7 +16,8 @@ import {
 } from "../src/acp/agents.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import { MemoryEventStore } from "../src/events.js";
-import { SessionRegistry, sameCommands } from "../src/registry.js";
+import { sameBackgroundTasks, SessionRegistry, sameCommands } from "../src/registry.js";
+import type { BackgroundTask } from "../src/acp/asynctasks.js";
 import {
   LocalRuntime,
   firstVersion,
@@ -389,6 +390,73 @@ process.stdout.write("\nthe agent's command list is bounded where it arrives\n")
   check("a list that is the same but now cut is announced", sameCommands({ commands: [], dropped: 0 }, { commands: [], dropped: 3 }), false);
   check("withdrawing everything is announced", sameCommands(listOf("a"), { commands: [], dropped: 0 }), false);
   check("and an empty list republished empty is not", sameCommands({ commands: [], dropped: 0 }, { commands: [], dropped: 0 }), true);
+
+  /*
+   * ⚠ **`sameBackgroundTasks`, which was exported with nothing driving it.**
+   *
+   * Its two siblings above are exported precisely because a `daemoncheck` sweeps
+   * them; this one had the same `export` and the same amplification to guard —
+   * `applyBackgroundTasks`' `touchSafe()` builds a snapshot, writes a SQLite row
+   * and enqueues a frame **per attached client**, inside the agent's own
+   * synchronous emit path — and nothing asserted any of it.
+   *
+   * The `usage.durationMs` exclusion is the row that matters. The adapter's
+   * progress frame may carry a usage block and nothing else, which merges to a
+   * record identical bar a counter no screen draws; comparing it would fan a
+   * snapshot out to every client for a number nobody reads. It is also exactly the
+   * kind of deliberate omission a later tidy-up reads as a bug and "fixes".
+   */
+  const bgTask = (over: Partial<BackgroundTask> = {}): BackgroundTask => ({
+    id: "t1",
+    name: "build",
+    taskType: "shell",
+    description: "",
+    state: "running",
+    summary: null,
+    lastToolName: null,
+    usage: null,
+    canStop: true,
+    showInTranscript: true,
+    outputFilePath: null,
+    toolCallId: null,
+    startedAt: 1_000,
+    endedAt: null,
+    ...over,
+  });
+  const usage = (durationMs: number) => ({ totalTokens: 10, toolUses: 2, durationMs });
+
+  check("an identical list is not announced", sameBackgroundTasks([bgTask()], [bgTask()]), true);
+  check("an empty list republished empty is not", sameBackgroundTasks([], []), true);
+  check("a new task is", sameBackgroundTasks([bgTask()], [bgTask(), bgTask({ id: "t2" })]), false);
+  check("a withdrawn one is", sameBackgroundTasks([bgTask()], []), false);
+  check(
+    "a reorder is, since the order is the one the panel shows",
+    sameBackgroundTasks([bgTask(), bgTask({ id: "t2" })], [bgTask({ id: "t2" }), bgTask()]),
+    false,
+  );
+  check("a state change is", sameBackgroundTasks([bgTask()], [bgTask({ state: "completed" })]), false);
+  check("and an end time is", sameBackgroundTasks([bgTask()], [bgTask({ endedAt: 2_000 })]), false);
+  // The three fields no screen reads today are still compared: a comparison that
+  // knows what today's UI draws goes wrong the day a second client draws more.
+  check("a summary nothing draws yet is still announced", sameBackgroundTasks([bgTask()], [bgTask({ summary: "done" })]), false);
+  check("and a lastToolName", sameBackgroundTasks([bgTask()], [bgTask({ lastToolName: "Bash" })]), false);
+  check("and an outputFilePath", sameBackgroundTasks([bgTask()], [bgTask({ outputFilePath: "/tmp/x" })]), false);
+  // The exclusion, from both sides.
+  check(
+    "a frame whose only delta is `usage.durationMs` is NOT announced",
+    sameBackgroundTasks([bgTask({ usage: usage(1_000) })], [bgTask({ usage: usage(9_999) })]),
+    true,
+  );
+  check(
+    "but a token count moving is",
+    sameBackgroundTasks([bgTask({ usage: usage(1_000) })], [bgTask({ usage: { totalTokens: 99, toolUses: 2, durationMs: 1_000 } })]),
+    false,
+  );
+  check(
+    "and usage appearing where there was none is",
+    sameBackgroundTasks([bgTask()], [bgTask({ usage: usage(1_000) })]),
+    false,
+  );
 }
 
 /* ------------------------------------------------------------------ *

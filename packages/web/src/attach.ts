@@ -281,8 +281,9 @@ export function admitFiles(existing: readonly PendingAttachment[], incoming: rea
  * inverts: a button that refused would be the one lying.
  *
  * What is left to refuse is narrow and is the caller's to decide, not this
- * function's: see `Composer`'s `sendRefused`, which is a session that is
- * `stopping` and a daemon too old to have the queue at all. Everything else about
+ * function's: see `Composer`'s `sendRefused` for the current set — a session that
+ * is `stopping`, a daemon too old to have the queue at all, and a `/clear` typed
+ * mid-turn, which the daemon still refuses. Everything else about
  * this predicate is unchanged — text or files, and an upload in flight wins over
  * both.
  */

@@ -73,9 +73,9 @@ export function taskTitle(task: BackgroundTask): string {
  * which is the only pair that answers for both.
  *
  * A running task measures against `now`, which the panel ticks once a second —
- * the one place in this app that schedules a render for a clock, and it is
- * affordable because the panel is a surface somebody opened rather than the
- * transcript.
+ * the only clock-driven render in the transcript surface, `MachineInstalls` having
+ * its own for install progress — and it is affordable because the panel is a
+ * surface somebody opened rather than the transcript.
  */
 export function taskElapsedMs(task: BackgroundTask, now: number): number {
   const end = task.endedAt ?? now;

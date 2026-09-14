@@ -1868,19 +1868,216 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
         canStop: true,
       });
       await settle();
-      const result = await own.get(`s_stop_${String(answer)}`)?.stopBackgroundTask("t1");
+
+      /*
+       * ⚠ **Over the route, and that is the whole reason this block was rewritten.**
+       *
+       * It used to call `managed.stopBackgroundTask` directly while the table
+       * beside it declared a `status` for each answer — and nothing ever read that
+       * field. So the method was driven and the *route* was not: its status map
+       * (200 / 404 / 502, and the two 409s), its envelope, and the deliberate
+       * `stopped: false → 200` this block's own prose argues for were asserted
+       * nowhere, and deleting the handler in `server.ts` left `daemoncheck` green.
+       * `want.status` is live now, which is what keeps the table honest.
+       */
+      const routed = createApp({
+        registry: own,
+        verifier,
+        instanceId: `i_stop_${String(answer)}`,
+        startedAt: now,
+        credentials,
+        roots: [users],
+        logins: new AgentLoginRuns({ runtime: own.sessionRuntime, onWarning: () => {} }),
+      }).app;
+      const stopOver = async (taskId: string): Promise<[number, any]> => {
+        const response = await routed.fetch(
+          new Request(
+            `http://d/sessions/s_stop_${String(answer)}/async-tasks/${encodeURIComponent(taskId)}/stop`,
+            { method: "POST", headers: { authorization: `Bearer ${tokenFor("u_alice")}` } },
+          ),
+        );
+        return [response.status, await response.json()];
+      };
+
+      const [status, body] = await stopOver("t1");
       if (want.body === null) {
-        check(`an agent that refuses is reported rather than read as a lost race (${String(answer)})`, result?.kind, "failed");
+        check(
+          `an agent that refuses is a 502 rather than a lost race (${String(answer)})`,
+          [status, body.error?.code],
+          [want.status, "agent_error"],
+        );
       } else {
-        check(`the agent's answer is carried through (${String(answer)})`, [result?.kind, result?.kind === "answered" ? result.stopped : null], ["answered", want.body.stopped]);
+        check(
+          `the agent's answer is carried through, under a 200 (${String(answer)})`,
+          [status, body.stopped],
+          [want.status, want.body.stopped],
+        );
+        check(
+          `and the answer carries the session back with it (${String(answer)})`,
+          typeof body.session?.id,
+          "string",
+        );
       }
       check(`and the id reached the agent verbatim (${String(answer)})`, rig.stops(), [
         { sessionId: `a_stop_${String(answer)}`, asyncTaskId: "t1" },
       ]);
-      const made = await own.get(`s_stop_${String(answer)}`)?.stopBackgroundTask("never-announced");
-      check(`an id this session never announced is refused before the agent is asked (${String(answer)})`, [made?.kind, rig.stops().length], ["no_task", 1]);
+
+      // The 404 is the other sentence, and it is taken before the agent is asked:
+      // `rig.stops()` must not have grown.
+      const [madeStatus, madeBody] = await stopOver("never-announced");
+      check(
+        `an id this session never announced is a 404, before the agent is asked (${String(answer)})`,
+        [madeStatus, madeBody.error?.code, rig.stops().length],
+        [404, "task_not_found", 1],
+      );
       await own.shutdown();
     }
+  }
+
+
+  /*
+   * The backgrounded marker, read off `_meta` on the daemon side.
+   *
+   * ⚠ **`readBackgroundedMarker` had no daemon-side assertion at all.** The only
+   * thing pinning `backgrounded` was `webcheck.tail-subagents-and-runs.ts`, which
+   * hand-builds an event with the field already set — so it was green over a
+   * daemon that never set it, which is the "driver over unreachable code" shape
+   * this tree has been bitten by before.
+   *
+   * What a regression costs is the whole feature: a detached `Bash` call's card
+   * reaches `completed` while the command runs on for minutes, which is exactly
+   * the thing the marker exists to prevent.
+   *
+   * Swept as pairs, because the near-misses are the point — the namespace is a
+   * vendor extension, so reading it from `claudeCode`, or accepting the *string*
+   * `"false"`, are both one edit away.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([interruptedRow("s_bgm", "daemon_restarted", "a_bgm")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+
+    const air = (backgrounded: unknown): Record<string, unknown> => ({
+      jetbrains: { air: { asyncTasks: { backgrounded } } },
+    });
+    const cases: readonly (readonly [string, Record<string, unknown> | undefined, boolean])[] = [
+      ["the marker is read where the agent sets it", air(true), true],
+      ["`false` is not backgrounded", air(false), false],
+      ["and the string \"false\" is not `true`, which truthiness would have taken", air("false"), false],
+      ["nor is the string \"true\"", air("true"), false],
+      ["an update with no `_meta` at all", undefined, false],
+      ["the marker in the wrong namespace is not this one", { claudeCode: { asyncTasks: { backgrounded: true } } }, false],
+      ["nor is an `air` that is an array", { jetbrains: { air: [{ asyncTasks: { backgrounded: true } }] } }, false],
+      ["nor an `air` holding no `asyncTasks`", { jetbrains: { air: { version: 1 } } }, false],
+    ];
+
+    let at = 0;
+    for (const [what, meta, want] of cases) {
+      at += 1;
+      const toolCallId = `call_${at}`;
+      // The card first, then the update that carries the marker: `backgrounded`
+      // rides `tool_call_update`, because it is a fact the agent states about
+      // *that* update rather than about the call.
+      rig.notify("a_bgm", { sessionUpdate: "tool_call", toolCallId, title: "Bash", kind: "execute", status: "in_progress" });
+      rig.notify("a_bgm", {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        ...(meta === undefined ? {} : { _meta: meta }),
+      });
+      // A tool draft is held until the next update, so one more arrival is what
+      // flushes the pair above out of the draft and into the log.
+      rig.notify("a_bgm", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "." } });
+      await settle();
+      const drawn = (own.get("s_bgm")?.log.read(0, 1000, 1024 * 1024) ?? [])
+        .map((stored) => stored.event)
+        .filter(
+          (event) =>
+            event.type === "tool_call_update" && (event as { toolCallId?: string }).toolCallId === toolCallId,
+        )
+        .map((event) => (event as { backgrounded?: boolean }).backgrounded);
+      check(what, drawn, [want]);
+    }
+    await own.shutdown();
+  }
+
+  /*
+   * What the polled listing carries, and what it must not drop anywhere else.
+   *
+   * ⚠ **The `listing` cut was asserted in neither direction.** Dropping
+   * `{ listing: true }` at the `GET /sessions` handler silently restores the
+   * multi-megabyte poll the flag exists to prevent; making the cut unconditional
+   * silently blanks the field on the socket and the single-session read. Both are
+   * invisible to `tsc`, and both were invisible here.
+   *
+   * Three surfaces and one rule: the listing cuts, `GET /sessions/:id` keeps, and
+   * the WS `snapshot` control frame keeps — that last one is `managed.snapshot()`
+   * with no options, which is the call asserted directly below rather than through
+   * a socket, because it is the same call the frame is built from.
+   *
+   * `null` rather than absent is deliberate on the listing and is asserted as
+   * such: the key stays so the record's shape does not change by route.
+   */
+  {
+    const rig = rigWith({ resume: true });
+    const store = storeOf([interruptedRow("s_list", "daemon_restarted", "a_list")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+    const path = "/private/tmp/claude-501/slug/s_list/tasks/t1.output";
+    rig.notify("a_list", {
+      sessionUpdate: "async_task_spawned",
+      asyncTaskId: "t1",
+      name: "build",
+      taskType: "shell",
+      description: "",
+      showInTranscript: true,
+      canStop: true,
+      outputFilePath: path,
+    });
+    await settle();
+
+    const routed = createApp({
+      registry: own,
+      verifier,
+      instanceId: "i_list",
+      startedAt: now,
+      credentials,
+      roots: [users],
+      logins: new AgentLoginRuns({ runtime: own.sessionRuntime, onWarning: () => {} }),
+    }).app;
+    const getJson = async (url: string): Promise<any> => {
+      const response = await routed.fetch(
+        new Request(`http://d${url}`, { headers: { authorization: `Bearer ${tokenFor("u_alice")}` } }),
+      );
+      return await response.json();
+    };
+
+    const listed = await getJson("/sessions");
+    const listedTask = listed.sessions?.[0]?.backgroundTasks?.[0];
+    check(
+      "the polled listing carries the row but not its output path",
+      [listedTask?.id, listedTask?.outputFilePath, "outputFilePath" in (listedTask ?? {})],
+      ["t1", null, true],
+    );
+
+    const one = await getJson("/sessions/s_list");
+    check(
+      "the single-session read carries the path whole",
+      [one.session?.backgroundTasks?.[0]?.id, one.session?.backgroundTasks?.[0]?.outputFilePath],
+      ["t1", path],
+    );
+
+    check(
+      "and so does the snapshot the socket's control frame is built from",
+      own.get("s_list")?.snapshot().backgroundTasks.map((task) => task.outputFilePath),
+      [path],
+    );
+    await own.shutdown();
   }
 
   /*

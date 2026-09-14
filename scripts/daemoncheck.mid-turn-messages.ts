@@ -100,6 +100,17 @@ process.stdout.write("\na message sent while the agent is working\n");
      * a restart, or another send. Nothing else in this file can open that window.
      */
     readonly holdsSteer?: boolean;
+    /**
+     * Do not end the turn when the cancel notification arrives.
+     *
+     * ⚠ **The only way to hold `cancelRequestedAt` open with a turn still
+     * running**, which is the exact window `sendMidTurn`'s pending-cancel guard
+     * exists for. The stub otherwise answers a cancel by resolving the held
+     * prompt in the same tick, so the window shuts before a test can type into
+     * it — and a real agent does not oblige: `cancelTurn` stamps the field and
+     * then *awaits* the turn ending, which is as long as the agent takes.
+     */
+    readonly holdsCancel?: boolean;
 
   }
 
@@ -181,7 +192,9 @@ process.stdout.write("\na message sent while the agent is working\n");
               // A *notification*, so without an arm it lands in `default:` and is
               // discarded in silence — and then the held turn never ends, which
               // would make the cancel block below assert nothing at all.
-              const ending = heldPromptId;
+              // `holdsCancel` leaves the turn running with the cancel already
+              // asked for — see the option.
+              const ending = options.holdsCancel === true ? null : heldPromptId;
               if (ending !== null) {
                 heldPromptId = null;
                 send({ jsonrpc: "2.0", id: ending, result: { stopReason: "cancelled" } });
@@ -1196,5 +1209,70 @@ process.stdout.write("\na message sent while the agent is working\n");
       .filter((event) => event.type === "error" && event.message === stoppedBeforeDelivery(1));
     check("and says the message never arrived, rather than going quiet", stranded.length, 1);
     check("the agent was never given it", promptsSeen, ["start the long thing"]);
+  }
+
+  /* ---- a cancel already asked for takes the steer off the table ---- */
+
+  /*
+   * ⚠ **The guard `sendMidTurn` calls "the one guard this method never took", and
+   * nothing drove it either.**
+   *
+   * Every `cancelTurn` in this file ran against `advertises: false`, so the
+   * conjunction `session.supportsSteering && this.cancelRequestedAt === null` was
+   * never once evaluated with steering *on* — deleting the second half left this
+   * whole driver green.
+   *
+   * What it prevents is not subtle. `cancelTurn` stamps `cancelRequestedAt` and
+   * then awaits the turn ending, and the composer draws Send over a pending cancel
+   * **by design**, so one ordinary client reaches this with no race to lose.
+   * Steering there hands the message to a turn already being torn down: the
+   * `202 {steered: true}` says the agent has it, the `prompt` event is in the
+   * transcript, and the only `turn_end` that ever arrives is the cancelled turn's —
+   * Q2.218's "a message that reached no model", under a success.
+   *
+   * The queue is the way out rather than a refusal, because the queue survives a
+   * cancel by construction: `deliverQueued` runs from `pump`'s `finally`, which a
+   * cancelled turn reaches like any other.
+   */
+  {
+    steersSeen.length = 0;
+    promptsSeen.length = 0;
+    const { app, managed, finishTurn } = await standUp({ advertises: true, answers: "injected", holdsCancel: true });
+    check("this agent really can be steered", managed.snapshot().midTurnDelivery, "steer");
+
+    const first = await post(app, managed.id, "start the long thing");
+    await quiesce();
+    check("a turn is running", [first.status, managed.status], [202, "running"]);
+
+    // Not awaited: `cancelTurn` resolves only once the turn has ended, and the
+    // window this is about is the one *inside* it.
+    const cancelling = cancelTurn(app, managed.id);
+    await quiesce();
+
+    const during = await post(app, managed.id, "actually, stop and do this instead");
+    check("a message typed over a pending cancel is still taken", during.status, 202);
+    check(
+      "but it is queued rather than steered into a turn being torn down",
+      [during.body?.queued === true, during.body?.steered === true, managed.snapshot().queuedPrompts.length],
+      [true, false, 1],
+    );
+    check("so the agent was never asked to steer it", steersSeen, []);
+
+    finishTurn();
+    await cancelling;
+    await quiesce();
+    await quiesce();
+
+    /*
+     * And the other half, which is what makes the queue the right answer rather
+     * than merely a safe one: the message is not lost. The cancelled turn's
+     * `finally` drains it, so the agent is handed it as an ordinary prompt.
+     */
+    check(
+      "and the message is delivered rather than dropped with the cancelled turn",
+      promptsSeen,
+      ["start the long thing", "actually, stop and do this instead"],
+    );
+    check("with nothing left waiting", managed.snapshot().queuedPrompts, []);
   }
 }

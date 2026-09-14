@@ -1,4 +1,5 @@
 import type { Server } from "node:http";
+import { PassThrough } from "node:stream";
 import { connect as netConnect, type AddressInfo } from "node:net";
 import { gunzipSync } from "node:zlib";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { serve } from "@hono/node-server";
 import { WebSocket } from "ws";
 import { MemoryEventStore, estimateBytes, truncateEvent, type ToolCallEvent } from "../src/events.js";
 import { toolCallLineage } from "../src/acp/subagents.js";
+import { splitAsyncTaskUpdates } from "../src/acp/client.js";
 import { SessionRegistry } from "../src/registry.js";
 import { EVENTS_PAGE_LIMIT, createApp } from "../src/server.js";
 import { openStores } from "../src/store/sqlite.js";
@@ -883,4 +885,163 @@ process.stdout.write("\nsubagent lineage\n");
     estimateBytes(cutSited) < estimateBytes(sited),
     `${estimateBytes(sited)} -> ${estimateBytes(cutSited)} bytes`,
   );
+}
+
+
+/* ------------------------------------------------------------------ *
+ * The split in front of every agent's stdout
+ * ------------------------------------------------------------------ */
+
+/*
+ * `splitAsyncTaskUpdates`, driven directly.
+ *
+ * ⚠ **This filter sees every byte of every agent's stdout and had no driver at
+ * all.** Its happy path was reachable only through a real agent, so every guard
+ * in it was live code nothing asserted — and the failure mode is not a feature
+ * going missing but one agent going permanently silent behind a live process.
+ *
+ * The two properties worth holding are *what is taken* and *what is passed
+ * through byte-for-byte*, and the second is the one with teeth: a frame this
+ * filter swallows by mistake is a frame the SDK never sees. A `session/update`
+ * carrying an `id` is the sharpest of those — JSON-RPC separates a request from a
+ * notification on that member alone, and taking a request leaves the agent waiting
+ * for a response nobody will write.
+ *
+ * Driven at every chunk size from 1 to 64 bytes, which is what puts a split inside
+ * a multi-byte character and inside a CRLF rather than only between frames.
+ */
+{
+  const marker = (kind: string, id?: unknown): string =>
+    JSON.stringify({
+      jsonrpc: "2.0",
+      ...(id === undefined ? {} : { id }),
+      method: "session/update",
+      params: { sessionId: "a1", update: { sessionUpdate: kind, asyncTaskId: "t1", state: "running" } },
+    });
+
+  const corpus: readonly (readonly [string, string, boolean])[] = [
+    ["a spawn is taken", marker("async_task_spawned"), true],
+    ["a progress frame is taken", marker("async_task_progress"), true],
+    ["a state update is taken", marker("async_task_state_update"), true],
+    // Every one of these has to reach the SDK untouched.
+    ["a task update sent as a *request* is forwarded, never swallowed", marker("async_task_spawned", 7), false],
+    ["and `id: null` is forwarded too, being malformed rather than a notification", marker("async_task_spawned", null), false],
+    ["an `async_task_`-prefixed kind outside the three is forwarded", marker("async_task_invented"), false],
+    ["a marker-bearing line that will not parse is the SDK's to answer for", "{async_task_ nope", false],
+    [
+      "so is one whose method is not session/update",
+      JSON.stringify({ jsonrpc: "2.0", method: "session/other", params: { sessionId: "a1", update: { sessionUpdate: "async_task_spawned" } } }),
+      false,
+    ],
+    [
+      "and one whose sessionId is not a string",
+      JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: 5, update: { sessionUpdate: "async_task_spawned" } } }),
+      false,
+    ],
+    ["agent prose containing the marker is an agent talking about this feature", "I ran async_task_spawned for you — 日本語 ✅", false],
+    ["an ordinary frame with no marker at all", JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "a1", update: { sessionUpdate: "agent_message_chunk" } } }), false],
+  ];
+
+  const feed = `${corpus.map(([, line]) => line).join("\n")}\n`;
+  const wantForwarded = corpus.filter(([, , taken]) => !taken).map(([, line]) => line).join("\n") + "\n";
+  const wantTaken = corpus.filter(([, , taken]) => taken).length;
+
+  const run = async (chunkSize: number): Promise<[string, number]> => {
+    const stdout = new PassThrough();
+    const taken: unknown[] = [];
+    const onward = splitAsyncTaskUpdates(stdout, (notification) => taken.push(notification));
+    const out: Buffer[] = [];
+    onward.on("data", (chunk: Buffer) => out.push(Buffer.from(chunk)));
+    const done = new Promise<void>((resolve) => onward.on("end", () => resolve()));
+    const bytes = Buffer.from(feed, "utf8");
+    for (let at = 0; at < bytes.length; at += chunkSize) stdout.write(bytes.subarray(at, at + chunkSize));
+    stdout.end();
+    await done;
+    return [Buffer.concat(out).toString("utf8"), taken.length];
+  };
+
+  // One pass at a whole-frame chunk size, naming each row, so a failure says
+  // which shape broke rather than only that some size disagreed.
+  {
+    for (const [what, line, shouldTake] of corpus) {
+      const stdout = new PassThrough();
+      const taken: unknown[] = [];
+      const onward = splitAsyncTaskUpdates(stdout, (notification) => taken.push(notification));
+      const out: Buffer[] = [];
+      onward.on("data", (chunk: Buffer) => out.push(Buffer.from(chunk)));
+      const done = new Promise<void>((resolve) => onward.on("end", () => resolve()));
+      stdout.end(Buffer.from(`${line}\n`, "utf8"));
+      await done;
+      check(what, [taken.length === 1, Buffer.concat(out).toString("utf8")], [shouldTake, shouldTake ? "" : `${line}\n`]);
+    }
+  }
+
+  // And then every boundary. Byte-for-byte on the forwarded half, because a
+  // filter that rewrites what it passes through is the same defect as one that
+  // swallows it.
+  {
+    let forwardedEverywhere = true;
+    let takenEverywhere = true;
+    for (let size = 1; size <= 64; size += 1) {
+      const [forwarded, takenCount] = await run(size);
+      if (forwarded !== wantForwarded) forwardedEverywhere = false;
+      if (takenCount !== wantTaken) takenEverywhere = false;
+    }
+    report(
+      "every forwarded byte survives every chunk boundary, 1..64",
+      forwardedEverywhere,
+      `${wantForwarded.length} chars of passthrough, including a split multi-byte character`,
+    );
+    report("and the same three frames are taken at every size", takenEverywhere, `${wantTaken} diverted`);
+  }
+
+  // A CRLF stream: the `\r` belongs to the line and must be forwarded with it,
+  // rather than quietly trimmed by a filter that does not own the framing.
+  {
+    const stdout = new PassThrough();
+    const onward = splitAsyncTaskUpdates(stdout, () => {});
+    const out: Buffer[] = [];
+    onward.on("data", (chunk: Buffer) => out.push(Buffer.from(chunk)));
+    const done = new Promise<void>((resolve) => onward.on("end", () => resolve()));
+    stdout.end("hello\r\nworld\r\n");
+    await done;
+    check("a CRLF stream keeps its carriage returns", Buffer.concat(out).toString("utf8"), "hello\r\nworld\r\n");
+  }
+
+  // An unterminated tail is flushed on end rather than dropped, and is still
+  // eligible to be taken.
+  {
+    const stdout = new PassThrough();
+    const onward = splitAsyncTaskUpdates(stdout, () => {});
+    const out: Buffer[] = [];
+    onward.on("data", (chunk: Buffer) => out.push(Buffer.from(chunk)));
+    const done = new Promise<void>((resolve) => onward.on("end", () => resolve()));
+    stdout.end("no newline here");
+    await done;
+    check("an unterminated tail is still forwarded on end", Buffer.concat(out).toString("utf8"), "no newline here");
+  }
+
+  /*
+   * A session handler that throws does not take the daemon's event loop with it.
+   *
+   * The measurement in `handOff`'s docblock is that an unguarded throw out of a
+   * `'data'` listener leaves the stream delivering **nothing ever again** — one
+   * agent silent behind a live process. So the contract is that `onward` is
+   * destroyed carrying the handler's error, which is what makes the registry put a
+   * fresh agent on the session.
+   */
+  {
+    const stdout = new PassThrough();
+    const onward = splitAsyncTaskUpdates(stdout, () => {
+      throw new Error("handler blew up");
+    });
+    onward.on("data", () => {});
+    const failed = await new Promise<string | null>((resolve) => {
+      onward.on("error", (error: Error) => resolve(error.message));
+      onward.on("end", () => resolve(null));
+      stdout.write(`${marker("async_task_spawned")}\n`);
+      stdout.end("after\n");
+    });
+    check("a throwing session handler destroys the connection rather than going silent", failed, "handler blew up");
+  }
 }

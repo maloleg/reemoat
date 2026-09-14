@@ -293,5 +293,5 @@ today's behaviour, degraded rather than broken. Nothing branches on a daemon
 
 | | |
 |---|---|
-| Queued prompts | **8 per session** (`MAX_QUEUED_PROMPTS`), non-empty only on an agent that cannot be steered. Checked **before** anything is appended, because on the steer path the queue is reached only once the steer has failed — a refused message must not leave a `prompt` event nobody will deliver. `429 prompt_queue_full` past it |
+| Queued prompts | **8 per session** (`MAX_QUEUED_PROMPTS`), weighed as `queuedPrompts.length + midTurnAccepted` — a reservation taken before the first await — so it also refuses a ninth *concurrent steer* over an empty queue. Usually empty on a steerable agent, but non-empty whenever a steer fails. Checked **before** anything is appended, because on the steer path the queue is reached only once the steer has failed — a refused message must not leave a `prompt` event nobody will deliver. `429 prompt_queue_full` past it |
 | Steering | One RPC, bounded at **10s**. Both adapters answered in single-digit milliseconds, so a timeout means the pipe is not being read at all; it degrades to the queue. ⚠ That is the one window where this feature can duplicate a message, and it is written down at the constant rather than solved |

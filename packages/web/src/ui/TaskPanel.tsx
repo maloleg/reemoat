@@ -1,5 +1,5 @@
 import { Bot, Square, X } from "lucide-react";
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { memo, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { errorText } from "../http";
 import {
@@ -243,7 +243,17 @@ function PanelBody({
   reports: boolean;
   onStopTask: ((task: BackgroundTask) => Promise<void>) | null;
 }): ReactNode {
-  const sections = taskSections(background);
+  /*
+   * ⚠ **Memoised because this component hangs off `EventList`, which re-renders on
+   * every streamed token — and the panel is open precisely while tokens stream.**
+   * `taskSections` allocates five fresh arrays per call, and each `TaskCard` below
+   * re-runs `taskTitle`, `taskElapsedMs`, `taskDuration`, `taskTokens` and
+   * `dotCells` (which allocates again). At the daemon's own ceiling that is 32
+   * cards rebuilt per arriving chunk, on a phone. The daemon already hands back a
+   * fresh array only when the set really changed — `sameBackgroundTasks` gates the
+   * announce — so the reference is a sound key.
+   */
+  const sections = useMemo(() => taskSections(background), [background]);
   /*
    * ⚠ **One interval for the whole panel, and it used to be one per card.**
    * `useTick` was called inside `TaskCard`, so a panel at the daemon's own
@@ -392,8 +402,10 @@ function PanelHeading({ label, count, id }: { label: string; count: number; id: 
 /**
  * How often a running card's elapsed time is redrawn.
  *
- * ⚠ **The one place in this app that schedules a render for a clock**, and it is
- * affordable only because it is scoped to a surface somebody opened: `tail.ts`
+ * ⚠ **The only clock-driven render in the transcript surface** — `MachineInstalls`
+ * ticks one the same way for install progress, so this is not the app's only one —
+ * and it is affordable only because it is scoped to a surface somebody opened:
+ * `tail.ts`
  * refuses an elapsed time on a tool card on the grounds that "a ticking number
  * re-renders the whole transcript once a second", and that objection is about the
  * transcript rather than about seconds. Nothing outside this panel re-renders,
@@ -457,7 +469,7 @@ function useTick(running: boolean): number {
  * progress frame, so a quiet task (a `sleep`, a build that calls nothing) carries
  * neither and band 3 simply does not exist.
  */
-function TaskCard({
+const TaskCard = memo(function TaskCard({
   task,
   now,
   onStop,
@@ -610,7 +622,7 @@ function TaskCard({
       {failure !== null && <p className="mt-2 text-2xs text-danger">Couldn&apos;t stop it: {failure}</p>}
     </div>
   );
-}
+});
 
 /**
  * A workflow's phases — one of them, always, and never a fraction.

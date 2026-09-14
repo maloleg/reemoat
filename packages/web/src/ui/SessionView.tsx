@@ -923,9 +923,11 @@ function Transcript({
   /*
    * Stopping one of them, or nothing at all.
    *
-   * `null` where there is no session to ask, which is what keeps the control off
-   * a row it could not act on. A daemon too old to have the route answers `404`,
-   * and that lands in the row's own sentence rather than a toast — the row is
+   * ⚠ **Unconditional, and the prop's `null` arm is a caller that does not exist
+   * yet rather than a state this screen reaches.** `EventList`'s own docblock for
+   * the prop says the same thing from the other side. An unreachable machine
+   * throws from inside here, and a daemon too old to have the route answers
+   * `404`; both land in the row's own sentence rather than a toast — the row is
    * what somebody pressed.
    */
   const onStopTask = useCallback(

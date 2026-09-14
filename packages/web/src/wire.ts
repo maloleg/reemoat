@@ -1143,8 +1143,13 @@ export interface SessionSnapshot {
   /**
    * Messages the daemon has taken and the agent has not been given yet.
    *
-   * Always empty on an agent that can be steered — the message went straight into
-   * the running turn, so there is nothing to wait. `seq` names the `prompt` event
+   * ⚠ **Usually empty on an agent that can be steered, never guaranteed empty.**
+   * The message normally goes straight into the running turn — but the daemon
+   * falls through to this queue whenever the steer itself fails: an agent that
+   * advertised `_session/steering` and then answered `unsupported`, or a
+   * `prompt_required` landing while a `/clear` or a restart is in flight. So read
+   * this array rather than inferring it from {@link midTurnDelivery}; that is what
+   * {@link queuedSeqs} does. `seq` names the `prompt` event
    * the message already is, which is how the transcript finds the bubble to draw
    * its line under without matching on text.
    *
@@ -1611,19 +1616,6 @@ export function backgroundTasksOf(session: SessionSnapshot): readonly Background
  */
 export function taskFinished(state: AsyncTaskState): boolean {
   return state === "completed" || state === "failed" || state === "stopped";
-}
-
-/**
- * Whether this session has background work still going.
- *
- * ⚠ **Not the same question as "is the list empty".** An agent that does not
- * report answers `false` here and would answer `false` to an emptiness test too,
- * which is why every sentence drawn from this has to be about *what the agent
- * said* rather than about what is running on the machine. See
- * {@link SessionSnapshot.reportsBackgroundTasks}.
- */
-export function backgroundWorkRunning(session: SessionSnapshot): boolean {
-  return backgroundTasksOf(session).some((task) => !taskFinished(task.state));
 }
 
 /**

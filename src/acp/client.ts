@@ -881,7 +881,17 @@ const MAX_STDOUT_FRAME_CHARS = 16 * 1024 * 1024;
  * falling inside a multi-byte character would otherwise corrupt it — and the
  * corruption would land in somebody's transcript rather than in an error.
  */
-function splitAsyncTaskUpdates(
+/*
+ * Exported for `daemoncheck` and for nothing else — `sameCommands`' precedent.
+ *
+ * This sits in front of **every byte of every agent's stdout**, so a regression in
+ * it is not one feature failing but one agent going silent with a live process
+ * around it. It had no driver at all while every guard in it (a request-shaped
+ * frame that must be forwarded rather than swallowed, a marker-bearing line that
+ * will not parse, an `async_task_`-prefixed kind outside the three, the multi-byte
+ * chunk boundary, the ceiling) was reachable only from a real agent.
+ */
+export function splitAsyncTaskUpdates(
   stdout: NodeReadable,
   deliver: (notification: acp.SessionNotification) => void,
 ): NodeReadable {
