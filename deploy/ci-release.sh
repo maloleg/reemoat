@@ -252,12 +252,42 @@ notes=$(extract_notes)
   The GitHub Release is that section and nothing else. Write it before tagging."
 
 # ---------------------------------------------------------------------------
-# Refuse a commit whose checks are not green.
+# Refuse a commit whose checks are not green — and **wait** for one still running.
 #
-# Byte-for-byte the gate `ci-deploy.sh` applies, with one thing true here that is
-# not true there: the `check` *workflow* is green only when the `check` job and
-# the `image` job both are. So this gate is strictly stronger than a deploy's —
-# the image about to be pushed is the one `imagecheck` already built and started.
+# The same gate `ci-deploy.sh` applies, with one thing true here that is not true
+# there: the `check` *workflow* is green only when the `check` job and the `image`
+# job both are. So this gate is strictly stronger than a deploy's — the image
+# about to be pushed is the one `imagecheck` already built and started.
+#
+# ⚠ **It used to read the verdict once, and that made the gate a race this
+# workflow loses by default.** The old query filtered to `status == "completed"`
+# and collapsed everything else through `// "none"`, so a `check` run that was
+# still *in flight* was indistinguishable from a commit that had never been
+# checked at all — and both refused. But `release.yml` triggers on the tag push,
+# and `check.yml` triggers on the very same push, so the two start in the same
+# second and this gate runs ~15s later against a run that takes ~2m10s. The gate
+# was therefore only ever passing because somebody had pushed the branch minutes
+# *earlier*, leaving a completed run on the same commit for it to find.
+#
+# Measured on this repository. v0.8.0: branch pushed 21:44:03, its `check`
+# finished 21:46:05, the tag pushed 21:48:46 — 2m41s of slack, gate green.
+# v0.9.0: branch pushed 12:22:35, tag pushed 12:22:37, gate read at 12:22:51 with
+# both runs still going — `"none"`, and the release refused. Two seconds apart is
+# the ordinary way to push a branch and its tag; the 2m41s was luck, and nothing
+# anywhere asked for it. The refusal even said *"Wait for it"*, to a person who
+# had already walked away.
+#
+# So `pending` is now its own verdict and it is waited on, bounded by
+# `RELEASE_CHECK_WAIT_SECONDS` (default 420 — three times a `check` run, and well
+# under `release.yml`'s `timeout-minutes: 10`, so the deadline is this script's
+# sentence rather than a runner kill with no explanation).
+#
+# ⚠ **`none` is deliberately NOT waited on.** A commit with no `check` run at all
+# is the shape a missing `actions: read` produces — `release.yml` says so at the
+# `plan` job — and that is a permissions bug which must stay loud and instant
+# rather than hiding behind a seven-minute wait. Run rows exist the moment the
+# event dispatches, so there is no registration lag for this to paper over: at
+# 12:22:51 above, both runs already existed and were merely unfinished.
 #
 # `RELEASE_SKIP_CHECK_GATE=1` is the escape, and it is deliberately awkward.
 # ---------------------------------------------------------------------------
@@ -265,10 +295,36 @@ notes=$(extract_notes)
 if [ "${RELEASE_SKIP_CHECK_GATE:-0}" = "1" ]; then
   echo "check gate skipped by RELEASE_SKIP_CHECK_GATE"
 else
-  verdict=$("$GH" run list --workflow check --commit "$RELEASE_REF" \
-    --json conclusion,status --limit 20 \
-    --jq '[.[] | select(.status == "completed")] | first | .conclusion // "none"' 2>/dev/null || echo "unknown")
+  # Both injectable so `deploycheck` can drive the wait, the deadline and the
+  # green-after-pending path in milliseconds. A wait of 0 is the old read-once
+  # behaviour exactly, which is how the driver asserts what that used to cost.
+  check_wait=${RELEASE_CHECK_WAIT_SECONDS:-420}
+  check_poll=${RELEASE_CHECK_POLL_SECONDS:-15}
+  waited=0
+  while :; do
+    verdict=$("$GH" run list --workflow check --commit "$RELEASE_REF" \
+      --json conclusion,status --limit 20 \
+      --jq 'if length == 0 then "none"
+            elif any(.[]; .status == "completed")
+            then ([.[] | select(.status == "completed")] | first | .conclusion // "unknown")
+            else "pending" end' 2>/dev/null || echo "unknown")
+    [ "$verdict" = "pending" ] || break
+    if [ "$waited" -ge "$check_wait" ]; then
+      verdict="timeout"
+      break
+    fi
+    echo "check for $RELEASE_REF: still running, ${waited}s of ${check_wait}s"
+    sleep "$check_poll"
+    waited=$((waited + check_poll))
+  done
   echo "check for $RELEASE_REF: $verdict"
+  if [ "$verdict" = "timeout" ]; then
+    fail "refusing to release $RELEASE_REF: its \`check\` run was still going after ${check_wait}s.
+
+  Something is stuck, or a check got slower than this gate expects. Look at it,
+  then re-run this job — the tag and the commit do not move.
+  RELEASE_CHECK_WAIT_SECONDS raises the bound."
+  fi
   if [ "$verdict" != "success" ]; then
     fail "refusing to release $RELEASE_REF: its \`check\` run is \"$verdict\".
 

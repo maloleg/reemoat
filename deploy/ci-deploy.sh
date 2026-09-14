@@ -92,15 +92,49 @@ fi
 # automated safety net, and "pushed, then deployed before the run finished" is
 # the one way to route around them. `DEPLOY_SKIP_CHECK_GATE=1` is the escape,
 # and it is deliberately awkward to type.
+#
+# ⚠ **`pending` is waited on rather than refused, and the argument is written out
+# at `ci-release.sh`'s copy of this gate** — where it was a live defect rather
+# than a latent one. There, `release.yml` fires on the same push as `check.yml`,
+# so reading the verdict once always read a run still in flight; the old query
+# collapsed that into `"none"` and refused, and v0.9.0's release died on it.
+#
+# Here the exposure is smaller because `deploy.yml` is `workflow_dispatch` — a
+# person presses a button, usually long after the push — but it is not zero, and
+# "I pushed and immediately deployed" is exactly the shape somebody reaches for.
+# The two copies stay the same gate, which is the property that made the defect
+# worth fixing in both places at once rather than only where it fired.
 # ---------------------------------------------------------------------------
 
 if [ "${DEPLOY_SKIP_CHECK_GATE:-0}" = "1" ]; then
   echo "check gate skipped by DEPLOY_SKIP_CHECK_GATE"
 else
-  verdict=$("$GH" run list --workflow check --commit "$DEPLOY_REF" \
-    --json conclusion,status --limit 20 \
-    --jq '[.[] | select(.status == "completed")] | first | .conclusion // "none"' 2>/dev/null || echo "unknown")
+  check_wait=${DEPLOY_CHECK_WAIT_SECONDS:-420}
+  check_poll=${DEPLOY_CHECK_POLL_SECONDS:-15}
+  waited=0
+  while :; do
+    verdict=$("$GH" run list --workflow check --commit "$DEPLOY_REF" \
+      --json conclusion,status --limit 20 \
+      --jq 'if length == 0 then "none"
+            elif any(.[]; .status == "completed")
+            then ([.[] | select(.status == "completed")] | first | .conclusion // "unknown")
+            else "pending" end' 2>/dev/null || echo "unknown")
+    [ "$verdict" = "pending" ] || break
+    if [ "$waited" -ge "$check_wait" ]; then
+      verdict="timeout"
+      break
+    fi
+    echo "check for $DEPLOY_REF: still running, ${waited}s of ${check_wait}s"
+    sleep "$check_poll"
+    waited=$((waited + check_poll))
+  done
   echo "check for $DEPLOY_REF: $verdict"
+  if [ "$verdict" = "timeout" ]; then
+    fail "refusing to deploy $DEPLOY_REF: its \`check\` run was still going after ${check_wait}s.
+
+  Something is stuck, or a check got slower than this gate expects. Look at it,
+  then dispatch again. DEPLOY_CHECK_WAIT_SECONDS raises the bound."
+  fi
   if [ "$verdict" != "success" ]; then
     fail "refusing to deploy $DEPLOY_REF: its \`check\` run is \"$verdict\".
 

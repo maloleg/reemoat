@@ -4332,6 +4332,95 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
   );
 
   /*
+   * ⚠ **And the fifth state, which is the one the gate used to lose on.**
+   *
+   * `release.yml` fires on the same push as `check.yml`, so this gate runs while
+   * the run it is asking about is still going. The old query could not see that —
+   * it filtered to `status == "completed"` and collapsed everything else into
+   * `"none"` — so an in-flight check and a commit nobody ever checked refused
+   * identically. v0.9.0's release died on exactly that, fifteen seconds after a
+   * `check` that went on to pass.
+   *
+   * Driven with a counting stub rather than a fixed one, because the property is
+   * a *transition*: `pending` first, `success` on a later poll. A stub that only
+   * ever said `success` would pass over a gate that never waits at all, which is
+   * the whole failure this is here to catch.
+   */
+  const ghPendingThen = (later: string, pendings: number): string =>
+    stub(
+      `case "$1 $2" in\n` +
+        `  "run list")\n` +
+        `    n=0\n` +
+        `    [ -f "$GH_PENDING_COUNT" ] && n=$(cat "$GH_PENDING_COUNT")\n` +
+        `    n=$((n + 1)); echo "$n" > "$GH_PENDING_COUNT"\n` +
+        `    if [ "$n" -le ${pendings} ]; then echo "pending"; else echo "${later}"; fi ;;\n` +
+        `  "release view") exit 1 ;;\n` +
+        `  "release create") echo "created $*" ;;\n` +
+        `esac`,
+    );
+
+  {
+    const counter = join(tmp("ghcount-"), "n");
+    const waits = release("plan", {
+      GH: ghPendingThen("success", 2),
+      GH_PENDING_COUNT: counter,
+      RELEASE_CHECK_POLL_SECONDS: "0",
+      RELEASE_CHECK_WAIT_SECONDS: "60",
+    });
+    check("a check still running is waited for rather than refused", waits.status, 0);
+    check("and the wait is visible rather than a silent stall", waits.out.includes("still running"), true);
+    check("and it polled more than once", waits.out.split("still running").length - 1 >= 2, true);
+  }
+
+  {
+    /* Waiting does not launder a red run: pending, then failure, still refuses. */
+    const counter = join(tmp("ghcount-"), "n");
+    const red = release("plan", {
+      GH: ghPendingThen("failure", 1),
+      GH_PENDING_COUNT: counter,
+      RELEASE_CHECK_POLL_SECONDS: "0",
+      RELEASE_CHECK_WAIT_SECONDS: "60",
+    });
+    check("a check that goes on to fail is still refused after the wait", red.status, 2);
+    check("and names the conclusion, not the waiting", red.err.includes('"failure"'), true);
+  }
+
+  {
+    /*
+     * The deadline. `RELEASE_CHECK_WAIT_SECONDS=0` is the old read-once gate
+     * exactly, which is how this asserts what that behaviour used to cost: a
+     * check that is merely unfinished refuses, with a sentence about the
+     * deadline rather than about the commit.
+     */
+    const counter = join(tmp("ghcount-"), "n");
+    const timedOut = release("plan", {
+      GH: ghPendingThen("success", 99),
+      GH_PENDING_COUNT: counter,
+      RELEASE_CHECK_POLL_SECONDS: "0",
+      RELEASE_CHECK_WAIT_SECONDS: "0",
+    });
+    check("a check that never finishes refuses at the deadline", timedOut.status, 2);
+    check("and says it was still going rather than blaming the commit", timedOut.err.includes("still going"), true);
+  }
+
+  {
+    /*
+     * ⚠ **`none` is NOT waited on**, and that is the half worth pinning. A commit
+     * with no run at all is what a missing `actions: read` produces, and that is a
+     * permissions bug which has to stay instant and loud rather than hiding behind
+     * a seven-minute wait. With a poll of 0 and a wait of 60 a waiting gate would
+     * spin; this asserts it returns straight away.
+     */
+    const noRun = release("plan", {
+      GH: gh("none"),
+      RELEASE_CHECK_POLL_SECONDS: "0",
+      RELEASE_CHECK_WAIT_SECONDS: "60",
+    });
+    check("a commit with no check run at all refuses without waiting", noRun.status, 2);
+    check("and never says it waited", noRun.out.includes("still running"), false);
+  }
+
+  /*
    * A re-release, refused on both halves. The second is the one that matters:
    * GitHub refuses to create a release twice, and **GHCR moves a tag without
    * complaining** — so publishing v0.1.0 again silently repoints a name somebody

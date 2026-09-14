@@ -558,6 +558,15 @@ a graph somebody can re-run one job of. It refuses:
   GitHub refuses to create a release twice, and GHCR moves a tag without a word;
 - an empty `CHANGELOG.md` section, since the release page is that section.
 
+A `check` run that is **still going** is waited for rather than refused — up to
+`RELEASE_CHECK_WAIT_SECONDS` (420 by default, polled every
+`RELEASE_CHECK_POLL_SECONDS`). It has to be: `release.yml` fires on the tag push
+and `check.yml` fires on that same push, so the gate always runs while the run it
+is asking about is in flight. Reading the verdict once meant a release only
+succeeded if the branch had been pushed minutes earlier, which is how v0.9.0's
+first attempt died. A commit with **no** run at all is still an instant refusal —
+that is what a missing `actions: read` looks like, and it must stay loud.
+
 `RELEASE_SKIP_CHECK_GATE=1` and `RELEASE_ALLOW_RETAG=1` are the escapes, and both
 are deliberately awkward to type. `deploycheck` drives all of it with no registry
 and no forge.

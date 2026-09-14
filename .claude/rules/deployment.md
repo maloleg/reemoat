@@ -286,8 +286,12 @@ manifests, the root, `app.ts`'s `VERSION`, `src/version.ts`'s `DAEMON_VERSION`,
 the newest `CHANGELOG` heading), each refusal naming its own file; a commit whose `check` run is not green, which here
 means the `image` job too and is therefore stronger than the deploy gate; a tag
 that already has a release **or an image**, GHCR moving a tag being silent; and an
-empty changelog section. `RELEASE_SKIP_CHECK_GATE` and `RELEASE_ALLOW_RETAG` are
-the two escapes. `deploycheck` drives all of it through `GH`, `DOCKER` and
+empty changelog section. A `check` still **running** is waited for rather than
+refused (`RELEASE_CHECK_WAIT_SECONDS`, 420s) — both workflows fire on the same
+tag push, so reading the verdict once always read an unfinished run; a commit with
+no run at all still refuses instantly, that being the shape of a missing
+`actions: read`. `ci-deploy.sh` carries the same gate and the same wait.
+`RELEASE_SKIP_CHECK_GATE` and `RELEASE_ALLOW_RETAG` are the two escapes. `deploycheck` drives all of it through `GH`, `DOCKER` and
 `RELEASE_ROOT`, the last pointing at a synthetic tree so six different
 disagreements are reachable.
 
