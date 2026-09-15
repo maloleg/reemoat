@@ -122,8 +122,37 @@ pub fn run() {
                 .build()?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("the Reemoat shell could not start");
+        .build(tauri::generate_context!())
+        .expect("the Reemoat shell could not start")
+        .run(|handle, event| {
+            /*
+             * ⚠ **The daemon dies with the app, and this is the only thing that
+             * makes that true.** `Child` does not kill on drop — it detaches — so
+             * without this the daemon is orphaned on every quit and keeps running
+             * with nothing able to stop it. Measured 2026-09-15: two seconds after
+             * the parent exits the child is alive on `ppid 1`, answering `/health`,
+             * and it stays that way indefinitely.
+             *
+             * It is not merely untidy. The orphan keeps its *own* bundle's runtime
+             * and sources, so replacing Reemoat.app leaves the old daemon running
+             * and announced — the new app finds it alive with a matching
+             * `instanceId`, reads `foreign`, and never starts the version it
+             * shipped with. Emptying the Trash makes it worse rather than better:
+             * the process survives on its inodes while `tsx` still resolves
+             * plugin, agent and upload paths lazily, so the first one needed is an
+             * `ENOENT` inside a daemon that goes on answering 200.
+             *
+             * `RunEvent::Exit` rather than a window close, because closing the
+             * window on macOS is not quitting.
+             */
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(host) = handle.try_state::<commands::Host>() {
+                    if let Ok(mut supervisor) = host.supervisor.lock() {
+                        supervisor.stop();
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]

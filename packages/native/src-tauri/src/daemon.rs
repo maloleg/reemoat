@@ -601,6 +601,16 @@ pub fn daemon_path(payload: &Payload, home: &Path, user_path: Option<&str>) -> S
 /// it, not enough to be a log file nobody rotates.
 const LOG_LINES: usize = 200;
 
+/// How long a stopping daemon is given before it is killed outright.
+///
+/// `scripts/daemon.ts`'s own `SHUTDOWN_HARD_LIMIT_MS`, plus a second: a daemon
+/// that has not gone by then was not going to, and the extra second means the
+/// usual path is the daemon's own timer rather than this one racing it.
+const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_millis(26_000);
+
+/// How often the stop above looks, while it waits.
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// A daemon this app started, and what it said.
 ///
 /// ⚠ **The pid is recorded so that stopping is identity-checked.** `~/.reemoat` is
@@ -829,6 +839,36 @@ impl Supervisor {
         {
             let _ = child.kill();
         }
+        /*
+         * ⚠ **Bounded, because this runs on the way out of the main loop.** An
+         * unbounded `wait` hands the daemon's shutdown budget to the quit gesture:
+         * `scripts/daemon.ts` gives each session 20 s and caps itself at
+         * `SHUTDOWN_HARD_LIMIT_MS` (25 s), so a machine with a busy session could
+         * leave a dock icon unresponsive for that long. Measured with no sessions
+         * it is 0.30 s, so the deadline is a backstop rather than the usual path.
+         *
+         * ⚠ **And waiting at all is the point, not politeness.** A quit that
+         * signals and returns lets a relaunch start a second daemon while the first
+         * still holds `reemoat.db`; the new one loses `claimDaemonLock` and exits,
+         * and the setup flow reads that as a daemon that will not start. Waiting is
+         * what makes "the app is gone" mean "the daemon is gone".
+         */
+        let deadline = std::time::Instant::now() + STOP_DEADLINE;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                // Already reaped, or a handle that cannot be waited on. Either way
+                // there is nothing left to wait for.
+                Err(_) => return,
+                Ok(None) => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(STOP_POLL);
+        }
+        // It outlasted its own hard limit, so it is wedged rather than finishing.
+        let _ = child.kill();
         let _ = child.wait();
     }
 }

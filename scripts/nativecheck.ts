@@ -968,6 +968,21 @@ const probe = /pub fn is_alive\([\s\S]*?\n\}/.exec(daemonRs)?.[0] ?? "";
 check("the liveness probe exists to be read", probe.length > 0, true);
 check("and it sends no credential", /authorization|Bearer|reqwest/i.test(probe), false);
 check("and it asks the one route below the auth gate", /GET \/health/.test(probe), true);
+/*
+ * ⚠ **And the daemon dies with the app, which is one line and no other evidence.**
+ * `Child` does not kill on drop — it detaches — so without an exit hook the daemon
+ * is orphaned on every quit, keeps its *own* bundle's runtime and sources, and the
+ * next version of this app finds it alive and announced, reads `foreign`, and never
+ * starts the daemon it shipped with. Nothing else in this repository can see the
+ * absence of a callback: `cargo` compiles either way and no driver runs the app.
+ */
+check("the shell handles its own exit", /RunEvent::Exit/.test(libRs), true);
+check("and stops the daemon it started there", /supervisor\.stop\(\)/.test(libRs), true);
+/*
+ * Bounded, because it runs on the way out of the main loop: an unbounded wait
+ * hands the daemon's 25-second shutdown budget to the quit gesture.
+ */
+check("and the stop is bounded rather than open-ended", /const STOP_DEADLINE/.test(daemonRs), true);
 check(
   "and the state command asks before answering foreign",
   /announced\.filter\(\|found\| ours \|\| daemon::is_alive/.test(read(`${TAURI_DIR}/src/commands.rs`)),
