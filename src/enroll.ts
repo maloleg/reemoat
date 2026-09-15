@@ -25,6 +25,27 @@ export type EnrollErrorCode =
   | "bad_response"
   | "no_usable_keys";
 
+/**
+ * What `fetch failed` actually was.
+ *
+ * ⚠ **`fetch` in undici reports every transport failure as the same two words,
+ * and the reason is one level down in `cause`.** Measured 2026-09-15 on a machine
+ * whose control plane sits behind a private CA: `~/Library/Logs/reemoat/daemon.log`
+ * held 2019 lines of `could not reach the control plane … fetch failed` and not one
+ * word about a certificate, while the same request with `NODE_EXTRA_CA_CERTS` set
+ * answered 200. The cause said `UNABLE_TO_VERIFY_LEAF_SIGNATURE` the whole time.
+ *
+ * Appended here rather than inside `describeError`, which every error envelope in
+ * this fleet goes through: the hidden-cause problem is `fetch`'s, and this is the
+ * one call site where a wrong answer costs somebody a day.
+ */
+function causeOf(error: unknown): string {
+  const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined;
+  if (!(cause instanceof Error)) return "";
+  const code = (cause as { code?: unknown }).code;
+  return ` (${typeof code === "string" && code.length > 0 ? `${code}: ` : ""}${cause.message})`;
+}
+
 export class EnrollError extends Error {
   constructor(
     readonly code: EnrollErrorCode,
@@ -120,7 +141,10 @@ export async function enroll(options: EnrollOptions): Promise<EnrollResult> {
     if (controller.signal.aborted) {
       throw new EnrollError("timeout", `the control plane at ${url.origin} did not answer within ${timeoutMs / 1000}s`);
     }
-    throw new EnrollError("unreachable", `could not reach the control plane at ${url.origin}: ${describeError(error)}`);
+    throw new EnrollError(
+      "unreachable",
+      `could not reach the control plane at ${url.origin}: ${describeError(error)}${causeOf(error)}`,
+    );
   } finally {
     clearTimeout(timer);
   }

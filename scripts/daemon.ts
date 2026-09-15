@@ -113,6 +113,18 @@ function threadpoolNote(): string {
  */
 const DEFAULT_HOST = "127.0.0.1";
 const SHUTDOWN_HARD_LIMIT_MS = 25_000;
+
+/**
+ * The control plane refused the enrollment code: single-use, expired or unknown.
+ *
+ * A fresh code is the remedy, and it is the **only** failure here for which that
+ * is true — which is why it has a code of its own rather than sharing `2` with
+ * every other reason this process gives up.
+ */
+const EXIT_CODE_REFUSED = 3;
+
+/** The control plane could not be reached or did not answer. Wait, do not re-mint. */
+const EXIT_CONTROL_PLANE_UNREACHABLE = 4;
 const DEFAULT_DB = join(homedir(), ".reemoat", "reemoat.db");
 const DAY_MS = 86_400_000;
 
@@ -1293,12 +1305,31 @@ async function buildVerifier(): Promise<AuthSetup> {
         console.log(`relay: ${identity.relayUrl} (every client reaches this daemon through it)`);
       }
     } catch (error) {
-      const hint =
-        error instanceof EnrollError && error.code === "code_rejected"
-          ? "\n  Enrollment codes are single-use and expire. Ask for a fresh one."
-          : "";
+      const rejected = error instanceof EnrollError && error.code === "code_rejected";
+      const hint = rejected ? "\n  Enrollment codes are single-use and expire. Ask for a fresh one." : "";
       console.error(`enrollment failed: ${describe(error)}${hint}`);
-      process.exit(2);
+      /*
+       * ⚠ **Three exits rather than one, so a supervisor can tell what to do
+       * next.** Everything here used to be `2`, which is also the code for a
+       * missing token, an unreadable identity, a database a newer daemon migrated
+       * and a lock another daemon holds — so a parent watching this process could
+       * only know that it failed. Reemoat.app is such a parent now, and the
+       * difference decides whether it mints a fresh code (which is pointless and
+       * re-enrolls the machine when the real problem was a held lock) or reports
+       * what happened.
+       *
+       * The alternative was reading these words, and a supervisor that greps its
+       * child's log is one rewording away from silently doing nothing. Nothing in
+       * `deploy/` branches on the code — launchd and systemd see only non-zero —
+       * so this adds a signal without changing what any existing unit does.
+       */
+      process.exit(
+        rejected
+          ? EXIT_CODE_REFUSED
+          : error instanceof EnrollError && (error.code === "unreachable" || error.code === "timeout")
+            ? EXIT_CONTROL_PLANE_UNREACHABLE
+            : 2,
+      );
     }
   }
 

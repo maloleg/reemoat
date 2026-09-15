@@ -258,6 +258,80 @@ const CONTROL_PLANE_KEY: &str = "REEMOAT_CONTROL_PLANE";
 /// an enrollment code would delete all of it, so only these three are replaced.
 const OWNED_KEYS: [&str; 3] = ["REEMOAT_AUTH", CONTROL_PLANE_KEY, "REEMOAT_ENROLL_CODE"];
 
+/// A unit an earlier shell install left behind for this daemon, if there is one.
+///
+/// ⚠ **A supervisor and this app cannot both own one env file.**
+/// `deploy/launchd/reemoat.plist.in` sets `KeepAlive` with `ThrottleInterval 10`,
+/// which is correct for a server and hostile here: rewrite the file with a fresh
+/// enrollment code and launchd's next respawn — within ten seconds — sources the
+/// *new* file and races this app's child for a single-use code, the database lock
+/// and the port. Whichever loses, one of them redeems the code and the other never
+/// can. Measured on a real machine 2026-09-15: exactly such a plist, pointing at
+/// `~/srv/reemoat/deploy/run-daemon.sh` with the same env file and database, with
+/// 2019 failed starts behind it.
+///
+/// So the rewrite is refused and the person is told which file to deal with. Named
+/// by a glob rather than by the label `deploy/` happens to use today, because a
+/// unit somebody renamed is still a unit that will respawn.
+pub fn managed_unit(home: &Path) -> Option<PathBuf> {
+    let directories = [
+        home.join("Library").join("LaunchAgents"),
+        home.join(".config").join("systemd").join("user"),
+    ];
+    for directory in directories {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let found = entries.flatten().map(|entry| entry.path()).find(|path| {
+            let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
+            (extension == "plist" || extension == "service") && name.contains("reemoat")
+        });
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
+/// What to say about one, including how to switch it off.
+pub fn managed_unit_detail(unit: &Path) -> String {
+    let remedy = if unit.extension().and_then(|value| value.to_str()) == Some("plist") {
+        "launchctl bootout gui/$(id -u)/com.reemoat.daemon"
+    } else {
+        "systemctl --user disable --now reemoat"
+    };
+    format!(
+        "This computer already has a Reemoat daemon installed as a background service, at {}. \
+         It would restart itself and compete for the same settings, so Reemoat left them alone. \
+         Stop it first with: {remedy}",
+        unit.display()
+    )
+}
+
+/// Whether a value may be written into the env file as itself.
+///
+/// ⚠ **This file is sourced by `deploy/run-daemon.sh` with `.`, and every key
+/// `parse_env` finds is set on the daemon's environment with no whitelist.** So a
+/// value carrying a newline writes a *second* assignment — and `NODE_OPTIONS`
+/// pointing at a `data:` import is arbitrary code inside the daemon — while one
+/// carrying `$(…)` or a backtick is arbitrary code in the shell that sources it.
+/// These values come from the control plane rather than from a stranger, which is
+/// an argument for this being unreachable today and none at all for writing them
+/// verbatim.
+///
+/// **Refused rather than escaped**, for the reason `env_contents` already gives
+/// about newlines: `parse_env` strips one pair of quotes and does not understand
+/// `'\''`, so an escaping scheme here would be a second, divergent reading of a
+/// file that already has one authoritative reader. Nothing legitimate is refused —
+/// an enrollment code is `ec_` and base64url, and a machine id is an opaque token
+/// of the same alphabet.
+pub fn is_writable_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
+}
+
 /// There is no env file on this computer.
 pub const CONFIG_NONE: &str = "none";
 /// There is one, and it names the server this app is signed in to.
@@ -310,8 +384,20 @@ pub fn config_state(home: &Path, origin: Option<&str>) -> &'static str {
 /// left in place, because a later assignment wins in both readers of this file and
 /// a survivor below would shadow the line just written.
 pub fn env_rewritten(existing: &str, control_plane: &str, enroll_code: &str) -> String {
+    /*
+     * ⚠ **`both` survives a rewrite, and only an absent or shared-secret mode
+     * becomes `signed`.** `both` is the break-glass shape — a control-plane
+     * identity *and* `REEMOAT_TOKEN` — and a machine set up by hand that way has
+     * clients presenting the shared secret. Rewriting it to `signed` to refresh an
+     * enrollment code would sign those clients out for a reason that has nothing
+     * to do with them.
+     */
+    let mode = match parse_env(existing).get("REEMOAT_AUTH").map(|value| value.trim().to_lowercase()) {
+        Some(found) if found == "both" => "both",
+        _ => "signed",
+    };
     let wanted: [(&str, &str); 3] = [
-        ("REEMOAT_AUTH", "signed"),
+        ("REEMOAT_AUTH", mode),
         (CONTROL_PLANE_KEY, control_plane),
         ("REEMOAT_ENROLL_CODE", enroll_code),
     ];
@@ -620,6 +706,8 @@ const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 pub struct Supervisor {
     child: Option<std::process::Child>,
     log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// The exit status of the last child, once one has finished. See `owns_running`.
+    last_exit: Option<i32>,
 }
 
 /// What the page is told. Deliberately a small, closed set.
@@ -640,6 +728,13 @@ pub struct DaemonState {
     pub claimed: Option<String>,
     /// The tail of what it printed, and only when that explains something.
     pub detail: Option<String>,
+    /// How it exited, when this app started it and it has finished.
+    ///
+    /// `3` is an enrollment code the control plane refused and `4` a control plane
+    /// it could not reach — the two the caller acts on differently. See
+    /// `Supervisor::owns_running`.
+    #[serde(rename = "exitCode")]
+    pub exit_code: Option<i32>,
     /// `none` · `here` · `elsewhere` — what `~/.reemoat/daemon.env` already says.
     ///
     /// ⚠ **Asked before a machine is created, never after.** See `config_state`,
@@ -658,22 +753,54 @@ impl Default for DaemonState {
             claimed: None,
             detail: None,
             config: CONFIG_NONE.to_string(),
+            exit_code: None,
         }
     }
 }
 
 impl Supervisor {
     pub fn new() -> Supervisor {
-        Supervisor { child: None, log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())) }
+        Supervisor {
+            child: None,
+            log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            last_exit: None,
+        }
     }
 
     /// Whether this app currently owns a running daemon.
     pub fn owns_running(&mut self) -> bool {
-        match self.child.as_mut() {
-            None => false,
+        let status = match self.child.as_mut() {
+            None => return false,
             // `try_wait` reaps; `Ok(None)` is "still running".
-            Some(child) => matches!(child.try_wait(), Ok(None)),
+            Some(child) => child.try_wait(),
+        };
+        match status {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                /*
+                 * ⚠ **Kept, because it is the only structured thing a dead child
+                 * left behind.** `scripts/daemon.ts` exits `3` for an enrollment
+                 * code the control plane refused and `4` for a control plane it
+                 * could not reach, and those are the two cases where the caller's
+                 * next move differs — mint a fresh code, or wait. Everything else
+                 * is `2`, which is also a held database lock and a missing token,
+                 * and re-minting for those re-enrolls a machine over a problem no
+                 * new code can touch. The alternative was reading the log, and a
+                 * supervisor that greps its child's output is one rewording away
+                 * from silently doing nothing.
+                 */
+                self.last_exit = status.code();
+                // The handle is spent: reaped once, it can answer nothing again.
+                self.child = None;
+                false
+            }
+            Err(_) => false,
         }
+    }
+
+    /// How the last child this app started went, once one has finished.
+    pub fn exit_code(&self) -> Option<i32> {
+        self.last_exit
     }
 
     /// The tail of the child's output, newest last.
@@ -698,6 +825,9 @@ impl Supervisor {
         if self.owns_running() {
             return Ok(());
         }
+        // A new child's outcome is not the old one's; a stale code read as this
+        // one's would send the caller down a branch for a failure that is over.
+        self.last_exit = None;
         let path = daemon_path(payload, home, login_shell_path(std::env::var("SHELL").ok().as_deref()).as_deref());
 
         let mut command = Command::new(&payload.node);
@@ -1078,6 +1208,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(dir.join(".reemoat")).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_service_somebody_installed_by_hand_is_found_whatever_it_is_called() {
+        let home = scratch("unit");
+        let agents = home.join("Library").join("LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        assert!(managed_unit(&home).is_none(), "an empty directory is not a unit");
+        std::fs::write(agents.join("com.example.other.plist"), "").unwrap();
+        assert!(managed_unit(&home).is_none(), "somebody else's agent is not ours");
+        // Renamed, because a unit somebody renamed still respawns.
+        let ours = agents.join("io.Reemoat.daemon.plist");
+        std::fs::write(&ours, "").unwrap();
+        assert_eq!(managed_unit(&home), Some(ours));
+        // And the remedy matches the supervisor the file belongs to.
+        assert!(managed_unit_detail(Path::new("/x/a.plist")).contains("launchctl bootout"));
+        assert!(managed_unit_detail(Path::new("/x/a.service")).contains("systemctl --user"));
+    }
+
+    #[test]
+    fn a_value_that_could_write_a_second_assignment_is_refused() {
+        for bad in ["ec_a\nNODE_OPTIONS=--import=data:x", "ec_$(id)", "ec_`id`", "ec_a'b", "", "ec_a b"] {
+            assert!(!is_writable_value(bad), "{bad:?} should be refused");
+        }
+        for good in ["ec_AbC-123_x.y", "m_01HQ", "https://cp.example"] {
+            assert!(is_writable_value(good), "{good:?} should be allowed");
+        }
     }
 
     #[test]

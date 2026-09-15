@@ -387,7 +387,33 @@ export interface DaemonState {
    * the host knows.
    */
   config: string;
+  /**
+   * How the daemon exited, when this app started it and it has finished.
+   *
+   * ⚠ **The structured half of "why did it stop", and the reason no arm in the
+   * store reads the log.** `scripts/daemon.ts` answers {@link DAEMON_EXIT}: `3`
+   * for an enrollment code the control plane refused, `4` for a control plane it
+   * could not reach. Everything else is `2`, which is also a held database lock, a
+   * missing token and a database a newer daemon migrated — none of which a fresh
+   * code can touch. `null` where it was signalled rather than exiting, or where
+   * this app did not start it.
+   */
+  exitCode: number | null;
 }
+
+/**
+ * The exits `scripts/daemon.ts` gives that mean something different to a parent.
+ *
+ * Mirrored from that file's own constants, which `nativecheck` compares against
+ * this object. Reading the log instead was the alternative, and a supervisor that
+ * greps its child's output is one rewording away from silently doing nothing.
+ */
+export const DAEMON_EXIT = {
+  /** The control plane refused the code: single-use, expired or unknown. */
+  codeRefused: 3,
+  /** The control plane could not be reached, or did not answer. */
+  controlPlaneUnreachable: 4,
+} as const;
 
 /**
  * The three answers {@link DaemonState.config} may carry.

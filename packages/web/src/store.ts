@@ -11,6 +11,7 @@ import { keyOf, machineId, refOf, sessionId, type MachineId, type SessionKey, ty
 import { describe, MachineConnection, type MachineState } from "./machine";
 import {
   DAEMON_CONFIG,
+  DAEMON_EXIT,
   daemonState,
   hostReady,
   nativeHydrating,
@@ -891,6 +892,18 @@ const SETUP_POLL_MS = 1_000;
  */
 const SETUP_SETTLE_MS = 30_000;
 
+/** How often it looks after {@link SETUP_SETTLE_MS} has passed and it is still up in the air. */
+const SETUP_SLOW_POLL_MS = 5_000;
+
+/**
+ * When the screen stops watching altogether.
+ *
+ * ⚠ **There is a slow phase because stopping at the fast deadline was a wrong
+ * answer rather than a late one**: a daemon that came up a second afterwards left
+ * the notice saying it had failed, with nothing still watching to take that back.
+ */
+const SETUP_GIVE_UP_MS = 5 * 60_000;
+
 /** Said when the env file here belongs to a fleet this app is not signed in to. */
 const FOREIGN_ENV_DETAIL =
   "The daemon settings already on this computer name a different Reemoat server, or could not be read, " +
@@ -1565,9 +1578,11 @@ class AppStore implements StreamSink {
    * than any pattern.
    */
   private async settleDaemon(claim: string | null, retried = false): Promise<void> {
-    const deadline = Date.now() + SETUP_SETTLE_MS;
+    const slowFrom = Date.now() + SETUP_SETTLE_MS;
+    const giveUpAt = Date.now() + SETUP_GIVE_UP_MS;
+    let slowed = false;
     for (;;) {
-      await sleep(SETUP_POLL_MS);
+      await sleep(Date.now() < slowFrom ? SETUP_POLL_MS : SETUP_SLOW_POLL_MS);
       const state = await daemonState();
       // The bridge went away mid-poll. Nothing true can be said, so say nothing.
       if (state === null) return;
@@ -1585,48 +1600,57 @@ class AppStore implements StreamSink {
        * the one measured on this Mac: a leftover `deploy/install.sh` LaunchAgent
        * holding `reemoat.db`, so our child loses `claimDaemonLock` and dies while
        * its daemon stays up and announced.
-       *
-       * Reachable only from inside a settle, because `setUpThisComputer` returns at
-       * its status gate when a daemon was already `foreign` before it began.
        */
       if (state.status === "foreign") {
         this.patch({ setup: { step: "failed", detail: ANOTHER_DAEMON_DETAIL } });
         return;
       }
       if (state.status === "exited") {
-        if (!retried) {
+        /*
+         * ⚠ **A fresh code is the answer to exactly one exit, and guessing cost a
+         * quota slot per failure.** Retrying on the *fact* of an exit was right
+         * while an exit was all the daemon said; it now says which, so `2` — a held
+         * database lock, a missing token, a database a newer daemon migrated —
+         * stops being answered with a mint that re-enrolls the machine over a
+         * problem no code can touch. Still no reading of the log: this is the
+         * process's own status, not its words.
+         */
+        if (!retried && state.exitCode === DAEMON_EXIT.codeRefused) {
           const machine = claim ?? state.claimed;
           if (machine !== null) {
-            const again = await this.remintFor(machine);
             /*
-             * ⚠ **`later` returns rather than falling through, and that is not
-             * tidiness.** `remintFor` has already written the reason the control
-             * plane could not be reached; falling through would overwrite it with
-             * the daemon's own last words, so somebody whose network is down reads
-             * "this enrollment code was rejected".
+             * `later` returns rather than falling through: `remintFor` has already
+             * written why the control plane could not be reached, and falling
+             * through would overwrite it with the daemon's own last words.
              */
+            const again = await this.remintFor(machine);
             if (again !== "dead") return;
           }
           /*
-           * ⚠ **No live claim, and the file here has provably failed to start.**
-           * This is the original bug in its pure form: a computer carrying a
-           * half-finished `deploy/install.sh` install, whose code is dead, and
-           * which this app has never bought a machine for. Adoption is the right
-           * first move and it has now been tried; without this arm the answer is a
-           * sentence and a dead end, identical on every relaunch, escapable only by
-           * deleting a file nobody mentions.
-           *
-           * At most one machine is ever bought this way: the claim it writes is
-           * what the *next* launch re-mints against instead of buying again.
+           * No live claim, and settings that have provably failed to start. This is
+           * the original bug in its pure form — a half-finished `deploy/install.sh`
+           * install whose code is dead, on a computer this app has never bought a
+           * machine for. At most one machine is ever bought this way: the claim it
+           * writes is what the next launch re-mints against.
            */
           if (await this.provisionOver()) return;
         }
         this.patch({ setup: { step: "failed", detail: state.detail } });
         return;
       }
-      if (Date.now() >= deadline) {
+      /*
+       * ⚠ **Slower, rather than stopping.** Giving up at the fast deadline left the
+       * notice saying `failed` over a daemon that came up a second later, with
+       * nothing watching to take it back. The poll widens instead, so a slow start
+       * costs patience rather than a wrong answer.
+       */
+      if (Date.now() >= giveUpAt) {
         this.patch({ setup: { step: "failed", detail: state.detail ?? SLOW_START_DETAIL } });
         return;
+      }
+      if (!slowed && Date.now() >= slowFrom) {
+        slowed = true;
+        this.patch({ setup: { step: "starting", detail: SLOW_START_DETAIL } });
       }
     }
   }

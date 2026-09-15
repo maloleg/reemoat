@@ -129,7 +129,9 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
         (None, true) => daemon::DaemonState { status: "starting".to_string(), claimed, ..Default::default() },
         (None, false) => {
             let tail = supervisor.tail();
+            let exit_code = supervisor.exit_code();
             daemon::DaemonState {
+                exit_code,
                 // A tail with no live child means one was started and is gone;
                 // with no tail at all, nothing was ever tried here.
                 status: if tail.is_some() { "exited" } else { "absent" }.to_string(),
@@ -184,6 +186,39 @@ pub fn host_daemon_start(
         ));
     }
 
+    if !enroll_code.is_empty() && !daemon::is_writable_value(&enroll_code) {
+        return Err("that enrollment code is not a shape this can write down".into());
+    }
+    if !machine_id.is_empty() && !daemon::is_writable_value(&machine_id) {
+        return Err("that machine id is not a shape this can write down".into());
+    }
+
+    /*
+     * ⚠ **Before the env file, not after.** The claim is what stops the next launch
+     * buying a second machine for this computer, and a machine row is never given
+     * back — so if writing the file fails on a full disk or a bad permission, the
+     * `?` must not carry away the record that a machine was already bought. Cheap
+     * and idempotent, which is what makes ordering it first free.
+     */
+    if !machine_id.is_empty() {
+        if let Some(origin) = origin.as_deref() {
+            daemon::write_claim(&host.config_dir, origin, &machine_id)?;
+        }
+    }
+
+    /*
+     * ⚠ **A rewrite is refused while a background service owns the same file.** It
+     * would respawn within its throttle interval, source the new file and race this
+     * app's child for a single-use code, the database lock and the port — and
+     * whichever loses, the code is spent. Only the rewrite: adoption below is
+     * exactly the right thing to do with a machine somebody else set up.
+     */
+    if !enroll_code.is_empty() && env_file.exists() {
+        if let Some(unit) = daemon::managed_unit(&home) {
+            return Err(daemon::managed_unit_detail(&unit));
+        }
+    }
+
     if !enroll_code.is_empty() {
         /*
          * ⚠ **The origin this app is signed in to, never a URL from the page.**
@@ -215,18 +250,6 @@ pub fn host_daemon_start(
         write_private(&env_file, &text)?;
     } else if !env_file.exists() {
         return Err("a control plane and an enrollment code are needed to set this machine up".into());
-    }
-
-    /*
-     * ⚠ **Recorded before the daemon is started, never after.** The whole point of
-     * the claim is to survive the app dying between creating a machine and that
-     * machine being enrolled — so writing it after a successful start would leave
-     * open exactly the window it exists to close.
-     */
-    if !machine_id.is_empty() {
-        if let Some(origin) = origin.as_deref() {
-            daemon::write_claim(&host.config_dir, origin, &machine_id)?;
-        }
     }
 
     let text = std::fs::read_to_string(&env_file).map_err(|e| format!("could not read {}: {e}", env_file.display()))?;

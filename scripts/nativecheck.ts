@@ -932,6 +932,30 @@ const pageConfig = [
 check("the host names three", rustConfig.length, 3);
 check("and the page mirrors exactly those", [...pageConfig].sort(), [...rustConfig].sort());
 /*
+ * ⚠ **And the exits the daemon gives, written down in three places.**
+ * `scripts/daemon.ts` decides them, `daemon.rs` carries one back, and `store.ts`
+ * branches on them — so a renumbering on one side is a store that silently takes
+ * no arm at all. The alternative to a number was reading the daemon's log, and a
+ * supervisor that greps its child's output is one rewording away from doing
+ * nothing quietly; that is the whole reason these exist, so they are pinned.
+ */
+const daemonTs = read("scripts/daemon.ts");
+const nativeTs = read("packages/web/src/native.ts");
+for (const [name, constant] of [
+  ["codeRefused", "EXIT_CODE_REFUSED"],
+  ["controlPlaneUnreachable", "EXIT_CONTROL_PLANE_UNREACHABLE"],
+] as const) {
+  const daemonValue = capture(daemonTs, new RegExp(`const ${constant} = (\\d+);`));
+  const pageValue = capture(nativeTs, new RegExp(`${name}: (\\d+),`));
+  check(`the daemon names ${constant}`, daemonValue !== null, true);
+  check(`and the page agrees on ${name}`, pageValue, daemonValue);
+}
+check(
+  "and the daemon still keeps 2 for everything else",
+  /process\.exit\(\s*rejected[\s\S]{0,240}:\s*2,?\s*\)/.test(daemonTs),
+  true,
+);
+/*
  * And the key itself is spelled the same on both sides of the *file*, since the
  * shell installer writes it and this reads it back.
  */
@@ -983,6 +1007,28 @@ check("and stops the daemon it started there", /supervisor\.stop\(\)/.test(libRs
  * hands the daemon's 25-second shutdown budget to the quit gesture.
  */
 check("and the stop is bounded rather than open-ended", /const STOP_DEADLINE/.test(daemonRs), true);
+/*
+ * ⚠ **And a rewrite is refused while a hand-installed service owns the same file.**
+ * `deploy/launchd/reemoat.plist.in` sets `KeepAlive` with `ThrottleInterval 10`,
+ * so launchd would respawn within ten seconds, source the newly written file and
+ * race this app's child for a single-use enrollment code, the database lock and
+ * the port. Whichever loses, the code is spent and neither ends up enrolled.
+ */
+check("a hand-installed service is looked for", /fn managed_unit\(/.test(daemonRs), true);
+check(
+  "and a rewrite is refused while one owns the file",
+  /daemon::managed_unit\(&home\)/.test(read(`${TAURI_DIR}/src/commands.rs`)),
+  true,
+);
+/*
+ * ⚠ **And a value that could write a second assignment is refused rather than
+ * escaped.** The env file is sourced by `run-daemon.sh` with `.`, and every key
+ * `parse_env` finds reaches the daemon's environment with no whitelist — so a
+ * newline is a second assignment and `NODE_OPTIONS` is code. `parse_env` strips one
+ * pair of quotes and does not understand `'\''`, so escaping here would be a
+ * second, divergent reading of a file that already has one authoritative reader.
+ */
+check("values written into the env file are validated", /fn is_writable_value\(/.test(daemonRs), true);
 check(
   "and the state command asks before answering foreign",
   /announced\.filter\(\|found\| ours \|\| daemon::is_alive/.test(read(`${TAURI_DIR}/src/commands.rs`)),

@@ -394,6 +394,20 @@ process.stdout.write("\nthe machine limit\n");
      */
     check("and it never pattern-matches the log to decide", /code_unusable|code_rejected/.test(settle), false);
     /*
+     * ⭐ **And a fresh code answers exactly one exit.** Retrying on the *fact* of
+     * an exit was right while an exit was all the daemon said; it says which now,
+     * so a held database lock or a missing token stops being answered with a mint
+     * that re-enrolls the machine over a problem no code can touch. Still the
+     * process's status rather than its words.
+     */
+    check("a mint answers a refused code and nothing else", /DAEMON_EXIT\.codeRefused/.test(settle), true);
+    /*
+     * ⭐ **And the fast deadline slows down rather than giving a wrong answer.**
+     * Stopping there left the notice saying `failed` over a daemon that came up a
+     * second later, with nothing still watching to take it back.
+     */
+    check("a slow start is waited out, not called a failure", /SETUP_SLOW_POLL_MS/.test(settle), true);
+    /*
      * ⭐ **And a computer whose settings cannot start is not a dead end.**
      *
      * The pure form of the original bug: a half-finished `deploy/install.sh`
