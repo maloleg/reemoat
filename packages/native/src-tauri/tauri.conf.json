@@ -54,6 +54,7 @@
     "publisher": "rends-east",
     "createUpdaterArtifacts": false,
     "macOS": {
+      "infoPlist": "Info.plist",
       "minimumSystemVersion": "13.0",
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true,

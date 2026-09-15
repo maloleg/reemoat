@@ -334,17 +334,26 @@ process.stdout.write("\nwhich settings screen a URL names\n");
 
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
-  check("a plain user sees three sections", visibleSections(plain).map((s) => s.id), ["account", "keys", "machines"]);
+  check("a plain user sees four sections", visibleSections(plain).map((s) => s.id), ["account", "keys", "machines", "logs"]);
   check(
-    "an admin sees six",
+    "an admin sees seven",
     visibleSections(admin).map((s) => s.id),
-    ["account", "keys", "machines", "server", "email", "users"],
+    ["account", "keys", "machines", "logs", "server", "email", "users"],
   );
-  // Six ids, and this is the count the plan named three ways before it was one:
+  // Seven ids, and this is the count the plan named three ways before it was one:
   // the union, the table and the `SectionBody` switch. The switch ends in a
   // `never` arm and the union is the table's element type, so this line is the
   // table's own claim.
-  check("and the table has exactly six entries", SECTION_SPECS.length, 6);
+  check("and the table has exactly seven entries", SECTION_SPECS.length, 7);
+  /*
+   * ⚠ **Logs is the one section nobody is gated out of and nobody else can see.**
+   * It is `adminOnly: false`, because what it draws is this computer's own daemon
+   * rather than anything about the account — and it is deliberately *not* gated on
+   * the native shell either. `visibleSections` answers from `Me`, and a second
+   * criterion there would make `refusedSectionText` explain a refusal by naming
+   * the wrong reason; the browser arm is a sentence on the screen instead.
+   */
+  check("and Logs is not an admin section", SECTION_SPECS.find((spec) => spec.id === "logs")?.adminOnly, false);
   // The owner's call: the rows everybody sees say what they are and carry no
   // second line; the admin rows keep one because their titles do not.
   check(
@@ -439,7 +448,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * phase when the control plane is unreachable but machines are already known,
    * and never sets `me`. So this fails closed rather than optimistically.
    */
-  check("and somebody we could not identify sees three", visibleSections(null).map((s) => s.id), ["account", "keys", "machines"]);
+  check("and somebody we could not identify sees four", visibleSections(null).map((s) => s.id), ["account", "keys", "machines", "logs"]);
   /*
    * The default the pane draws where the URL names no section — `Settings.tsx`
    * renders it at `sm` and above, and the rail highlights the same constant.

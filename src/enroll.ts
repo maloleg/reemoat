@@ -20,10 +20,64 @@ import { describeError } from "./http.js";
 
 export type EnrollErrorCode =
   | "unreachable"
+  /**
+   * The operating system refused a connection to an address on this network.
+   *
+   * Separated from `unreachable` because the remedy is nothing like it: the
+   * network is fine and the control plane is up — see {@link localNetworkBlocked}.
+   */
+  | "local_network"
   | "timeout"
   | "code_rejected"
   | "bad_response"
   | "no_usable_keys";
+
+/**
+ * Whether the operating system refused the connection rather than the network.
+ *
+ * ⚠ **Measured 2026-09-15 on macOS 15, and it is invisible from inside this
+ * process.** A daemon started by Reemoat.app is a child of it, so the app is the
+ * *responsible process* for Local Network Privacy — and until somebody grants
+ * that, a connect to a private-subnet address fails with `EHOSTUNREACH` while the
+ * very same address answers `ping` and `curl` from a terminal one second later.
+ * The same daemon started from a shell inherits the terminal's permission and
+ * works, which is why every earlier measurement of this missed it.
+ *
+ * It is `unreachable`'s twin and must not be filed under it: `unreachable` means
+ * *wait, the network or the server is down*, and this means *nothing is down and
+ * waiting will not help*. The two are told apart by the errno and the address
+ * rather than by any message, because `fetch` says `fetch failed` to both.
+ *
+ * Only a private address counts. `EHOSTUNREACH` reaching a public one is an
+ * ordinary routing failure, and offering somebody a privacy setting for it would
+ * send them to a switch that changes nothing.
+ */
+function localNetworkBlocked(error: unknown): boolean {
+  const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined;
+  if (!(cause instanceof Error)) return false;
+  const code = (cause as { code?: unknown }).code;
+  if (code !== "EHOSTUNREACH" && code !== "ENETUNREACH") return false;
+  const address = (cause as { address?: unknown }).address;
+  return typeof address === "string" && isPrivateAddress(address);
+}
+
+/** RFC1918, link-local, and their IPv6 equivalents. */
+function isPrivateAddress(address: string): boolean {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(address);
+  if (v4 !== null) {
+    const first = Number(v4[1]);
+    const second = Number(v4[2]);
+    return (
+      first === 10 ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 169 && second === 254)
+    );
+  }
+  const v6 = address.toLowerCase();
+  // fc00::/7 (unique local) and fe80::/10 (link local).
+  return /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6);
+}
 
 /**
  * What `fetch failed` actually was.
@@ -142,7 +196,7 @@ export async function enroll(options: EnrollOptions): Promise<EnrollResult> {
       throw new EnrollError("timeout", `the control plane at ${url.origin} did not answer within ${timeoutMs / 1000}s`);
     }
     throw new EnrollError(
-      "unreachable",
+      localNetworkBlocked(error) ? "local_network" : "unreachable",
       `could not reach the control plane at ${url.origin}: ${describeError(error)}${causeOf(error)}`,
     );
   } finally {

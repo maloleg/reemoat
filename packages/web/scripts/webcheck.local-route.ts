@@ -402,3 +402,44 @@ async function connect(id: string) {
     `local at ${localAt}, relayOnline at ${relayAt}`,
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Which machine is *this* one, and why that is not the route
+ *
+ * ⚠ **The 2026-09-15 reversal's other half.** The machine this app sets up is
+ * labelled after the computer now, like every other machine, because that label
+ * is read by a phone and by every other client of the account. What is left
+ * saying "you are sitting at this one" is a badge, and the badge needs a fact
+ * that is true per client: the announce file, which is what `localDaemon` reads.
+ *
+ * Driven above for the value (`localAnnouncedFor` against a stubbed
+ * `host_local_daemon`); asserted off disk here for the two wirings a value test
+ * cannot see — where the store gets it from, and when it asks again.
+ * ------------------------------------------------------------------ */
+{
+  const store = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+
+  check("the store keeps which machine this computer is", /localMachineId: MachineId \| null;/.test(store), true);
+  check("and fills it from the daemon's announce file", /const found = await localDaemon\(\);/.test(store), true);
+
+  /*
+   * ⚠ **Not `route.kind === "local"`, and this is a negative on purpose.** The
+   * route is a *preference*: `setLocalOff` turns the loopback path off per machine
+   * (driven two sections up), and a badge keyed on it would vanish from the
+   * machine somebody is sitting at the moment they chose the relay. Identity and
+   * reachability are the same file read and two different questions.
+   */
+  const refresher = /private async refreshLocalMachine\(\)[\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+  check("refreshLocalMachine was found to read", refresher.length > 0, true);
+  check("and it never consults the routing preference", /localOff|localBaseFor|kind === "local"/.test(refresher), false);
+
+  /*
+   * ⚠ **A memo, where `localBaseFor` refuses one — so *when* it is refreshed is
+   * the whole of its correctness.** `runResume` is the funnel every wake, every
+   * machine mutation (`machinesChanged`) and the bootstrap promotion already pass
+   * through. Asked anywhere narrower and a daemon that starts *after* the app — on
+   * a laptop where both come up at login, the ordinary case — is never badged.
+   */
+  const resume = /private async runResume\([\s\S]*?\n    this\.patch\(\{ resuming: true \}\);[\s\S]{0,400}/.exec(store)?.[0] ?? "";
+  check("and the resume funnel is what asks again", /await this\.refreshLocalMachine\(\);/.test(resume), true);
+}

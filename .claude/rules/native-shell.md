@@ -224,11 +224,17 @@ the process was derived from a credential for a different fleet.
 
 An app-defined `#[tauri::command]` is **not** ACL-gated — it is callable from every
 window without an entry — so `commands.rs` is the whole surface and
-`capabilities/default.json` grants nothing. Nine of them; the newest is
-`host_local_daemon`, which reads a file the *daemon* wrote and answers a finished
+`capabilities/default.json` grants nothing. **Thirteen** of them — `nativecheck`
+holds the two lists to each other rather than this file holding a number, which is
+why the count here is prose and not a claim anything rests on. `host_local_daemon`
+reads a file the *daemon* wrote and answers a finished
 origin rather than the host and port it was built from — `local.rs` refuses
 anything but `127.0.0.1` and `::1`, in the host process, for `host_cp`'s reason. It
-opens no socket, so the leg count two sections up is unchanged. The three Tauri plugins here
+opens no socket, so the leg count two sections up is unchanged; neither does
+`host_daemon_log`, the newest, which hands the page the supervisor's own 200-line
+ring for Settings → Logs. That is a **second** reader of that ring on purpose:
+`host_daemon_state` is on the setup screen's one-second poll and its `detail` means
+*what explains this failure*, so widening it would put a log on a poll. The three Tauri plugins here
 (`opener`, `dialog`, `clipboard-manager`) are driven **from Rust**, so a JS
 permission for any of them would be a door the webview could walk through on a page
 that renders agent output. `nativecheck` pins the permission list empty as an exact

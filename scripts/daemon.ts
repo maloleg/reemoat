@@ -125,6 +125,14 @@ const EXIT_CODE_REFUSED = 3;
 
 /** The control plane could not be reached or did not answer. Wait, do not re-mint. */
 const EXIT_CONTROL_PLANE_UNREACHABLE = 4;
+
+/**
+ * The operating system refused a connection to an address on this network.
+ *
+ * Its own code because its remedy is its own: nothing is down and no amount of
+ * waiting helps — somebody has to grant a permission. See `localNetworkBlocked`.
+ */
+const EXIT_LOCAL_NETWORK_BLOCKED = 5;
 const DEFAULT_DB = join(homedir(), ".reemoat", "reemoat.db");
 const DAY_MS = 86_400_000;
 
@@ -1326,9 +1334,11 @@ async function buildVerifier(): Promise<AuthSetup> {
       process.exit(
         rejected
           ? EXIT_CODE_REFUSED
-          : error instanceof EnrollError && (error.code === "unreachable" || error.code === "timeout")
-            ? EXIT_CONTROL_PLANE_UNREACHABLE
-            : 2,
+          : error instanceof EnrollError && error.code === "local_network"
+            ? EXIT_LOCAL_NETWORK_BLOCKED
+            : error instanceof EnrollError && (error.code === "unreachable" || error.code === "timeout")
+              ? EXIT_CONTROL_PLANE_UNREACHABLE
+              : 2,
       );
     }
   }

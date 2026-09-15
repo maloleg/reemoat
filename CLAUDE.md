@@ -62,7 +62,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 941 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 945 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -250,7 +250,11 @@ pnpm --dir packages/native install   # the native shell's own node_modules. **Th
                                      #   excluded from the workspace, so the Tauri CLI never lands on
                                      #   a daemon host and a Tauri bump never moves the root lockfile
 pnpm native                          # tauri dev: Vite on 5173, the window over it
-pnpm native:build                    # → a .app and a .dmg with packages/web inside the binary.
+pnpm native:build                    # → a .app with packages/web inside the binary. **No .dmg**:
+                                     #   `bundle.targets` is `["app"]`, because tauri's `bundle_dmg.sh`
+                                     #   drives Finder over AppleScript and times out anywhere nobody is
+                                     #   logged in — `docs/NATIVE.md` has the measurement and the one-line
+                                     #   `--bundles dmg` escape.
                                      #   Ad-hoc signed: no identity is committed, and none is needed
                                      #   for a development build. arm64 only on a checkout with no
                                      #   rustup; `docs/NATIVE.md` has the rest

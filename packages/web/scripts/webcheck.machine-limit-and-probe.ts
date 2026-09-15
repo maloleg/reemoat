@@ -308,7 +308,8 @@ process.stdout.write("\nthe machine limit\n");
     /*
      * And it consults what it already claimed. Creating unconditionally on every
      * bootstrap is the defect this whole record exists to prevent: a machine row is
-     * counted with no revoked filter, so each one spends one of fifty for ever.
+     * counted with no revoked filter, so each one holds a slot until it is
+     * revoked — and nobody revokes a machine they never knew was made.
      */
     check("and it re-mints against a machine it already made", /state\.claimed/.test(setUp), true);
     /*
@@ -385,7 +386,24 @@ process.stdout.write("\nthe machine limit\n");
     const settle = /private async settleDaemon\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
     const remint = /private async remintFor\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
     check("and the settle loop exists to be checked", settle.length > 0, true);
-    check("and it reports what the daemon actually printed", /state\.detail/.test(settle), true);
+    /*
+     * ⚠ **And what it reports is a *sentence*, never the daemon's own output** —
+     * owner's call, 2026-09-15, reversing the arm this assertion used to pin. The
+     * settle loop put `state.detail` — the host's two-hundred-line ring — straight
+     * into the rail's notice, which drew it verbatim in a `<pre>`. The ring is
+     * Settings → Logs now and the rail says one sentence.
+     *
+     * Both halves, because either alone goes green over the wrong thing: the tail
+     * is not read here, **and** every failure that has evidence says where it went.
+     * A negative alone is the anti-pattern this file already names elsewhere — it
+     * would pass just as well over a flow that says nothing at all.
+     */
+    check("and the settle loop never puts the daemon's output in the notice", /state\.detail/.test(settle), false);
+    check("while every failure with evidence names where it is", /LOGS_POINTER|DAEMON_STOPPED_DETAIL|GAVE_UP_DETAIL/.test(settle), true);
+    const pointer = /const LOGS_POINTER = "([^"]+)"/.exec(store)?.[1] ?? "";
+    check("and the pointer names a real settings section", /Logs/.test(pointer), true);
+    const sections = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
+    check("which the section table actually has", /title: "Logs"/.test(sections), true);
     /*
      * ⚠ **And it retries on the *fact* of an exit, never on the text of one.**
      * Matching `code_unusable` in a log tail would be a fourth reader of a string
@@ -439,8 +457,8 @@ process.stdout.write("\nthe machine limit\n");
     /*
      * ⭐ **And "that machine is gone" is a *named* refusal.** With the test the
      * other way round, a 401 on an expired session or any unrecognised 5xx bought a
-     * second machine for a machine that is alive. A slot is never given back, so
-     * the default has to be the answer that spends nothing.
+     * second machine for a machine that is alive — a slot held until a person
+     * notices it, so the default has to be the answer that spends nothing.
      */
     for (const code of ["machine_not_found", "machine_revoked"] as const) {
       check(`a dead claim is ${code}`, remint.includes(code), true);
@@ -489,29 +507,40 @@ process.stdout.write("\nthe machine limit\n");
       true,
     );
     /*
-     * ⚠ **The machine this app sets up is called `local`, not the host name** —
-     * an owner's call on seeing the first real run produce `MacBook-Pro-Nikita`.
-     * The host name is what the control plane would want, because it
-     * distinguishes rows; `local` is what the person wants, because the one
-     * machine this app creates is the computer they are sitting at.
+     * ⚠ **The machine this app sets up carries the ordinary host name, and
+     * `local` is not a name at all** — an owner's call, 2026-09-15, reversing one
+     * taken the same day. The first answer was the literal `local`, on the
+     * argument that the machine this app sets up is the computer somebody is
+     * sitting at. What that missed is who else reads the label: a phone, a second
+     * computer, anybody holding a grant — and to all of them `local` names a
+     * computer somewhere else.
      *
-     * The host name survives as the **collision fallback**, and that is the half
-     * worth pinning: names are compared case-insensitively across everything an
-     * account can see, so a second computer cannot also be `local`, and falling
-     * back to a number would name nothing anybody could recognise from a phone.
+     * So this pins **both halves of the reversal**, because either alone can be
+     * quietly undone: the base is the host name, and no literal `"local"` is left
+     * in the function. The `local`-ness moved to a badge drawn off the announce
+     * file, asserted in `webcheck.local-route.ts` where the announce stub lives.
      */
-    const { LOCAL_MACHINE_NAME } = await import("../src/store.js");
-    check("the machine this app sets up is called local", LOCAL_MACHINE_NAME, "local");
-    check("and that is itself a valid label", LABEL.test(LOCAL_MACHINE_NAME), true);
     const storeSrc = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
-    check(
-      "and the host name is what a collision falls back to",
-      /machineLabelFor\(boot\.hostName\)/.test(storeSrc),
-      true,
-    );
+    const creating = /private async createForThisComputer\([\s\S]*?\n  \}/.exec(storeSrc)?.[0] ?? "";
+    check("createForThisComputer was found to read", creating.length > 0, true);
+    check("the machine this app sets up is named after the computer", /const base = machineLabelFor\(boot\.hostName\)/.test(creating), true);
+    check("and nothing there names a machine `local`", /"local"/.test(creating), false);
+    check("the constant that used to is gone", /LOCAL_MACHINE_NAME/.test(storeSrc), false);
 
-    // And the suffix the one retry appends is itself a valid label.
+    /*
+     * ⚠ **The retry's suffix, and the boundary that made it vacuous.**
+     * `machineLabelFor` applies its `.slice(0, 64)` **last**, so appending `-2`
+     * and re-shaping a maximal name answers the original name — the retry would
+     * re-post what had just collided. The base is sliced to 61 first; this is the
+     * case that proves it, and it is the case the old spelling of this assertion
+     * (`machineLabelFor(null)` = eight characters) could never have reached.
+     */
     check("a disambiguated name is still a label", LABEL.test(machineLabelFor(`${machineLabelFor(null)}-2`)), true);
+    const longest = machineLabelFor("x".repeat(200));
+    check("a maximal label is the full sixty-four", longest.length, 64);
+    check("and re-shaping it with a suffix gives the name back", machineLabelFor(`${longest}-2`), longest);
+    check("so the retry slices first", machineLabelFor(`${longest.slice(0, 61)}-2`).endsWith("-2"), true);
+    check("and the code does the slicing", /base\.slice\(0, 61\)/.test(creating), true);
   }
 
   for (const file of ["ui/SessionBrowser.tsx", "ui/NewSession.tsx", "ui/settings/MachinesSection.tsx"]) {
@@ -626,7 +655,20 @@ process.stdout.write("\nthe machine limit\n");
     // screen, asserted below once that file is read: a negative alone pointed at
     // the file the sentence left (review D12).
     check("and no longer says so in the subline", /not yours to rename or retire/.test(src), false);
-    check("with the state badge outranking it", /machineBadgeText\(machine\)[\s\S]{0,200}\?\? \(machine\.owned === true \? null : "shared"\)/.test(src), true);
+    /*
+     * ⚠ **Three ranks now, and the middle one is the 2026-09-15 reversal.** The
+     * machine this app sets up is named after the computer like any other, so the
+     * only thing left saying *which row you are sitting at* is this badge — and it
+     * has to outrank `shared` or a machine somebody shared with you stops being
+     * findable on the one screen you are on. A state badge still wins over both.
+     */
+    check(
+      "with the state badge outranking both",
+      /machineBadgeText\(machine\)[\s\S]{0,260}\?\? \(isThisDevice \? "this device" : machine\.owned === true \? null : "shared"\)/.test(src),
+      true,
+    );
+    check("and `this device` comes from the store rather than from the route", /isThisDevice=\{machine\.id === state\.localMachineId\}/.test(src), true);
+    check("never from the routing preference, which can be switched off", /route[\s\S]{0,40}=== "local"/.test(src), false);
     /*
      * Creating and retiring a machine move `machineCount`, which is the number
      * the limit is enforced against — and `runResume` refreshes `me` only on a

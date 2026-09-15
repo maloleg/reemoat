@@ -944,6 +944,7 @@ const nativeTs = read("packages/web/src/native.ts");
 for (const [name, constant] of [
   ["codeRefused", "EXIT_CODE_REFUSED"],
   ["controlPlaneUnreachable", "EXIT_CONTROL_PLANE_UNREACHABLE"],
+  ["localNetworkBlocked", "EXIT_LOCAL_NETWORK_BLOCKED"],
 ] as const) {
   const daemonValue = capture(daemonTs, new RegExp(`const ${constant} = (\\d+);`));
   const pageValue = capture(nativeTs, new RegExp(`${name}: (\\d+),`));
@@ -952,9 +953,24 @@ for (const [name, constant] of [
 }
 check(
   "and the daemon still keeps 2 for everything else",
-  /process\.exit\(\s*rejected[\s\S]{0,240}:\s*2,?\s*\)/.test(daemonTs),
+  /process\.exit\(\s*rejected[\s\S]{0,600}:\s*2,?\s*\)/.test(daemonTs),
   true,
 );
+/*
+ * ⚠ **And the app says why macOS refused it, because the daemon cannot.**
+ * Measured 2026-09-15 on macOS 15: a daemon started by this app is a child of it,
+ * so this app is the responsible process for Local Network Privacy — and until
+ * that is granted, reaching a control plane on a private subnet fails with
+ * `EHOSTUNREACH` while the same address answers `ping` from a terminal one second
+ * later. The key is what makes the system's own prompt say something about
+ * Reemoat rather than nothing at all.
+ */
+check(
+  "the bundle asks for the local network in its own words",
+  /NSLocalNetworkUsageDescription/.test(read(`${TAURI_DIR}/Info.plist`)),
+  true,
+);
+check("and the config merges that file in", (bundle["macOS"] as Record<string, unknown>)["infoPlist"], "Info.plist");
 /*
  * And the key itself is spelled the same on both sides of the *file*, since the
  * shell installer writes it and this reads it back.
@@ -1050,6 +1066,129 @@ check(
   owned.split(",").map((k) => k.trim()).filter(Boolean),
   ['"REEMOAT_AUTH"', "CONTROL_PLANE_KEY", '"REEMOAT_ENROLL_CODE"'],
 );
+
+/*
+ * ⚠ **The log is its own command, and the split is the assertion.** Owner's call,
+ * 2026-09-15: the setup notice stopped drawing the daemon's two hundred lines and
+ * Settings → Logs draws them instead. The obvious way to feed that screen would
+ * have been to widen `DaemonState.detail` to carry the ring whenever there is one
+ * — which puts a log on the one-second setup poll and turns a field meaning *what
+ * explains this failure* into a log field by accident. So: a second command, and
+ * `host_daemon_state`'s running and foreign arms still answer `detail: None`.
+ *
+ * Both halves, because the first alone would go green over a widened `detail`
+ * sitting beside a command nobody calls.
+ */
+{
+  const commandsRs = read(`${TAURI_DIR}/src/commands.rs`);
+  check("the log has a command of its own", /pub fn host_daemon_log\(/.test(commandsRs), true);
+  check("and the supervisor answers it as lines", /pub fn log_lines\(&self\) -> Vec<String>/.test(daemonRs), true);
+  /*
+   * ⚠ **And the poll carries no output at all any more.** `DaemonState` had a
+   * `detail` field holding the tail, which is what the setup notice drew; the
+   * notice draws a sentence now, so the field has no reader and is gone rather
+   * than left on the wire for nobody. What the poll asks the ring is a boolean —
+   * `printed_anything`, which is the whole of `exited` against `absent`.
+   *
+   * A negative and a positive, because either alone is satisfied by the wrong
+   * thing: no field named `detail` on the struct, and the bit that replaced it.
+   */
+  check("the poll carries no daemon output", /pub detail:/.test(daemonRs), false);
+  check("and asks the ring for a bit instead", /pub fn printed_anything\(&self\) -> bool/.test(daemonRs), true);
+  check("which is what tells `exited` from `absent`", /if supervisor\.printed_anything\(\) \{ "exited" \} else \{ "absent" \}/.test(commandsRs), true);
+  check("and the page's mirror of the struct dropped it too", /detail/.test(/export interface DaemonState \{[\s\S]*?\n\}/.exec(read("packages/web/src/native.ts"))?.[0] ?? "x detail"), false);
+  /*
+   * ⚠ **And it never refuses.** A screen whose whole subject is "what did it say"
+   * has no use for a refusal it would have to render instead of the log — every
+   * absence is an empty list, and the screen tells them apart from the state it
+   * already has. A `Result` here would be a second empty-state vocabulary.
+   */
+  check("the log command answers a list rather than a result", /pub fn host_daemon_log\(host: State<'_, Host>\) -> Vec<String>/.test(commandsRs), true);
+}
+
+/*
+ * ⚠ **The payload is not where a coding-agent CLI comes from, and it shipped one
+ * anyway.** Measured 2026-09-15: `codex-acp` depends on `@openai/codex`, so npm
+ * staged that package and wrote a `.bin/codex` for it, while `--omit=optional`
+ * dropped the platform package that implements it — on purpose, because
+ * `deploy/agents.sh` installs that CLI from the vendor (Q4.114). `daemon_path`
+ * puts the payload's `.bin` first on PATH, which is right for the adapters and
+ * wrong for this: `findOnPath("codex")` returned a shim that answers every
+ * invocation with `Missing optional dependency`, ahead of the working copy the
+ * person had installed. The agent was *listed* — listing asks only whether the
+ * CLI resolves — and failed after the first message.
+ *
+ * Two halves, and the second is what keeps this from rotting: the prune exists,
+ * **and** the names it prunes are exactly `AGENT_LOGIN`'s. A fifth agent added in
+ * `src/acp/agents.ts` and not in the staging script is this defect back, on the
+ * fifth agent, with nothing saying so.
+ */
+{
+  const staging = read(`${NATIVE}/scripts/build-daemon.mjs`);
+  check("the payload prunes the agent CLIs it does not ship", /function pruneAgentClis\(\)/.test(staging), true);
+  check("and the prune runs", /^pruneAgentClis\(\);$/m.test(staging), true);
+  const staged = /const AGENT_CLIS = \[([^\]]*)\]/.exec(staging)?.[1] ?? "";
+  const pruning = staged.split(",").map((name) => name.trim().replace(/^"|"$/g, "")).filter(Boolean).sort();
+  const agentsTs = read("src/acp/agents.ts");
+  const login = /export const AGENT_LOGIN[\s\S]*?\n\};/.exec(agentsTs)?.[0] ?? "";
+  const commands = [...login.matchAll(/^    command: "([a-z]+)",$/gm)].map((m) => m[1]).sort();
+  check("both lists were found", pruning.length > 0 && commands.length > 0, true);
+  check("and the payload prunes exactly the CLIs this daemon drives", pruning, commands);
+  /*
+   * The ordering the prune exists because of. `.bin` first is deliberate — the
+   * adapters and the runtime must resolve with no profile at all — so the fix
+   * cannot be to move it, and this pins that it was not moved by mistake.
+   */
+  check("the payload's bin is still first on the daemon's PATH", /parts\.push\(payload\.root\.join\("node_modules"\)\.join\("\.bin"\)/.test(daemonRs), true);
+}
+
+/*
+ * ⚠ **Who the daemon is, which `env_clear` took away and which a credential store
+ * keys on.** Measured 2026-09-15 on the machine that had it, and it is the
+ * sharpest failure this shell has produced: `claude` derives its macOS Keychain
+ * *account* from `USER`, falling back to the literal `unknown`. Spawned without
+ * it, the agent looked up a credential nobody has, wrote an **empty** one under
+ * `unknown` on its first start, and then answered every turn with `OAuth session
+ * expired and could not be refreshed` — while the same binary, same `HOME`, same
+ * Keychain, worked in a terminal three feet away. Reproduced exactly on
+ * `env -i HOME=… PATH=… LANG=…`: refused without `USER`, answered with it.
+ *
+ * Signing in again could never have fixed it: a sign-in writes the *right*
+ * account and the agent kept reading the wrong one.
+ *
+ * Three assertions, because the interesting part is not that the line exists.
+ */
+{
+  const start = /pub fn start\(&mut self[\s\S]*?\n    \}/.exec(daemonRs)?.[0] ?? "";
+  check("the supervisor's spawn was found to read", start.length > 0, true);
+  check("it still builds the environment rather than inheriting one", /\.env_clear\(\)/.test(start), true);
+  check("and it names who the daemon is", /command\.env\("USER", &name\);/.test(start), true);
+  check("in both spellings, because POSIX has two and tools read either", /command\.env\("LOGNAME", &name\);/.test(start), true);
+  /*
+   * ⚠ **Set *before* the env file is applied, so a `USER=` line there still wins.**
+   * That is the rule the certificate pass-through states outright, and it is what
+   * keeps an interim workaround somebody wrote into `~/.reemoat/daemon.env` from
+   * fighting the fix. Asserted by position, because nothing typed can hold an
+   * ordering.
+   */
+  const named = start.indexOf('command.env("USER", &name);');
+  const fromFile = start.indexOf("for (key, value) in env {");
+  check("and the env file still wins over it", named > 0 && fromFile > named, true);
+  /*
+   * The authority, not the inherited value — `commands.rs` takes `HOME` from
+   * `app.path().home_dir()` for the same reason, and a stale export from whoever
+   * launched the bundle is exactly what this must not reproduce.
+   */
+  check("the name comes from the system rather than from a variable", /libc::getpwuid\(libc::getuid\(\)\)/.test(daemonRs), true);
+  /*
+   * The two neighbours caught with it. Neither is measured breaking anything —
+   * they are here because the failure was not "claude is unusual", it was "a clean
+   * environment is missing what every tool assumes a session has".
+   */
+  for (const name of ["SHELL", "TMPDIR"]) {
+    check(`and ${name} reaches the daemon too`, new RegExp(`"${name}",`).test(start), true);
+  }
+}
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
 process.exit(failures === 0 ? 0 : 1);

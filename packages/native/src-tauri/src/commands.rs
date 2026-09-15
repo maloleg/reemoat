@@ -84,8 +84,8 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
     /*
      * ⚠ **Answered on every state read, because the caller's *first* decision
      * depends on it.** A store that cannot see an existing env file creates a
-     * machine for a computer that already had one — permanently, since a machine
-     * row is never given back. `daemon::config_state` carries the measurement.
+     * machine for a computer that already had one — a quota slot spent on a
+     * machine nobody asked for, and one only a person who notices it can return. `daemon::config_state` carries the measurement.
      */
     let config = daemon::config_state(&home, origin.as_deref()).to_string();
     let Ok(mut supervisor) = host.supervisor.lock() else {
@@ -114,7 +114,6 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
             status: "running".to_string(),
             machine_id: Some(found.machine_id),
             claimed,
-            detail: None,
             ..Default::default()
         },
         // Announced by somebody else's daemon — the shell installer's, or one left
@@ -123,21 +122,20 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
             status: "foreign".to_string(),
             machine_id: Some(found.machine_id),
             claimed,
-            detail: None,
             ..Default::default()
         },
         (None, true) => daemon::DaemonState { status: "starting".to_string(), claimed, ..Default::default() },
         (None, false) => {
-            let tail = supervisor.tail();
             let exit_code = supervisor.exit_code();
             daemon::DaemonState {
                 exit_code,
-                // A tail with no live child means one was started and is gone;
-                // with no tail at all, nothing was ever tried here.
-                status: if tail.is_some() { "exited" } else { "absent" }.to_string(),
+                // A ring with something in it and no live child means one was
+                // started and is gone; an empty one, that nothing was ever tried
+                // here. The lines themselves are `host_daemon_log`'s — this poll
+                // asks the ring for a bit and never for its contents (Q7.140).
+                status: if supervisor.printed_anything() { "exited" } else { "absent" }.to_string(),
                 machine_id: None,
                 claimed,
-                detail: tail,
                 ..Default::default()
             }
         }
@@ -276,6 +274,30 @@ pub fn host_daemon_stop(host: State<'_, Host>) -> Result<(), String> {
         .map_err(|_| "the supervisor is poisoned".to_string())?
         .stop();
     Ok(())
+}
+
+/// What the daemon this app started has printed, newest last.
+///
+/// ⚠ **Its own command rather than a field on `host_daemon_state`, and that is
+/// about what each is asked.** `host_daemon_state` answers a word on a one-second
+/// poll while a computer is being set up; this answers two hundred lines to one
+/// screen that somebody opened on purpose. Folding the second into the first would
+/// put the log on the poll, and `DaemonState.detail` — which means *what explains
+/// this failure* and is `None` wherever nothing needs explaining — would become a
+/// log field by accident.
+///
+/// **Never `Err`.** A screen whose subject is "what did it say" has no use for a
+/// refusal it would have to render instead; every reason there is nothing to show
+/// — no daemon started here, a daemon somebody else's installer started, a daemon
+/// that has printed nothing yet — is an empty list, and the screen says which of
+/// those it is from the state it already has.
+#[tauri::command]
+pub fn host_daemon_log(host: State<'_, Host>) -> Vec<String> {
+    match host.supervisor.lock() {
+        Ok(supervisor) => supervisor.log_lines(),
+        // See `log_lines`: a poisoned lock costs the evidence, never the app.
+        Err(_) => Vec::new(),
+    }
 }
 
 /// `0600` inside a `0700` directory, on the platforms that have modes.

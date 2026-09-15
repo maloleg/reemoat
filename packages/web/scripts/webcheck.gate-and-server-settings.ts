@@ -1026,23 +1026,23 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
 
-  check("a non-admin sees three rows", navRows(plain).map((row) => row.spec.id), ["account", "keys", "machines"]);
+  check("a non-admin sees four rows", navRows(plain).map((row) => row.spec.id), ["account", "keys", "machines", "logs"]);
   /*
    * THE case, and it is invisible to the only people who could report it: a
    * heading computed from the static table renders "Server" above nothing for a
    * non-admin, and only an admin ever sees this nav in a correct state.
    */
   check("and no heading floats over nothing", navRows(plain).every((row) => row.heading === null), true);
-  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "keys", "machines"]);
+  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "keys", "machines", "logs"]);
   check(
-    "an admin sees six",
+    "an admin sees seven",
     navRows(admin).map((row) => row.spec.id),
-    ["account", "keys", "machines", "server", "email", "users"],
+    ["account", "keys", "machines", "logs", "server", "email", "users"],
   );
   check(
     "with the heading on the first row of its group only",
     navRows(admin).map((row) => row.heading),
-    [null, null, null, "server", null, null],
+    [null, null, null, null, "server", null, null],
   );
   const adminIndex = (id: string): number => navRows(admin).findIndex((row) => row.spec.id === id);
   check("and Server sits above Users", adminIndex("server") < adminIndex("users"), true);

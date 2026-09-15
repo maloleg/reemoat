@@ -489,6 +489,56 @@ function regenerateShims() {
 }
 
 /**
+ * The coding-agent CLIs, which this payload deliberately does not ship.
+ *
+ * `AGENT_LOGIN[*].command` in `src/acp/agents.ts` is the list; `nativecheck`
+ * reads both and asserts they are the same set, because a fifth agent added
+ * there and not here is this whole defect back on the fifth agent.
+ */
+const AGENT_CLIS = ["claude", "kimi", "codex", "opencode"];
+
+/**
+ * Take the agent CLIs' shims back out of `.bin`.
+ *
+ * ⚠ **Measured 2026-09-15, and it is the second half of `--omit=optional`.**
+ * `codex-acp` depends on `@openai/codex`, so npm stages that package *and* writes
+ * a `.bin/codex` for it — while the platform package that actually implements it
+ * (`@openai/codex-darwin-arm64`, 250 MB) is dropped on purpose, because
+ * `deploy/agents.sh` installs and updates that CLI from the vendor and the pinned
+ * copy is never the one meant to run (Q4.114). So the payload shipped a `codex`
+ * that answers every invocation with `Error: Missing optional dependency
+ * @openai/codex-darwin-arm64`.
+ *
+ * ⚠ **And it shipped it *first on PATH*.** `daemon_path` in `daemon.rs` puts this
+ * directory ahead of the user's own PATH — which is right for the adapters and
+ * the runtime, the things that must resolve with no profile at all — so
+ * `findOnPath("codex")` in the daemon returned the broken shim in front of the
+ * working `~/.local/bin/codex` the person had installed themselves. The visible
+ * symptom is the one the owner reported: the agent is *listed*, because listing
+ * asks only whether the CLI resolves, and the failure lands after the first
+ * message. Worse, `spawnPlan` then writes that path into `CODEX_PATH`, so the
+ * override exists to point the adapter at the broken copy.
+ *
+ * **An allowlist would be wrong here.** `.bin` has to keep whatever npm wrote for
+ * the adapters and the runtime — `claude-agent-acp`, `codex-acp`, `tsx`, `node`,
+ * `npm` — and naming those exhaustively means a transitive rename breaks the
+ * payload silently. What this file actually knows is narrower and stable: **the
+ * payload is not where a coding-agent CLI comes from.** So the four names are
+ * refused and everything else npm wrote stays.
+ */
+function pruneAgentClis() {
+  const binDir = join(stageDir, "node_modules", ".bin");
+  const pruned = [];
+  for (const name of AGENT_CLIS) {
+    const path = join(binDir, name);
+    if (!existsSync(path)) continue;
+    rmSync(path);
+    pruned.push(name);
+  }
+  step(pruned.length === 0 ? "no agent CLI shims to prune" : `pruned ${pruned.join(", ")} from .bin`);
+}
+
+/**
  * The assertion this whole file exists to be able to make.
  *
  * A symlink anywhere under the payload is a `cargo build` that fails with
@@ -536,6 +586,7 @@ installDependencies(runtime, entryVersions());
 copySource(runtime);
 placeRuntime(runtime);
 regenerateShims();
+pruneAgentClis();
 assertNoSymlinks();
 process.stdout.write(
   `  payload ${(payloadSize() / 1e6).toFixed(0)} MB at ${relative(repoRoot, stageDir)}\n`,

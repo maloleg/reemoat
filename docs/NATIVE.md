@@ -44,7 +44,7 @@ notifications.
 ```bash
 pnpm --dir packages/native install    # once. The ROOT install does not do this
 pnpm native                           # Vite on 5173 with the window over it
-pnpm native:build                     # a .app and a .dmg
+pnpm native:build                     # a .app — not a .dmg, see below
 pnpm nativecheck                      # offline, no cargo, part of `pnpm check`
 cd packages/native/src-tauri && cargo test && cargo clippy -- -D warnings
 ```

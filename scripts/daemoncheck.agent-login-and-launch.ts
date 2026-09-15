@@ -1043,6 +1043,26 @@ process.stdout.write("\nthe environment an agent is spawned with\n");
    */
   check("but CODEX_HOME survives, because it is an override and not a session", env["CODEX_HOME"], "/somewhere/else");
   check("and CODEX_PATH survives, which is the binary rather than the credentials", env["CODEX_PATH"], "/opt/codex");
+  /*
+   * ⚠ **And `USER` reaches the agent, which is the second half of a bug whose
+   * first half was in the desktop shell.** Measured 2026-09-15: `claude` derives
+   * its macOS **Keychain account** from `USER` and falls back to the literal
+   * `unknown`, so an agent spawned without it looks up a credential nobody has,
+   * writes an empty one there on first start, and then fails every turn with
+   * `OAuth session expired and could not be refreshed` — while the same binary
+   * works in a terminal. The shell's `Supervisor::start` now sets it; this is the
+   * assertion that the daemon does not then take it away again.
+   *
+   * It is a **negative about `SESSION_SCOPED_ENV`** rather than a positive about
+   * some code: `agentEnv` strips an explicit list plus `REEMOAT_*`, so `USER`
+   * survives today by not being on that list. Nothing said so, and "add the
+   * session-ish looking names" is exactly the edit that would put it there.
+   */
+  process.env["USER"] = "ada";
+  process.env["LOGNAME"] = "ada";
+  const identified = agentEnv();
+  check("USER reaches the agent, because a credential store is keyed on it", identified["USER"], "ada");
+  check("and LOGNAME with it, since POSIX has two spellings and tools read either", identified["LOGNAME"], "ada");
   check("and so does CLAUDE_CODE_EXECUTABLE", env["CLAUDE_CODE_EXECUTABLE"], "/opt/claude");
 
   for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];

@@ -77,6 +77,7 @@ pub fn run() {
             commands::host_daemon_state,
             commands::host_daemon_start,
             commands::host_daemon_stop,
+            commands::host_daemon_log,
             commands::host_set_server,
             commands::host_credential_set,
             commands::host_credential_clear,

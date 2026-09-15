@@ -670,6 +670,13 @@ function RenameMachine({ machine }: { machine: AppState["machines"][number] }): 
  * is a routing preference held in this client's own storage, which is why it is
  * last and under a heading that says so.
  *
+ * ⚠ **The heading's two words are also a badge one screen back, and they are not
+ * the same claim.** `MachinesSection`'s `this device` badge marks the *one* row
+ * that is the computer the app runs on. This heading is on *every* machine's page
+ * and means "this section is about your client, not about that host" — which is
+ * why it is drawn for a machine on the other side of the world. They are never on
+ * screen together, and neither may be renamed on the assumption it is the other.
+ *
  * ⚠ **Drawn in a browser too, where it can only ever refuse.** The arm is
  * structurally dead there — a page served over `https:` cannot reach
  * `http://127.0.0.1` at all — and the easy thing would be to render nothing. That

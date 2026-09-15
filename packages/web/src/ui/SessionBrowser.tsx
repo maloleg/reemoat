@@ -1945,9 +1945,19 @@ function SidebarFoot({ state, machine }: { state: AppState; machine: MachineId |
  * reachable*, with the cause sitting in a string nothing renders — which is exactly
  * what happened on the first real run, and cost a whole round trip to diagnose.
  *
- * `detail` is the daemon's own last words, from the ring `host_daemon_state` keeps.
- * Shown verbatim and never summarised: it is the only evidence there is, and a
- * friendlier sentence would be this screen inventing a cause it does not know.
+ * ⚠ **And the evidence is no longer *here*** — owner's call, 2026-09-15. This
+ * drew `host_daemon_state`'s ring, two hundred lines of it, in a `<pre>` under
+ * that sentence: program output on a rail whose subject is somebody's sessions,
+ * in the one place they are reading prose. The ring is Settings → Logs now
+ * (`LogsSection`), and what is left here is `said` — one sentence, which for
+ * every failure that has evidence ends by naming that screen.
+ *
+ * ⚠ **Sans, and `whitespace-pre-line` rather than a `<pre>`.** `said` is prose,
+ * so `web-typography.md` puts it in sans; the newlines are preserved for the one
+ * producer that needs them — the host's refusal when a `deploy/install.sh`
+ * service already owns this computer, which ends with the command that clears it.
+ * That is a remedy somebody retypes, bounded at two lines and written by this
+ * fleet, and reflowing it into a paragraph makes it unusable.
  */
 export function SetupNotice({ setup }: { setup: SetupState }): ReactNode {
   if (setup.step !== "failed") {
@@ -1960,13 +1970,8 @@ export function SetupNotice({ setup }: { setup: SetupState }): ReactNode {
   return (
     <div className="mx-3 mb-2 shrink-0 rounded-md border border-edge-strong bg-raised px-3 py-2 text-xs text-fg">
       <p>This computer could not be set up.</p>
-      {setup.detail !== null && (
-        /*
-         * Monospace and pre-wrapped, because this is program output rather than
-         * prose — `web-typography.md`'s rule, and the reason a stack trace stays
-         * readable instead of being reflowed into a paragraph.
-         */
-        <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-2xs text-muted">{setup.detail}</pre>
+      {setup.said !== null && (
+        <p className="mt-1 whitespace-pre-line break-words text-muted">{setup.said}</p>
       )}
     </div>
   );

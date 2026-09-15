@@ -35,7 +35,8 @@
 //! a machine installed by `deploy/bootstrap.sh` is *adopted* — read through
 //! `local.rs` like any other — and never raced. The same rule is what stops a
 //! second control-plane machine being created for one computer, which would burn a
-//! quota slot permanently (`machine_owners` is counted with no revoked filter).
+//! quota slot until a person notices and revokes it — the count is
+//! `machine_owners` rows, and a revoke is what releases one.
 //!
 //! **And it never kills a daemon it did not start.** `Instance` records the pid and
 //! the start time of the child this app launched; a daemon whose file says
@@ -360,7 +361,8 @@ pub const CONFIG_ELSEWHERE: &str = "elsewhere";
 /// ⚠ **The signal that was missing, and its absence cost a quota slot every
 /// launch.** Without it `host_daemon_state` answered `absent` for a computer that
 /// already had a half-finished install; the store then created a machine —
-/// permanent, since `machine_owners` is counted with no revoked filter — and
+/// held until somebody revokes it, which nobody does to a machine they never
+/// knew was made — and
 /// `host_daemon_start` skipped the write and started the daemon carrying the *old*
 /// file's code, for a *different* machine. Measured on a real machine 2026-09-15:
 /// a machine row created at 15:15:54, a daemon started at 15:15:55, and an
@@ -486,7 +488,7 @@ pub fn parse_env(text: &str) -> BTreeMap<String, String> {
 ///
 /// ⚠ **This exists because a machine row is permanent and a quota slot is not
 /// given back.** `machine_owners` is counted with **no revoked filter**, so every
-/// `POST /v1/machines` spends one of fifty for ever. The window is small and real:
+/// `POST /v1/machines` spends one of fifty until somebody revokes it by hand. The window is small and real:
 /// the app creates a machine, writes the env file, starts the daemon — and if it
 /// is quit, or crashes, or the enrollment code expires before the daemon redeems
 /// it, then on the next launch the machine id exists only on the control plane and
@@ -578,6 +580,63 @@ pub fn host_name() -> Option<String> {
     #[cfg(not(unix))]
     {
         std::env::var("COMPUTERNAME").ok().filter(|n| !n.is_empty())
+    }
+}
+
+/// The account name this process runs as, for the child's `USER`/`LOGNAME`.
+///
+/// ⚠ **Measured 2026-09-15, and it is the whole of why an agent could not
+/// authenticate while the same CLI worked in a terminal three feet away.**
+/// `env_clear` in `Supervisor::start` is deliberate, and what it cleared included
+/// `USER`. On macOS `claude` derives its **Keychain account** from that variable
+/// and falls back to the literal `unknown` — so the agent looked up
+/// `(Claude Code-credentials, "unknown")`, found nothing, wrote an *empty*
+/// credential there on its first start, and from then on read back `expiresAt: 0`
+/// with no refresh token to fix it. What the person sees is `Failed to
+/// authenticate: OAuth session expired and could not be refreshed`, which reads as
+/// a login that lapsed rather than as a lookup under the wrong name — and it is
+/// unfixable by signing in again, because signing in writes the *right* account
+/// and the agent keeps reading the wrong one.
+///
+/// Reproduced on the machine that had it, same binary, same `HOME`:
+/// `env -i HOME=… PATH=… LANG=…` refuses; adding `USER=… LOGNAME=…` answers.
+///
+/// ⚠ **`getpwuid` first and the environment second**, which is the ordering `HOME`
+/// already has: `commands.rs` takes the home from `app.path().home_dir()` rather
+/// than from `$HOME`, because a value the system answers cannot be a stale export
+/// from whoever launched the bundle. The environment is the fallback for a uid
+/// with no passwd entry, which is a container rather than a Mac.
+///
+/// **This is one instance of a class, not a special case for claude.** Anything
+/// that keys a credential, a cache or a config directory on the account name has
+/// the same hole, and nothing in a clean environment would have said so — see the
+/// pass-through list in `start` for the two neighbours caught with it.
+fn login_name() -> Option<String> {
+    #[cfg(unix)]
+    {
+        // Safe: `getpwuid` answers a pointer into libc's own static storage, valid
+        // until this thread calls it again; the name is copied out before anything
+        // else can. A null answer is "no passwd entry for this uid", which is a
+        // real state rather than an error, so it falls through to the environment.
+        let from_passwd = unsafe {
+            let entry = libc::getpwuid(libc::getuid());
+            if entry.is_null() {
+                None
+            } else {
+                std::ffi::CStr::from_ptr((*entry).pw_name).to_str().ok().map(str::to_owned)
+            }
+        };
+        for candidate in [from_passwd, std::env::var("USER").ok(), std::env::var("LOGNAME").ok()] {
+            match candidate {
+                Some(name) if !name.trim().is_empty() => return Some(name),
+                _ => continue,
+            }
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::var("USERNAME").ok().filter(|name| !name.trim().is_empty())
     }
 }
 
@@ -742,8 +801,6 @@ pub struct DaemonState {
     /// A caller that sees this set must re-mint a code against it rather than
     /// create a second machine.
     pub claimed: Option<String>,
-    /// The tail of what it printed, and only when that explains something.
-    pub detail: Option<String>,
     /// How it exited, when this app started it and it has finished.
     ///
     /// `3` is an enrollment code the control plane refused and `4` a control plane
@@ -767,7 +824,6 @@ impl Default for DaemonState {
             status: String::new(),
             machine_id: None,
             claimed: None,
-            detail: None,
             config: CONFIG_NONE.to_string(),
             exit_code: None,
         }
@@ -819,13 +875,43 @@ impl Supervisor {
         self.last_exit
     }
 
-    /// The tail of the child's output, newest last.
-    pub fn tail(&self) -> Option<String> {
-        let held = self.log.lock().ok()?;
-        if held.is_empty() {
-            return None;
+    /// Whether the child has printed anything at all, ever.
+    ///
+    /// ⚠ **The one thing `host_daemon_state` asks the ring, and it asks for a
+    /// *bit*.** With no live child, a ring with something in it means one was
+    /// started and is gone, and an empty one means nothing was ever tried here —
+    /// which is the whole of `exited` against `absent`. It used to hand over the
+    /// two hundred lines themselves, as `DaemonState.detail`, so that the setup
+    /// notice could draw them; the notice draws a sentence now and the lines are
+    /// Settings → Logs's (Q7.140), so what is left on the poll is this boolean.
+    pub fn printed_anything(&self) -> bool {
+        self.log.lock().map(|held| !held.is_empty()).unwrap_or(false)
+    }
+
+    /// The whole ring, as lines, for the screen whose subject is the ring.
+    ///
+    /// ⚠ **A second reader rather than a wider `DaemonState`, and the split is the
+    /// point.** `host_daemon_state` is on the setup screen's one-second poll and
+    /// answers a word; putting two hundred lines on it so that one screen could
+    /// have them is a log on a poll. `host_daemon_log` is the screen's own command.
+    ///
+    /// ⚠ **And `Vec<String>` rather than a joined string**, because the caller
+    /// draws lines. Joining here and splitting there is a round trip through a
+    /// separator a log line is allowed to contain.
+    ///
+    /// Empty where nothing was ever started here, where the app did not start it
+    /// — a daemon from `deploy/install.sh` is somebody else's child and this app
+    /// holds no pipe to it — and where it has printed nothing yet. All three are
+    /// the same answer on purpose: this is what *this app's* child said, and the
+    /// screen tells them apart from the status rather than from the shape of this.
+    pub fn log_lines(&self) -> Vec<String> {
+        match self.log.lock() {
+            Ok(held) => held.clone(),
+            // A poisoned mutex means a reader thread panicked while holding it.
+            // Nothing here is worth taking the app down for: the log is evidence,
+            // and no evidence is a survivable answer where a crash is not.
+            Err(_) => Vec::new(),
         }
-        Some(held.join("\n"))
     }
 
     /// Start the daemon, with the environment it needs and nothing of ours.
@@ -865,6 +951,30 @@ impl Supervisor {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        /*
+         * ⚠ **Who this process *is*, which `env_clear` above took away and which a
+         * surprising amount of software reads.** See {@link login_name} for the
+         * measurement: without `USER`, claude keys its Keychain lookup on the
+         * literal `unknown`, writes an empty credential there, and every session
+         * afterwards fails with `OAuth session expired and could not be refreshed`
+         * while the same binary works in a terminal. Nothing in the daemon's own
+         * logs can say that, because from the daemon's side the agent simply
+         * refused.
+         *
+         * **Both spellings, because POSIX has two and tools pick either.**
+         * `LOGNAME` is the standardised one and `USER` is the one everything
+         * actually reads; setting one and not the other is the same bug waiting for
+         * a different program.
+         *
+         * Set *before* the env file is applied, so a `USER=` line there still wins
+         * — which is the rule the certificate block below states outright, and it
+         * keeps the interim workaround somebody may already have written into
+         * `~/.reemoat/daemon.env` from fighting this fix.
+         */
+        if let Some(name) = login_name() {
+            command.env("USER", &name);
+            command.env("LOGNAME", &name);
+        }
         for (key, value) in env {
             command.env(key, value);
         }
@@ -897,7 +1007,22 @@ impl Supervisor {
          * none of these, which is why the env file is still the durable answer and
          * why the failure now has a screen to appear on.
          */
+        /*
+         * ⚠ **`SHELL` and `TMPDIR` are here for `USER`'s reason rather than for a
+         * certificate's, and they are the neighbours that class of bug was hiding.**
+         * Neither is a credential, and neither has been measured breaking anything
+         * — they are listed because the failure above was *not* "claude is unusual",
+         * it was "a clean environment is missing what every tool assumes a session
+         * has", and these are the other two a spawned agent reads. `SHELL` decides
+         * which shell a Bash tool runs rather than falling to `/bin/sh` — this
+         * process already reads it, one function up, to compose the daemon's PATH.
+         * `TMPDIR` on macOS is a per-user directory under `/var/folders`, and
+         * without it every temporary file and socket an agent makes lands in the
+         * world-writable `/tmp` instead.
+         */
         for name in [
+            "SHELL",
+            "TMPDIR",
             "NODE_EXTRA_CA_CERTS",
             "SSL_CERT_FILE",
             "SSL_CERT_DIR",
@@ -1027,6 +1152,31 @@ impl Default for Supervisor {
 
 #[cfg(test)]
 mod tests {
+    /// The account name is answered, and it is the one the session is running as.
+    ///
+    /// ⚠ **The regression this exists for is invisible from inside the daemon.**
+    /// Without `USER`, `claude` keys its Keychain lookup on the literal `unknown`,
+    /// writes an empty credential under that account, and then reports
+    /// `OAuth session expired and could not be refreshed` on every turn — a
+    /// sentence about a *login*, for a bug about a *name*, from a binary that works
+    /// perfectly in a terminal. Nothing on the daemon's side can tell the two
+    /// apart, which is why the assertion has to live here.
+    ///
+    /// Compared against `$USER` only when the environment has one: `getpwuid` is
+    /// the authority and the variable is the fallback, so the useful property is
+    /// that the two agree wherever both exist — under CI with no `USER` exported,
+    /// the non-empty half is still asserted.
+    #[test]
+    fn login_name_is_this_account() {
+        let answered = super::login_name().expect("a uid always has an account name on a developer machine");
+        assert!(!answered.trim().is_empty(), "an empty name is the `unknown` bug with extra steps");
+        if let Ok(from_env) = std::env::var("USER") {
+            if !from_env.trim().is_empty() {
+                assert_eq!(answered, from_env, "getpwuid and $USER must not disagree about who this is");
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

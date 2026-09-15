@@ -14,6 +14,7 @@ import {
   DAEMON_EXIT,
   daemonState,
   hostReady,
+  localDaemon,
   nativeHydrating,
   startLocalDaemon,
   type NativeBoot,
@@ -850,31 +851,6 @@ export interface AgentCommandList {
   dropped: number;
 }
 
-/**
- * How far setting this computer up has got, for the one screen that draws it.
- *
- * Three states and no more: it is running, it failed, or there is nothing to say.
- * `detail` is the daemon's own last words on a failure — the tail
- * `host_daemon_state` keeps — because "it did not start" with no reason attached is
- * the sentence this whole second question was added to avoid.
- */
-/**
- * A control-plane label for this computer, from whatever name it has.
- *
- * ⚠ **A second copy of somebody else's validation rule, and it is deliberately the
- * loose half.** `MACHINE_LABEL` on the control plane is
- * `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`, and this does not re-implement it — it
- * *shapes toward* it and lets the server refuse. The difference matters: a strict
- * copy here would drift the day that regex changes and would start refusing names
- * the server accepts, from a client that cannot see why. What this guarantees is
- * only that a plausible name goes out rather than `Rends’s MacBook Pro`.
- *
- * `null` in, `"computer"` out — a name is required and there is nothing to build
- * one from. It will collide on the second such machine, which is what the caller's
- * one retry is for.
- */
-export const LOCAL_MACHINE_NAME = "local";
-
 /** How often the setup flow asks the host whether the daemon is up yet. */
 const SETUP_POLL_MS = 1_000;
 
@@ -910,6 +886,11 @@ const FOREIGN_ENV_DETAIL =
   "so they were left alone. Sign in to that server instead, or move ~/.reemoat/daemon.env aside to set " +
   "this computer up here.";
 
+/** Said when macOS is refusing this app the network its server is on. */
+const LOCAL_NETWORK_DETAIL =
+  "macOS is not letting Reemoat reach servers on this network, so the daemon could not sign in. " +
+  "Allow it under System Settings → Privacy & Security → Local Network, then reopen Reemoat.";
+
 /** Said when another daemon holds this computer and ours could not start. */
 const ANOTHER_DAEMON_DETAIL =
   "Another Reemoat daemon is already running on this computer, so the one Reemoat started could not. " +
@@ -918,6 +899,62 @@ const ANOTHER_DAEMON_DETAIL =
 /** Said when the daemon is neither up nor gone after {@link SETUP_SETTLE_MS}. */
 const SLOW_START_DETAIL = "The daemon on this computer has not finished starting yet.";
 
+/**
+ * Where the evidence is, appended to every failure that has any.
+ *
+ * ⚠ **The half of the 2026-09-15 change that keeps it from being a regression.**
+ * The rail used to carry the daemon's own output; taking it away and saying
+ * nothing would re-create exactly the failure `SetupNotice` was added to prevent —
+ * a cause sitting in a string nothing renders, which cost a whole round trip to
+ * diagnose on the first real run. So the listing moved and a pointer to it stayed.
+ *
+ * One string rather than a clause per arm: three arms need it, and three copies of
+ * a screen's name is three things to forget when the screen is renamed.
+ */
+const LOGS_POINTER = "Settings → Logs has what it printed.";
+
+/** Said when a daemon this app started came up and then stopped. */
+const DAEMON_STOPPED_DETAIL = `The daemon Reemoat started on this computer stopped. ${LOGS_POINTER}`;
+
+/**
+ * Said when it is neither up nor gone after {@link SETUP_GIVE_UP_MS}.
+ *
+ * Distinct from {@link SLOW_START_DETAIL}, which is drawn while something is still
+ * watching. This is drawn by the arm that has stopped watching, so it may not say
+ * "not finished yet" — nothing is going to come back and take that sentence away.
+ */
+const GAVE_UP_DETAIL = `The daemon on this computer did not finish starting. ${LOGS_POINTER}`;
+
+/**
+ * A control-plane label for this computer, from whatever name it has.
+ *
+ * ⚠ **A second copy of somebody else's validation rule, and it is deliberately the
+ * loose half.** `MACHINE_LABEL` on the control plane is
+ * `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`, and this does not re-implement it — it
+ * *shapes toward* it and lets the server refuse. The difference matters: a strict
+ * copy here would drift the day that regex changes and would start refusing names
+ * the server accepts, from a client that cannot see why. What this guarantees is
+ * only that a plausible name goes out rather than `Rends’s MacBook Pro`.
+ *
+ * `null` in, `"computer"` out — a name is required and there is nothing to build
+ * one from. It will collide on the second such machine, which is what the caller's
+ * one retry is for.
+ *
+ * ⚠ **`.slice(0, 64)` is the last step, which is what makes the caller's retry
+ * suffix a trap.** `machineLabelFor(`${sixtyFourChars}-2`)` answers the original
+ * sixty-four characters, so a retry that appends and re-shapes re-posts the name
+ * that just collided. {@link AppStore.createForThisComputer} slices to 61 first,
+ * and `webcheck` pins the boundary.
+ *
+ * ⚠ **It is not the only copy of this rule in the tree, and the other one is
+ * shell.** `deploy/bootstrap.sh`'s `sanitize_label` names a machine after
+ * `uname -n` for the one-line installer, and the two do not agree character for
+ * character: this strips a trailing `.local` upstream (`commands.rs`'s
+ * `host_name`), `uname -n` does not, and only this one collapses runs of hyphens.
+ * The same computer set up by the app and by the installer can therefore be
+ * spelled two ways — which is a *collision* rather than a correctness bug, since
+ * both are valid labels and the second is refused with `409 machine_exists`.
+ */
 export function machineLabelFor(hostName: string | null): string {
   const shaped = (hostName ?? "")
     .normalize("NFKD")
@@ -932,9 +969,29 @@ export function machineLabelFor(hostName: string | null): string {
   return shaped.length > 0 ? shaped : "computer";
 }
 
+/**
+ * How far setting this computer up has got, for the one screen that draws it.
+ *
+ * Three states and no more: it is running, it failed, or there is nothing to say.
+ *
+ * ⚠ **`said` is a sentence and never a listing — owner's call, 2026-09-15.** It
+ * was `detail`, and what it carried was a *mixture*: four arms put an
+ * app-authored remedy in it, and three put the daemon's own last two hundred
+ * lines, which the rail then drew verbatim in a `<pre>`. Program output in the
+ * one place somebody is reading prose. The output moved to Settings → Logs
+ * ({@link LogsSection}) and what is left here is one sentence per failure, each
+ * of which names where the evidence went when there is any.
+ *
+ * ⚠ **The sentence may still be multi-line, and that is not a listing.** One
+ * producer — the host's `managed_unit_detail` — ends with the command that clears
+ * the state it describes, indented on its own line, because a remedy somebody
+ * retypes is useless reflowed into a paragraph. That is a *remedy*, bounded at two
+ * lines and written by this fleet; the rule being kept is that a ring of somebody
+ * else's output does not ride this field.
+ */
 export interface SetupState {
   step: "creating" | "starting" | "failed";
-  detail: string | null;
+  said: string | null;
 }
 
 export interface AppState {
@@ -953,6 +1010,26 @@ export interface AppState {
    * branch is the only place it is read.
    */
   host: NativeBoot | null;
+  /**
+   * Which machine, if any, is the computer this app is running on.
+   *
+   * ⚠ **Drawn, never stored.** The machine's control-plane label is the ordinary
+   * host name, because that row is read by a phone, by a second computer and by
+   * anybody holding a grant — and "local" is false on every one of those screens.
+   * Which row you are *sitting at* is true of exactly one client, so it is
+   * answered here, per client, from the announce file the daemon on this computer
+   * wrote. {@link AppStore.createForThisComputer} carries the reversal that made
+   * this field necessary.
+   *
+   * ⚠ **The announce file rather than `route.kind === "local"`.** The route is a
+   * preference `setLocalOff` can switch off, so a badge keyed on it would vanish
+   * from the machine somebody is sitting at the moment they chose the relay.
+   * Identity and reachability are not the same read.
+   *
+   * **`null` in a browser and for ever**, the same structurally dead arm as
+   * {@link AppState.host}: `localDaemon()` answers `null` with no shell.
+   */
+  localMachineId: MachineId | null;
   me: Me | null;
   machines: MachineState[];
   /**
@@ -1083,6 +1160,7 @@ class AppStore implements StreamSink {
     phase: cp.currentCredential() === null && !nativeHydrating() ? "signed_out" : "loading",
     setup: null,
     host: null,
+    localMachineId: null,
     me: null,
     machines: [],
     rootsByMachine: new Map(),
@@ -1482,7 +1560,7 @@ class AppStore implements StreamSink {
        * has announced itself here that this app did not start — the shell
        * installer's, most likely. Starting a second would be refused by
        * `claimDaemonLock` against one database, and creating a second machine for
-       * one computer would spend a quota slot that is never given back.
+       * one computer would spend a quota slot on a machine nobody asked for.
        */
       if (state.status !== "absent" && state.status !== "exited") return;
 
@@ -1493,7 +1571,7 @@ class AppStore implements StreamSink {
        * bought for a computer this app is not going to be able to start.
        */
       if (state.config === DAEMON_CONFIG.elsewhere) {
-        this.patch({ setup: { step: "failed", detail: FOREIGN_ENV_DETAIL } });
+        this.patch({ setup: { step: "failed", said: FOREIGN_ENV_DETAIL } });
         return;
       }
 
@@ -1517,7 +1595,7 @@ class AppStore implements StreamSink {
        * enrolled as already exists. Start it and buy nothing.
        */
       if (state.config === DAEMON_CONFIG.here) {
-        this.patch({ setup: { step: "starting", detail: null } });
+        this.patch({ setup: { step: "starting", said: null } });
         await startLocalDaemon("", "");
         await this.settleDaemon(state.claimed);
         return;
@@ -1541,11 +1619,11 @@ class AppStore implements StreamSink {
        */
       if (!mayAddMachine(this.snapshot.me)) return;
 
-      this.patch({ setup: { step: "creating", detail: null } });
+      this.patch({ setup: { step: "creating", said: null } });
       const created = await this.createForThisComputer(boot);
       if (created === null) return;
 
-      this.patch({ setup: { step: "starting", detail: null } });
+      this.patch({ setup: { step: "starting", said: null } });
       await startLocalDaemon(created.enrollment.code, created.machine.id);
       /*
        * The row is a fact now — the control plane answered 201 — so this is the
@@ -1556,7 +1634,7 @@ class AppStore implements StreamSink {
       await this.machinesChanged("machine-added");
       await this.settleDaemon(created.machine.id);
     } catch (error) {
-      this.patch({ setup: { step: "failed", detail: describe(error) } });
+      this.patch({ setup: { step: "failed", said: describe(error) } });
     }
   }
 
@@ -1602,7 +1680,7 @@ class AppStore implements StreamSink {
        * its daemon stays up and announced.
        */
       if (state.status === "foreign") {
-        this.patch({ setup: { step: "failed", detail: ANOTHER_DAEMON_DETAIL } });
+        this.patch({ setup: { step: "failed", said: ANOTHER_DAEMON_DETAIL } });
         return;
       }
       if (state.status === "exited") {
@@ -1615,6 +1693,21 @@ class AppStore implements StreamSink {
          * problem no code can touch. Still no reading of the log: this is the
          * process's own status, not its words.
          */
+        /*
+         * ⚠ **The one failure whose remedy is a switch rather than a wait.**
+         * Measured 2026-09-15 on macOS 15: the daemon is a child of this app, so
+         * this app is the responsible process for Local Network Privacy — and
+         * until that is granted, a connect to a control plane on a private subnet
+         * fails with `EHOSTUNREACH` while the same address answers `ping` and
+         * `curl` from a terminal a second later. Nothing in the daemon's own words
+         * says "permission", so the sentence has to come from here — and the errno
+         * and the address, which are the evidence, are in Settings → Logs with
+         * everything else it printed rather than appended to this sentence.
+         */
+        if (state.exitCode === DAEMON_EXIT.localNetworkBlocked) {
+          this.patch({ setup: { step: "failed", said: `${LOCAL_NETWORK_DETAIL} ${LOGS_POINTER}` } });
+          return;
+        }
         if (!retried && state.exitCode === DAEMON_EXIT.codeRefused) {
           const machine = claim ?? state.claimed;
           if (machine !== null) {
@@ -1635,7 +1728,7 @@ class AppStore implements StreamSink {
            */
           if (await this.provisionOver()) return;
         }
-        this.patch({ setup: { step: "failed", detail: state.detail } });
+        this.patch({ setup: { step: "failed", said: DAEMON_STOPPED_DETAIL } });
         return;
       }
       /*
@@ -1645,12 +1738,12 @@ class AppStore implements StreamSink {
        * costs patience rather than a wrong answer.
        */
       if (Date.now() >= giveUpAt) {
-        this.patch({ setup: { step: "failed", detail: state.detail ?? SLOW_START_DETAIL } });
+        this.patch({ setup: { step: "failed", said: GAVE_UP_DETAIL } });
         return;
       }
       if (!slowed && Date.now() >= slowFrom) {
         slowed = true;
-        this.patch({ setup: { step: "starting", detail: SLOW_START_DETAIL } });
+        this.patch({ setup: { step: "starting", said: SLOW_START_DETAIL } });
       }
     }
   }
@@ -1668,10 +1761,10 @@ class AppStore implements StreamSink {
   private async provisionOver(): Promise<boolean> {
     const boot = this.snapshot.host;
     if (boot === null || !mayAddMachine(this.snapshot.me)) return false;
-    this.patch({ setup: { step: "creating", detail: null } });
+    this.patch({ setup: { step: "creating", said: null } });
     const created = await this.createForThisComputer(boot);
     if (created === null) return false;
-    this.patch({ setup: { step: "starting", detail: null } });
+    this.patch({ setup: { step: "starting", said: null } });
     await startLocalDaemon(created.enrollment.code, created.machine.id);
     await this.machinesChanged("machine-added");
     await this.settleDaemon(created.machine.id, true);
@@ -1708,16 +1801,17 @@ class AppStore implements StreamSink {
        * first version had this the other way round — anything that was not a
        * transport failure meant "that machine is gone" — so a 401 on an expired
        * session, a 403 about the limit, or any 5xx bought a second machine for a
-       * machine that is alive and well. A slot is never given back, so the default
-       * has to be the one that spends nothing.
+       * machine that is alive and well. Nothing returns that slot but a person
+       * noticing and revoking it, so the default has to be the one that spends
+       * nothing.
        */
       const gone =
         ApiError.isApiError(error) && (error.code === "machine_not_found" || error.code === "machine_revoked");
       if (gone) return "dead";
-      this.patch({ setup: { step: "failed", detail: errorText(error) } });
+      this.patch({ setup: { step: "failed", said: errorText(error) } });
       return "later";
     }
-    this.patch({ setup: { step: "starting", detail: null } });
+    this.patch({ setup: { step: "starting", said: null } });
     await startLocalDaemon(again.code, machineId);
     await this.machinesChanged("machine-added");
     await this.settleDaemon(machineId, true);
@@ -1731,27 +1825,36 @@ class AppStore implements StreamSink {
    * A control-plane label is refused when the account can already *see* one
    * spelled the same, compared case-insensitively — so two machines both called
    * `macbook` collide even though nobody typed either. The host name is what
-   * distinguishes them, and where there is none this asks for nothing clever: it
-   * falls back to a generic label and lets the retry below disambiguate.
+   * distinguishes them, and where there is none this asks for nothing clever:
+   * `machineLabelFor(null)` answers `computer`, and the one retry below suffixes
+   * whatever the base turned out to be.
+   *
+   * ⚠ **Two callers, and the second is the one where a collision is likely.**
+   * {@link AppStore.setUpThisComputer} reaches here on a computer with no daemon
+   * settings at all; {@link AppStore.provisionOver} reaches here for a computer
+   * whose settings have proved they cannot start — which is exactly the computer
+   * most likely to already own a machine row under this same host name.
    */
   private async createForThisComputer(boot: NativeBoot): Promise<CreatedMachine | null> {
     /*
-     * ⚠ **`local`, not the host name — an owner's call, 2026-09-15, on seeing the
-     * first real run name a machine `MacBook-Pro-Nikita`.**
+     * ⚠ **The ordinary host name — an owner's call, 2026-09-15, reversing one
+     * taken the same day.**
      *
-     * The host name is what the *control plane* would want: it distinguishes rows.
-     * `local` is what the *person* wants, because the one machine this app sets up
-     * is by definition the computer they are sitting at, and a list where one row
-     * says `local` reads instantly.
+     * The first answer was the literal `local`, on the argument that the one
+     * machine this app sets up is by definition the computer somebody is sitting
+     * at. What that missed is **who else reads the label.** It is not local to the
+     * account: it is the row a phone sees, the row a second computer sees, and the
+     * row somebody holding a grant on this machine sees — and to every one of them
+     * `local` names a computer that is somewhere else. A fact true of exactly one
+     * client may not be stored on a row every client reads. `localRoute.ts` states
+     * that rule for *reachability*; this is the same rule for *naming*.
      *
-     * ⚠ **The cost is real and is why the host name is still the fallback.** Names
-     * are compared case-insensitively across every machine an account can see, so
-     * the *second* computer somebody sets up cannot also be `local` — that is a
-     * `409 machine_exists`, and `createForThisComputer`'s retry is what answers it.
-     * The retry uses the host name rather than a number, because `local-2` names
-     * nothing a person can recognise from a phone while `MacBook-Pro-Nikita` does.
+     * So the label is what this computer is called, and **"this device" is drawn
+     * rather than stored** — off the announce file, on the machine the app is
+     * actually running on, through {@link AppState.localMachineId}. It costs one
+     * badge and it cannot be wrong on anybody else's screen.
      */
-    const base = LOCAL_MACHINE_NAME;
+    const base = machineLabelFor(boot.hostName);
     try {
       return await cp.createMachine(base);
     } catch (error) {
@@ -1761,11 +1864,13 @@ class AppStore implements StreamSink {
        */
       if (!ApiError.isApiError(error) || error.code !== "machine_exists") throw error;
       /*
-       * Somebody already has a `local`. Fall back to what this computer is called,
-       * which is the only other name available that means anything to a person
-       * reading the list from somewhere else.
+       * ⚠ **Sliced to 61 before the suffix, because {@link machineLabelFor}
+       * truncates *last*.** Without the slice a maximal host name re-shapes back to
+       * itself, and the retry posts the name that has just collided — a wasted
+       * round trip and a failure that reads as the server's rather than as a
+       * second computer with the same name. `webcheck` pins the boundary.
        */
-      const named = machineLabelFor(boot.hostName);
+      const named = machineLabelFor(`${base.slice(0, 61)}-2`);
       if (named === base) throw error;
       return await cp.createMachine(named);
     }
@@ -1898,6 +2003,27 @@ class AppStore implements StreamSink {
       // See above. Deliberately empty: every outcome worth acting on has been
       // acted on before this catch is reached.
     }
+  }
+
+  /**
+   * Re-read which machine this computer is, from the daemon's own announce file.
+   *
+   * ⚠ **A memo, where {@link localBaseFor} deliberately refuses one — and what
+   * the answer is *for* is the whole difference.** Routing must find a daemon
+   * that started after the app, on a laptop where both come up at login, so it
+   * re-reads per route resolution. A badge may be one wake late: what it costs to
+   * be stale is a row that does not say "this device" until the next resume, and
+   * what a per-render IPC read would cost is a file read per paint of a list.
+   *
+   * Called from {@link AppStore.runResume}, which is the one funnel every wake,
+   * every machine mutation and the bootstrap promotion already pass through.
+   * Best-effort and silent: `localDaemon` swallows its own refusals and answers
+   * `null`, which is the correct value for "there is no daemon here" as well.
+   */
+  private async refreshLocalMachine(): Promise<void> {
+    const found = await localDaemon();
+    const id = found === null ? null : machineId(found.machineId);
+    if (id !== this.snapshot.localMachineId) this.patch({ localMachineId: id });
   }
 
   /**
@@ -2035,6 +2161,10 @@ class AppStore implements StreamSink {
   private async runResume(reason: string): Promise<void> {
     const epoch = ++this.epoch;
     this.patch({ resuming: true });
+
+    // Which computer this is, before anything that draws a machine list. One
+    // file read over IPC in the shell, and a synchronous `null` in a browser.
+    await this.refreshLocalMachine();
 
     /*
      * The registry may have changed while we were asleep — a machine added, a

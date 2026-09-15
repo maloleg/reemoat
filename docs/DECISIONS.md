@@ -62,14 +62,14 @@ bug in the file.
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 56 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 67 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 137 | `###` |
-| | | **941** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 141 | `###` |
+| | | **945** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 941 rather than the 480
+dividers. So the count is over **both** depths, and it says 945 rather than the 484
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -31176,3 +31176,238 @@ Sandbox is off. Windows (WebView2, Chromium's Private Network Access) and Linux
 costs nothing visible: `proveLocal` fails and the relay answers.
 
 **Status.** Reversed an earlier decision. Q7.135 is superseded.
+
+### Q7.138 — Why the payload shipped a coding-agent CLI it deliberately does not ship
+
+**Question.** The owner reported, of the desktop build: *"why don't the CLIs the app
+installs pick up the authorization from Claude Code on this machine? They list it,
+and after the first message it turns out there is no authorization."* What is the
+mechanism?
+
+**Decision. Two independent mechanisms, one of them a packaging defect this fixes
+and one of them a property of the probe that stays.**
+
+**The defect: `pruneAgentClis` in `packages/native/scripts/build-daemon.mjs`.**
+`codex-acp` depends on `@openai/codex`, so npm stages that package **and writes a
+`.bin/codex` shim for it** — while `--omit=optional` drops
+`@openai/codex-darwin-arm64`, the platform package that actually implements it, on
+purpose, because `deploy/agents.sh` installs that CLI from the vendor and the pinned
+copy is never the one meant to run (Q4.114). Measured 2026-09-15 on the staged
+payload: `node_modules/.bin/codex --version` answers `Error: Missing optional
+dependency @openai/codex-darwin-arm64`. And `daemon_path` in `daemon.rs` puts the
+payload's `.bin` **first** on the daemon's PATH — which is right, and is what makes
+`claude-agent-acp` and `tsx` resolve under a GUI-launched process with no profile —
+so `findOnPath("codex")` answered the broken shim ahead of the working
+`~/.local/bin/codex` the person had installed themselves. `spawnPlan` then wrote
+that path into `CODEX_PATH`, so the override existed to point the adapter at the
+broken copy. The fix is the narrow one: the payload is not where a coding-agent CLI
+comes from, so the four `AGENT_LOGIN` commands are pruned out of `.bin` and
+everything npm wrote for the adapters and the runtime stays. `nativecheck` holds the
+pruned list to `AGENT_LOGIN`'s, because a fifth agent added in one place and not the
+other is this entry again on the fifth agent.
+
+**⚠ The property that stays: `claude auth status` is a credential-*presence* test,
+never a validity test.** Measured 2026-09-15 against claude 2.1.270, from a stripped
+environment with a temporary `HOME`: with `CLAUDE_CODE_OAUTH_TOKEN` set to
+`sk-ant-oat01-thisisnotarealtoken-0000…` it prints `{"loggedIn": true, "authMethod":
+"oauth_token", …}`, and it prints `loggedIn: false` only with **no** credential of
+any kind. `readLoginAnswer` believes that boolean and nothing else, `agentStance`
+maps it to `signed_in`, and `admit` refuses on `=== false` alone — so an agent
+holding a dead credential is listed as signed in, and one whose state could not be
+read at all (`null` → `unchecked`) is still offered a tile and still startable.
+
+**And claude is the harness where that cannot be caught at the gate.** kimi and
+codex answer `initialize` while logged out and reject `session/new` with `-32000`,
+which is the refusal `502 agent_auth_required` already reports. `claude-agent-acp`
+implements no authentication at all — it spawns the binary named in
+`CLAUDE_CODE_EXECUTABLE` and inherits whatever that binary is logged in as — so
+there is nothing to reject at `session/new` and the failure necessarily lands in the
+turn. That is the owner's *"after the first message"*, exactly, and it is structural
+rather than a missing check.
+
+**Not the cause, each ruled out by measurement.** The macOS Keychain's per-binary
+ACL: the file credential alone answers correctly from a stripped environment, and
+the payload ships no `claude` at all. `agentEnv()` stripping something: its prefix
+loop deletes `REEMOAT_*` and the explicit `SESSION_SCOPED_ENV` list, none of which
+carries a credential — `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN` and
+`ANTHROPIC_API_KEY` all survive. `HOME`: `Supervisor::start` sets it from
+`app.path().home_dir()`. A stale pasted credential shadowing the ambient one
+(`launch` merges `secrets(agent)` last, so it does): the row on this machine was
+tested against the API and is live.
+
+**Status.** The packaging half is fixed and pinned. The probe half is open and is
+the honest answer to *"why does it say it is signed in"* — it says a credential is
+configured, and no non-interactive command any of the four offers says more.
+
+### Q7.139 — What the machine the desktop app sets up is called
+
+**Question.** Q7.137 built an app that creates a machine by itself. On the first real
+run it named one `MacBook-Pro-Nikita`, the owner asked for `local` instead, and that
+shipped the same day. Then: *"remove the global machine name — the local machine is
+called local only where the app is running; for everyone else, the ordinary name."*
+
+**Decision. The label is the ordinary host name, and `local` is drawn per client.**
+`createForThisComputer` posts `machineLabelFor(boot.hostName)`;
+`LOCAL_MACHINE_NAME` is deleted. Which row is the computer you are sitting at is
+answered by `AppState.localMachineId`, filled from the daemon's own announce file
+through `localDaemon()`, and drawn as a `this device` badge on that one row.
+
+**Why the first answer was wrong, and it is one question it did not ask: who reads
+the label.** `local` is a good name on the screen of the computer it names. It is
+not local to the *account* — it is the row a phone sees, the row a second computer
+sees, and the row somebody holding a grant sees, and to every one of them it names a
+computer that is somewhere else. `packages/web/src/localRoute.ts` already states the
+general form of this for reachability — a value true of one client may not sit on a
+row every client reads — and naming is the same rule.
+
+**The badge is keyed on the announce file, never on the route.** `route.kind ===
+"local"` looks like the same fact and is not: `setLocalOff` lets somebody route a
+machine through the relay deliberately, at which point a badge keyed on it would
+vanish from the machine they are sitting at. Identity and reachability are one file
+read and two questions.
+
+**A memo, where `localBaseFor` refuses one, and the asymmetry is argued rather than
+inherited.** Routing re-reads per resolution because a daemon that starts *after*
+the app — on a laptop where both come up at login, the ordinary case — must be found
+without a restart. A badge may be one wake late, so `refreshLocalMachine` hangs off
+`runResume`, the funnel every wake, every machine mutation and the bootstrap
+promotion already pass through.
+
+**One thing this cost, and it was a latent defect rather than a new one.** The retry
+that disambiguates a collision now matters on the *first* computer rather than the
+second, so it was read properly for the first time: `machineLabelFor` applies its
+`.slice(0, 64)` **last**, so appending `-2` to a maximal name and re-shaping answers
+the original name — the retry re-posted what had just collided. The base is sliced
+to 61 first, and `webcheck` pins the boundary case, which the old assertion (built
+from an eight-character label) could never have reached.
+
+**Not migrated.** A machine already created as `local` keeps that label. Renaming is
+`cp.renameMachine`, one tap from the machine's own screen; an automatic rewrite is a
+write nobody asked for, can itself `409` on `nameVisibleTo` leaving half a
+migration, and is cosmetic for a grantee anyway — `machines.name` was minted as
+`qualifiedName(label, id)` at creation and is permanently unchangeable.
+
+**Status.** Reverses the decision of 2026-09-15 recorded in `store.ts` and pinned in
+`webcheck.machine-limit-and-probe.ts`, on the owner's word the same day.
+
+### Q7.140 — Where a failed setup's output goes
+
+**Question.** *"Remove the error listing wherever they are listed; just add a logs
+section in settings."*
+
+**Decision. The listing left the session rail and Settings → Logs is where it
+went.** `SetupNotice` drew `host_daemon_state`'s two-hundred-line ring verbatim in a
+`<pre>` under the sentence *"This computer could not be set up."* — program output on
+a rail whose subject is somebody's sessions, in the one place they are reading prose.
+`LogsSection` draws it now; the rail keeps one sentence.
+
+**`SetupState.detail` became `said`, and the rename is the substance.** That field
+carried a *mixture*: four arms put an app-authored remedy in it and three put the
+daemon's own output, so deleting the `<pre>` without splitting it either loses the
+remedies or keeps feeding a listing into prose. `said` is a sentence, and every
+failure that has evidence ends by naming the screen it went to — `LOGS_POINTER`,
+one string rather than a clause per arm.
+
+**The pointer is not decoration.** `SetupNotice`'s own docblock records why it
+exists: the cause sitting in a string nothing renders cost a whole round trip to
+diagnose on the first real run. Moving the evidence and saying nothing would
+re-create exactly that, one layer further away.
+
+**A second host command rather than a wider `DaemonState`.** `host_daemon_log`
+answers `Supervisor::log_lines`. The obvious alternative — let `detail` carry the
+ring whenever there is one — puts a log on the setup screen's one-second poll and
+turns a field meaning *what explains this failure* into a log field by accident.
+`nativecheck` pins both halves: the command exists, and the `running` and `foreign`
+arms still answer `detail: None`.
+
+**⚠ Not a reversal of Q3.225**, and the distinction is the whole argument for the
+screen. That removed the *delivery log* from Server settings as noise: it answered a
+question nobody was asking on a screen people go to in order to configure things, and
+the one person who ever needed it had a terminal. This is the output of a process the
+app itself spawns, supervises and hides — and the person it is for has no terminal
+**by construction**, because the point of the desktop app is that they never opened
+one.
+
+**What it deliberately does not show, said on the screen rather than left blank.**
+One ring, from the daemon this app started on this computer. A daemon
+`deploy/install.sh` installed is somebody else's child with no pipe to this process;
+a machine across the relay serves no log route at all. `nothingHere` draws a
+different sentence for each of `running`, `foreign`, `exited` and nothing-yet, and
+the browser arm says the output is on the computer it runs on — because an empty
+scroller under a machine picker would be a screen promising four things it can
+answer one of.
+
+**Left alone, and named so the scope is a decision rather than an oversight.**
+`PluginsPanel`'s *What it printed* block and its install-failure dump are a
+different subject — per-plugin, bounded at 500 characters by `MAX_FAILURE_CHARS`,
+and with nowhere else to go, since this screen is about one process and that one is
+about another. `AgentsPanel`'s login transcript is a live terminal for a flow
+somebody is driving, and `rawTranscriptIsOpen`'s fallback role is measured. Both are
+the owner's call to make separately.
+
+**Status.** Shipped.
+
+### Q7.141 — Why an agent could not authenticate while the same CLI worked in a terminal
+
+**Question.** On the machine the desktop app set up, every `claude` turn failed with
+`Failed to authenticate: OAuth session expired and could not be refreshed`, while
+`claude` in a terminal on that same machine, as that same user, worked. Signing in
+again changed nothing.
+
+**Decision. `Supervisor::start` passes `USER` and `LOGNAME`, from `getpwuid` rather
+than from its own environment.**
+
+**The mechanism, and it is a name rather than a credential.** `env_clear` is
+deliberate — the app's own environment is a GUI process's, carrying Tauri's
+variables, launchd's, and, if somebody started the app from a terminal inside a
+coding agent, that agent's session — so the daemon's environment is *built*. What
+the allowlist did not carry was `USER`. On macOS `claude` derives its **Keychain
+account** from that variable and falls back to the literal `unknown`. So the agent
+looked up `(Claude Code-credentials, "unknown")`, found nothing, **wrote an empty
+credential there on its first start**, and from then on read back `expiresAt: 0`
+with no refresh token to repair. Two items with that service then existed on the
+machine: the real one under the account name, alive; and a stub under `unknown`,
+created the same second the first session started.
+
+**Why it could not be diagnosed from the symptom.** The sentence is about a login
+that lapsed, and the fault is a lookup under the wrong name — so every remedy the
+sentence suggests is wrong, and one of them actively cannot work: signing in again
+writes the *right* account while the agent keeps reading the wrong one. Measured
+`env -i HOME=… PATH=… LANG=…` against the user's own `claude` 2.1.272: refused;
+plus `USER=… LOGNAME=…`: answered.
+
+**Both spellings.** `LOGNAME` is the standardised name and `USER` is the one
+software actually reads; setting one is the same bug waiting for a different
+program.
+
+**`getpwuid` first, the environment second**, which is the ordering `HOME` already
+has — `commands.rs` takes the home from `app.path().home_dir()` rather than from
+`$HOME`, because a value the system answers cannot be a stale export from whoever
+launched the bundle. And set **before** the env file is applied, so a `USER=` line
+written there as an interim workaround still wins.
+
+**⚠ Two ruled out by measurement, and both were plausible enough to have been
+acted on.** A pasted `CLAUDE_CODE_OAUTH_TOKEN` shadowing the ambient credential —
+`launch` does merge `secrets(agent)` last, and a copied *access* token carries no
+refresh token, which would produce this exact sentence: refuted, `agent_credentials`
+held **no rows**. And the Keychain ACL binding the item to the creating process's
+code identity, the daemon running under an ad-hoc-signed bundle's own `node`:
+refuted, the ACLs on both items were identical. Neither was a bad guess; both were
+guesses about *access* where the fault was about *identity*.
+
+**The class, not the instance.** `SHELL` and `TMPDIR` were added beside it — not
+because either was measured breaking anything, but because the finding is not
+"claude is unusual", it is "a clean environment is missing what every tool assumes
+a session has". Anything that keys a credential, a cache or a config directory on
+the account name had the same hole.
+
+**Asserted in three places, because no one of them can see the whole path.**
+`nativecheck` reads the spawn: `env_clear` still there, both names set, set before
+the env file, and the name taken from `getpwuid` rather than from a variable. A
+Rust test asserts `login_name` answers this account and does not disagree with
+`$USER`. And `daemoncheck` asserts the *second* hop — that `agentEnv` does not
+strip what the shell just set, which it does not do today only by `USER` not being
+on `SESSION_SCOPED_ENV`'s list.
+
+**Status.** Fixed. The empty `unknown` Keychain item on an affected machine is
+inert but stays until deleted by hand.

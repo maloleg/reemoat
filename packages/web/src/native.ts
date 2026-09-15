@@ -374,7 +374,6 @@ export interface DaemonState {
    * than create another.
    */
   claimed: string | null;
-  detail: string | null;
   /**
    * What `~/.reemoat/daemon.env` already says: one of {@link DAEMON_CONFIG}.
    *
@@ -413,6 +412,13 @@ export const DAEMON_EXIT = {
   codeRefused: 3,
   /** The control plane could not be reached, or did not answer. */
   controlPlaneUnreachable: 4,
+  /**
+   * The operating system refused a connection to an address on this network.
+   *
+   * Its own answer because its remedy is its own: nothing is down and waiting
+   * changes nothing — somebody has to grant Local Network access to this app.
+   */
+  localNetworkBlocked: 5,
 } as const;
 
 /**
@@ -438,6 +444,37 @@ export async function daemonState(): Promise<DaemonState | null> {
   } catch {
     // The bridge itself is gone. Same answer as a build with no payload.
     return null;
+  }
+}
+
+/**
+ * What the daemon on this computer has printed, newest last.
+ *
+ * ⚠ **The second question about the daemon's output, and the first one is not
+ * this.** {@link daemonState} is a word on the setup screen's one-second poll,
+ * and it asks the ring only whether anything was ever printed — that bit is the
+ * whole of `exited` against `absent`. This is the ring itself, for the one screen
+ * somebody opens to read it. The split is `commands.rs`'s and is why a log never
+ * rides a poll; Q7.140 is the argument.
+ *
+ * **`[]` for every absence, and they are deliberately one answer.** No native
+ * shell; a daemon this app did not start, because the shell installer's daemon is
+ * somebody else's child and this app holds no pipe to it; a daemon that has
+ * printed nothing yet. The screen tells them apart from the state it already has
+ * rather than from the shape of this answer.
+ *
+ * The bytes are a ring bounded at 200 lines in the host, not a file. Nothing here
+ * rotates, and nothing on disk is being read — which is what keeps this from
+ * being a second, weaker copy of `~/Library/Logs`.
+ */
+export async function daemonLog(): Promise<readonly string[]> {
+  if (!inNativeShell()) return [];
+  try {
+    return (await invoke<string[]>("host_daemon_log")) ?? [];
+  } catch {
+    // The bridge itself is gone — the same answer as a shell with no payload, and
+    // the same answer as a daemon that has said nothing. See the docblock.
+    return [];
   }
 }
 
