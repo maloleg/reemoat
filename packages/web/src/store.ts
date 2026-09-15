@@ -897,6 +897,11 @@ const FOREIGN_ENV_DETAIL =
   "so they were left alone. Sign in to that server instead, or move ~/.reemoat/daemon.env aside to set " +
   "this computer up here.";
 
+/** Said when another daemon holds this computer and ours could not start. */
+const ANOTHER_DAEMON_DETAIL =
+  "Another Reemoat daemon is already running on this computer, so the one Reemoat started could not. " +
+  "It is reachable, but it belongs to a different machine — stop it, or use that machine instead.";
+
 /** Said when the daemon is neither up nor gone after {@link SETUP_SETTLE_MS}. */
 const SLOW_START_DETAIL = "The daemon on this computer has not finished starting yet.";
 
@@ -1566,9 +1571,26 @@ class AppStore implements StreamSink {
       const state = await daemonState();
       // The bridge went away mid-poll. Nothing true can be said, so say nothing.
       if (state === null) return;
-      if (state.status === "running" || state.status === "foreign") {
+      if (state.status === "running") {
         this.patch({ setup: null });
         await this.machinesChanged("machine-added");
+        return;
+      }
+      /*
+       * ⚠ **`foreign` is not success here, however much it looks like one.** It
+       * means a daemon is up that this app did not start — so the child it *did*
+       * start is gone, and the machine this flow was setting up never enrolled.
+       * Counting it as success cleared the notice and left somebody with a machine
+       * that exists on the control plane and nowhere else. The concrete way in is
+       * the one measured on this Mac: a leftover `deploy/install.sh` LaunchAgent
+       * holding `reemoat.db`, so our child loses `claimDaemonLock` and dies while
+       * its daemon stays up and announced.
+       *
+       * Reachable only from inside a settle, because `setUpThisComputer` returns at
+       * its status gate when a daemon was already `foreign` before it began.
+       */
+      if (state.status === "foreign") {
+        this.patch({ setup: { step: "failed", detail: ANOTHER_DAEMON_DETAIL } });
         return;
       }
       if (state.status === "exited") {

@@ -955,10 +955,22 @@ const owned = /const OWNED_KEYS: \[&str; 3\] = \[([^\]]+)\];/.exec(daemonRs)?.[1
  * this covered". Nothing would ever start a daemon again, on a computer whose
  * daemon dies with the app by design.
  */
-check("a daemon this app did not start is confirmed to be there", /fn is_listening\(/.test(daemonRs), true);
+check("a daemon this app did not start is confirmed to be there", /fn is_alive\(/.test(daemonRs), true);
+/*
+ * ⚠ **And the probe carries no credential.** `local.rs` reads a file rather than
+ * probing precisely because a *meaningful* probe would hand a 300-second bearer to
+ * whatever happened to answer. `/health` is the one route below the daemon's auth
+ * middleware, so asking it costs nothing — but only while nothing attaches a
+ * header to the request, which is why it is written over a raw socket rather than
+ * through a configured client.
+ */
+const probe = /pub fn is_alive\([\s\S]*?\n\}/.exec(daemonRs)?.[0] ?? "";
+check("the liveness probe exists to be read", probe.length > 0, true);
+check("and it sends no credential", /authorization|Bearer|reqwest/i.test(probe), false);
+check("and it asks the one route below the auth gate", /GET \/health/.test(probe), true);
 check(
   "and the state command asks before answering foreign",
-  /announced\.filter\(\|found\| ours \|\| daemon::is_listening/.test(read(`${TAURI_DIR}/src/commands.rs`)),
+  /announced\.filter\(\|found\| ours \|\| daemon::is_alive/.test(read(`${TAURI_DIR}/src/commands.rs`)),
   true,
 );
 check(

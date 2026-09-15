@@ -99,10 +99,15 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
      * is on. Believing it answers `foreign`, which is the one status the setup flow
      * treats as "somebody else has this covered" — and then nothing starts a daemon
      * ever again, on a computer whose daemon dies with the app by design.
+     * ⚠ **And it is `/health` rather than a bare connect, because the port is not
+     * the daemon.** `REEMOAT_PORT` is a fixed value in the env file, so a stale
+     * announce names an ordinary port that anything may hold afterwards. The
+     * answer carries the same `instanceId` the file does, so this proves the
+     * daemon rather than the socket.
      * Not asked when this app owns the child: the handle is better evidence than a
-     * socket, and it saves a connect on the polling path.
+     * probe, and it keeps a round trip off the one-second polling path.
      */
-    let announced = announced.filter(|found| ours || daemon::is_listening(&found.base));
+    let announced = announced.filter(|found| ours || daemon::is_alive(&found.base, &found.instance_id));
 
     let mut state = match (announced, ours) {
         (Some(found), true) => daemon::DaemonState {

@@ -414,6 +414,15 @@ process.stdout.write("\nthe machine limit\n");
      */
     check("a control plane that could not be reached is not reported as a bad code", /!== "dead"/.test(settle), true);
     /*
+     * ⭐ **And a daemon this app did not start is not this app's success.**
+     * Reaching `foreign` from inside a settle means the child that *was* started is
+     * gone and the machine being set up never enrolled — while something else
+     * answers on this computer. Counting it as success cleared the notice and left
+     * somebody owning a machine that exists on the control plane and nowhere else.
+     */
+    check("a foreign daemon does not clear the notice", /status === "foreign"/.test(settle), true);
+    check("and only a daemon this app started does", /status === "running"[\s\S]{0,120}setup: null/.test(settle), true);
+    /*
      * ⭐ **And "that machine is gone" is a *named* refusal.** With the test the
      * other way round, a 401 on an expired session or any unrecognised 5xx bought a
      * second machine for a machine that is alive. A slot is never given back, so

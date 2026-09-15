@@ -166,14 +166,17 @@ pub fn env_contents(control_plane: &str, enroll_code: &str) -> String {
     text
 }
 
-/// How long a loopback connect is given before it counts as nobody home.
+/// How long the liveness probe is given, connect and answer alike.
 ///
 /// Loopback, so this is a syscall rather than a network round trip; the timeout
-/// exists for the pathological case of a listening socket whose backlog is full,
-/// not for latency.
+/// exists for the pathological case — a socket whose backlog is full, or a process
+/// wedged mid-answer — not for latency.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Whether anything at all is listening where the announce file says it is.
+/// The most of a `/health` answer this will read before giving up on it.
+const PROBE_LIMIT: u64 = 8 * 1024;
+
+/// Whether *this* daemon — the one the announce file describes — is still there.
 ///
 /// ⚠ **The announce file is not evidence that a daemon is running, and treating
 /// it as evidence strands this app permanently.** `src/announce.ts` writes it at
@@ -184,27 +187,61 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250)
 /// computer whose daemon dies with the app by design. The only way out was
 /// deleting a file nobody tells you about.
 ///
-/// A bare TCP connect, and deliberately not `GET /health`: this needs to know
-/// whether a socket is open, not to parse an answer, and the whole reason
-/// `local.rs` reads a file instead of probing is that a *meaningful* probe would
-/// have to carry a 300-second bearer to whatever happened to answer. Opening a
-/// connection and closing it carries nothing at all.
-pub fn is_listening(base: &str) -> bool {
+/// ⚠ **And a bare connect is not enough, which is the second half of the same
+/// bug.** `REEMOAT_PORT` is a fixed value in the env file, so after an unclean
+/// exit the port named by a stale announce is an ordinary port that anything may
+/// now hold — another dev server, a second hand-installed daemon on a different
+/// database, a proxy. A connect proves somebody is listening; it does not prove it
+/// is the daemon this file describes, and answering `foreign` to a stranger is the
+/// same permanent deadlock, just rarer.
+///
+/// `GET /health` proves it, and costs nothing to ask: `src/server.ts` lets that one
+/// route past the auth middleware — *"the one route without a token"* — and it
+/// answers the same `instanceId` the announce file holds. The rule `local.rs`
+/// keeps is about not handing a **credential** to whatever answered, and this
+/// sends no `authorization` header at all; it is written as a raw request over the
+/// socket rather than through `reqwest` so that there is no configured client for
+/// a later edit to attach one to.
+pub fn is_alive(base: &str, instance_id: &str) -> bool {
+    use std::io::{Read, Write};
     let Ok(url) = url::Url::parse(base) else {
         return false;
     };
-    let Some(port) = url.port() else {
+    let (Some(host), Some(port)) = (url.host_str(), url.port()) else {
         return false;
     };
     // `local::read` already refused anything but `127.0.0.1` and `::1`, so this
     // parses back what it built rather than trusting the file.
-    let Some(host) = url.host_str() else {
-        return false;
-    };
     let Ok(address) = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() else {
         return false;
     };
-    std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(address, port), PROBE_TIMEOUT).is_ok()
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(address, port), PROBE_TIMEOUT)
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
+    // HTTP/1.0 with an explicit close, so the answer ends at EOF and this needs no
+    // chunked or keep-alive handling of its own.
+    let request = format!("GET /health HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut raw = Vec::new();
+    if (&mut stream).take(PROBE_LIMIT).read_to_end(&mut raw).is_err() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&raw);
+    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+        return false;
+    };
+    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+        return false;
+    }
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body.trim()) else {
+        return false;
+    };
+    parsed.get("instanceId").and_then(|value| value.as_str()) == Some(instance_id)
 }
 
 /* ── what an existing env file already says ──────────────────────────────── */
@@ -1029,17 +1066,55 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_announce_file_is_not_evidence_that_anything_is_listening() {
+    /// Answer one request with `body`, then close. Returns the port.
+    fn stub_health(body: &'static str) -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(is_listening(&format!("http://127.0.0.1:{port}")));
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let Ok((mut socket, _)) = listener.accept() else { return };
+            let mut seen = [0u8; 1024];
+            let read = socket.read(&mut seen).unwrap_or(0);
+            // ⚠ The property this whole shape exists for: nothing is offered to
+            // whatever answered. Asserted on the server side, where the bytes
+            // actually arrive, rather than on the request string.
+            let sent = String::from_utf8_lossy(&seen[..read]).to_lowercase();
+            assert!(!sent.contains("authorization"), "the probe must carry no credential");
+            let _ = socket.write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}")
+                    .as_bytes(),
+            );
+        });
+        port
+    }
+
+    #[test]
+    fn an_announce_file_is_not_evidence_that_the_daemon_is_alive() {
+        let port = stub_health(r#"{"ok":true,"instanceId":"i_live"}"#);
+        assert!(is_alive(&format!("http://127.0.0.1:{port}"), "i_live"));
+    }
+
+    #[test]
+    fn a_stranger_on_the_port_is_not_this_daemon() {
+        /*
+         * The second half of the stale-announce bug. `REEMOAT_PORT` is fixed in the
+         * env file, so the port a dead daemon named is an ordinary port anything may
+         * hold afterwards — and a bare connect would call each of these alive.
+         */
+        let other = stub_health(r#"{"ok":true,"instanceId":"i_somebody_else"}"#);
+        assert!(!is_alive(&format!("http://127.0.0.1:{other}"), "i_live"));
+        let garbage = stub_health("not json at all");
+        assert!(!is_alive(&format!("http://127.0.0.1:{garbage}"), "i_live"));
+    }
+
+    #[test]
+    fn nothing_listening_is_nothing_running() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         drop(listener);
-        // The same address with nothing behind it — which is exactly what a stale
-        // `daemon.json` names after a force quit or a power cut.
-        assert!(!is_listening(&format!("http://127.0.0.1:{port}")));
-        assert!(!is_listening("http://127.0.0.1"), "no port is not a daemon");
-        assert!(!is_listening("not a url"));
+        assert!(!is_alive(&format!("http://127.0.0.1:{port}"), "i_live"));
+        assert!(!is_alive("http://127.0.0.1", "i_live"), "no port is not a daemon");
+        assert!(!is_alive("not a url", "i_live"));
     }
 
     #[test]
