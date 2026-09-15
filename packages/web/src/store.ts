@@ -880,16 +880,22 @@ const SETUP_POLL_MS = 1_000;
 /**
  * How long a daemon is given to enroll before the screen stops promising it will.
  *
- * Generous on purpose: this covers a cold Node start, a `tsx` compile of the
- * daemon's entry point and one round trip to the control plane, on a machine that
- * may be doing a first-run install at the same time.
+ * ⚠ **Derived, not guessed — and it was a guess until it was measured.** On a
+ * 2026 MacBook, with the bundled runtime and a spawn matching the supervisor's:
+ * the daemon is listening 0.311 s after launch on a cold `tsx` cache and 0.20 s
+ * warm, answering `/health` ~0.02 s later. Its own startup is therefore noise.
+ * What can actually take time is the one control-plane round trip, and `enroll()`
+ * bounds that itself at 15 s before giving up — so nothing here can legitimately
+ * run longer than that plus a start. The rest is margin for a cold page cache,
+ * which is unmeasured.
  */
-const SETUP_SETTLE_MS = 45_000;
+const SETUP_SETTLE_MS = 30_000;
 
 /** Said when the env file here belongs to a fleet this app is not signed in to. */
 const FOREIGN_ENV_DETAIL =
-  "The daemon settings already on this computer name a different Reemoat server, so they were left alone. " +
-  "Sign in to that server instead, or move ~/.reemoat/daemon.env aside to set this computer up here.";
+  "The daemon settings already on this computer name a different Reemoat server, or could not be read, " +
+  "so they were left alone. Sign in to that server instead, or move ~/.reemoat/daemon.env aside to set " +
+  "this computer up here.";
 
 /** Said when the daemon is neither up nor gone after {@link SETUP_SETTLE_MS}. */
 const SLOW_START_DETAIL = "The daemon on this computer has not finished starting yet.";
@@ -1399,7 +1405,7 @@ class AppStore implements StreamSink {
      * *Before* `resume("bootstrap")`, so a machine created here is in the registry
      * by the time the first resume runs rather than four seconds later.
      */
-    await this.setUpThisComputer();
+    await this.beginSetUp();
 
     this.startPolling();
     await this.resume("bootstrap");
@@ -1419,8 +1425,24 @@ class AppStore implements StreamSink {
    * else. A person whose account is full, or whose daemon will not start, still has
    * a working app pointed at every other machine they have.
    */
-  /** Whether the one-shot setup below has already run in this process. */
-  private settingUp = false;
+  /**
+   * The setup run in flight, so two bootstraps cannot both buy a machine.
+   *
+   * ⚠ **Released when it settles, never latched.** A flag set once per process
+   * also makes `retry()` a no-op for setup: somebody whose control plane was down
+   * fixes their network, presses Retry, and nothing happens until they restart the
+   * app. Concurrency is the only thing that needs guarding here — the flow is
+   * idempotent against its own result, since a second run sees the machine the
+   * first one made and adopts it.
+   */
+  private settingUp: Promise<void> | null = null;
+
+  private beginSetUp(): Promise<void> {
+    this.settingUp ??= this.setUpThisComputer().finally(() => {
+      this.settingUp = null;
+    });
+    return this.settingUp;
+  }
 
   private async setUpThisComputer(): Promise<void> {
     /*
@@ -1431,15 +1453,6 @@ class AppStore implements StreamSink {
      */
     const boot = this.snapshot.host;
     if (boot === null) return;
-    /*
-     * ⚠ **`bootstrap()` has three callers** — the entry point, `retry()` and the
-     * forced password change — so this is re-entrant, and two runs racing would
-     * each see `absent` and buy a machine. Never cleared: once this has run to a
-     * conclusion in a process, running it again in the same process can only
-     * repeat work whose answer has not changed.
-     */
-    if (this.settingUp) return;
-    this.settingUp = true;
 
     try {
       const state = await daemonState();

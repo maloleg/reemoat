@@ -363,7 +363,15 @@ process.stdout.write("\nthe machine limit\n");
      * entry point, `retry()` and the forced password change — so two runs racing
      * would each read `absent` and each buy a machine.
      */
-    check("the setup flow is single-flight", /this\.settingUp/.test(setUp), true);
+    check("the setup flow is single-flight", /this\.settingUp \?\?=/.test(store), true);
+    /*
+     * ⚠ **And the guard is released, never latched.** A flag set once per process
+     * also makes `retry()` a no-op for setup: somebody whose control plane was
+     * down fixes their network, presses Retry, and nothing happens until they
+     * restart the app. Concurrency is all that needs guarding — a second run sees
+     * the machine the first made and adopts it.
+     */
+    check("and it is released when the run settles", /\.finally\(\(\) => \{\s*this\.settingUp = null;/.test(store), true);
     /*
      * ⭐ **And the start is watched rather than assumed.**
      *

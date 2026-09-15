@@ -246,16 +246,49 @@ pub fn host_daemon_stop(host: State<'_, Host>) -> Result<(), String> {
 /// `deploy/install.sh` to this very file. A filesystem with no POSIX modes is not
 /// a reason to refuse — it is the same judgement `store/sqlite.ts` already makes.
 fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
-    std::fs::write(path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    use std::io::Write;
+    /*
+     * ⚠ **`std::fs::write` was wrong here twice over, and this is the one file
+     * that can afford neither.** It truncates before it writes, so a crash in
+     * between leaves an env file with no `REEMOAT_CONTROL_PLANE` — which
+     * `config_state` reads as `elsewhere`, and the app then refuses to touch a
+     * file it corrupted itself, telling the person their computer is set up for
+     * another server. Being locked out is bad; being locked out by a sentence that
+     * is not true is worse. And the `chmod` landed *after* the bytes, so the
+     * enrollment code and the certificate path sat at the umask's mode for the
+     * length of a write.
+     *
+     * A temporary file created at `0600`, filled, flushed and renamed over the
+     * target closes both: the mode is never wrong because it is set at creation,
+     * and every reader sees either the whole old file or the whole new one.
+     */
+    let dir = path.parent().ok_or_else(|| format!("{} has no directory", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        }
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
-    Ok(())
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("daemon.env");
+    let tmp = dir.join(format!("{name}.tmp.{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    // `sync_all` rather than a plain close: a rename that beats its own contents to
+    // disk is the failure this shape exists to prevent.
+    if let Err(e) = file.write_all(contents.as_bytes()).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("could not write {}: {e}", tmp.display()));
+    }
+    drop(file);
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("could not write {}: {e}", path.display())
+    })
 }
 
 /// Where `bundle.resources` landed, in a bundle and in `tauri dev` alike.
