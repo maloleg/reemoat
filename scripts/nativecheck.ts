@@ -1021,6 +1021,17 @@ check(
   true,
 );
 /*
+ * ⚠ **And the remedy must clear what the check looks at.** The first one said
+ * `launchctl bootout`, which unloads a service and leaves its file — so the check
+ * found it again, refused again, and offered the same command: a permanent lockout
+ * whose own instructions could not end it. Detection is by file, because
+ * `RunAtLoad` means an unloaded plist comes back at the next login, so the remedy
+ * has to move the file.
+ */
+const remedy = /pub fn managed_unit_detail\([\s\S]*?\n\}/.exec(daemonRs)?.[0] ?? "";
+check("the remedy exists to be read", remedy.length > 0, true);
+check("and it moves the file rather than only unloading it", /mv \{/.test(remedy), true);
+/*
  * ⚠ **And a value that could write a second assignment is refused rather than
  * escaped.** The env file is sourced by `run-daemon.sh` with `.`, and every key
  * `parse_env` finds reaches the daemon's environment with no whitelist — so a

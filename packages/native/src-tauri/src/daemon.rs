@@ -294,17 +294,33 @@ pub fn managed_unit(home: &Path) -> Option<PathBuf> {
     None
 }
 
-/// What to say about one, including how to switch it off.
+/// What to say about one, including a remedy that actually clears it.
+///
+/// ⚠ **The remedy has to make this check pass, and the first one did not.**
+/// It said `launchctl bootout`, which unloads a service and leaves its file
+/// exactly where it was — so the check found it again, refused again, and offered
+/// the same useless command: a permanent lockout whose own instructions could not
+/// end it. Caught on a machine where the unit was *already* unloaded.
+///
+/// ⚠ **And unloaded is not harmless, which is why the file is the test rather than
+/// the running service.** `deploy/launchd/reemoat.plist.in` sets `RunAtLoad`, so a
+/// plist sitting in `~/Library/LaunchAgents` is loaded again at the next login —
+/// a check that passed on "not running now" would hand the machine over and lose
+/// it at the next reboot. Moving the file is what settles it both ways, so that is
+/// what is asked for; the unload is there to stop one that is running this minute.
 pub fn managed_unit_detail(unit: &Path) -> String {
+    let name = unit.file_name().and_then(|value| value.to_str()).unwrap_or("the unit");
     let remedy = if unit.extension().and_then(|value| value.to_str()) == Some("plist") {
-        "launchctl bootout gui/$(id -u)/com.reemoat.daemon"
+        let label = name.trim_end_matches(".plist");
+        format!("launchctl bootout gui/$(id -u)/{label} 2>/dev/null; mv {} ~/{name}.off", unit.display())
     } else {
-        "systemctl --user disable --now reemoat"
+        let label = name.trim_end_matches(".service");
+        format!("systemctl --user disable --now {label}; mv {} ~/{name}.off", unit.display())
     };
     format!(
         "This computer already has a Reemoat daemon installed as a background service, at {}. \
          It would restart itself and compete for the same settings, so Reemoat left them alone. \
-         Stop it first with: {remedy}",
+         Move it aside first — unloading is not enough, because it is loaded again at every login:\n  {remedy}",
         unit.display()
     )
 }
@@ -1223,8 +1239,19 @@ mod tests {
         std::fs::write(&ours, "").unwrap();
         assert_eq!(managed_unit(&home), Some(ours));
         // And the remedy matches the supervisor the file belongs to.
-        assert!(managed_unit_detail(Path::new("/x/a.plist")).contains("launchctl bootout"));
-        assert!(managed_unit_detail(Path::new("/x/a.service")).contains("systemctl --user"));
+        let plist = managed_unit_detail(Path::new("/x/com.reemoat.daemon.plist"));
+        assert!(plist.contains("launchctl bootout gui/$(id -u)/com.reemoat.daemon"));
+        let service = managed_unit_detail(Path::new("/x/reemoat.service"));
+        assert!(service.contains("systemctl --user disable --now reemoat"));
+        /*
+         * ⚠ **The remedy must clear what this function detects.** The first one
+         * only unloaded the service and left the file, so the very next check found
+         * it again and offered the same command — a refusal its own instructions
+         * could not end. Detection is by file, so the remedy has to move the file.
+         */
+        for detail in [&plist, &service] {
+            assert!(detail.contains("mv "), "the remedy must remove what the check looks at: {detail}");
+        }
     }
 
     #[test]
