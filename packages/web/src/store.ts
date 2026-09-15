@@ -9,7 +9,15 @@ import { ApiError, errorText, isTransportFailure, meansLater } from "./http";
 import type { InstanceConfig } from "./instance";
 import { keyOf, machineId, refOf, sessionId, type MachineId, type SessionKey, type SessionRef } from "./ids";
 import { describe, MachineConnection, type MachineState } from "./machine";
-import { hostReady, nativeHydrating, type NativeBoot } from "./native";
+import {
+  DAEMON_CONFIG,
+  daemonState,
+  hostReady,
+  nativeHydrating,
+  startLocalDaemon,
+  type NativeBoot,
+} from "./native";
+import { mayAddMachine } from "./quota";
 import { mergeOptimistic } from "./sessionOrder";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
 import {
@@ -20,6 +28,7 @@ import {
   showsAsEnded,
   type AgentCommand,
   type AgentConfig,
+  type CreatedMachine,
   type LaggedFrame,
   type Me,
   type PluginSummary,
@@ -840,6 +849,70 @@ export interface AgentCommandList {
   dropped: number;
 }
 
+/**
+ * How far setting this computer up has got, for the one screen that draws it.
+ *
+ * Three states and no more: it is running, it failed, or there is nothing to say.
+ * `detail` is the daemon's own last words on a failure — the tail
+ * `host_daemon_state` keeps — because "it did not start" with no reason attached is
+ * the sentence this whole second question was added to avoid.
+ */
+/**
+ * A control-plane label for this computer, from whatever name it has.
+ *
+ * ⚠ **A second copy of somebody else's validation rule, and it is deliberately the
+ * loose half.** `MACHINE_LABEL` on the control plane is
+ * `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`, and this does not re-implement it — it
+ * *shapes toward* it and lets the server refuse. The difference matters: a strict
+ * copy here would drift the day that regex changes and would start refusing names
+ * the server accepts, from a client that cannot see why. What this guarantees is
+ * only that a plausible name goes out rather than `Rends’s MacBook Pro`.
+ *
+ * `null` in, `"computer"` out — a name is required and there is nothing to build
+ * one from. It will collide on the second such machine, which is what the caller's
+ * one retry is for.
+ */
+export const LOCAL_MACHINE_NAME = "local";
+
+/** How often the setup flow asks the host whether the daemon is up yet. */
+const SETUP_POLL_MS = 1_000;
+
+/**
+ * How long a daemon is given to enroll before the screen stops promising it will.
+ *
+ * Generous on purpose: this covers a cold Node start, a `tsx` compile of the
+ * daemon's entry point and one round trip to the control plane, on a machine that
+ * may be doing a first-run install at the same time.
+ */
+const SETUP_SETTLE_MS = 45_000;
+
+/** Said when the env file here belongs to a fleet this app is not signed in to. */
+const FOREIGN_ENV_DETAIL =
+  "The daemon settings already on this computer name a different Reemoat server, so they were left alone. " +
+  "Sign in to that server instead, or move ~/.reemoat/daemon.env aside to set this computer up here.";
+
+/** Said when the daemon is neither up nor gone after {@link SETUP_SETTLE_MS}. */
+const SLOW_START_DETAIL = "The daemon on this computer has not finished starting yet.";
+
+export function machineLabelFor(hostName: string | null): string {
+  const shaped = (hostName ?? "")
+    .normalize("NFKD")
+    // Anything outside the label alphabet becomes a hyphen rather than vanishing,
+    // so `Ann's Mac` and `Anns Mac` stay different machines.
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    // A label must start with a letter or a digit.
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/[-._]+$/, "")
+    .slice(0, 64);
+  return shaped.length > 0 ? shaped : "computer";
+}
+
+export interface SetupState {
+  step: "creating" | "starting" | "failed";
+  detail: string | null;
+}
+
 export interface AppState {
   /**
    * `"signed_out"` rather than `"needs_key"`: it names the state, and the remedy
@@ -917,6 +990,21 @@ export interface AppState {
    */
   commands: ReadonlyMap<SessionKey, AgentCommandList>;
   /** The control plane itself failed. Not fatal while cached tokens are alive. */
+  /**
+   * Setting this computer up as a machine, when the app is the thing doing it.
+   *
+   * `null` everywhere else and for ever — in a browser, on a computer that already
+   * has a daemon, and once one is running. It is a fact about *what this store has
+   * done*, which is why it lives here rather than on a `MachineState`: there is no
+   * machine yet to hang it on, and that is precisely the state it describes.
+   *
+   * ⚠ **Deliberately not `cpError`.** A control-plane outage is the app being
+   * unusable; failing to set a machine up is one affordance not working while
+   * everything else — other machines, other sessions — is fine. Writing this into
+   * `cpError` would put the whole app on the spinner for it, which is the failure
+   * `bootstrap`'s own catch arm already argues against at length.
+   */
+  setup: SetupState | null;
   cpError: string | null;
   /**
    * What this instance allows, or `null` while it is unknown.
@@ -969,6 +1057,7 @@ class AppStore implements StreamSink {
      * and then replaces it, which reads as having been signed out.
      */
     phase: cp.currentCredential() === null && !nativeHydrating() ? "signed_out" : "loading",
+    setup: null,
     host: null,
     me: null,
     machines: [],
@@ -1295,8 +1384,246 @@ class AppStore implements StreamSink {
       });
     }
 
+    /*
+     * ⚠ **Here, and the placement is three constraints at once.**
+     *
+     * *After* the `try`, because a throw inside it lands in the catch above, which
+     * sets `cpError` and — with no connections, which is exactly the empty-fleet
+     * case this exists for — forces `phase` back to `"loading"`. Setting a machine
+     * up must never be able to put the app on the spinner.
+     *
+     * *After* `phase: "ready"`, so the app is usable while this runs. It talks to
+     * the control plane and then waits on a daemon starting; none of that is
+     * something to hold a first paint behind.
+     *
+     * *Before* `resume("bootstrap")`, so a machine created here is in the registry
+     * by the time the first resume runs rather than four seconds later.
+     */
+    await this.setUpThisComputer();
+
     this.startPolling();
     await this.resume("bootstrap");
+  }
+
+  /**
+   * Make this computer a machine, if it is not one and this app can do it.
+   *
+   * **The whole of "the daemon stops being a thing you install".** Everything it
+   * needs already existed separately: the control plane hands back a machine, a
+   * grant and a single-use code in one answer; the host process can write the env
+   * file and start the daemon; and the daemon announces itself when it is up. This
+   * is the twenty lines that put them in a row.
+   *
+   * ⚠ **It never throws and never reports through `cpError`.** Every arm below
+   * either returns or lands in the one catch, which writes `setup` and nothing
+   * else. A person whose account is full, or whose daemon will not start, still has
+   * a working app pointed at every other machine they have.
+   */
+  private async setUpThisComputer(): Promise<void> {
+    /*
+     * `null` in a browser, for ever — this is the native shell's `host_boot`
+     * answer. Gated on the shell rather than on `machines.length === 0` on
+     * purpose: a fleet-size gate would also be true in the browser, where there is
+     * no host to ask and nothing to start.
+     */
+    const boot = this.snapshot.host;
+    if (boot === null) return;
+
+    try {
+      const state = await daemonState();
+      // No bridge, or a build carrying no payload: the relay is the only route,
+      // exactly as it was before any of this existed.
+      if (state === null || state.status === "unsupported") return;
+      /*
+       * ⚠ **`foreign` is a reason to stop, not a reason to try harder.** A daemon
+       * has announced itself here that this app did not start — the shell
+       * installer's, most likely. Starting a second would be refused by
+       * `claimDaemonLock` against one database, and creating a second machine for
+       * one computer would spend a quota slot that is never given back.
+       */
+      if (state.status !== "absent" && state.status !== "exited") return;
+
+      /*
+       * ⚠ **A file naming another fleet is reported and left strictly alone.** The
+       * host refuses to write over it too; this arm exists so the refusal is a
+       * sentence on the screen rather than a thrown string, and so no machine is
+       * bought for a computer this app is not going to be able to start.
+       */
+      if (state.config === DAEMON_CONFIG.elsewhere) {
+        this.patch({ setup: { step: "failed", detail: FOREIGN_ENV_DETAIL } });
+        return;
+      }
+
+      /*
+       * What this app already spent a machine on, for this server. Re-minting
+       * against it is how a code that expired before the daemon redeemed it gets
+       * replaced without buying a second machine — the window is real, an
+       * enrollment code lives an hour.
+       *
+       * ⚠ **Asked before adoption, and that ordering is the fix.** Measured
+       * 2026-09-15: this branch ran, minted a fresh code, and the host then skipped
+       * the write and started the daemon on the *old* file's dead code — a machine
+       * bought at 15:15:54 and a `409 code_unusable` one second later. A claim
+       * means the file is this app's to refresh; adoption is for a file that is
+       * not.
+       */
+      if (state.claimed !== null) {
+        if (await this.remintFor(state.claimed)) return;
+        // The claim pointed at a machine that is gone or switched off. Fall
+        // through and create one rather than re-minting at it for ever.
+      }
+
+      /*
+       * Adoption: something already configured a daemon here for this server —
+       * `deploy/install.sh`, or this app before a restart — and the machine it
+       * enrolled as already exists. Start it and buy nothing.
+       */
+      if (state.config === DAEMON_CONFIG.here) {
+        this.patch({ setup: { step: "starting", detail: null } });
+        await startLocalDaemon("", "", "");
+        await this.settleDaemon(null);
+        return;
+      }
+
+      /*
+       * The ceiling, asked before the request rather than discovered as a 409.
+       * `mayAddMachine` is the same predicate the three screens that offer this use
+       * — this is a fourth door onto one rule, and it must not invent a second.
+       */
+      if (!mayAddMachine(this.snapshot.me)) return;
+
+      this.patch({ setup: { step: "creating", detail: null } });
+      const created = await this.createForThisComputer(boot);
+      if (created === null) return;
+
+      this.patch({ setup: { step: "starting", detail: null } });
+      await startLocalDaemon(created.controlPlaneUrl, created.enrollment.code, created.machine.id);
+      /*
+       * The row is a fact now — the control plane answered 201 — so this is the
+       * store catching up rather than drawing ahead of an answer. `machinesChanged`
+       * rather than `resume` alone, because creating a machine also changes how
+       * many of them you may have, and that is read off `me`.
+       */
+      await this.machinesChanged("machine-added");
+      await this.settleDaemon(created.machine.id);
+    } catch (error) {
+      this.patch({ setup: { step: "failed", detail: describe(error) } });
+    }
+  }
+
+  /**
+   * Watch the daemon this app just started until it is up, or is not going to be.
+   *
+   * ⚠ **The half that was missing, and its absence is why the failure was
+   * invisible.** `startLocalDaemon` resolving means a process was *spawned*;
+   * everything that can go wrong afterwards — a refused enrollment code, a
+   * certificate the daemon cannot verify, a database a newer daemon migrated —
+   * happens seconds later in a child whose output goes to a ring buffer nobody was
+   * reading. Measured 2026-09-15: the child died in under a second and the screen
+   * said nothing at all, because `setup` had already been cleared.
+   *
+   * One retry, and it is deliberately **not** conditional on what the log says.
+   * Matching `code_unusable` in a tail would be a fourth reader of a string the
+   * daemon is free to reword; re-minting costs no quota and the retry is bounded
+   * at one, so "it exited and we hold a machine" is both simpler and more robust
+   * than any pattern.
+   */
+  private async settleDaemon(claim: string | null, retried = false): Promise<void> {
+    const deadline = Date.now() + SETUP_SETTLE_MS;
+    for (;;) {
+      await sleep(SETUP_POLL_MS);
+      const state = await daemonState();
+      // The bridge went away mid-poll. Nothing true can be said, so say nothing.
+      if (state === null) return;
+      if (state.status === "running" || state.status === "foreign") {
+        this.patch({ setup: null });
+        await this.machinesChanged("machine-added");
+        return;
+      }
+      if (state.status === "exited") {
+        const machine = claim ?? state.claimed;
+        if (!retried && machine !== null && (await this.remintFor(machine))) return;
+        this.patch({ setup: { step: "failed", detail: state.detail } });
+        return;
+      }
+      if (Date.now() >= deadline) {
+        this.patch({ setup: { step: "failed", detail: state.detail ?? SLOW_START_DETAIL } });
+        return;
+      }
+    }
+  }
+
+  /**
+   * A fresh code for a machine this app already created. `true` if it was used.
+   *
+   * `false` means the claim is not worth keeping — the machine was retired, or its
+   * owner is over the limit — and the caller should create a new one instead of
+   * re-minting at a row that will refuse for ever.
+   *
+   * ⚠ **Only the mint is caught.** A blanket `try` around the start as well read a
+   * *host* refusal — "that file belongs to another server" — as "this machine is
+   * gone", and fell through to buying another one. A failure to start is the
+   * caller's to report, not this function's to swallow.
+   */
+  private async remintFor(machineId: string): Promise<boolean> {
+    let again;
+    try {
+      again = await cp.mintEnrollment(machineId);
+    } catch {
+      return false;
+    }
+    this.patch({ setup: { step: "starting", detail: null } });
+    await startLocalDaemon(again.controlPlaneUrl, again.code, machineId);
+    await this.machinesChanged("machine-added");
+    await this.settleDaemon(machineId, true);
+    return true;
+  }
+
+  /**
+   * Create the machine, naming it after this computer.
+   *
+   * ⚠ **The name is the part that fails on the second computer, not the first.**
+   * A control-plane label is refused when the account can already *see* one
+   * spelled the same, compared case-insensitively — so two machines both called
+   * `macbook` collide even though nobody typed either. The host name is what
+   * distinguishes them, and where there is none this asks for nothing clever: it
+   * falls back to a generic label and lets the retry below disambiguate.
+   */
+  private async createForThisComputer(boot: NativeBoot): Promise<CreatedMachine | null> {
+    /*
+     * ⚠ **`local`, not the host name — an owner's call, 2026-09-15, on seeing the
+     * first real run name a machine `MacBook-Pro-Nikita`.**
+     *
+     * The host name is what the *control plane* would want: it distinguishes rows.
+     * `local` is what the *person* wants, because the one machine this app sets up
+     * is by definition the computer they are sitting at, and a list where one row
+     * says `local` reads instantly.
+     *
+     * ⚠ **The cost is real and is why the host name is still the fallback.** Names
+     * are compared case-insensitively across every machine an account can see, so
+     * the *second* computer somebody sets up cannot also be `local` — that is a
+     * `409 machine_exists`, and `createForThisComputer`'s retry is what answers it.
+     * The retry uses the host name rather than a number, because `local-2` names
+     * nothing a person can recognise from a phone while `MacBook-Pro-Nikita` does.
+     */
+    const base = LOCAL_MACHINE_NAME;
+    try {
+      return await cp.createMachine(base);
+    } catch (error) {
+      /*
+       * One retry, with a suffix, and then it stops. A loop here would spend a
+       * permanent machine slot per attempt against a name rule it cannot see.
+       */
+      if (!ApiError.isApiError(error) || error.code !== "machine_exists") throw error;
+      /*
+       * Somebody already has a `local`. Fall back to what this computer is called,
+       * which is the only other name available that means anything to a person
+       * reading the list from somewhere else.
+       */
+      const named = machineLabelFor(boot.hostName);
+      if (named === base) throw error;
+      return await cp.createMachine(named);
+    }
   }
 
   private dropMachine(id: MachineId): void {

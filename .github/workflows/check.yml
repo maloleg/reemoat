@@ -310,6 +310,21 @@ jobs:
       # failure otherwise is a path error that reads like a config bug.
       - run: pnpm web:build
 
+      # And the daemon payload, for the sharper version of the same reason.
+      #
+      # ⚠ **This is not a build step, it is a prerequisite of `cargo` itself.**
+      # `bundle.resources` and `bundle.externalBin` are copied from inside
+      # `build.rs`, not by the bundler — so with the staging directory absent
+      # every one of the three cargo steps below fails with
+      # `ResourcePathNotFound`, including `fmt`, which has no business caring
+      # about a 200 MB payload. It is a step of its own rather than a
+      # `beforeBuildCommand` for exactly that: `beforeBuildCommand` runs for
+      # `tauri build` alone and would leave clippy and test broken.
+      #
+      # It downloads an official Node build (checksum-verified) and installs the
+      # payload's dependencies, so it wants the network and roughly a minute.
+      - run: pnpm native:stage
+
       - name: cargo fmt
         run: cargo fmt --manifest-path packages/native/src-tauri/Cargo.toml --check
 

@@ -856,5 +856,51 @@ check(
   [],
 );
 
+/* ------------------------------------------------------------------ *
+ * The runtime the desktop app carries
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe Node the native shell ships, against the floor this repository sets\n");
+
+/*
+ * **A fourth kind of version, and the reason it belongs in this file.**
+ *
+ * The other pins here are of things this repository *is* — its release, its
+ * adapters, its API-key ceiling. This is a pin on something it **vendors**:
+ * `packages/native/scripts/build-daemon.mjs` downloads an official Node build and
+ * embeds it in the `.app`, so on a machine that installs Reemoat that binary is
+ * the Node the daemon runs under, whatever else is on the box.
+ *
+ * ⚠ **Which makes `engines.node` stop being advice.** Everywhere else that field
+ * describes a machine somebody else set up, and a violation shows up as `pnpm`
+ * refusing to install. Here it describes a file this repository chose, and a
+ * violation ships: `node:sqlite` is behind `--experimental-sqlite` before 24 and
+ * this daemon's entire store is that module, so a payload built on 22 would pass
+ * every driver, build, sign, install — and fail at `openStores`, on a user's
+ * machine, with the daemon exiting 2 into a launchd restart loop.
+ *
+ * Compared as major only. The patch moves whenever the pin is bumped and pinning
+ * it twice would be two places to edit for one fact.
+ */
+const stageSrc = read("packages/native/scripts/build-daemon.mjs");
+const stagedNode = capture(stageSrc, /const NODE_VERSION = "v(\d+)\.\d+\.\d+";/);
+check("the staging script pins a Node version", stagedNode !== null, true);
+const enginesFloor = capture(read("package.json"), /"node":\s*">=(\d+)"/);
+check("and package.json states a floor", enginesFloor !== null, true);
+check(
+  "and the runtime that ships is not below it",
+  stagedNode !== null && enginesFloor !== null && Number(stagedNode) >= Number(enginesFloor),
+  true,
+);
+/*
+ * And it is an LTS line rather than current. Not a correctness property — current
+ * would run — but a shipped desktop application is the one place in this
+ * repository where the runtime cannot be updated by the person operating it, so
+ * the line that keeps getting security fixes longest is the one to be on. An even
+ * major is LTS; the check is arithmetic rather than a table so it needs no
+ * maintenance when a new one is cut.
+ */
+check("and it is an LTS line", stagedNode !== null && Number(stagedNode) % 2 === 0, true);
+
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
 process.exit(failures === 0 ? 0 : 1);

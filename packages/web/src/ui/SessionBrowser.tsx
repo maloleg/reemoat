@@ -7,7 +7,7 @@ import { machineQuotaNotice, mayAddMachine } from "../quota";
 import { folderLabel } from "../paths";
 import { navigate, newPath, sessionPath } from "../router";
 import { settingsPath } from "../settings";
-import { elapsedSince, sessionGroups, sessionLists, type AppState, type SessionRow } from "../store";
+import { elapsedSince, sessionGroups, sessionLists, type AppState, type SessionRow, type SetupState } from "../store";
 import { humanRequests, needsHuman, resumeStalled } from "../wire";
 import {
   Button,
@@ -171,6 +171,8 @@ export function SessionBrowser({
       )}
 
       {state.cpError !== null && <ControlPlaneNotice />}
+
+      {state.setup !== null && <SetupNotice setup={state.setup} />}
 
       {state.machines.length > 0 && <ChatSearch value={needle} />}
 
@@ -1929,6 +1931,43 @@ function SidebarFoot({ state, machine }: { state: AppState; machine: MachineId |
         <ProfileMenu state={state} machine={machine} className="min-w-0 flex-1" />
         <HelpButton />
       </div>
+    </div>
+  );
+}
+
+/**
+ * What setting this computer up is doing, and what it said when it failed.
+ *
+ * ⚠ **The failure arm is the whole reason this exists.** The app creates a machine
+ * and starts a daemon by itself now, and every part of that can fail on somebody
+ * else's computer: a port in use, a code that expired, a payload that will not
+ * spawn. Without this the symptom is a machine in the list that is simply *not
+ * reachable*, with the cause sitting in a string nothing renders — which is exactly
+ * what happened on the first real run, and cost a whole round trip to diagnose.
+ *
+ * `detail` is the daemon's own last words, from the ring `host_daemon_state` keeps.
+ * Shown verbatim and never summarised: it is the only evidence there is, and a
+ * friendlier sentence would be this screen inventing a cause it does not know.
+ */
+export function SetupNotice({ setup }: { setup: SetupState }): ReactNode {
+  if (setup.step !== "failed") {
+    return (
+      <div className="mx-3 mb-2 shrink-0 rounded-md border border-edge-strong bg-raised px-3 py-2 text-xs text-fg">
+        {setup.step === "creating" ? "Setting this computer up…" : "Starting the daemon on this computer…"}
+      </div>
+    );
+  }
+  return (
+    <div className="mx-3 mb-2 shrink-0 rounded-md border border-edge-strong bg-raised px-3 py-2 text-xs text-fg">
+      <p>This computer could not be set up.</p>
+      {setup.detail !== null && (
+        /*
+         * Monospace and pre-wrapped, because this is program output rather than
+         * prose — `web-typography.md`'s rule, and the reason a stack trace stays
+         * readable instead of being reflowed into a paragraph.
+         */
+        <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-2xs text-muted">{setup.detail}</pre>
+      )}
     </div>
   );
 }

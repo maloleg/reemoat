@@ -46,6 +46,7 @@
     "web": "pnpm --filter @reemoat/web dev",
     "web:build": "pnpm --filter @reemoat/web build",
     "native": "pnpm --dir packages/native run dev",
+    "native:stage": "pnpm --dir packages/native run stage",
     "native:build": "pnpm --dir packages/native run build"
   },
   "dependencies": {

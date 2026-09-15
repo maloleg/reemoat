@@ -60,6 +60,41 @@ does not walk up and silently install the repository's three projects instead.
 running `pnpm cp` serves from disk per request. Reload any open browser tab
 afterwards — the same hazard `pnpm web:build` has (Q5.15).
 
+### The daemon inside it, and the loop for changing it
+
+The app carries a daemon — a Node runtime in `Contents/MacOS/node` and a snapshot of
+`src/`, `scripts/` and `deploy/` in `Contents/Resources/daemon/`, staged by
+`pnpm native:stage`.
+
+⚠ **That snapshot is not your working tree, and it is not your working tree in
+`tauri dev` either.** `bundle.resources` is copied by `build.rs` into
+`target/<profile>/`, and `resource_dir()` answers that copy in a development build
+exactly as it answers `Contents/Resources` in a bundle. So editing `src/session.ts`
+and reloading the window shows the *old* code, with nothing anywhere saying why —
+measured, and the reason this paragraph exists.
+
+For daemon work there are two loops and they are not interchangeable:
+
+```bash
+# Changing the daemon: point the app at a checkout. Development builds only.
+REEMOAT_DAEMON_PAYLOAD=/path/to/reemoat/app pnpm native
+
+# Changing what ships: re-stage, then rebuild.
+pnpm native:stage && pnpm native:build
+```
+
+The override swaps the **code** and never the runtime: the daemon still runs under
+the bundled `node`, so a checkout is exercised against the binary that will ship. It
+is `cfg!(debug_assertions)`-gated, for `lib.rs`'s navigation-guard reason — a
+variable naming a directory this process executes as you is fine on a developer's
+machine and is not fine in an application people install.
+
+**And the third loop is the one that needs no app at all.** A daemon started the
+ordinary way — `pnpm daemon`, or the launchd unit — runs your working tree and
+announces itself, and the app *adopts* it (`host_daemon_state` answers `foreign` and
+starts nothing). That is the fastest loop for daemon work and it is what already
+happens on a machine with a daemon installed.
+
 ### Prerequisites
 
 | Platform | Needs |

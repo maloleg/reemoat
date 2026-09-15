@@ -7,8 +7,9 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
+    "stage": "node scripts/build-daemon.mjs",
+    "dev": "node scripts/build-daemon.mjs && tauri dev",
+    "build": "node scripts/build-daemon.mjs && tauri build",
     "icon": "tauri icon icon.png"
   },
   "devDependencies": {

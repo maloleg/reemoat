@@ -628,6 +628,153 @@ check(
 );
 
 /* ------------------------------------------------------------------ *
+ * The daemon payload, and the two sweeps it has to stay out of
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe daemon this app carries, and where it is allowed to sit\n");
+
+const STAGE = "packages/native/scripts/build-daemon.mjs";
+const stage = read(STAGE);
+
+/*
+ * **The runtime is an `externalBin` and the payload is a `resources` entry, and
+ * swapping them is the failure this pair exists to catch.**
+ *
+ * `externalBin` lands in `Contents/MacOS/` and is signed as nested code;
+ * `resources` lands in `Contents/Resources/` and is not reliably signed at all.
+ * `node` is the only Mach-O in the payload — everything else is JavaScript, since
+ * `node:sqlite` is built in and the whole dependency set is pure JS — so it is the
+ * only thing that has to be in the first list, and putting the JS tree there
+ * instead would put 200 MB through a code-signing walk that has nothing to sign.
+ */
+const externalBin = (bundle["externalBin"] ?? []) as string[];
+check("the runtime is an external binary", externalBin, ["binaries/node"]);
+/*
+ * ⚠ **The map form, not the list form.** `resource_relpath` in `tauri-utils` maps
+ * `..` to a literal `_up_` path segment, so a list entry reaching out of
+ * `src-tauri` lands at `Resources/_up_/_up_/…` and `resource_dir().join("daemon")`
+ * finds nothing. The map form honours the destination it is given. Asserted as the
+ * whole object rather than the key, because the destination is what `daemon.rs`
+ * joins onto and a renamed value is a path that resolves to nothing at runtime.
+ */
+check("the payload is a resource, by the map form", bundle["resources"], { "target/daemon/": "daemon" });
+/*
+ * ⚠ **`target/` is not a tidiness choice, it is what keeps two other drivers
+ * honest**, and it is the one thing about this staging directory that has to be
+ * asserted rather than remembered.
+ *
+ * The payload is a verbatim copy of `src/`, `scripts/` and `deploy/`. Staged
+ * anywhere else under `packages/native` it would be caught by this file's own
+ * no-TypeScript sweep — which is the *good* failure. The bad one is `docscheck`:
+ * it walks the working tree rather than `git ls-files`, so a second copy of every
+ * `.ts` in `src/` would enter its symbol corpus, and assertion 4 there would start
+ * answering `true` for symbols that no longer exist anywhere real. That is that
+ * driver switched off in the direction that reads as passing. `SKIP_DIR` already
+ * holds `target`, so the destination is chosen to land inside a skip that exists
+ * rather than to need a new one.
+ */
+const stageDest = Object.keys((bundle["resources"] ?? {}) as Record<string, unknown>)[0] ?? "";
+check("and it is staged under target/, which both sweeps already skip", stageDest.startsWith("target/"), true);
+check("the staging script is where the config expects it", existsSync(join(ROOT, STAGE)), true);
+/*
+ * **Staged by its own step, never by `beforeBuildCommand`.** Resources and
+ * external binaries are copied from inside `build.rs`, so they are read by *cargo*
+ * — `cargo clippy`, `cargo test` and `tauri build --no-bundle` all fail with
+ * `ResourcePathNotFound` if the directory is absent, and the `native` CI job runs
+ * all three. A `beforeBuildCommand` runs for `tauri build` alone and would leave
+ * those three broken on a clean checkout. Both manifests are asserted because the
+ * root script is what CI calls and the package script is what actually stages.
+ */
+check(
+  "the root exposes a staging step",
+  /"native:stage":\s*"pnpm --dir packages\/native run stage"/.test(read("package.json")),
+  true,
+);
+const nativePkg = read(`${NATIVE}/package.json`);
+check("the package defines it", /"stage":\s*"node scripts\/build-daemon\.mjs"/.test(nativePkg), true);
+/*
+ * And both cargo-driving scripts run it first. Not a convenience: `tauri dev` runs
+ * `build.rs` exactly like `tauri build` does, so a developer who has never staged
+ * gets `ResourcePathNotFound` from a Rust build rather than a missing payload.
+ */
+for (const script of ["dev", "build"] as const) {
+  check(
+    `\`${script}\` stages before it reaches cargo`,
+    new RegExp(`"${script}":\\s*"node scripts/build-daemon\\.mjs && tauri `).test(nativePkg),
+    true,
+  );
+}
+/*
+ * ⚠ **The runtime is downloaded and verified, never copied off the build machine.**
+ * `process.execPath` on this checkout is Homebrew's, and `otool -L` names seven
+ * Homebrew dylibs under it (`@rpath/libnode.147.dylib`, `libuv`, `libada`, …) — a
+ * bundle built from it runs on the machine that built it and nowhere else. And
+ * since what is fetched is an executable that will be signed with this project's
+ * identity and run as the user, the checksum step is not optional hygiene.
+ */
+check("the runtime is fetched from nodejs.org", /const NODE_DIST = "https:\/\/nodejs\.org\/dist"/.test(stage), true);
+check("and verified against the release's own manifest", /SHASUMS256\.txt/.test(stage) && /checksum mismatch/.test(stage), true);
+/*
+ * **The payload must contain no symlink, and the script asserts it itself.** The
+ * bundler's `copy_file` refuses anything that is not a regular file and its walker
+ * does not follow links, so one symlink is a `cargo build` that dies with
+ * `"… is not a file"` — reported as a broken Rust build rather than as a packaging
+ * mistake. Pinned here so the self-check cannot be deleted as redundant.
+ */
+check("the payload refuses to contain a symlink", /function assertNoSymlinks/.test(stage), true);
+/*
+ * ⚠ **The runtime is placed once, and this assertion exists because it was twice.**
+ *
+ * The payload needs a `node` inside `node_modules/.bin` — the package shims test
+ * `$basedir/node`, and `deploy/agents.sh` resolves the runtime as the node *beside*
+ * npm. Copying the binary there satisfies both and costs **122 MB, byte-identical
+ * to the `externalBin` copy**: measured at 360 MiB projected for the bundle against
+ * 244 MiB without it. Nothing failed, nothing warned, and the only symptom was a
+ * download twice the size it needed to be.
+ *
+ * A symlink is what this wants and is the one thing the bundler cannot copy, so
+ * what sits there is a shim. Asserted as "writes a shim, does not copy the binary"
+ * rather than by measuring the staged tree, because this driver has to pass on a
+ * clean checkout where nothing has been staged yet.
+ */
+check(
+  "the runtime is placed once and reached by a shim",
+  /for candidate in .*MacOS\/node/.test(stage) && !/cpSync\(node, join\(binDir/.test(stage),
+  true,
+);
+/*
+ * ⚠ **The 552 MB that must not come back.** The two ACP adapters each pull a
+ * coding-agent CLI as *optional* platform packages, which `pnpm-workspace.yaml`'s
+ * `overrides` strip from the pnpm tree for the reasons Q4.114 gives at length.
+ * npm has no equivalent of pnpm's `'-'`, so the payload drops the whole optional
+ * set — and `deploy/docker/Dockerfile` already measured what that costs on its own
+ * ("`--no-optional` would take esbuild's own platform binary with it and break
+ * `tsx`"), which is why exactly one of them is named back in.
+ */
+check("optional dependencies are dropped from the payload", /"--omit=optional"/.test(stage), true);
+/*
+ * ⚠ **And every target names esbuild's binary back in — checked per target, not
+ * once.** This is the assertion that would have gone vacuous the day a second
+ * platform was added: one `ESBUILD_BINARY` constant covering macOS would pass
+ * while a Linux build silently shipped a `tsx` with no compiler behind it. The
+ * table is the unit, so the check counts it.
+ */
+const triples = [...stage.matchAll(/"([a-z0-9_]+-[a-z0-9-]+)":\s*\{\s*dir:/g)].map((m) => m[1]);
+const withEsbuild = [...stage.matchAll(/esbuild:\s*"(@esbuild\/[a-z0-9-]+)"/g)].map((m) => m[1]);
+check("more than one platform is described", triples.length > 1, true);
+check("and every one of them names an esbuild binary", withEsbuild.length, triples.length);
+/*
+ * **The runtime binary is a build input and never a tracked file.** 122 MB, and
+ * the one staged artifact that cannot live under `target/` — `externalBin`
+ * resolves relative to `src-tauri`, not to the cargo profile directory.
+ */
+check(
+  "the staged runtime is gitignored",
+  /^packages\/native\/src-tauri\/binaries\/$/m.test(read(".gitignore")),
+  true,
+);
+
+/* ------------------------------------------------------------------ *
  * Distribution: configured, and inert
  * ------------------------------------------------------------------ */
 
@@ -659,6 +806,66 @@ const mac = (bundle["macOS"] ?? {}) as Record<string, unknown>;
 check("the hardened runtime is on", mac["hardenedRuntime"], true);
 check("an entitlements file is named", typeof mac["entitlements"], "string");
 check("and it exists", existsSync(join(ROOT, TAURI_DIR, String(mac["entitlements"]))), true);
+/*
+ * **Two Mach-O binaries, two signatures, two entitlement sets — and the split is
+ * the assertion.**
+ *
+ * The app's set stays at one entitlement: this is the signature on the window
+ * holding the fleet's credential. The bundled runtime's is five, because V8
+ * cannot start under the hardened runtime without them — and they were *measured*
+ * off the official build's own signature (`codesign -d --entitlements -`) rather
+ * than chosen, so this list is what the people who build V8 ask for.
+ *
+ * Pinned as exact sets in both directions. A key added to the app's file is a
+ * loosening of the wrong process — `disable-library-validation` there would mean
+ * any dylib could be loaded into the window — and a key dropped from the
+ * runtime's is a daemon that will not start once signing is switched on, which is
+ * a failure nobody would see until the first signed build.
+ */
+const keysOf = (rel: string): string[] =>
+  [...read(rel).matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1] ?? "").sort();
+check("the app's entitlements stay at exactly one", keysOf(`${TAURI_DIR}/entitlements.plist`), [
+  "com.apple.security.network.client",
+]);
+check("the runtime has its own file", existsSync(join(ROOT, TAURI_DIR, "entitlements-node.plist")), true);
+check("and it carries exactly what V8 needs", keysOf(`${TAURI_DIR}/entitlements-node.plist`), [
+  "com.apple.security.cs.allow-dyld-environment-variables",
+  "com.apple.security.cs.allow-jit",
+  "com.apple.security.cs.allow-unsigned-executable-memory",
+  "com.apple.security.cs.disable-executable-page-protection",
+  "com.apple.security.cs.disable-library-validation",
+]);
+/*
+ * ⚠ **`get-task-allow` is the one key in that measurement that must never be
+ * copied**, and it is asserted absent rather than left to the exact-set check
+ * above — because the failure it describes deserves its own sentence. It lets
+ * another process attach a debugger and read the daemon's memory: every
+ * transcript, the machine's signing keys, `identity.tunnel_key`. Node ships it
+ * because Node's own builds are debuggable. Notarization rejects it, which is the
+ * only reason anybody would find it by accident rather than by reading this.
+ */
+check(
+  "and never the debug entitlement Node ships with",
+  read(`${TAURI_DIR}/entitlements-node.plist`).includes("get-task-allow</key>"),
+  false,
+);
+/*
+ * ⚠ **The macOS floor is 13.0 because the *opt-in* background service needs it.**
+ *
+ * The daemon is an ordinary child process of this app and dies with it, which is
+ * the default and needs no floor at all. What needs 13 is the switch beside it:
+ * `SMAppService` is how a login item gets registered such that macOS owns it,
+ * shows it in System Settings, and — the part that decides it — **removes it when
+ * the app is deleted**. The alternative is a plist written by hand into
+ * `~/Library/LaunchAgents`, which with `KeepAlive` survives the app being dragged
+ * to the trash and relaunches a missing binary every ten seconds for ever.
+ *
+ * Pinned rather than left to drift, because lowering it would compile, install,
+ * and then fail at the one call that matters — on the oldest machines, which are
+ * the population least likely to report it. 11 and 12 are out of support, and the
+ * nearest prior art in this space ships the same floor.
+ */
+check("the macOS floor is where the opt-in service starts", mac["minimumSystemVersion"], "13.0");
 /*
  * ⚠ **Inert, and asserted inert.** With no `signingIdentity` a build is ad-hoc
  * signed and runs locally, which is what makes a development build work on a
@@ -698,6 +905,53 @@ check(
 check("an iOS floor is decided rather than defaulted", typeof ((bundle["iOS"] ?? {}) as Record<string, unknown>)["minimumSystemVersion"], "string");
 check("and an Android one", typeof ((bundle["android"] ?? {}) as Record<string, unknown>)["minSdkVersion"], "number");
 check("no Apple development team is committed", ((bundle["iOS"] ?? {}) as Record<string, unknown>)["developmentTeam"], null);
+
+/*
+ * ── what the env file already on a computer is allowed to say ──────────────
+ *
+ * ⚠ **Three answers, written down twice, and a fourth added to one side alone is
+ * silent.** `daemon.rs` decides whether `~/.reemoat/daemon.env` names this server,
+ * another one, or nothing; `store.ts` branches on the answer to decide between
+ * adopting a daemon, refreshing its enrollment code, and buying a machine. A value
+ * the page has never heard of falls through every arm and does *nothing* — which
+ * is precisely the failure this pair of constants was introduced to end, so
+ * leaving it to be caught by reading would be the same bug one level up.
+ *
+ * Compared as sets off disk, the way `OPENABLE` and the scheme allowlist already
+ * are — this file's own precedent for one rule with copies on both sides of the
+ * bridge.
+ */
+process.stdout.write("\nthe env file's three answers, on both sides of the bridge\n");
+const daemonRs = read(`${TAURI_DIR}/src/daemon.rs`);
+const rustConfig = [...daemonRs.matchAll(/pub const CONFIG_[A-Z]+: &str = "([a-z]+)";/g)].map((m) => m[1]);
+const pageConfig = [
+  ...read("packages/web/src/native.ts")
+    .slice(read("packages/web/src/native.ts").indexOf("export const DAEMON_CONFIG"))
+    .matchAll(/^\s{2}([a-z]+): "([a-z]+)",$/gm),
+].map((m) => m[2]);
+check("the host names three", rustConfig.length, 3);
+check("and the page mirrors exactly those", [...pageConfig].sort(), [...rustConfig].sort());
+/*
+ * And the key itself is spelled the same on both sides of the *file*, since the
+ * shell installer writes it and this reads it back.
+ */
+check(
+  "the fleet is decided by the key install.sh writes",
+  /const CONTROL_PLANE_KEY: &str = "REEMOAT_CONTROL_PLANE";/.test(daemonRs),
+  true,
+);
+/*
+ * ⚠ **The keys a rewrite is allowed to touch are a closed list of three.** Growing
+ * it is how a refreshed enrollment code deletes somebody's `NODE_EXTRA_CA_CERTS`
+ * — measured on a real machine 2026-09-15, where that line was the only reason the
+ * daemon could reach its control plane at all.
+ */
+const owned = /const OWNED_KEYS: \[&str; 3\] = \[([^\]]+)\];/.exec(daemonRs)?.[1] ?? "";
+check(
+  "a rewrite may replace exactly the three keys this app owns",
+  owned.split(",").map((k) => k.trim()).filter(Boolean),
+  ['"REEMOAT_AUTH"', "CONTROL_PLANE_KEY", '"REEMOAT_ENROLL_CODE"'],
+);
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
 process.exit(failures === 0 ? 0 : 1);

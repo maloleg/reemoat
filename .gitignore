@@ -78,3 +78,12 @@ dist/
 # committed, the way a checked-in Xcode project is.
 packages/native/src-tauri/target/
 packages/native/src-tauri/gen/schemas/
+
+# The Node runtime staged for `bundle.externalBin` by
+# `packages/native/scripts/build-daemon.mjs`. A 122 MB binary downloaded from
+# nodejs.org and checksum-verified on the way in — a build input, not a source
+# file, and the one staged artifact that cannot live under `target/` because
+# `externalBin` resolves its path relative to `src-tauri` rather than to the
+# cargo profile directory.
+packages/native/src-tauri/binaries/
+.wt/

@@ -3479,6 +3479,7 @@ name = "reemoat-native"
 version = "0.0.0"
 dependencies = [
  "keyring",
+ "libc",
  "percent-encoding",
  "reqwest",
  "serde",

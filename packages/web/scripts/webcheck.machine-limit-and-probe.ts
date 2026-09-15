@@ -267,6 +267,161 @@ process.stdout.write("\nthe machine limit\n");
    * somebody else, while the limit counts only the ones you own).
    */
   const strip = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+  /*
+   * ⭐ **The fourth door onto that predicate, and it draws no screen.**
+   *
+   * `store.ts` creates a machine by itself now, for the computer the desktop app
+   * is running on. The three files below are affordances somebody presses; this
+   * one is not, which is exactly why it needs naming here — a silent create that
+   * skipped `mayAddMachine` would spend a permanent slot and answer `409` to
+   * nobody, and every assertion in this file would stay green while it did.
+   */
+  {
+    const store = strip(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+    check("the store asks the shared predicate before creating a machine", /mayAddMachine\(/.test(store), true);
+    check("and never re-derives it from the fields", /machineLimit|machineCount|canAddMachine/.test(store), false);
+    /*
+     * ⚠ **Gated on the native shell, never on the fleet being empty**, and this is
+     * the assertion that keeps the live bootstrap driver honest. That driver stubs
+     * `fetch` with a function that ignores `init.method`, so a `POST /v1/machines`
+     * from it would be answered `{machines: []}` with a 200 and a machine id of
+     * `undefined`. It cannot reach this code because `__TAURI__` is absent when
+     * `native.ts` is first imported and `host` is therefore `null` — a fleet-size
+     * gate would have no such protection.
+     */
+    check(
+      "and reaches the host before it decides anything",
+      /const boot = this\.snapshot\.host;\s*if \(boot === null\) return;/.test(store),
+      true,
+    );
+    /*
+     * ⚠ **A failed setup may not become `cpError`.** That field puts the whole app
+     * on the spinner — `bootstrap`'s catch arm forces `phase: "loading"` with no
+     * connections, which is precisely the empty-fleet state this runs in. One
+     * affordance failing must not read as the control plane being down.
+     */
+    const setUp = /private async setUpThisComputer\(\)[\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check("the setup path exists to be checked", setUp.length > 0, true);
+    check("and it never writes cpError", /cpError/.test(setUp), false);
+    check("and it never moves the phase", /phase:/.test(setUp), false);
+    /*
+     * And it consults what it already claimed. Creating unconditionally on every
+     * bootstrap is the defect this whole record exists to prevent: a machine row is
+     * counted with no revoked filter, so each one spends one of fifty for ever.
+     */
+    check("and it re-mints against a machine it already made", /state\.claimed/.test(setUp), true);
+    /*
+     * ⭐ **And it asks what is already configured on this computer, before it buys
+     * anything.**
+     *
+     * Measured on a real machine 2026-09-15, and this is the whole failure: a
+     * computer carrying a half-finished `deploy/install.sh` install reported
+     * `absent` — because nothing looked at the env file — so the store created a
+     * machine at 15:15:54, and one second later the host started the daemon on the
+     * *old* file's hour-dead enrollment code. `409 code_unusable`, a child gone in
+     * under a second, a permanently spent quota slot, and nothing on the screen.
+     *
+     * Three assertions because the three arms fail differently: without the
+     * `elsewhere` arm this app writes over a daemon somebody else configured;
+     * without the `here` arm it buys a machine for a computer that has one; and
+     * without the empty-argument adoption call the host cannot tell "start what is
+     * there" from "provision this".
+     */
+    check("and it reads what the env file here already says", /state\.config/.test(setUp), true);
+    for (const arm of ["elsewhere", "here"] as const) {
+      check(`and it has an arm for ${arm}`, new RegExp(`DAEMON_CONFIG\\.${arm}`).test(setUp), true);
+    }
+    check('and adoption starts with no code at all', /startLocalDaemon\("",\s*"",\s*""\)/.test(setUp), true);
+    /*
+     * ⭐ **And the start is watched rather than assumed.**
+     *
+     * `startLocalDaemon` resolving means a process was *spawned*. Everything that
+     * can still go wrong — a refused code, an unverifiable certificate, a database
+     * a newer daemon migrated — happens seconds later in a child whose output goes
+     * to a ring buffer. The version of this flow that cleared `setup` on the next
+     * line reported success for a daemon that was already dead, which is how the
+     * failure above stayed invisible through two builds.
+     */
+    check("the setup flow settles rather than assuming a spawn worked", /settleDaemon\(/.test(setUp), true);
+    const settle = /private async settleDaemon\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check("and the settle loop exists to be checked", settle.length > 0, true);
+    check("and it reports what the daemon actually printed", /state\.detail/.test(settle), true);
+    /*
+     * ⚠ **And it retries on the *fact* of an exit, never on the text of one.**
+     * Matching `code_unusable` in a log tail would be a fourth reader of a string
+     * the daemon is free to reword, and a reworded string would silently switch the
+     * retry off. Re-minting costs no quota and the retry is bounded at one.
+     */
+    check("and it never pattern-matches the log to decide", /code_unusable|code_rejected/.test(settle), false);
+  }
+
+  /*
+   * ⭐ **The name, which is the half that fails on the *second* computer.**
+   *
+   * A control-plane label is refused when the account can already see one spelled
+   * the same, compared case-insensitively — so this is not about tidiness, it is
+   * the difference between an app that sets up one Mac and an app that sets up
+   * two. And the alphabet is not ours: `MACHINE_LABEL` is
+   * `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`, so anything this produces that the
+   * server would refuse is a `400` nobody can act on.
+   *
+   * Asserted against the server's own regex rather than against examples, because
+   * the property wanted is "whatever comes out is acceptable", not "these six
+   * strings map to these six strings".
+   */
+  {
+    const { machineLabelFor } = await import("../src/store.js");
+    const LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+    const cases: [string | null, string][] = [
+      ["Rendss-MacBook-Pro", "an ordinary host name survives intact"],
+      ["Ann's Mac", "an apostrophe becomes a separator rather than vanishing"],
+      ["--weird--", "leading punctuation is dropped, since a label must start alphanumeric"],
+      ["...", "a name with nothing usable in it still yields a label"],
+      ["", "so does an empty one"],
+      [null, "and so does no name at all"],
+      ["Ы-машина", "and a name in another script"],
+      ["x".repeat(200), "and one far past the length bound"],
+    ];
+    for (const [input, name] of cases) {
+      check(name, LABEL.test(machineLabelFor(input)), true);
+    }
+    /*
+     * The one behavioural assertion, and it is about *collisions* rather than
+     * shape: two different computers must not be flattened onto one label by the
+     * sanitiser itself, or the retry is asked to fix something it cannot see.
+     */
+    check(
+      "two names that differ only in punctuation stay different machines",
+      machineLabelFor("Anns Mac") !== machineLabelFor("Ann's Mac"),
+      true,
+    );
+    /*
+     * ⚠ **The machine this app sets up is called `local`, not the host name** —
+     * an owner's call on seeing the first real run produce `MacBook-Pro-Nikita`.
+     * The host name is what the control plane would want, because it
+     * distinguishes rows; `local` is what the person wants, because the one
+     * machine this app creates is the computer they are sitting at.
+     *
+     * The host name survives as the **collision fallback**, and that is the half
+     * worth pinning: names are compared case-insensitively across everything an
+     * account can see, so a second computer cannot also be `local`, and falling
+     * back to a number would name nothing anybody could recognise from a phone.
+     */
+    const { LOCAL_MACHINE_NAME } = await import("../src/store.js");
+    check("the machine this app sets up is called local", LOCAL_MACHINE_NAME, "local");
+    check("and that is itself a valid label", LABEL.test(LOCAL_MACHINE_NAME), true);
+    const storeSrc = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+    check(
+      "and the host name is what a collision falls back to",
+      /machineLabelFor\(boot\.hostName\)/.test(storeSrc),
+      true,
+    );
+
+    // And the suffix the one retry appends is itself a valid label.
+    check("a disambiguated name is still a label", LABEL.test(machineLabelFor(`${machineLabelFor(null)}-2`)), true);
+  }
+
   for (const file of ["ui/SessionBrowser.tsx", "ui/NewSession.tsx", "ui/settings/MachinesSection.tsx"]) {
     const src = strip(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
     check(`${file} asks the shared predicate`, /mayAddMachine\(/.test(src), true);

@@ -20,6 +20,18 @@ version = "0.0.0"
 name = "reemoat_native_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# **Unix only, and for exactly one call.** `scripts/daemon.ts` implements a real
+# graceful stop — a 20 s budget to close sessions, a hard exit at 25 — and it is
+# reached by SIGTERM. `std::process::Child::kill` is SIGKILL, which skips it and
+# interrupts every turn in flight. There is no portable SIGTERM in std, so the one
+# signal this app sends comes from here.
+#
+# ⚠ Windows has no SIGTERM at all, so `Supervisor::stop` is ungraceful there and
+# says so at the call site. That is a real gap on a real target platform, not a
+# platform this project does not have.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.180"
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 

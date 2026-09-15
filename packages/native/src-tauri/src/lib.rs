@@ -12,6 +12,7 @@
 
 mod commands;
 mod config;
+mod daemon;
 mod credential;
 mod local;
 mod proxy;
@@ -73,6 +74,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::host_boot,
             commands::host_local_daemon,
+            commands::host_daemon_state,
+            commands::host_daemon_start,
+            commands::host_daemon_stop,
             commands::host_set_server,
             commands::host_credential_set,
             commands::host_credential_clear,
@@ -97,6 +101,7 @@ pub fn run() {
                 client: proxy::client(),
                 config_dir: dir,
                 durable: credential::probe(),
+                supervisor: Mutex::new(daemon::Supervisor::new()),
             });
 
             /*

@@ -95,6 +95,18 @@ export interface NativeBoot {
    */
   credential: string | null;
   platform: string;
+  /**
+   * What this computer is called, for naming the machine it becomes.
+   *
+   * ⚠ **Not {@link NativeBoot.platform}.** That is the operating system — the
+   * literal string `"macos"` on every Mac — and a machine named from it collides
+   * on the second computer an account sets up, against a check the control plane
+   * makes case-insensitively across everything that account can see.
+   *
+   * `null` where the host could not read one, which is a real state rather than a
+   * failure: the caller has to ask instead of guessing.
+   */
+  hostName: string | null;
   appVersion: string;
   /**
    * `false` where this machine's credential store took a canary and lost it — a
@@ -330,6 +342,116 @@ export async function localDaemon(): Promise<LocalDaemon | null> {
     // answer: there is no local daemon this client can reach.
     return null;
   }
+}
+
+/**
+ * How the daemon on this computer is doing — the *second* question about it.
+ *
+ * ⚠ **Not a replacement for {@link localDaemon}, and the split is deliberate.**
+ * That one answers "is there a daemon here worth showing a token to?" and answers
+ * `null` to every failure, which is right for a daemon somebody installed with the
+ * shell installer. This one exists because the app can now be the thing that
+ * *started* it, and "there is no daemon" is a dishonest answer about a process the
+ * app launched and watched exit. `commands.rs` carries the state table.
+ *
+ * `status` is a string rather than a union because the host owns the set and
+ * `wire.ts`'s rule applies: an unknown value has to fail toward "keep working"
+ * rather than crash a screen, so the caller matches the states it knows and treats
+ * anything else as "nothing to say".
+ */
+export interface DaemonState {
+  status: string;
+  /** What a *running* daemon says it is. */
+  machineId: string | null;
+  /**
+   * What this app already spent a `POST /v1/machines` on, for this server.
+   *
+   * ⚠ **Not the same question as {@link DaemonState.machineId}, and treating them
+   * as one costs a quota slot permanently.** A machine row is counted with no
+   * revoked filter, so every create spends one of fifty for ever. This is set
+   * whenever a machine was created here — including when the daemon never came up
+   * — so a caller that sees it must re-mint a code against that machine rather
+   * than create another.
+   */
+  claimed: string | null;
+  detail: string | null;
+  /**
+   * What `~/.reemoat/daemon.env` already says: one of {@link DAEMON_CONFIG}.
+   *
+   * ⚠ **Asked before a machine is created, and the whole reason a machine used to
+   * be created for a computer that already had one.** Without it the only visible
+   * state was `absent`, which reads as *nothing here* and is wrong for a computer
+   * carrying a half-finished `deploy/install.sh` install. The host answers it
+   * rather than handing over the file, because deciding whether it names *this*
+   * server means comparing origins, and the origin is deliberately something only
+   * the host knows.
+   */
+  config: string;
+}
+
+/**
+ * The three answers {@link DaemonState.config} may carry.
+ *
+ * Mirrored from `daemon.rs`'s `CONFIG_*` constants, which `nativecheck` compares
+ * against this object — a fourth answer added on one side and not the other would
+ * otherwise fall through every arm in the store and do nothing at all.
+ */
+export const DAEMON_CONFIG = {
+  /** No env file on this computer. */
+  none: "none",
+  /** One that names the server this app is signed in to. */
+  here: "here",
+  /** One that names another server, or nothing this can read. */
+  elsewhere: "elsewhere",
+} as const;
+
+export async function daemonState(): Promise<DaemonState | null> {
+  if (!inNativeShell()) return null;
+  try {
+    return (await invoke<DaemonState | null>("host_daemon_state")) ?? null;
+  } catch {
+    // The bridge itself is gone. Same answer as a build with no payload.
+    return null;
+  }
+}
+
+/**
+ * Set this computer up as a machine, and start the daemon.
+ *
+ * ⚠ **The enrollment code crosses the bridge and is written by the host to a
+ * `0600` file — it is never put on a command line.** `deploy/bootstrap.sh` passes
+ * it on stdin for the same reason: argv is readable by every account on the host,
+ * and a code is a full machine identity until it is redeemed.
+ *
+ * A rejection is a sentence, not a status: the host refuses rather than
+ * overwriting when an env file already exists, because rewriting one re-enrolls a
+ * machine that is already enrolled and redeeming a code retires its live tunnel
+ * key.
+ */
+export async function startLocalDaemon(
+  controlPlane: string,
+  enrollCode: string,
+  machineId: string,
+): Promise<DaemonState> {
+  /*
+   * ⚠ **All three empty is adoption, and is a real call rather than a mistake.**
+   * The host then starts what `~/.reemoat/daemon.env` already configures and
+   * creates nothing — which is what a machine set up by `deploy/install.sh`, or by
+   * this app before a restart, needs. Passing a code instead makes it provisioning,
+   * and the host rewrites the file.
+   */
+  return await invoke<DaemonState>("host_daemon_start", { controlPlane, enrollCode, machineId });
+}
+
+/**
+ * Stop the daemon this app started, and only that one.
+ *
+ * Nothing happens to a daemon the shell installer set up: the host holds a handle
+ * to the child it spawned and stopping is identity-checked against it, because a
+ * pid is reused and `~/.reemoat` is shared with whatever else set one up.
+ */
+export async function stopLocalDaemon(): Promise<void> {
+  await invoke<void>("host_daemon_stop");
 }
 
 /**

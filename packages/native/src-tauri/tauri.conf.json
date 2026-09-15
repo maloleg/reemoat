@@ -34,6 +34,10 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "externalBin": ["binaries/node"],
+    "resources": {
+      "target/daemon/": "daemon"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -50,7 +54,7 @@
     "publisher": "rends-east",
     "createUpdaterArtifacts": false,
     "macOS": {
-      "minimumSystemVersion": "11.0",
+      "minimumSystemVersion": "13.0",
       "entitlements": "entitlements.plist",
       "hardenedRuntime": true,
       "signingIdentity": null,

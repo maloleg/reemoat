@@ -1,6 +1,6 @@
 //! Everything the webview may ask this process to do, and nothing else.
 //!
-//! Nine, and the list is short on purpose: an app-defined command is not
+//! Twelve, and the list is short on purpose: an app-defined command is not
 //! ACL-gated, so this file *is* the capability surface. `pnpm nativecheck` holds
 //! it to the set `packages/web/src/native.ts` actually calls, in both directions —
 //! a command nobody calls is a door nobody is watching, and a call with no command
@@ -16,6 +16,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::config;
 use crate::credential;
+use crate::daemon;
 use crate::local::{self, LocalDaemon};
 use crate::proxy::{self, CpAnswer, CpRequest};
 
@@ -24,12 +25,233 @@ pub struct Host {
     pub client: reqwest::Client,
     pub config_dir: std::path::PathBuf,
     pub durable: bool,
+    /// The daemon this app started, if it started one. See `daemon.rs`.
+    pub supervisor: Mutex<daemon::Supervisor>,
 }
 
 impl Host {
     fn origin(&self) -> Option<String> {
         self.server.lock().ok().and_then(|held| held.clone())
     }
+}
+
+/* ── the daemon on this computer, when this app is the one running it ────── */
+
+/// Where the daemon is and how it is doing.
+///
+/// ⚠ **The second question about a local daemon, and deliberately not merged into
+/// `host_local_daemon`.** That one answers `None` to every failure because its
+/// caller has exactly one question — *is there a daemon here worth showing a token
+/// to?* — and a diagnostic on that path would be noise. This one exists because
+/// the app is now sometimes *responsible* for the daemon, and reporting "none" for
+/// a process that exited two seconds ago would be the app hiding its own failure.
+///
+/// The states, and each names a different thing to do about it:
+///
+/// - `unsupported` — no payload in this build. Nothing to offer; the relay is the
+///   only route, as it was before any of this.
+/// - `foreign` — a daemon is announced that this app did not start. Adopted, never
+///   raced: `claimDaemonLock` would refuse a second process against one database,
+///   and creating a second control-plane machine for one computer would burn a
+///   quota slot permanently.
+/// - `running` — this app started it and it has announced itself.
+/// - `starting` — this app started it and it has not announced itself yet.
+/// - `exited` — it was started and is gone. `detail` carries the tail of what it
+///   printed, which is the whole reason this command exists.
+/// - `absent` — nothing here, and nothing has been tried.
+#[tauri::command]
+pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::DaemonState {
+    let unknown = |status: &str| daemon::DaemonState {
+        status: status.to_string(),
+        ..Default::default()
+    };
+    let Ok(home) = app.path().home_dir() else {
+        return unknown("unsupported");
+    };
+    if daemon::Payload::locate(&resource_dir(&app), &exe_path()).is_none() {
+        return unknown("unsupported");
+    }
+
+    let announced = local::read(&home);
+    /*
+     * What this app already spent a machine on, for *this* server. Read here rather
+     * than left to the page, because the page would have to be told the origin to
+     * ask the question and the origin is deliberately something only the host
+     * knows — the same rule `host_cp` keeps.
+     */
+    let origin = host.origin();
+    let claimed = origin.as_deref().and_then(|origin| daemon::read_claim(&host.config_dir, origin));
+    /*
+     * ⚠ **Answered on every state read, because the caller's *first* decision
+     * depends on it.** A store that cannot see an existing env file creates a
+     * machine for a computer that already had one — permanently, since a machine
+     * row is never given back. `daemon::config_state` carries the measurement.
+     */
+    let config = daemon::config_state(&home, origin.as_deref()).to_string();
+    let Ok(mut supervisor) = host.supervisor.lock() else {
+        return daemon::DaemonState { status: "absent".to_string(), claimed, config, ..Default::default() };
+    };
+    let ours = supervisor.owns_running();
+
+    let mut state = match (announced, ours) {
+        (Some(found), true) => daemon::DaemonState {
+            status: "running".to_string(),
+            machine_id: Some(found.machine_id),
+            claimed,
+            detail: None,
+            ..Default::default()
+        },
+        // Announced by somebody else's daemon — the shell installer's, or one left
+        // from a previous run of this app that outlived it.
+        (Some(found), false) => daemon::DaemonState {
+            status: "foreign".to_string(),
+            machine_id: Some(found.machine_id),
+            claimed,
+            detail: None,
+            ..Default::default()
+        },
+        (None, true) => daemon::DaemonState { status: "starting".to_string(), claimed, ..Default::default() },
+        (None, false) => {
+            let tail = supervisor.tail();
+            daemon::DaemonState {
+                // A tail with no live child means one was started and is gone;
+                // with no tail at all, nothing was ever tried here.
+                status: if tail.is_some() { "exited" } else { "absent" }.to_string(),
+                machine_id: None,
+                claimed,
+                detail: tail,
+                ..Default::default()
+            }
+        }
+    };
+    state.config = config;
+    state
+}
+
+/// Bring the daemon up, provisioning this computer first if it is being asked to.
+///
+/// **Three cases, decided by what the caller brought and by what is already on
+/// disk**, and the docblock that used to be here described none of them: it
+/// claimed this "refuses rather than overwrites when an env file already exists",
+/// while the code silently skipped the write and started the daemon on whatever
+/// the file said. That is how a machine created at 15:15:54 was followed one
+/// second later by a daemon enrolling with a *different* machine's hour-old code
+/// and dying on `409 code_unusable`, with nothing on screen — measured on a real
+/// machine 2026-09-15.
+///
+/// - **A control plane and a code** — provisioning, whether this is the first time
+///   or a fresh code for a machine whose last one expired. Writes the file,
+///   preserving every key this app does not own (`daemon::env_rewritten`).
+/// - **Neither, and a file that names this server** — adoption. Start what is
+///   already configured and create nothing. This is a `deploy/install.sh` machine,
+///   or this app's own after a restart.
+/// - **A file naming another server** — refused outright, both above. Overwriting
+///   it would point somebody's working daemon at a fleet they did not choose.
+#[tauri::command]
+pub fn host_daemon_start(
+    control_plane: String,
+    enroll_code: String,
+    machine_id: String,
+    app: AppHandle,
+    host: State<'_, Host>,
+) -> Result<daemon::DaemonState, String> {
+    let home = app.path().home_dir().map_err(|_| "no home directory".to_string())?;
+    let payload = daemon::Payload::locate(&resource_dir(&app), &exe_path())
+        .ok_or_else(|| "this build carries no daemon".to_string())?;
+
+    let env_file = daemon::env_path(&home);
+    let origin = host.origin();
+    if daemon::config_state(&home, origin.as_deref()) == daemon::CONFIG_ELSEWHERE {
+        return Err(format!(
+            "{} on this computer is set up for a different Reemoat server, so this one was left alone.",
+            env_file.display()
+        ));
+    }
+
+    if !control_plane.is_empty() && !enroll_code.is_empty() {
+        let dir = env_file.parent().ok_or_else(|| "bad env path".to_string())?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        /*
+         * ⚠ **A rewrite, not a replacement, when there is already a file.** The one
+         * measured here carried a private CA path its owner had added by hand —
+         * without which the daemon cannot reach that control plane at all. Writing
+         * `env_contents` over it would have deleted the line and turned a refused
+         * enrollment code into a TLS failure.
+         */
+        let text = match std::fs::read_to_string(&env_file) {
+            Ok(existing) => daemon::env_rewritten(&existing, &control_plane, &enroll_code),
+            Err(_) => daemon::env_contents(&control_plane, &enroll_code),
+        };
+        write_private(&env_file, &text)?;
+    } else if !env_file.exists() {
+        return Err("a control plane and an enrollment code are needed to set this machine up".into());
+    }
+
+    /*
+     * ⚠ **Recorded before the daemon is started, never after.** The whole point of
+     * the claim is to survive the app dying between creating a machine and that
+     * machine being enrolled — so writing it after a successful start would leave
+     * open exactly the window it exists to close.
+     */
+    if !machine_id.is_empty() {
+        if let Some(origin) = origin.as_deref() {
+            daemon::write_claim(&host.config_dir, origin, &machine_id)?;
+        }
+    }
+
+    let text = std::fs::read_to_string(&env_file).map_err(|e| format!("could not read {}: {e}", env_file.display()))?;
+    let env = daemon::parse_env(&text);
+    host.supervisor
+        .lock()
+        .map_err(|_| "the supervisor is poisoned".to_string())?
+        .start(&payload, &home, &env)?;
+    Ok(daemon::DaemonState {
+        status: "starting".to_string(),
+        claimed: if machine_id.is_empty() { None } else { Some(machine_id) },
+        // True by construction: every path that reaches here either wrote a file
+        // naming this server or adopted one that already did.
+        config: daemon::CONFIG_HERE.to_string(),
+        ..Default::default()
+    })
+}
+
+/// Stop the daemon this app started, and only that one.
+#[tauri::command]
+pub fn host_daemon_stop(host: State<'_, Host>) -> Result<(), String> {
+    host.supervisor
+        .lock()
+        .map_err(|_| "the supervisor is poisoned".to_string())?
+        .stop();
+    Ok(())
+}
+
+/// `0600` inside a `0700` directory, on the platforms that have modes.
+///
+/// The enrollment code is a full machine identity until it is redeemed, so this
+/// is the same discipline `src/announce.ts` applies to `daemon.json` and
+/// `deploy/install.sh` to this very file. A filesystem with no POSIX modes is not
+/// a reason to refuse — it is the same judgement `store/sqlite.ts` already makes.
+fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Where `bundle.resources` landed, in a bundle and in `tauri dev` alike.
+fn resource_dir(app: &AppHandle) -> std::path::PathBuf {
+    app.path().resource_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// This process's own executable, whose directory holds `bundle.externalBin`.
+fn exe_path() -> std::path::PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 /// What the first paint needs, in one round trip.
@@ -50,6 +272,19 @@ pub struct Boot {
     /// 401 signing you out of a session you just started.
     pub credential: Option<String>,
     pub platform: String,
+    /// What this computer is called, for naming the machine it becomes.
+    ///
+    /// ⚠ **Not `platform`, and the difference is the whole reason this field
+    /// exists.** `platform` is `std::env::consts::OS` — the literal string
+    /// `"macos"` on every Mac ever made. Naming a control-plane machine from it
+    /// succeeds once and then collides for ever, and the collision is checked
+    /// case-insensitively against every machine the account can see, so the second
+    /// computer gets a `409` for a name nobody typed.
+    ///
+    /// `None` where the host name cannot be read, which is a real state on a
+    /// locked-down box: the caller then has to ask rather than guess.
+    #[serde(rename = "hostName")]
+    pub host_name: Option<String>,
     #[serde(rename = "appVersion")]
     pub app_version: String,
     /// `false` where this machine's keyring took a canary and lost it — see
@@ -65,6 +300,7 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
         server,
         credential,
         platform: std::env::consts::OS.to_string(),
+        host_name: daemon::host_name(),
         app_version: app.package_info().version.to_string(),
         durable: host.durable,
     }

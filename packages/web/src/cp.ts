@@ -7,6 +7,7 @@ import { cpSend, inNativeShell, setNativeCredential } from "./native";
 import type { ConfigField, InstanceConfig } from "./instance";
 import type {
   AdminUser,
+  CreatedMachine,
   CreatedUser,
   EnrollmentCode,
   IssuedToken,
@@ -642,6 +643,36 @@ export function renameMachine(id: string, name: string): Promise<{ id: string; n
 
 export function mintEnrollment(id: string): Promise<EnrollmentCode> {
   return cpFetch<EnrollmentCode>(`/v1/machines/${encodeURIComponent(id)}/enrollments`, { method: "POST" });
+}
+
+/**
+ * Register a machine, grant it to yourself and mint its first code — one request.
+ *
+ * ⚠ **This function existed, was deleted on 2026-09-04, and is back for a
+ * different caller.** It went with the by-name "add a machine" form on Settings →
+ * Machines, because a machine is enrolled *from the host it runs on* and a code
+ * carried to another computer by hand was the step that form existed to create.
+ * `webcheck.machine-limit-and-probe.ts` still pins that **no settings screen may
+ * `POST /v1/machines` under any spelling**, and that pin stays true: the caller
+ * now is `store.ts`'s provisioning step, on a computer that is about to run the
+ * daemon itself, where there is nothing to carry anywhere.
+ *
+ * ⚠ **Every call spends one of fifty, permanently.** `machine_owners` is counted
+ * with no revoked filter, so retiring a machine does not give the slot back. A
+ * caller must know it has not already claimed one — `DaemonState.claimed` is that
+ * record — and should ask `mayAddMachine(me)` first rather than discovering the
+ * ceiling as a `409 machine_limit`.
+ *
+ * The answer carries all three halves because the server resolves the third:
+ * `controlPlaneUrl` is the address **the daemon will dial**, taken from the
+ * request rather than from this page's origin — which in dev is Vite's port, and
+ * in the native shell is a custom scheme naming no server at all.
+ */
+export function createMachine(name: string): Promise<CreatedMachine> {
+  return cpFetch<CreatedMachine>("/v1/machines", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
 }
 
 /**
