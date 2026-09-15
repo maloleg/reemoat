@@ -166,6 +166,47 @@ pub fn env_contents(control_plane: &str, enroll_code: &str) -> String {
     text
 }
 
+/// How long a loopback connect is given before it counts as nobody home.
+///
+/// Loopback, so this is a syscall rather than a network round trip; the timeout
+/// exists for the pathological case of a listening socket whose backlog is full,
+/// not for latency.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether anything at all is listening where the announce file says it is.
+///
+/// ⚠ **The announce file is not evidence that a daemon is running, and treating
+/// it as evidence strands this app permanently.** `src/announce.ts` writes it at
+/// start and removes it on a clean stop — so an unclean one (a force quit, a
+/// crash, a `kill -9`, a power cut) leaves it behind. `host_daemon_state` then
+/// answers `foreign`, the setup flow returns at its status gate because somebody
+/// else's daemon is apparently up, and **nothing ever starts one again** — on a
+/// computer whose daemon dies with the app by design. The only way out was
+/// deleting a file nobody tells you about.
+///
+/// A bare TCP connect, and deliberately not `GET /health`: this needs to know
+/// whether a socket is open, not to parse an answer, and the whole reason
+/// `local.rs` reads a file instead of probing is that a *meaningful* probe would
+/// have to carry a 300-second bearer to whatever happened to answer. Opening a
+/// connection and closing it carries nothing at all.
+pub fn is_listening(base: &str) -> bool {
+    let Ok(url) = url::Url::parse(base) else {
+        return false;
+    };
+    let Some(port) = url.port() else {
+        return false;
+    };
+    // `local::read` already refused anything but `127.0.0.1` and `::1`, so this
+    // parses back what it built rather than trusting the file.
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Ok(address) = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(address, port), PROBE_TIMEOUT).is_ok()
+}
+
 /* ── what an existing env file already says ──────────────────────────────── */
 
 /// The key that decides which fleet a daemon belongs to.
@@ -966,6 +1007,39 @@ mod tests {
     fn a_computer_with_no_env_file_is_an_empty_slot() {
         let home = scratch("cfg-none");
         assert_eq!(config_state(&home, Some("https://cp.example")), CONFIG_NONE);
+    }
+
+    #[test]
+    fn a_file_this_app_wrote_itself_is_always_its_own() {
+        /*
+         * ⚠ **The round trip, because the two halves are written apart.** The host
+         * writes `env_contents(origin)` and then, on the next launch, asks
+         * `config_state` whether that file is its own. If the spelling written is
+         * not the spelling compared, the app refuses a file it wrote itself — for
+         * ever, since nothing rewrites a file it believes belongs to somebody else.
+         */
+        let home = scratch("cfg-roundtrip");
+        for origin in ["https://cp.example", "http://127.0.0.1:7890", "https://cp.example:8443"] {
+            std::fs::write(env_path(&home), env_contents(origin, "ec_abc")).unwrap();
+            assert_eq!(config_state(&home, Some(origin)), CONFIG_HERE, "{origin}");
+            // And the same after a code refresh, which takes the other write path.
+            let existing = std::fs::read_to_string(env_path(&home)).unwrap();
+            std::fs::write(env_path(&home), env_rewritten(&existing, origin, "ec_next")).unwrap();
+            assert_eq!(config_state(&home, Some(origin)), CONFIG_HERE, "{origin} rewritten");
+        }
+    }
+
+    #[test]
+    fn an_announce_file_is_not_evidence_that_anything_is_listening() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(is_listening(&format!("http://127.0.0.1:{port}")));
+        drop(listener);
+        // The same address with nothing behind it — which is exactly what a stale
+        // `daemon.json` names after a force quit or a power cut.
+        assert!(!is_listening(&format!("http://127.0.0.1:{port}")));
+        assert!(!is_listening("http://127.0.0.1"), "no port is not a daemon");
+        assert!(!is_listening("not a url"));
     }
 
     #[test]

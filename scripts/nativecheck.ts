@@ -947,6 +947,20 @@ check(
  * daemon could reach its control plane at all.
  */
 const owned = /const OWNED_KEYS: \[&str; 3\] = \[([^\]]+)\];/.exec(daemonRs)?.[1] ?? "";
+/*
+ * ⚠ **An announce file is not evidence that a daemon is running.** `announce.ts`
+ * removes it on a clean stop and cannot on an unclean one, so a force quit, a
+ * crash or a power cut leaves one naming a port nobody is on — and believing it
+ * answers `foreign`, the one status the setup flow reads as "somebody else has
+ * this covered". Nothing would ever start a daemon again, on a computer whose
+ * daemon dies with the app by design.
+ */
+check("a daemon this app did not start is confirmed to be there", /fn is_listening\(/.test(daemonRs), true);
+check(
+  "and the state command asks before answering foreign",
+  /announced\.filter\(\|found\| ours \|\| daemon::is_listening/.test(read(`${TAURI_DIR}/src/commands.rs`)),
+  true,
+);
 check(
   "a rewrite may replace exactly the three keys this app owns",
   owned.split(",").map((k) => k.trim()).filter(Boolean),

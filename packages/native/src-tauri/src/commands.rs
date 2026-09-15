@@ -92,6 +92,17 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
         return daemon::DaemonState { status: "absent".to_string(), claimed, config, ..Default::default() };
     };
     let ours = supervisor.owns_running();
+    /*
+     * ⚠ **A daemon this app did not start has to be *there*, not merely announced.**
+     * `src/announce.ts` removes its file on a clean stop and cannot on an unclean
+     * one, so a force quit, a crash or a power cut leaves one naming a port nobody
+     * is on. Believing it answers `foreign`, which is the one status the setup flow
+     * treats as "somebody else has this covered" — and then nothing starts a daemon
+     * ever again, on a computer whose daemon dies with the app by design.
+     * Not asked when this app owns the child: the handle is better evidence than a
+     * socket, and it saves a connect on the polling path.
+     */
+    let announced = announced.filter(|found| ours || daemon::is_listening(&found.base));
 
     let mut state = match (announced, ours) {
         (Some(found), true) => daemon::DaemonState {

@@ -1572,8 +1572,33 @@ class AppStore implements StreamSink {
         return;
       }
       if (state.status === "exited") {
-        const machine = claim ?? state.claimed;
-        if (!retried && machine !== null && (await this.remintFor(machine)) === "used") return;
+        if (!retried) {
+          const machine = claim ?? state.claimed;
+          if (machine !== null) {
+            const again = await this.remintFor(machine);
+            /*
+             * ⚠ **`later` returns rather than falling through, and that is not
+             * tidiness.** `remintFor` has already written the reason the control
+             * plane could not be reached; falling through would overwrite it with
+             * the daemon's own last words, so somebody whose network is down reads
+             * "this enrollment code was rejected".
+             */
+            if (again !== "dead") return;
+          }
+          /*
+           * ⚠ **No live claim, and the file here has provably failed to start.**
+           * This is the original bug in its pure form: a computer carrying a
+           * half-finished `deploy/install.sh` install, whose code is dead, and
+           * which this app has never bought a machine for. Adoption is the right
+           * first move and it has now been tried; without this arm the answer is a
+           * sentence and a dead end, identical on every relaunch, escapable only by
+           * deleting a file nobody mentions.
+           *
+           * At most one machine is ever bought this way: the claim it writes is
+           * what the *next* launch re-mints against instead of buying again.
+           */
+          if (await this.provisionOver()) return;
+        }
         this.patch({ setup: { step: "failed", detail: state.detail } });
         return;
       }
@@ -1582,6 +1607,29 @@ class AppStore implements StreamSink {
         return;
       }
     }
+  }
+
+  /**
+   * Buy a machine and write over settings that have proved they cannot start.
+   *
+   * `false` where nothing was tried — no shell to ask, or the account is at its
+   * ceiling — so the caller reports the daemon's own reason instead.
+   *
+   * The write is `env_rewritten`, so an existing file keeps every key this app
+   * does not own: a private CA path, a custom `REEMOAT_HOST`/`REEMOAT_PORT`, and
+   * the installer's own prose all survive being re-pointed at a new machine.
+   */
+  private async provisionOver(): Promise<boolean> {
+    const boot = this.snapshot.host;
+    if (boot === null || !mayAddMachine(this.snapshot.me)) return false;
+    this.patch({ setup: { step: "creating", detail: null } });
+    const created = await this.createForThisComputer(boot);
+    if (created === null) return false;
+    this.patch({ setup: { step: "starting", detail: null } });
+    await startLocalDaemon(created.enrollment.code, created.machine.id);
+    await this.machinesChanged("machine-added");
+    await this.settleDaemon(created.machine.id, true);
+    return true;
   }
 
   /**
@@ -1609,11 +1657,19 @@ class AppStore implements StreamSink {
        * machine row is counted with no revoked filter, so that slot never comes
        * back.
        */
-      if (isTransportFailure(error) || meansLater(error)) {
-        this.patch({ setup: { step: "failed", detail: errorText(error) } });
-        return "later";
-      }
-      return "dead";
+      /*
+       * ⚠ **Dead is the *named* refusal, and everything else is `later`.** The
+       * first version had this the other way round — anything that was not a
+       * transport failure meant "that machine is gone" — so a 401 on an expired
+       * session, a 403 about the limit, or any 5xx bought a second machine for a
+       * machine that is alive and well. A slot is never given back, so the default
+       * has to be the one that spends nothing.
+       */
+      const gone =
+        ApiError.isApiError(error) && (error.code === "machine_not_found" || error.code === "machine_revoked");
+      if (gone) return "dead";
+      this.patch({ setup: { step: "failed", detail: errorText(error) } });
+      return "later";
     }
     this.patch({ setup: { step: "starting", detail: null } });
     await startLocalDaemon(again.code, machineId);

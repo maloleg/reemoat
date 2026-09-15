@@ -356,8 +356,7 @@ process.stdout.write("\nthe machine limit\n");
      * temporary.
      */
     check('only a refusal falls through to buying one', /!== "dead"/.test(setUp), true);
-    const remint = /private async remintFor\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
-    check("and the mint failure is classified rather than swallowed", /isTransportFailure\(/.test(remint), true);
+
     /*
      * ⭐ **And the whole flow runs once.** `bootstrap()` has three callers — the
      * entry point, `retry()` and the forced password change — so two runs racing
@@ -384,6 +383,7 @@ process.stdout.write("\nthe machine limit\n");
      */
     check("the setup flow settles rather than assuming a spawn worked", /settleDaemon\(/.test(setUp), true);
     const settle = /private async settleDaemon\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    const remint = /private async remintFor\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
     check("and the settle loop exists to be checked", settle.length > 0, true);
     check("and it reports what the daemon actually printed", /state\.detail/.test(settle), true);
     /*
@@ -393,6 +393,36 @@ process.stdout.write("\nthe machine limit\n");
      * retry off. Re-minting costs no quota and the retry is bounded at one.
      */
     check("and it never pattern-matches the log to decide", /code_unusable|code_rejected/.test(settle), false);
+    /*
+     * ⭐ **And a computer whose settings cannot start is not a dead end.**
+     *
+     * The pure form of the original bug: a half-finished `deploy/install.sh`
+     * install with a dead code, on a Mac this app has never bought a machine for.
+     * Adoption is the right first move and it fails; without this arm the answer is
+     * a sentence, identical on every relaunch, escapable only by deleting a file
+     * nobody mentions. At most one machine is bought this way — the claim it writes
+     * is what the next launch re-mints against.
+     */
+    check("a failed adoption can still provision", /provisionOver\(\)/.test(settle), true);
+    const provision = /private async provisionOver\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check("and buying there asks the shared predicate too", /mayAddMachine\(/.test(provision), true);
+    /*
+     * ⭐ **And an unreachable control plane keeps its own sentence.** `remintFor`
+     * writes why the mint failed; falling through would overwrite it with the
+     * daemon's last words, so somebody whose network is down reads "this enrollment
+     * code was rejected".
+     */
+    check("a control plane that could not be reached is not reported as a bad code", /!== "dead"/.test(settle), true);
+    /*
+     * ⭐ **And "that machine is gone" is a *named* refusal.** With the test the
+     * other way round, a 401 on an expired session or any unrecognised 5xx bought a
+     * second machine for a machine that is alive. A slot is never given back, so
+     * the default has to be the answer that spends nothing.
+     */
+    for (const code of ["machine_not_found", "machine_revoked"] as const) {
+      check(`a dead claim is ${code}`, remint.includes(code), true);
+    }
+    check("and the mint failure is classified rather than swallowed", /ApiError\.isApiError\(/.test(remint), true);
   }
 
   /*
