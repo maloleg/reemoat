@@ -332,7 +332,38 @@ process.stdout.write("\nthe machine limit\n");
     for (const arm of ["elsewhere", "here"] as const) {
       check(`and it has an arm for ${arm}`, new RegExp(`DAEMON_CONFIG\\.${arm}`).test(setUp), true);
     }
-    check('and adoption starts with no code at all', /startLocalDaemon\("",\s*"",\s*""\)/.test(setUp), true);
+    check('and adoption starts with no code at all', /startLocalDaemon\("",\s*""\)/.test(setUp), true);
+    /*
+     * ⭐ **And adoption is tried *before* a fresh code is minted.**
+     *
+     * Re-minting first re-enrolls a daemon that was already enrolled: the daemon
+     * compares `codeFp` against the file's code (`scripts/daemon.ts`), so a new
+     * code is a new fingerprint and `enroll()` runs — rotating the tunnel key on
+     * every single launch, and turning a half-reachable control plane into a
+     * daemon that exits 2 despite holding a perfectly good identity. The ordering
+     * is the whole fix, so it is asserted as an ordering rather than as two arms.
+     */
+    check(
+      "and adoption comes before re-minting",
+      setUp.indexOf("DAEMON_CONFIG.here") < setUp.indexOf("remintFor("),
+      true,
+    );
+    /*
+     * ⭐ **And a transient mint failure may not buy a machine.** `remintFor`
+     * answering a plain boolean read "the wifi dropped" as "that machine is gone"
+     * and fell through to `createForThisComputer` — a permanently spent quota slot
+     * for a computer that already had one, on the failure most likely to be
+     * temporary.
+     */
+    check('only a refusal falls through to buying one', /!== "dead"/.test(setUp), true);
+    const remint = /private async remintFor\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check("and the mint failure is classified rather than swallowed", /isTransportFailure\(/.test(remint), true);
+    /*
+     * ⭐ **And the whole flow runs once.** `bootstrap()` has three callers — the
+     * entry point, `retry()` and the forced password change — so two runs racing
+     * would each read `absent` and each buy a machine.
+     */
+    check("the setup flow is single-flight", /this\.settingUp/.test(setUp), true);
     /*
      * ⭐ **And the start is watched rather than assumed.**
      *

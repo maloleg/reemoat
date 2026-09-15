@@ -418,6 +418,11 @@ export async function daemonState(): Promise<DaemonState | null> {
 /**
  * Set this computer up as a machine, and start the daemon.
  *
+ * ⚠ **No control-plane URL crosses this bridge.** The host writes the origin it
+ * is already signed in to, which is `native-shell.md`'s standing rule and, here,
+ * the difference between an app that can re-read its own env file and one that
+ * decides the file belongs to a stranger the moment a proxy reports a scheme.
+ *
  * ⚠ **The enrollment code crosses the bridge and is written by the host to a
  * `0600` file — it is never put on a command line.** `deploy/bootstrap.sh` passes
  * it on stdin for the same reason: argv is readable by every account on the host,
@@ -428,19 +433,15 @@ export async function daemonState(): Promise<DaemonState | null> {
  * machine that is already enrolled and redeeming a code retires its live tunnel
  * key.
  */
-export async function startLocalDaemon(
-  controlPlane: string,
-  enrollCode: string,
-  machineId: string,
-): Promise<DaemonState> {
+export async function startLocalDaemon(enrollCode: string, machineId: string): Promise<DaemonState> {
   /*
-   * ⚠ **All three empty is adoption, and is a real call rather than a mistake.**
+   * ⚠ **Both empty is adoption, and is a real call rather than a mistake.**
    * The host then starts what `~/.reemoat/daemon.env` already configures and
    * creates nothing — which is what a machine set up by `deploy/install.sh`, or by
    * this app before a restart, needs. Passing a code instead makes it provisioning,
    * and the host rewrites the file.
    */
-  return await invoke<DaemonState>("host_daemon_start", { controlPlane, enrollCode, machineId });
+  return await invoke<DaemonState>("host_daemon_start", { enrollCode, machineId });
 }
 
 /**

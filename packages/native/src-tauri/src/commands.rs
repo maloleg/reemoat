@@ -139,17 +139,17 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
 /// and dying on `409 code_unusable`, with nothing on screen — measured on a real
 /// machine 2026-09-15.
 ///
-/// - **A control plane and a code** — provisioning, whether this is the first time
-///   or a fresh code for a machine whose last one expired. Writes the file,
-///   preserving every key this app does not own (`daemon::env_rewritten`).
-/// - **Neither, and a file that names this server** — adoption. Start what is
+/// - **A code** — provisioning, whether this is the first time or a fresh code for
+///   a machine whose last one expired. Writes the file, preserving every key this
+///   app does not own (`daemon::env_rewritten`), and writes **this host's own
+///   origin** as the control plane rather than anything the page supplied.
+/// - **No code, and a file that names this server** — adoption. Start what is
 ///   already configured and create nothing. This is a `deploy/install.sh` machine,
 ///   or this app's own after a restart.
 /// - **A file naming another server** — refused outright, both above. Overwriting
 ///   it would point somebody's working daemon at a fleet they did not choose.
 #[tauri::command]
 pub fn host_daemon_start(
-    control_plane: String,
     enroll_code: String,
     machine_id: String,
     app: AppHandle,
@@ -168,7 +168,21 @@ pub fn host_daemon_start(
         ));
     }
 
-    if !control_plane.is_empty() && !enroll_code.is_empty() {
+    if !enroll_code.is_empty() {
+        /*
+         * ⚠ **The origin this app is signed in to, never a URL from the page.**
+         * `native-shell.md` already states the rule — *a path crosses the bridge,
+         * never a URL* — and the first version of this broke it by writing
+         * whatever `POST /v1/machines` answered in `controlPlaneUrl`. That value is
+         * `installOrigin`, which is the *request's* origin with `x-forwarded-proto`
+         * applied, so behind a proxy declaring `http` it is a different spelling
+         * from the one this app uses — and a different spelling makes
+         * `config_state` answer `elsewhere` on the next launch, which is this app
+         * refusing a file it wrote itself, for ever. Writing the origin the host
+         * already holds makes `CONFIG_HERE` true by construction rather than by
+         * agreement between two services.
+         */
+        let control_plane = origin.clone().ok_or_else(|| "no server has been chosen yet".to_string())?;
         let dir = env_file.parent().ok_or_else(|| "bad env path".to_string())?;
         std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         /*

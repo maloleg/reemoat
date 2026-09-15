@@ -1419,6 +1419,9 @@ class AppStore implements StreamSink {
    * else. A person whose account is full, or whose daemon will not start, still has
    * a working app pointed at every other machine they have.
    */
+  /** Whether the one-shot setup below has already run in this process. */
+  private settingUp = false;
+
   private async setUpThisComputer(): Promise<void> {
     /*
      * `null` in a browser, for ever — this is the native shell's `host_boot`
@@ -1428,6 +1431,15 @@ class AppStore implements StreamSink {
      */
     const boot = this.snapshot.host;
     if (boot === null) return;
+    /*
+     * ⚠ **`bootstrap()` has three callers** — the entry point, `retry()` and the
+     * forced password change — so this is re-entrant, and two runs racing would
+     * each see `absent` and buy a machine. Never cleared: once this has run to a
+     * conclusion in a process, running it again in the same process can only
+     * repeat work whose answer has not changed.
+     */
+    if (this.settingUp) return;
+    this.settingUp = true;
 
     try {
       const state = await daemonState();
@@ -1467,11 +1479,6 @@ class AppStore implements StreamSink {
        * means the file is this app's to refresh; adoption is for a file that is
        * not.
        */
-      if (state.claimed !== null) {
-        if (await this.remintFor(state.claimed)) return;
-        // The claim pointed at a machine that is gone or switched off. Fall
-        // through and create one rather than re-minting at it for ever.
-      }
 
       /*
        * Adoption: something already configured a daemon here for this server —
@@ -1480,9 +1487,20 @@ class AppStore implements StreamSink {
        */
       if (state.config === DAEMON_CONFIG.here) {
         this.patch({ setup: { step: "starting", detail: null } });
-        await startLocalDaemon("", "", "");
-        await this.settleDaemon(null);
+        await startLocalDaemon("", "");
+        await this.settleDaemon(state.claimed);
         return;
+      }
+
+      /*
+       * Nothing configured here, but a machine was already bought for this server
+       * — the app was quit between `POST /v1/machines` and the daemon redeeming
+       * its code. Re-mint against it rather than buying a second.
+       */
+      if (state.claimed !== null) {
+        if ((await this.remintFor(state.claimed)) !== "dead") return;
+        // Only a *refusal* falls through: the machine is gone or switched off, and
+        // re-minting at it for ever would be worse than making a new one.
       }
 
       /*
@@ -1497,7 +1515,7 @@ class AppStore implements StreamSink {
       if (created === null) return;
 
       this.patch({ setup: { step: "starting", detail: null } });
-      await startLocalDaemon(created.controlPlaneUrl, created.enrollment.code, created.machine.id);
+      await startLocalDaemon(created.enrollment.code, created.machine.id);
       /*
        * The row is a fact now — the control plane answered 201 — so this is the
        * store catching up rather than drawing ahead of an answer. `machinesChanged`
@@ -1542,7 +1560,7 @@ class AppStore implements StreamSink {
       }
       if (state.status === "exited") {
         const machine = claim ?? state.claimed;
-        if (!retried && machine !== null && (await this.remintFor(machine))) return;
+        if (!retried && machine !== null && (await this.remintFor(machine)) === "used") return;
         this.patch({ setup: { step: "failed", detail: state.detail } });
         return;
       }
@@ -1565,18 +1583,30 @@ class AppStore implements StreamSink {
    * gone", and fell through to buying another one. A failure to start is the
    * caller's to report, not this function's to swallow.
    */
-  private async remintFor(machineId: string): Promise<boolean> {
+  private async remintFor(machineId: string): Promise<"used" | "dead" | "later"> {
     let again;
     try {
       again = await cp.mintEnrollment(machineId);
-    } catch {
-      return false;
+    } catch (error) {
+      /*
+       * ⚠ **Only a refusal means the claim is dead, and the distinction is a
+       * permanent quota slot.** A blanket `false` here read "the wifi dropped" as
+       * "that machine is gone" and fell through to buying another — for a computer
+       * that already had one, on the one failure most likely to be transient. A
+       * machine row is counted with no revoked filter, so that slot never comes
+       * back.
+       */
+      if (isTransportFailure(error) || meansLater(error)) {
+        this.patch({ setup: { step: "failed", detail: errorText(error) } });
+        return "later";
+      }
+      return "dead";
     }
     this.patch({ setup: { step: "starting", detail: null } });
-    await startLocalDaemon(again.controlPlaneUrl, again.code, machineId);
+    await startLocalDaemon(again.code, machineId);
     await this.machinesChanged("machine-added");
     await this.settleDaemon(machineId, true);
-    return true;
+    return "used";
   }
 
   /**
