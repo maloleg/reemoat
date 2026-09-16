@@ -839,6 +839,59 @@ for (const script of ["dev", "build"] as const) {
 check("the runtime is fetched from nodejs.org", /const NODE_DIST = "https:\/\/nodejs\.org\/dist"/.test(stage), true);
 check("and verified against the release's own manifest", /SHASUMS256\.txt/.test(stage) && /checksum mismatch/.test(stage), true);
 /*
+ * ⚠ **A cache is valid only if the thing it caches is there, and this asked the
+ * directory.**
+ *
+ * `existsSync(extracted)` answered `true` for a directory that had been emptied,
+ * so the script reported *(cached)* and handed back a tree with no `bin/node` —
+ * surfacing two functions later as `spawnSync … ENOENT` on a path whose own name
+ * says "cache", which reads as a corrupt download. It broke CI on
+ * `97d1e58`, having been poisoned by the run before it.
+ *
+ * Two independent ways in, which is why both halves are pinned. `Swatinem/rust-cache`
+ * treats every subdirectory of `target/` as a build profile and cleans what it
+ * does not recognise before saving — so the cache lived somewhere another tool
+ * owns, and a green run saved the directory without its 130 MB binary. And
+ * locally, `run()` aborts the script on a non-zero exit, so an interrupted `tar`
+ * leaves a partial directory that every later run then trusts.
+ *
+ * The correctness half is validating by the **file about to be executed**; the
+ * cost half is not living under `target/` at all. Neither replaces the other: the
+ * first makes a poisoned cache a re-download instead of a failure, the second
+ * stops it being poisoned every run.
+ */
+check("the runtime cache is validated by the binary, not the directory", /existsSync\(binary\)/.test(stage), true);
+check("and a directory that lost its binary is refetched", /rmSync\(extracted, \{ recursive: true, force: true \}\)/.test(stage), true);
+check(
+  "and it does not live where rust-cache prunes",
+  /const cacheDir = join\(tauriRoot, "\.node-cache"\)/.test(stage),
+  true,
+);
+check("and it is gitignored under its new name", /^packages\/native\/src-tauri\/\.node-cache\/$/m.test(gitignore), true);
+/*
+ * ⚠ **And the workflow caches the directory the script actually writes to.** The
+ * path is now written down twice — once in `build-daemon.mjs`, once in
+ * `check.yml` — and a mismatch is silent in the direction that costs the most: CI
+ * saves an empty path, every run re-downloads 50 MB, and nothing anywhere is red.
+ * That is the `.dockerignore`/Dockerfile hazard `CLAUDE.md` already names, at a
+ * smaller scale, and it gets the same treatment: read both off disk.
+ *
+ * The cache key is pinned to `NODE_VERSION` rather than to the script's hash —
+ * the file changes far more often than the version does, and a key that churns is
+ * a cache that never hits.
+ */
+const checkWorkflow = read(".github/workflows/check.yml");
+check(
+  "the workflow caches the directory the staging script writes to",
+  /path: packages\/native\/src-tauri\/\.node-cache/.test(checkWorkflow),
+  true,
+);
+check(
+  "and keys that cache on the pinned runtime version",
+  /steps\.node-runtime\.outputs\.version/.test(checkWorkflow),
+  true,
+);
+/*
  * **The payload must contain no symlink, and the script asserts it itself.** The
  * bundler's `copy_file` refuses anything that is not a regular file and its walker
  * does not follow links, so one symlink is a `cargo build` that dies with

@@ -181,7 +181,25 @@ const here = fileURLToPath(new URL(".", import.meta.url));
 const nativeRoot = join(here, "..");
 const repoRoot = join(nativeRoot, "..", "..");
 const tauriRoot = join(nativeRoot, "src-tauri");
-const cacheDir = join(tauriRoot, "target", "node-cache");
+/*
+ * ⚠ **Outside `target/`, and it was inside it.** `Swatinem/rust-cache` treats
+ * every subdirectory of `target/` as a build profile and cleans what it does not
+ * recognise before saving — so a green CI run saved `node-cache/` with the
+ * directory tree intact and the 130 MB binary gone, and the next run restored
+ * that shell, read it as a cache, and died two functions later on
+ * `spawnSync … ENOENT`.
+ *
+ * The docblock on {@link fetchRuntime} used to argue for `target/` on the grounds
+ * that `cargo clean` then discards it, *"which is the right trade for a 50 MB
+ * archive"*. That trade was priced without knowing another tool owns that
+ * directory. It is reversed here: `cargo clean` no longer discards the runtime —
+ * delete this directory by hand for that — and in exchange the download happens
+ * when {@link NODE_VERSION} moves rather than on every CI run.
+ *
+ * `fetchRuntime` validates by the binary regardless, so this is the cost fix and
+ * that is the correctness one. Neither replaces the other.
+ */
+const cacheDir = join(tauriRoot, ".node-cache");
 const stageDir = join(tauriRoot, "target", "daemon");
 const binariesDir = join(tauriRoot, "binaries");
 
@@ -238,17 +256,44 @@ function readJson(path) {
 /**
  * The official Node build, downloaded once and kept.
  *
- * Cached under `target/`, so `cargo clean` discards it and a rebuild fetches it
- * again — which is the right trade for a 50 MB archive that changes only when
- * {@link NODE_VERSION} does.
+ * Cached beside the crate rather than under `target/` — see {@link cacheDir} for
+ * which tool made that necessary — so it survives `cargo clean` and is refetched
+ * only when {@link NODE_VERSION} moves.
+ *
+ * ⚠ **A cache is valid only if the thing it caches is there, and this asked the
+ * directory instead.** `existsSync(extracted)` answered `true` for a directory
+ * that had been emptied, so this reported *(cached)* and handed back a tree with
+ * no `bin/node` in it — and the failure surfaced two functions later as
+ * `spawnSync … ENOENT` on a path whose own name says "cache", which reads as a
+ * corrupt download rather than as a cache that was never checked.
+ *
+ * Two ways in, and the second is why this is a bug rather than a CI quirk.
+ * `Swatinem/rust-cache` **prunes `target/`** before saving it, so a green run
+ * saves the directory without its 130 MB binary and the *next* run restores the
+ * shell — which is exactly what happened, and the run that broke was the first
+ * one to restore a cache the run before it had poisoned. And locally: `run()`
+ * aborts the whole script on a non-zero exit, so an interrupted `tar` leaves a
+ * partial directory behind that every later run then trusts.
+ *
+ * So the question is asked of the **file that is about to be executed**, and a
+ * directory that cannot answer it is removed rather than worked around. That
+ * makes this self-healing against any pruner, any interrupted extraction, and
+ * anything else that takes the contents without taking the name.
  */
 function fetchRuntime() {
   const name = `node-${NODE_VERSION}-${target.dir}`;
   const archive = join(cacheDir, `${name}.${target.archive}`);
   const extracted = join(cacheDir, name);
-  if (existsSync(extracted)) {
+  // The one file everything downstream needs: `placeRuntime` copies it to
+  // `binaries/`, and `installDependencies` spawns it to run npm.
+  const binary = join(extracted, "bin", "node");
+  if (existsSync(binary)) {
     step(`runtime ${NODE_VERSION} ${target.dir} (cached)`);
     return extracted;
+  }
+  if (existsSync(extracted)) {
+    step(`cached runtime at ${relative(repoRoot, extracted)} has no bin/node — refetching`);
+    rmSync(extracted, { recursive: true, force: true });
   }
   mkdirSync(cacheDir, { recursive: true });
 
@@ -270,7 +315,10 @@ function fetchRuntime() {
   step(`checksum ok (${got.slice(0, 16)}…)`);
 
   run("tar", ["xzf", archive, "-C", cacheDir]);
-  if (!existsSync(extracted)) fail(`${archive} did not extract to ${extracted}`);
+  // Asked of the binary rather than the directory, for the reason above: an
+  // archive that produced a name and no contents must fail here, loudly, rather
+  // than two functions later as an ENOENT on a path called "cache".
+  if (!existsSync(binary)) fail(`${archive} did not extract a runtime to ${extracted}`);
   return extracted;
 }
 

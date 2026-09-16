@@ -317,6 +317,31 @@ jobs:
       # failure otherwise is a path error that reads like a config bug.
       - run: pnpm web:build
 
+      # The Node runtime the payload ships, cached across runs by version.
+      #
+      # ⚠ **Its own cache, and it used to have none because it lived inside
+      # `target/`** — where `Swatinem/rust-cache` above already saves. That looked
+      # free and was not: rust-cache treats every subdirectory of `target/` as a
+      # build profile and cleans what it does not recognise before saving, so a
+      # green run saved the cache directory with its 130 MB binary stripped out,
+      # and the next run restored the shell, read the directory's existence as a
+      # hit, and died on `spawnSync … ENOENT`. The script validates by the binary
+      # now, so the worst case is a re-download rather than a red build; this is
+      # what stops it being the every-run case.
+      #
+      # Keyed on the pinned version rather than on the script's hash: the file
+      # changes far more often than `NODE_VERSION` does, and a key that churns is
+      # a cache that never hits.
+      - id: node-runtime
+        run: |
+          version=$(grep -oE 'const NODE_VERSION = "v[0-9.]+"' packages/native/scripts/build-daemon.mjs | grep -oE 'v[0-9.]+')
+          test -n "$version" || { echo "build-daemon.mjs pins no NODE_VERSION this can read"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: packages/native/src-tauri/.node-cache
+          key: node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ steps.node-runtime.outputs.version }}
+
       # And the daemon payload, for the sharper version of the same reason.
       #
       # ⚠ **This is not a build step, it is a prerequisite of `cargo` itself.**

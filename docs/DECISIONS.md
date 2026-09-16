@@ -60,16 +60,16 @@ bug in the file.
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 353 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 60 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 111 | `####` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 112 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 142 | `###` |
-| | | **960** | |
+| | | **961** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 960 rather than the 496
+dividers. So the count is over **both** depths, and it says 961 rather than the 496
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -25541,6 +25541,51 @@ clear, on exact equality against the canonical value the host already answered �
 deliberately nothing cleverer, because a looser comparison would be a second
 normalizer on the page, and two spellings of one origin is two credential keys.
 Both indices are asserted.
+
+#### Q5.117 — A cache is valid only if the thing it caches is there
+
+**The defect.** `build-daemon.mjs` asked `existsSync(extracted)` — the *directory*
+the Node runtime unpacks into — and reported *(cached)* on the strength of it. A
+directory that had been emptied answered `true`, so the script handed back a tree
+with no `bin/node`, and the failure surfaced two functions later as
+`spawnSync … ENOENT` on a path whose own name says "cache". It reads as a corrupt
+download. It is a check that was never a check.
+
+**How it was poisoned, which is the part worth measuring.**
+`Swatinem/rust-cache` treats every subdirectory of `target/` as a build profile
+and cleans what it does not recognise before saving — and the runtime cache lived
+at `target/node-cache` by an explicit decision, argued as *"`cargo clean` discards
+it, which is the right trade for a 50 MB archive"*. So a **green** run saved the
+directory with its 130 MB binary stripped out, and the **next** run restored the
+shell and died. The run that broke was the first one to restore a cache the run
+before it had poisoned, which is why nothing in the commit that went red had
+anything to do with it.
+
+There is a second way in with no CI involved: `run()` aborts the script on a
+non-zero exit, so an interrupted `tar` leaves a partial directory that every later
+run then trusts.
+
+**The rule, in two halves that do not replace each other.** *Correctness*: the
+question is asked of the **file about to be executed**, and a directory that
+cannot answer it is removed rather than worked around — which makes this
+self-healing against any pruner, any interrupted extraction, and anything else
+that takes the contents without taking the name. *Cost*: the cache does not live
+under `target/` at all, because that directory has an owner. The `cargo clean`
+trade is reversed and said so at the constant: it was priced without knowing
+another tool cleans there, and a runtime that survives `cargo clean` is a smaller
+loss than a build that breaks every other run.
+
+**What that leaves, and what pays for it.** Outside `target/` the runtime is no
+longer covered by `rust-cache` at all, so CI would download 50 MB every run. It
+gets an `actions/cache` step of its own, keyed on `NODE_VERSION` rather than on
+the script's hash — the file changes far more often than the version does, and a
+key that churns is a cache that never hits.
+
+**And the path is now written down twice**, in the script and in the workflow. A
+mismatch is silent in the direction that costs most — CI saves an empty path,
+every run re-downloads, nothing is red — so `nativecheck` reads both off disk.
+That is the `.dockerignore`/Dockerfile hazard `CLAUDE.md` already names, at a
+smaller scale and with the same treatment.
 
 ## Measured behaviour of the agents and the tools
 

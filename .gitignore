@@ -86,6 +86,11 @@ dist-gate/
 # are generated once by `tauri android init` / `tauri ios init` and then edited and
 # committed, the way a checked-in Xcode project is.
 packages/native/src-tauri/target/
+# The Node runtime `build-daemon.mjs` downloads, beside the crate rather than
+# under `target/` — `Swatinem/rust-cache` prunes every subdirectory of that one,
+# which left a cache directory with no binary in it and a CI failure that read as
+# a corrupt download. The script's own `cacheDir` carries the argument.
+packages/native/src-tauri/.node-cache/
 packages/native/src-tauri/gen/schemas/
 
 # The Node runtime staged for `bundle.externalBin` by
