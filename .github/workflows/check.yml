@@ -337,7 +337,7 @@ jobs:
           version=$(grep -oE 'const NODE_VERSION = "v[0-9.]+"' packages/native/scripts/build-daemon.mjs | grep -oE 'v[0-9.]+')
           test -n "$version" || { echo "build-daemon.mjs pins no NODE_VERSION this can read"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: packages/native/src-tauri/.node-cache
           key: node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ steps.node-runtime.outputs.version }}
