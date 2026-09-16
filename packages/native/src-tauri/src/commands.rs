@@ -465,6 +465,20 @@ pub struct Boot {
     /// it survive a machine whose credential store silently discards writes.
     #[serde(rename = "deviceId")]
     pub device_id: Option<String>,
+    /// The address this build suggests, for the setup screen's field to open on.
+    ///
+    /// ⚠ **A suggestion, and never `server`.** They are different questions —
+    /// *what shall I put in the box* against *which fleet is this installation
+    /// on* — and the first draft answered them with one field by seeding the
+    /// default into `server.json` on first run. That skipped the setup screen
+    /// entirely, so the app chose somebody's fleet and told them afterwards, and
+    /// it made a `credential#<origin>` keyring account for an origin nobody had
+    /// confirmed. Two fields, and only the second one is ever written down.
+    ///
+    /// `None` in this repository: nothing here compiles a default in, which
+    /// `nativecheck` asserts the way it asserts `signingIdentity: null`.
+    #[serde(rename = "defaultServer")]
+    pub default_server: Option<String>,
 }
 
 #[tauri::command]
@@ -484,6 +498,7 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
         app_version: app.package_info().version.to_string(),
         durable: host.durable,
         device_id,
+        default_server: config::default_server(),
     }
 }
 

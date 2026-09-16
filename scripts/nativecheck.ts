@@ -1000,6 +1000,156 @@ check("the macOS floor is where the opt-in service starts", mac["minimumSystemVe
  */
 check("no signing identity is committed", mac["signingIdentity"], null);
 check("and no notarization provider is either", mac["providerShortName"], null);
+
+/* ── the default server, and its absence here ────────────────────────────── */
+
+/**
+ * **Which fleet a build joins, and why this repository names none.**
+ *
+ * `option_env!("REEMOAT_DEFAULT_SERVER")` is the only build-time input this app
+ * has. It is read in Rust rather than on the page for two reasons that both point
+ * the same way: `native.ts` refuses `import.meta.env`-style flags in that layer,
+ * and `host_cp`'s base has to live in the host process where the page cannot
+ * reach it — which is the same string the OS keyring account is built from.
+ *
+ * ⚠ **Asserted absent, exactly as `signingIdentity` is.** This is AGPL software
+ * and forks run their own control planes, so a value compiled in here would be
+ * one deployment's address in everybody's binary. `cp-accounts.md` makes the same
+ * argument for the two `REEMOAT_CP_*` addresses that reach the browser, and both
+ * are for the same reason without a compiled-in default.
+ */
+const configRs = flat(read(`${TAURI_DIR}/src/config.rs`));
+check(
+  "the default server comes from the environment at compile time",
+  /option_env!\("REEMOAT_DEFAULT_SERVER"\)/.test(configRs),
+  true,
+);
+check("and nothing hard-codes one beside it", /const DEFAULT_SERVER: Option<&str> = Some\(/.test(configRs), false);
+/*
+ * Through the one normalizer, because a suggested value and a typed one have to
+ * be the same spelling of the same server — two spellings is two credential keys,
+ * one of which a sign-out would not reach.
+ */
+check("the suggestion goes through the one normalizer", /normalize_origin\(DEFAULT_SERVER\?\)/.test(configRs), true);
+/*
+ * ⚠ **`option_env!` is baked into a cached object file.** Without this line cargo
+ * has no reason to recompile when the variable moves, so a fork that corrects its
+ * address gets a binary silently keeping the previous one — a failure with no
+ * symptom anywhere, which is why it is asserted rather than remembered.
+ */
+check(
+  "cargo is told to notice the variable changing",
+  /cargo:rerun-if-env-changed=REEMOAT_DEFAULT_SERVER/.test(read(`${TAURI_DIR}/build.rs`)),
+  true,
+);
+/*
+ * ⚠ **A suggestion for a form field, and never a value anything writes down.**
+ * The first draft seeded it — first launch with a default compiled in wrote it to
+ * `server.json` — and that was wrong twice: it skipped the setup screen, so the
+ * app chose a fleet and said so afterwards on the sign-in form; and it created a
+ * `credential#<origin>` keyring account for an origin nobody had confirmed.
+ *
+ * So `read_server` stays the **only** reader of *which server*, the shell calls
+ * it and nothing else, and `default_server` is a second function answering a
+ * second question. The two are held apart here because folding them is exactly
+ * the edit that would pass every other assertion in this file.
+ */
+const shellRs = flat(read(`${TAURI_DIR}/src/lib.rs`));
+check("the shell reads the chosen server and nothing else", /config::read_server\(&dir\)/.test(shellRs), true);
+check("and never writes one at startup", /read_or_seed_server|write_server/.test(shellRs), false);
+check("the suggestion is its own function", /pub fn default_server\(\) -> Option<String>/.test(configRs), true);
+check("and it writes nothing", /fn default_server[\s\S]{0,200}write_server/.test(configRs), false);
+/*
+ * And it reaches the page as its own field. `Boot`/`NativeBoot` key equality is
+ * asserted elsewhere in this file; what that cannot say is that the two fields
+ * stay two.
+ */
+const commandsSrc = flat(read(`${TAURI_DIR}/src/commands.rs`));
+check("the suggestion crosses the bridge under its own name", /rename = "defaultServer"/.test(commandsSrc), true);
+check("and the chosen server is still a separate field", /pub server: Option<String>/.test(commandsSrc), true);
+/*
+ * **And no file in this repository supplies a value.** The sweep is over every
+ * place a build is described — the native package, the root manifest, `deploy/`
+ * and the workflows — for the name followed by an assignment. The
+ * `rerun-if-env-changed=` declaration above is safe because there the `=`
+ * *precedes* the name.
+ */
+const setters: string[] = [];
+for (const file of [
+  "package.json",
+  `${NATIVE}/package.json`,
+  `${TAURI_DIR}/tauri.conf.json`,
+  ".github/workflows/check.yml",
+  ".github/workflows/release.yml",
+]) {
+  if (/REEMOAT_DEFAULT_SERVER\s*[=:]\s*\S/.test(read(file))) setters.push(file);
+}
+check("and no file in this repository sets one", setters, []);
+
+/* ── what adopting a server gives up ─────────────────────────────────────── */
+
+/**
+ * ⚠ **Two rules at one call site, answering oppositely, and neither had ever been
+ * asserted.** `host_set_server` erases the previous origin's *credential* — a
+ * credential this app will not present is one it has no reason to hold, and doing
+ * it in the same act is what makes "no credential is retained for a server you
+ * are not using" true of the act rather than of an intention.
+ *
+ * It erases the previous origin's *device id* nowhere, and must not learn to:
+ * the row on that server still exists, so forgetting the id leaves an
+ * installation nobody can recognise in their own list and spends a second slot
+ * against the account's limit on the way back. `cp-devices.md` is the argument.
+ */
+const setServer = flat(read(`${TAURI_DIR}/src/commands.rs`));
+const setServerBody = setServer.slice(
+  setServer.indexOf("pub fn host_set_server"),
+  setServer.indexOf("pub fn host_credential_set"),
+);
+check("the sweep can see host_set_server at all", setServerBody.length > 0, true);
+check("adopting a server gives up the previous one's sign-in", /credential::erase\(&previous\)/.test(setServerBody), true);
+check("and never the device recorded for it", /erase_device/.test(setServerBody), false);
+
+/* ── what the host process assumes about the platform it is on ───────────── */
+
+/**
+ * **PATH is a list, joined by the platform's own separator.**
+ *
+ * ⚠ It was `parts.join(":")`, which is POSIX's — so on Windows the daemon's whole
+ * `PATH` would have been one garbage entry and every agent CLI invisible. It also
+ * closes a latent bug on the platforms that *do* use `:`, where a directory whose
+ * own name contains one silently corrupted the list.
+ *
+ * Asserted here rather than left to `cargo test`, which cannot fail over a
+ * separator it never sees: CI compiles this crate on Unix only, so the hand-rolled
+ * join was correct in every environment that has ever run it.
+ */
+/*
+ * Comments stripped: the docblocks beside each of these quote the very shape
+ * being searched for — "never with a POSIX literal", "not Linuxbrew" — so the raw
+ * file satisfies every search here whichever way round the code is, and the
+ * cheapest route back to green would be deleting the explanation.
+ */
+const daemonSrc = flat(
+  read(`${TAURI_DIR}/src/daemon.rs`)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, ""),
+);
+check("the daemon's PATH is joined with the platform's separator", /std::env::join_paths\(/.test(daemonSrc), true);
+check("and never with a POSIX literal", /parts\.join\(":"\)/.test(daemonSrc), false);
+check("and the user's own PATH is split the same way", /std::env::split_paths\(/.test(daemonSrc), true);
+/*
+ * Homebrew is named on exactly one fallback list, because it was measured on
+ * exactly one platform. Linuxbrew on the Linux list would be a guess wearing a
+ * measurement's clothes.
+ */
+check("Homebrew is named once, on the platform it was measured on", (daemonSrc.match(/\/opt\/homebrew\/bin/g) ?? []).length, 1);
+check("and no fallback names Linuxbrew", /linuxbrew/i.test(daemonSrc), false);
+/*
+ * The login-shell probe is Unix by decision. It answered `None` on Windows by
+ * luck — `SHELL` being unset — and that luck breaks under Git Bash and MSYS2,
+ * which set it to a POSIX shell that knows nothing of the Windows `PATH`.
+ */
+check("the login-shell probe refuses where it cannot mean anything", /if !cfg!\(unix\) \{/.test(daemonSrc), true);
 /*
  * No updater artifacts, and no updater. `docs/NATIVE.md` carries the steps, and
  * the one that has to happen *before* a first public build is generating the

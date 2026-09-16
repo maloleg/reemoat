@@ -526,3 +526,128 @@ process.stdout.write("\na refusal about a credential that is no longer held\n");
   leaveShell();
   storage.clear();
 }
+
+/* ------------------------------------------------------------------ *
+ * Which operating system a sentence may name, and where
+ * ------------------------------------------------------------------ */
+
+/**
+ * **One function names an operating system, and this is the census that keeps it
+ * to one.**
+ *
+ * The defect it generalises: `LOCAL_NETWORK_DETAIL` in `store.ts` told everybody
+ * on every platform to *"allow it under System Settings → Privacy & Security →
+ * Local Network"*, while the classifier that produced that state keys on an errno
+ * and fires on any Unix. So a Linux box behind a firewall was handed a remedy
+ * naming a screen that does not exist. Nothing could have caught it: it compiles,
+ * it renders, and it is wrong only where nobody developing it was sitting.
+ *
+ * Stated as an **exact set** rather than a ceiling, in this driver's own idiom —
+ * what is interesting is the *absence* of a fifth name, and a `<= 4` would pass
+ * over a fifth screen that had quietly grown one.
+ */
+{
+  const srcRoot = new URL("../src/", import.meta.url);
+  const OS_WORD = /\bmacOS\b|\bWindows\b|\bLinux\b/;
+  const walk = (dir: URL, prefix: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const path = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) return walk(new URL(`${entry.name}/`, dir), `${path}/`);
+      if (!/\.tsx?$/.test(entry.name)) return [];
+      return OS_WORD.test(stripComments(readFileSync(new URL(entry.name, dir), "utf8"))) ? [path] : [];
+    });
+
+  /*
+   * Each of the four is a different reason, and none of them is "a screen
+   * explaining itself":
+   *
+   *   platform.ts      the one sentence with a measured per-platform remedy
+   *   device.ts        a *user-agent's* own words, read back on a sign-in row
+   *   ui/agentCard.ts  the **daemon's** platform, which is Node's vocabulary
+   *   legal/terms.ts   what an agent host must be, which is a fact about the
+   *                    service rather than about this client
+   *   enrollment.ts    `AGENT_HOST_OS`, the machines `install.sh` can be run on
+   *
+   * ⚠ **Not one of them is a screen describing the computer it is drawn on**, and
+   * that is the line. The last two are about the machine that will run *agents* —
+   * a Windows client adding a Linux machine is the ordinary case — which is why
+   * neither may ever be computed from `nativeBoot()?.platform`.
+   */
+  check("exactly these files name an operating system", walk(srcRoot, "").sort(), [
+    "device.ts",
+    "enrollment.ts",
+    "legal/terms.ts",
+    "platform.ts",
+    "ui/agentCard.ts",
+  ]);
+
+  /*
+   * And the clause beside the install command agrees with the script that
+   * refuses everything else. `deploy/bootstrap.sh`'s `detect_platform` is the
+   * authority; a screen that promised a third platform would be promising an
+   * installer that answers a sentence.
+   */
+  const bootstrap = readFileSync(new URL("../../../deploy/bootstrap.sh", import.meta.url), "utf8");
+  const detect = bootstrap.slice(bootstrap.indexOf("detect_platform"));
+  check("the bootstrap sweep found its own function", detect.length > 0, true);
+  check("the installer still accepts exactly the two this names", [/Darwin\)/.test(detect), /Linux\)/.test(detect)], [true, true]);
+  const enrollment = stripComments(readFileSync(new URL("../src/enrollment.ts", import.meta.url), "utf8"));
+  check("and the clause beside the command names no third", /AGENT_HOST_OS = "macOS or Linux"/.test(enrollment), true);
+  check("and is never computed from what this client runs on", /nativeBoot/.test(enrollment), false);
+}
+
+/**
+ * The platform sentence is total, and only one of its arms names an OS.
+ */
+{
+  const { hostPlatform, localNetworkDetail } = await import("../src/platform.js");
+  const all = ["macos", "windows", "linux", "other"] as const;
+
+  check("every platform is narrowed to itself", all.map((p) => hostPlatform(p)), [...all]);
+  check("and anything else is a platform we say nothing special about", [
+    hostPlatform("freebsd"),
+    hostPlatform("android"),
+    hostPlatform(null),
+    hostPlatform(undefined),
+    hostPlatform(""),
+  ], ["other", "other", "other", "other", "other"]);
+
+  const said = all.map((p) => localNetworkDetail(p));
+  check("every platform gets a sentence", said.filter((s) => s.length > 20).length, said.length);
+  /*
+   * ⚠ **This is the assertion that stops a guess being added as a remedy.**
+   * Local Network Privacy is a measurement — 2026-09-15, macOS 15, the daemon
+   * being a child of this app. Nothing equivalent has been measured on Windows or
+   * Linux, so those arms say what happened and stop. The day somebody measures
+   * one, this number moves *with the measurement* rather than ahead of it.
+   */
+  check("exactly one of them names an operating system", said.filter((s) => /\bmacOS\b/.test(s)).length, 1);
+  check("and none of them names one nobody has measured", said.some((s) => /\bWindows\b|\bLinux\b/.test(s)), false);
+  /*
+   * The caller appends the pointer to the logs, so no arm may carry one — two
+   * copies in one sentence is how it ends up said twice.
+   */
+  check("and none of them names the logs screen the caller points at", said.some((s) => /Settings → Logs/.test(s)), false);
+
+  /*
+   * The `never` arm, off disk. A `switch` answering `string` that falls off the
+   * end returns `undefined`, which the type system cannot see — `AgentGlyph`
+   * shipped exactly that for four releases.
+   */
+  const platformSrc = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
+  check("a fifth platform is a compile error rather than a blank sentence", /const exhaustive: never = platform;/.test(platformSrc), true);
+
+  /*
+   * ⚠ **The two platform vocabularies never cross.** `hostPlatform` takes Rust's
+   * (`macos`/`windows`/`linux`, from `NativeBoot.platform`); `osName` in
+   * `ui/agentCard.ts` takes Node's (`darwin`/`win32`/`linux`, from a daemon's
+   * `SystemInfo`). They agree on exactly one spelling, which is what makes a
+   * mixed-up call look right in review and answer `other` for every Mac in the
+   * fleet. Neither module may reach the other.
+   */
+  const agentCard = stripComments(readFileSync(new URL("../src/ui/agentCard.ts", import.meta.url), "utf8"));
+  check("the daemon's platform reader knows nothing of the client's", /from "\.\.\/platform"/.test(agentCard), false);
+  check("and the client's knows nothing of the daemon's", /agentCard/.test(stripComments(platformSrc)), false);
+  const storeSrc = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+  check("the one caller asks the host rather than the wire", /hostPlatform\(this\.snapshot\.host\?\.platform\)/.test(storeSrc), true);
+}

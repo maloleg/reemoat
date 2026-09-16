@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { installCommand } from "../enrollment";
+import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { keyOf } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
@@ -245,7 +245,7 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
         <p className="text-sm text-muted">No machines yet.</p>
         {mayAddMachine(state.me) ? (
           <>
-            <p className="text-xs text-muted">Run this on the machine you want to use:</p>
+            <p className="text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
             {/* ⚠ **One flex child, not two, and the column's `gap-3` is the
                 reason.** As siblings the offer inherited 12px above its own 16
                 and the `Or` rule sat visibly closer to the button than to the

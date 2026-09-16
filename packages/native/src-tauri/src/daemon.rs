@@ -718,6 +718,22 @@ const SHELL_TIMEOUT: Duration = Duration::from_secs(5);
 /// with a narrower PATH rather than a broken one.
 pub fn login_shell_path(shell: Option<&str>) -> Option<String> {
     const MARK: &str = "__reemoat_path__";
+    /*
+     * ⚠ **Unix by decision rather than by accident.** `SHELL` is unset on
+     * Windows, so this already answered `None` there — by luck, and luck that
+     * breaks under Git Bash and MSYS2, which do set `SHELL=/usr/bin/bash`. The
+     * spawn would then run a POSIX shell that knows nothing of the Windows `PATH`
+     * this is trying to read, and the answer would be worse than no answer.
+     *
+     * There is no Windows arm because there is nothing to write yet: a GUI
+     * process there inherits the user's environment rather than a bare launchd
+     * default, so the problem this exists for may not arise at all — and
+     * `paseo`'s equivalent refuses outright for the same reason. `daemon_path`'s
+     * fallback is what runs instead.
+     */
+    if !cfg!(unix) {
+        return None;
+    }
     let shell = shell?;
     if shell.is_empty() {
         return None;
@@ -801,14 +817,49 @@ pub fn daemon_path(payload: &Payload, home: &Path, user_path: Option<&str>) -> S
             .to_string(),
     );
     match user_path {
-        Some(p) if !p.trim().is_empty() => parts.push(p.trim().to_string()),
-        // The fallback, and it is deliberately the bare system default rather than
-        // a guess at where somebody keeps things. Homebrew is named because it is
-        // where `git` lives on most developer Macs that have it from Homebrew
-        // rather than from the Command Line Tools.
-        _ => {
-            parts.push("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string())
+        /*
+         * ⚠ **Split rather than pushed whole**, which `join_paths` forced and was
+         * right to: a component that itself contains the separator is exactly what
+         * it refuses, and the user's `PATH` *is* a list. Pushing it as one string
+         * made the whole join fail and collapsed the daemon's PATH to the payload's
+         * own `.bin` — caught by this file's own test, which is why it has one.
+         */
+        Some(p) if !p.trim().is_empty() => parts.extend(
+            std::env::split_paths(p.trim())
+                .map(|part| part.display().to_string())
+                .filter(|part| !part.is_empty()),
+        ),
+        /*
+         * The fallback, and it is deliberately the bare system default rather
+         * than a guess at where somebody keeps things.
+         *
+         * ⚠ **Per platform, and Homebrew is named on exactly one of them.** It is
+         * on the macOS list because that is where `git` lives on most developer
+         * Macs that have it from Homebrew rather than from the Command Line
+         * Tools — a measurement. Linuxbrew is deliberately *not* on the Linux
+         * list: naming it would be a guess wearing a measurement's clothes.
+         * Anything else gets no fallback at all, which leaves the payload's own
+         * `.bin` plus the managed directories — the honest answer for a platform
+         * nobody here has measured, and better than a list of paths that may not
+         * exist.
+         */
+        _ if cfg!(target_os = "macos") => {
+            parts.push("/opt/homebrew/bin".to_string());
+            parts.push("/usr/local/bin".to_string());
+            parts.push("/usr/bin".to_string());
+            parts.push("/bin".to_string());
+            parts.push("/usr/sbin".to_string());
+            parts.push("/sbin".to_string());
         }
+        _ if cfg!(target_os = "linux") => {
+            parts.push("/usr/local/bin".to_string());
+            parts.push("/usr/bin".to_string());
+            parts.push("/bin".to_string());
+            parts.push("/usr/local/sbin".to_string());
+            parts.push("/usr/sbin".to_string());
+            parts.push("/sbin".to_string());
+        }
+        _ => {}
     }
     for managed in [
         ".local/bin",
@@ -818,7 +869,22 @@ pub fn daemon_path(payload: &Payload, home: &Path, user_path: Option<&str>) -> S
     ] {
         parts.push(home.join(managed).display().to_string());
     }
-    parts.join(":")
+    /*
+     * ⚠ **`join_paths`, never `join(":")`.** `:` is POSIX's list separator and
+     * `;` is Windows's, so the hand-rolled join produced one garbage entry rather
+     * than a list on the platform this app is meant to be a client on. It also
+     * closes a latent bug on the platforms that *do* use `:` — a directory whose
+     * own name contains one silently corrupted the list, and this refuses it
+     * instead.
+     *
+     * A refusal falls back to the payload's own `.bin` alone, which is what the
+     * daemon actually needs: `src/acp/agents.ts` spawns out of it, and everything
+     * else on the list is a convenience.
+     */
+    match std::env::join_paths(parts.iter().map(std::ffi::OsString::from)) {
+        Ok(joined) => joined.to_string_lossy().into_owned(),
+        Err(_) => parts.first().cloned().unwrap_or_default(),
+    }
 }
 
 /* ── starting one, and watching it ───────────────────────────────────────── */
@@ -1378,11 +1444,19 @@ mod tests {
             Path::new("/home/x"),
             Some("/usr/bin:/bin"),
         );
-        assert!(path.starts_with("/app/daemon/node_modules/.bin:"));
+        // ⚠ Split with the platform's own separator rather than a literal `:`,
+        // for the reason `daemon_path` itself now joins with one: a test that
+        // hard-codes POSIX's is a test that cannot be right on Windows, which is
+        // the platform this whole change is about.
+        let parts: Vec<String> = std::env::split_paths(&path)
+            .map(|p| p.display().to_string())
+            .collect();
         // `agents.sh` resolves node as npm's sibling; if anything preceded the
         // payload's bin, the two could come from different installs.
-        let first = path.split(':').next().unwrap();
-        assert_eq!(first, "/app/daemon/node_modules/.bin");
+        assert_eq!(
+            parts.first().map(String::as_str),
+            Some("/app/daemon/node_modules/.bin")
+        );
     }
 
     #[test]
@@ -1392,12 +1466,14 @@ mod tests {
             Path::new("/home/x"),
             Some("/opt/mine/bin"),
         );
-        let parts: Vec<&str> = path.split(':').collect();
-        assert!(parts.contains(&"/opt/mine/bin"));
-        let mine = parts.iter().position(|p| *p == "/opt/mine/bin").unwrap();
+        let parts: Vec<String> = std::env::split_paths(&path)
+            .map(|p| p.display().to_string())
+            .collect();
+        assert!(parts.iter().any(|p| p == "/opt/mine/bin"));
+        let mine = parts.iter().position(|p| p == "/opt/mine/bin").unwrap();
         let managed = parts
             .iter()
-            .position(|p| *p == "/home/x/.local/bin")
+            .position(|p| p == "/home/x/.local/bin")
             .unwrap();
         // Appended, never prepended: a file dropped into a writable directory must
         // not win over what the person deliberately installed.
@@ -1409,6 +1485,31 @@ mod tests {
         let path = daemon_path(&payload_at("/app/daemon"), Path::new("/home/x"), None);
         assert!(path.contains("/usr/bin"));
         assert!(!path.contains("::"));
+    }
+
+    /// The user's answer is a **list**, and every entry of it survives.
+    ///
+    /// ⚠ This is the test that caught the join: pushing the shell's whole `PATH`
+    /// as one component made `join_paths` refuse — a component may not contain the
+    /// separator — and the daemon's PATH silently collapsed to the payload's own
+    /// `.bin`, which is every agent CLI and `git` invisible on a machine that has
+    /// them. Nothing else would have said so.
+    #[test]
+    fn every_entry_of_the_users_path_survives_the_join() {
+        let path = daemon_path(
+            &payload_at("/app/daemon"),
+            Path::new("/home/x"),
+            Some("/opt/a/bin:/opt/b/bin:/opt/c/bin"),
+        );
+        let parts: Vec<String> = std::env::split_paths(&path)
+            .map(|p| p.display().to_string())
+            .collect();
+        for wanted in ["/opt/a/bin", "/opt/b/bin", "/opt/c/bin"] {
+            assert!(
+                parts.iter().any(|p| p == wanted),
+                "{wanted} was lost: {path}"
+            );
+        }
     }
 
     #[test]

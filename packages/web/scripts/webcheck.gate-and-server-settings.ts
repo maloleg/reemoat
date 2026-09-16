@@ -1,5 +1,54 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
+
+/**
+ * Every module one entry point can reach, as paths under `packages/web/src`.
+ *
+ * ⚠ **Both `from "…"` and `import("…")`, and the dynamic half is the one that
+ * matters here.** Five screens in this app are `lazy()`, so a walk that followed
+ * static imports alone would answer *the first-paint path* rather than *the
+ * bundle* — and the question this exists for is what ends up in `dist` at all,
+ * where a lazily-fetched chunk is every bit as present as the entry.
+ *
+ * Extensionless and bundler-resolved, matching `vite.config.ts`: `./x` is tried
+ * as `x.tsx`, `x.ts`, then `x/index.{tsx,ts}`. A specifier that resolves to none
+ * of those is a package rather than a file and is not followed — the question is
+ * about this tree.
+ */
+function closure(entry: string): Set<string> {
+  const root = new URL("../src/", import.meta.url);
+  const resolve = (from: string, spec: string): string | null => {
+    if (!spec.startsWith(".")) return null;
+    const parts = `${from.includes("/") ? from.slice(0, from.lastIndexOf("/")) : ""}/${spec}`.split("/");
+    const stack: string[] = [];
+    for (const part of parts) {
+      if (part === "" || part === ".") continue;
+      if (part === "..") stack.pop();
+      else stack.push(part);
+    }
+    const base = stack.join("/");
+    for (const candidate of [`${base}.tsx`, `${base}.ts`, `${base}/index.tsx`, `${base}/index.ts`]) {
+      if (existsSync(new URL(candidate, root))) return candidate;
+    }
+    return null;
+  };
+
+  const seen = new Set<string>();
+  const queue = [entry];
+  while (queue.length > 0) {
+    const file = queue.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const code = readFileSync(new URL(file, root), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    for (const match of code.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+      const next = resolve(file, match[1] ?? "");
+      if (next !== null) queue.push(next);
+    }
+  }
+  return seen;
+}
 
 /* ------------------------------------------------------------------ *
  * The screens somebody reaches before there is a credential
@@ -586,30 +635,183 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\/\/[^\n]*/g, "");
   const gateBranch = app.indexOf('route.name === "gate"');
+  const legalBranch = app.indexOf('route.name === "legal"');
+  const picker = app.indexOf("<ChooseServer");
   const signedOut = app.indexOf('phase === "signed_out"');
   const wall = app.indexOf("mustChangePassword === true");
   const shell = app.indexOf("<AppShell");
-  check("App.tsx still branches on the gate route", gateBranch >= 0, true);
-  check("and still has a signed-out phase for it to outrank", signedOut >= 0, true);
+  check("and still has a signed-out phase for a screen to outrank", signedOut >= 0, true);
   check("and still has a wall in front of a temporary password", wall >= 0, true);
   check("and still renders the shell behind it", shell >= 0, true);
+  check("and still draws a document before either", legalBranch >= 0, true);
 
   /*
-   * A reset link opened in a browser that has never signed in arrives with
-   * `phase === "signed_out"` on the very first frame — that is not the edge
-   * case, it is the *normal* one — so below that branch the reset screen is
-   * unreachable in exactly the state it exists for, and what somebody clicking
-   * a mailed link would get is the sign-in form asking for the password they
-   * cannot remember.
+   * ⚠ **The app bundle draws no gate screen at all, and this assertion replaced
+   * three that were about where it drew one.**
+   *
+   * The three that went — a mailed link above the sign-in screen, above the wall,
+   * and the predicate deciding it — were all about an arm that turned out never
+   * to render for a mailed link in the first place. `/register`, `/confirm`,
+   * `/forgot`, `/reset` and `/verify` are served by the **control plane**, from
+   * `dist-gate`, over a closed list checked before the app's own fallback; and
+   * under the shell three of the five have no way in at all, a mail client
+   * opening a link in a browser and a Tauri window having no address bar. What
+   * that arm actually drew was the two screens `SignIn` created client-side.
+   *
+   * So the property is now structural rather than positional: there is nothing
+   * here to order. What replaces the ordering is the closure walk further down,
+   * which says the bundle cannot reach a gate screen even by accident.
    */
-  check("a mailed link is drawn above the sign-in screen", gateBranch < signedOut, true);
+  check("the app bundle draws no gate route at all", gateBranch, -1);
+
   /*
-   * And above the wall, which is the reason the wall is asserted at all:
-   * somebody an admin issued a temporary password to cannot type it into a
-   * "current password" box, so the mailed link is their only way out and it has
-   * to beat the screen that demands the thing they lost.
+   * **And it cannot reach one even by accident, which is the assertion the arm
+   * above is only the visible half of.**
+   *
+   * A grep on `App.tsx` says what one file does; this says what the *bundle*
+   * contains, which is the property. `packages/web` builds twice off two entry
+   * points — `main.tsx` into `dist` and `gate-main.tsx` into `dist-gate` — with
+   * no shared chunks by construction (`vite.gate.config.ts` argues why they are
+   * two builds rather than two inputs), so the import graph from each entry *is*
+   * the bundle, and a new importer anywhere would show up here rather than in a
+   * review.
+   *
+   * ⚠ **`GateCard` is the named exception rather than an oversight.**
+   * `ForcedPasswordChange` renders one, and that screen stays in the app by
+   * decision — it is the wall an admin-created account lands on. So the rule is
+   * *no gate **screen***, not *nothing from that directory*, and the pair below
+   * records it as an exception on purpose: a later reader who "fixes" the first
+   * check by moving `GateCard.tsx` out of `ui/gate/` would break the directory
+   * sweep further down and make `legal-pages.md`'s own glob stale.
+   *
+   * The second half is the non-vacuity control. A closure walk that silently
+   * resolved nothing would answer the empty set and pass the first check while
+   * asserting about no bytes at all.
    */
-  check("and above the forced password change", gateBranch < wall, true);
+  const appClosure = closure("main.tsx");
+  const gateClosure = closure("gate-main.tsx");
+  report("the walk found a bundle at all", appClosure.size > 40, `${appClosure.size} modules from main.tsx`);
+  check(
+    "the app bundle reaches no gate screen",
+    [...appClosure].filter((f) => f.startsWith("ui/gate/") && f !== "ui/gate/GateCard.tsx").sort(),
+    [],
+  );
+  check(
+    "the one shared box really is shared",
+    [appClosure.has("ui/gate/GateCard.tsx"), gateClosure.has("ui/gate/GateCard.tsx")],
+    [true, true],
+  );
+  check(
+    "and the gate bundle still draws all four",
+    [...gateClosure].filter((f) => f.startsWith("ui/gate/")).sort(),
+    ["ui/gate/Gate.tsx", "ui/gate/GateApp.tsx", "ui/gate/GateCard.tsx", "ui/gate/Handoff.tsx"],
+  );
+  /*
+   * The cheap loud half, which names a file rather than a graph: whichever of the
+   * two fails first, one of them says *where*.
+   */
+  check("App.tsx imports no gate screen", /ui\/gate\/Gate/.test(app), false);
+
+  /* ---- the server screen, as an editing screen ---- */
+
+  /**
+   * ⚠ **Two orderings, asserted as indices, because both fail silently.**
+   *
+   * The first: the page gives up its credential **before** `setNativeServer`
+   * moves the host's base. Below it, the four-second poll or a `cpFetch` in
+   * flight hands the old fleet's session token to a host somebody just typed in —
+   * the request succeeds, nothing on screen changes, and the only trace is a
+   * token in a stranger's log.
+   *
+   * The second: the no-op exit sits **above** that clear. Putting it after —
+   * where `host_set_server`'s own early return makes it look natural — means
+   * saving the address you are already on signs you out, because the clear has
+   * already run. That is how it was written first.
+   */
+  const chooseServer = readFileSync(new URL("../src/ui/ChooseServer.tsx", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  const noop = chooseServer.indexOf("typed === current");
+  const clears = chooseServer.indexOf("cp.clearSession()");
+  const adopts = chooseServer.indexOf("setNativeServer(typed)");
+  check("the server screen still does all three", [noop >= 0, clears >= 0, adopts >= 0], [true, true, true]);
+  check("saving an unchanged address gives nothing up", noop < clears, true);
+  check("and the credential goes before the host's origin moves", clears < adopts, true);
+  /*
+   * The field opens on the current value, and Cancel exists only where there is
+   * one — which is what keeps the first-run state uncancellable, and is why
+   * `signInReady` never had to learn about servers.
+   */
+  /*
+   * ⚠ **Two values, and folding them into one is the defect this pins.** The
+   * field opens on the *suggestion* when there is no server and on the *truth*
+   * when there is. The first draft had one value because it wrote the compiled-in
+   * default into the shell's config at first launch — which skipped this screen
+   * entirely, so the app chose a fleet and mentioned it afterwards on the sign-in
+   * form. Nothing is written down until somebody presses Continue.
+   */
+  check(
+    "the field opens on the current server, or on what the build suggests",
+    /useState\(current \?\? suggested \?\? ""\)/.test(chooseServer),
+    true,
+  );
+  check("the suggestion is read as itself and never as the server", /defaultServer/.test(chooseServer), true);
+  check("and the first screen greets rather than interrogating", /Welcome to Reemoat/.test(chooseServer), true);
+  /*
+   * ⚠ **Two sentences on this screen were true in one of its states and false in
+   * another, which is the class of bug a screen with two entrances grows.**
+   *
+   * *"That address is ours"* is nonsense on a build that compiled no default in —
+   * which is every build from this repository, where the field opens empty. And
+   * *"forgets this computer's sign-in"* describes something that does not exist
+   * when the screen is reached by the back control on the sign-in form, where
+   * there is no session at all. Each is now gated on the fact it claims.
+   */
+  check("the explainer knows whether there is an address above it", /suggested === null \?/.test(chooseServer), true);
+  check("and the sign-in it says will be lost is one that exists", /editing && signedIn &&/.test(chooseServer), true);
+  /*
+   * One field, first screen — and deliberately not when editing, where the sheet
+   * has already placed focus and taking it is the defect `Sheet`'s own effect
+   * exists to avoid.
+   */
+  check("the first screen focuses the one thing it asks for", /autoFocus=\{!editing\}/.test(chooseServer), true);
+  check("cancel is offered only where there is a server to go back to", /editing && \(/.test(chooseServer), true);
+  check("it says what changing servers costs", /forgets this computer/.test(chooseServer), true);
+  check("and the probe carries no credential", /probeServer\([^)]*authorization/i.test(chooseServer), false);
+
+  /*
+   * **The picker outranks everything, and its reason grew.** It was "a document
+   * route waits on `state.config`, and `config` needs a server, so `/terms` in a
+   * freshly installed app would spin for ever". With the picker reachable while
+   * signed in — from the sign-in screen's control and from Settings → Account —
+   * "there is no usable config" is every frame it is open rather than only the
+   * first ones after an install.
+   */
+  check("the server picker is drawn above every screen that needs a config", picker >= 0 && picker < legalBranch, true);
+  check("and above the sign-in screen it is reached from", picker < signedOut, true);
+
+  /*
+   * ⚠ **Every hook above every early return, asserted for the first time.**
+   *
+   * `App.tsx` records this as a defect it actually shipped — a render that took
+   * the gate, the sign-out or the forced-password arm ran one hook fewer than the
+   * render before it, `Minified React error #310`, an error boundary, and the
+   * whole screen gone — and notes it was *"caught in a browser rather than by
+   * `typecheck`, which cannot see it"*. Nothing has checked it since. This change
+   * widens the first early return, which is exactly the edit that would tempt
+   * somebody to compute something new just above it.
+   *
+   * Sliced to `App`'s own body: `OverlaySheet` below it calls `useState` after
+   * these returns, in file order, and is a different component.
+   */
+  const appBody = app.slice(app.indexOf("export function App("), app.indexOf("function OverlaySheet("));
+  const lastHook = Math.max(
+    ...["useState(", "useEffect(", "useSyncExternalStore(", "useRoute(", "useUnder(", "useOrigin("].map((hook) =>
+      appBody.lastIndexOf(hook),
+    ),
+  );
+  check("the hook sweep can see App's body at all", appBody.length > 0 && lastHook > 0, true);
+  check("every hook in App runs above its first early return", lastHook < appBody.indexOf("<ChooseServer"), true);
   /*
    * The wall itself precedes the shell, and that is the other half: below
    * `<AppShell` an account holding a temporary password is handed the whole app,
@@ -1233,6 +1435,73 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
    * restyling these back into plain text, not a pixel.
    */
   check("both doors wear the shared link look", signIn.split("${LINK}").length - 1, 2);
+
+  /*
+   * ⚠ **Three, not two, and the third is named here so the number is a list
+   * rather than a literal somebody bumps to go green.** Recovery, sign-up, and
+   * the control beside the server's own name — *"which fleet is this password
+   * about to be sent to"*, which is `cp.ts`'s oldest rule stated on the one
+   * screen where a browser's address bar cannot state it, because under a custom
+   * scheme there is one webview origin for every server.
+   *
+   * And the two doors are **anchors** now: this bundle carries no gate screen, so
+   * they leave for the control plane's own. Three properties, each a real
+   * failure — absolute rather than root-relative, or `openableHref` answers
+   * `null`, the shell's interceptor never fires and the webview quietly redraws
+   * this screen; `target="_blank"`, or the same-origin navigation inside Telegram
+   * destroys the launch fragment `telegram.ts` latches against and lands on a
+   * bundle with no Telegram wiring; and `controlPlaneOrigin()` rather than
+   * `location.origin`, which under the shell is `tauri://localhost`.
+   */
+  /*
+   * Comments stripped for these, and the `${LINK}` count above deliberately not:
+   * that one counts uses of a constant, while these are about what the code does
+   * — and the docblock beside each of them quotes the very shape being searched
+   * for, so the raw file satisfies the search whichever way round the code is.
+   * The cheapest route back to green would then be deleting the explanation.
+   */
+  const signInBody = signIn.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  check(
+    "the two doors are absolute addresses at the control plane",
+    (signInBody.match(/href=\{`\$\{authority\}\/(register|forgot)`\}/g) ?? []).length,
+    2,
+  );
+  check("and each opens outside this document", (signInBody.match(/target="_blank"/g) ?? []).length, 2);
+  check("the sign-in screen navigates nowhere itself", /navigate\(/.test(signInBody), false);
+  check("and never builds an address out of this page's origin", /location\.origin/.test(signInBody), false);
+  check("it asks the host where the control plane is", /controlPlaneOrigin\(\)/.test(signInBody), true);
+  /*
+   * ⚠ **The sign-in screen names no server, and for one draft it did.** The line
+   * sat under the lead sentence with a *Change* link beside it, on the argument
+   * that a custom scheme has no address bar. Sound, and the wrong screen: a login
+   * form is not where somebody learns which fleet they are on. That question has
+   * a screen of its own — the welcome — and a row under Settings → Account.
+   * Asserted as an absence, which is the only way a screen can be held to not
+   * growing something back.
+   */
+  check("the sign-in screen names no server", /nativeBoot\(\)\?\.server/.test(signInBody), false);
+  /*
+   * ⚠ **But it does offer a way back to the screen that sets one, and its absence
+   * was a one-way door built while removing another.**
+   *
+   * The welcome asks for a server and Continue adopts it. With no control here,
+   * somebody who typed a reachable but *wrong* address arrived at a sign-in form
+   * with no route to the screen that sets it — Settings → Account needs a
+   * session, and getting one needs the right server. That is the defect this
+   * whole change set out to fix, one screen along.
+   *
+   * Asserted as a pair: the control exists, and it still names no address. The
+   * first without the second is how the rejected line comes back wearing a
+   * chevron.
+   */
+  check("but it offers a way back to the screen that sets one", /pickServer\(\)/.test(signInBody), true);
+  check("and that control names a destination rather than an address", /https?:\/\//.test(signInBody), false);
+  /*
+   * Shell only. In a browser the server is the origin that served the page, so
+   * there is no screen to go back to — and a control that navigates nowhere is
+   * worse than none.
+   */
+  check("and it is drawn only where there is somewhere to go", /inNativeShell\(\) && \(/.test(signInBody), true);
 
   /*
    * ⚠ **The identifier field says both, because the route takes both.** `/v1/login`

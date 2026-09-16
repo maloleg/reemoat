@@ -8,6 +8,8 @@ paths:
   - packages/web/src/native.ts
   - packages/web/src/cp.ts
   - packages/web/src/ui/ChooseServer.tsx
+  - packages/web/src/ui/SignIn.tsx
+  - packages/web/src/platform.ts
   - scripts/nativecheck.ts
   - packages/web/scripts/webcheck.native-bridge.ts
 ---
@@ -164,6 +166,68 @@ transport for exactly this reason.
 is **`null` in a browser and for ever**. `ForcedPasswordChange` is the precedent:
 *"reached by state, not by a URL, which is why it is filed beside `SignIn.tsx`"*.
 
+**The first screen is a welcome, not a picker.** On a machine where nothing has
+happened yet it greets, says what is about to happen, and asks one thing, with the
+field already holding what the build suggests; **Continue** adopts it and the
+sign-in form is next. ⚠ That ordering was briefly the other way round — the
+default was written down at first launch and the address appeared instead as a
+line with a *Change* link under the sign-in form's lead sentence. The argument for
+it was real (a custom scheme has no address bar, so `cp.ts`'s "one origin" rule
+has nowhere else to be stated) and the screen was still wrong: a login form is not
+where somebody learns which fleet they are on, and a URL with a verb beside it
+reads as a thing to deal with before typing a password. Owner's call, 2026-09-16,
+on seeing it shipped.
+
+⚠ **The sign-in form carries a leading `‹ Server`, and building the welcome
+without one was a one-way door in a new place.** `Continue` adopts an address; a
+reachable but *wrong* one then left somebody on a sign-in form with no route to
+the screen that sets it — Settings → Account needs a session, and getting one
+needs the right server. It names its destination and never the address, which is
+the line that was rejected; it is shell-only, there being nowhere to go in a
+browser; and it is `web-shell.md`'s kind of back control, a fixed destination
+drawn as a chevron rather than `history.back()`.
+
+**Two entrances, and the second closed a hole rather than adding a convenience.**
+`state.host.server === null` is the welcome above; `state.pickingServer` is the
+**Server address** row under Settings → Account. Before it, `setNativeServer` had
+exactly one call site and `clearSession` leaves the server alone — so a server
+once chosen **could not be changed from inside the app at all**, and the only
+remedy was deleting the shell's config by hand.
+
+⚠ **`cp.clearSession()` runs before `setNativeServer`, and the safe-looking order
+is the wrong one.** `host_set_server` moves the base **in the host process**, so
+from the instant it returns every `host_cp` call goes to the *new* origin while
+the page still holds the old fleet's bearer — and the four-second poll,
+`refreshConfig` or any `cpFetch` in flight would hand server A's session token to
+a host somebody has just typed in. While the screen was only ever drawn at
+`server === null` there was no credential and no window; as a settings screen
+there is both. `clearSession()` is local, instant, cannot fail, and erases
+`credential#<old origin>` through the same call `host_set_server` was about to
+make. What it costs is one sign-in if the write then fails on a full disk; what
+the other order costs is a credential disclosure. `webcheck` asserts the two
+indices, because every other assertion stays green either way.
+
+**Adopting an origin equal to the one already held reloads nothing.**
+`host_set_server` returns early on a match — no file written, no credential
+erased — so re-typing the address you are on would otherwise be a sign-out charged
+for a spelling. Only reachable from the editing entrance, which is why it did not
+have to exist before.
+
+**Cancel exists if and only if there is a server to go back to**, and that is the
+whole of what keeps the first-run state uncancellable. It is also why
+`signInReady` did not have to learn about servers: there is no path to a sign-in
+form with no server, so the guard is structural rather than a second predicate
+answering a question `App.tsx` already answers.
+
+**What changing servers costs is said on the screen, in two sentences, and both
+halves are load-bearing.** The first is true because the credential for the old
+origin is erased in the same act. The second — *"Your account there is
+untouched"* — is true because **nothing here ends the session on the old
+server**: no `DELETE /v1/me/sessions/current` is sent, deliberately, it being a
+network call to a server somebody is leaving, which is often *why* they are
+leaving. The row stays in that server's Settings → Devices, and saying so is
+honest where claiming a revocation would not be.
+
 A `Route` arm would have been wrong twice. `parseGateScreen` is shared with the
 router, so the web build would parse and draw `/server` — a screen that can do
 nothing where the server is the origin that served the page. And `depthOf`,
@@ -171,9 +235,12 @@ nothing where the server is the origin that served the page. And `depthOf`,
 `isSheet`, `isOverlayPath` and `sheetUpLabel` take a new arm in silence: eight
 edits and a case table, against none.
 
-Above the `legal` arm and above the gate, because `App` waits on `state.config` for
-a document route and `config` comes from `GET /v1/instance`, which needs a server.
-Below it, `/terms` in a freshly installed app spins for ever.
+Above the `legal` arm, because `App` waits on `state.config` for a document route
+and `config` comes from `GET /v1/instance`, which needs a server. Below it,
+`/terms` spins for ever. ⚠ **That was a sentence about a freshly installed app and
+is now a standing one**: with the picker reachable while signed in, "there is no
+usable config" is every frame it is open rather than only the first ones after an
+install. There is no gate arm left to be above — see below.
 
 **Nothing in the page validates an address.** The host normalizes — scheme filled
 in, host lowercased, a default port dropped, path and query discarded — and answers
@@ -189,6 +256,67 @@ is why there is a second question rather than a refusal. Adopting ends in
 `location.assign("/")`, because every connection, token, route memo and socket in
 the process was derived from a credential for a different fleet.
 
+## The default server, and why this repository has none
+
+`option_env!("REEMOAT_DEFAULT_SERVER")` in `config.rs` is the only build-time
+input this app has, and **it is empty here**. `nativecheck` asserts that the way
+it asserts `signingIdentity: null`: this is AGPL software and forks run their own
+control planes, so a value compiled in would be one deployment's address in
+everybody's binary. `cp-accounts.md` makes the same argument for the two
+`REEMOAT_CP_*` addresses that reach the browser.
+
+**Read in Rust rather than on the page**, for two reasons pointing the same way:
+`native.ts` refuses `import.meta.env`-style flags in that layer, and `host_cp`'s
+base has to live in the host process where the page cannot reach it — the same
+string the keyring account is built from. **Environment at compile time** rather
+than run time is the one departure: a bundle has no environment to read when
+Finder, Explorer or a desktop entry launches it.
+
+⚠ **`build.rs` carries `cargo:rerun-if-env-changed` for the name**, without which
+the value is baked into a cached object file and a fork that corrects its address
+gets a binary silently keeping the previous one.
+
+⚠ **It is a suggestion for a form field and never a value anything writes down.**
+Both alternatives were built and taken back out — seeding it at first launch skips
+the welcome and makes a keyring account for an origin nobody confirmed; a fallback
+inside `read_server` silently repoints an installation when a later build ships a
+different default. Q4.121 carries both at length.
+
+So: **two functions, two questions.** `read_server` is *which fleet is this
+installation on* and is the only reader `lib.rs` calls; `default_server` is *what
+shall the box open on*, reaches the page as its own `defaultServer` field, and is
+written down by nothing. **Continue is the act that adopts an address.**
+`nativecheck` holds them apart, folding them being the edit that passes every
+other assertion there. A malformed default is no default: the box opens empty and
+the screen asks, and a fork's typo fails its own `cargo test`.
+
+## The gate is the browser's, and this bundle carries none of it
+
+`/register`, `/confirm`, `/forgot`, `/reset` and `/verify` are addresses the
+**control plane** serves, from `dist-gate`, over a closed list checked before the
+app's own fallback. So no HTTP request has ever rendered this bundle's copy of
+them, and under the shell three of the five had no way in at all — a mail client
+opens a link in a browser, and a Tauri window has no address bar. What `App.tsx`'s
+gate arm actually drew was the two screens `SignIn` created client-side.
+
+Both are **anchors** now, at `controlPlaneOrigin()` — **absolute** (a relative
+href answers `null` from `openableHref`, so the interceptor never fires and the
+webview quietly redraws the sign-in screen) and **`target="_blank"`** (this bundle
+also runs inside Telegram, where `<authority>/register` is the *same* origin, so a
+plain anchor destroys the launch fragment `telegram.ts` latches against). Q3.606
+carries both at length.
+
+`ui/gate/GateCard.tsx` stays in the app bundle and is the **named exception**:
+`ForcedPasswordChange` renders one. So the rule is *no gate screen*, not *nothing
+from that directory*, and `webcheck` walks both entry points' import closures to
+hold it — including dynamic imports, because a `lazy()` chunk is every bit as
+present in `dist` as the entry.
+
+`Route` keeps its `gate` arm and `screenOf` keeps its case: deleting those is the
+eight-edits-and-a-case-table above, and the parse is what keeps `parseGateScreen`
+and `parseLegalDoc` assertably disjoint. A typed `/register` falls through to
+`SignIn`, which is the answer every unknown path already gets.
+
 ## Facts about the platform
 
 - **`dragDropEnabled: false` is load-bearing, not styling.** Tauri intercepts OS
@@ -200,6 +328,48 @@ the process was derived from a credential for a different fleet.
   `navigator.clipboard` are available. The clipboard still gets a native arm first:
   a webview that has the object and refuses it without focus would fall through to
   `execCommand`, which some webviews have removed.
+- **There are two platform vocabularies and they agree on exactly one spelling.**
+  `NativeBoot.platform` is Rust's `std::env::consts::OS` — `macos`, `windows`,
+  `linux` — and is about **this client**; a daemon's `SystemInfo.os` is Node's
+  `process.platform` — `darwin`, `win32`, `linux` — and is about **that machine**.
+  `hostPlatform` in `platform.ts` reads the first, `osName` in `ui/agentCard.ts`
+  the second. `linux` is the shared word, which is what makes a mixed-up call look
+  right in review and answer "other" for every Mac in the fleet. `webcheck`
+  asserts neither module reaches the other.
+- **A sentence that names an operating system comes from one function, and there
+  is a census.** `localNetworkDetail` is total over `HostPlatform` with a `never`
+  arm, and **only its macOS arm names an OS** — Local Network Privacy is a
+  measurement, and nothing equivalent has been measured on Windows or Linux, so
+  those arms state the fact and point at the evidence rather than inventing a
+  remedy. The defect it generalises: the string it replaces told everybody on
+  every platform to open System Settings, while the classifier producing that
+  state keys on an errno and fires on any Unix. `webcheck` sweeps the whole
+  package for `macOS`/`Windows`/`Linux` against an **exact** five-file allowlist,
+  and not one of the five is a screen describing the computer it is drawn on.
+- **`AGENT_HOST_OS` is about the *other* computer and must never branch on this
+  one.** A Windows client adding a Linux machine is the ordinary case. It is held
+  against `deploy/bootstrap.sh`'s `detect_platform`, which accepts `Darwin` and
+  `Linux` and refuses everything else — there is no Windows installer because
+  `install.sh` is a shell script and there is no supervisor there to install into.
+- **PATH is a list, joined with the platform's own separator.** `env::join_paths`
+  and `env::split_paths`, never `join(":")` — which on Windows made the daemon's
+  whole PATH one garbage entry, and on POSIX silently corrupted the list for a
+  directory whose own name held a colon. The user's answer is *split* before it is
+  joined, because a component may not contain the separator and their `PATH` is
+  itself a list: pushing it whole made the join fail and collapsed the daemon's
+  PATH to the payload's `.bin`, which `cargo test` caught. Homebrew is named on
+  the macOS fallback only; Linuxbrew is deliberately absent, being a guess rather
+  than a measurement.
+- **`login_shell_path` is Unix by decision rather than by accident.** It answered
+  `None` on Windows because `SHELL` is unset — luck that breaks under Git Bash and
+  MSYS2, which set it to a POSIX shell that knows nothing of the Windows `PATH`.
+- **Closing the last window quits, on every platform including macOS.** Measured
+  in `tauri-runtime-wry`: destroying the last window emits `ExitRequested` and,
+  with nothing calling `prevent_exit()`, sets `ControlFlow::Exit`. ⚠ `lib.rs` said
+  *"closing the window on macOS is not quitting"* for four releases — a fact about
+  **AppKit**, which Tauri does not implement. The code was right and the reason
+  was not. The macOS convention (stay running, return from the dock) is a
+  deliberate non-goal beside "no menu bar, no tray".
 - **The origin is not the same string on every platform.** `tauri://localhost` on
   macOS and Linux, `http://tauri.localhost` on Windows and Android. Anything
   comparing an origin, or building a URL out of `location.origin`, is

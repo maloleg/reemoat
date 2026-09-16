@@ -37,9 +37,12 @@ never notice a client leaving.
 
 Node >= 24, ESM, TypeScript strict. Everything in `src/`, `scripts/` and
 `packages/control-plane` runs straight off `tsx` with no build step. `packages/web`
-is bundled by Vite **twice, into two directories**: `dist` is the whole app and
-goes into the Reemoat binary, `dist-gate` is sign-up, the mailed-link screens, the
-legal documents and the handoff page, and goes into the control plane's image. The
+is bundled by Vite **twice, into two directories**: `dist` is the app and goes into
+the Reemoat binary, `dist-gate` is sign-up, the mailed-link screens, the legal
+documents and the handoff page, and goes into the control plane's image. **The app
+carries no gate screen** — it links out to the control plane's own, so there is one
+sign-up form in the fleet rather than two; `GateCard` is the one shared box and
+`webcheck` walks both import closures to hold that line. The
 Authority serves the second at **nine addresses** and the app at none — a closed
 list rather than an SPA fallback, so the product is not in the image to be served.
 `REEMOAT_CP_WEB` names a built app for a checkout. Q4.118, `docs/AUTHORITY.md`.
@@ -66,7 +69,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 954 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 960 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -268,7 +271,9 @@ pnpm --dir packages/native install   # the native shell's own node_modules. **Th
                                      #   excluded from the workspace, so the Tauri CLI never lands on
                                      #   a daemon host and a Tauri bump never moves the root lockfile
 pnpm native                          # tauri dev: Vite on 5173, the window over it
-pnpm native:build                    # → a .app with packages/web inside the binary. **No .dmg**:
+pnpm native:build                    # → a macOS .app with packages/web inside the binary.
+                                     #   REEMOAT_DEFAULT_SERVER is the only build-time input and is
+                                     #   unset here, so a fork inherits no address; docs/NATIVE.md. **No .dmg**:
                                      #   `bundle.targets` is `["app"]`, because tauri's `bundle_dmg.sh`
                                      #   drives Finder over AppleScript and times out anywhere nobody is
                                      #   logged in — `docs/NATIVE.md` has the measurement and the one-line

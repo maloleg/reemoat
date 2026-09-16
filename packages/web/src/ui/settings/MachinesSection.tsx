@@ -1,7 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { CONTROL_PLANE_UNREACHABLE } from "../../account";
-import { installCommand } from "../../enrollment";
+import { AGENT_HOST_OS, installCommand } from "../../enrollment";
 import { controlPlaneOrigin } from "../../native";
 import {
   machineAllowanceText,
@@ -181,7 +181,11 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
         <h2 className={SETTINGS_HEADING}>Add a machine</h2>
         {canAdd ? (
           <>
-            <div className="mt-3">
+            {/* Which machines this is for, for `AGENT_HOST_OS`'s reason: the
+                command is about the computer that will run agents, not about the
+                one drawing this screen. */}
+            <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
+            <div className="mt-2">
               <CommandLine command={installCommand(controlPlaneOrigin())} />
             </div>
             {/* Under the command, never above it: the free way to add a machine

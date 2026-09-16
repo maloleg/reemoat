@@ -62,11 +62,53 @@ pub fn server_file(dir: &Path) -> PathBuf {
     dir.join("server.json")
 }
 
+/// The server a build was pointed at, or `None`.
+///
+/// ⚠ **Absent in this repository, deliberately, and that is the same rule
+/// `signingIdentity` and `providerShortName` follow one file over.** This is AGPL
+/// software and forks run their own control planes, so a value compiled in here
+/// would be one deployment's address in everybody's binary — the argument
+/// `cp-accounts.md` already makes for `REEMOAT_CP_PLUGIN_CATALOGUE_URL` and
+/// `REEMOAT_CP_MACHINES_OFFER_URL`, which have no compiled-in default for exactly
+/// this reason. `nativecheck` asserts no file here sets it.
+///
+/// **Environment at compile time rather than at run time**, which is the one
+/// departure from those two: a bundle has no environment to read — it is launched
+/// by Finder, by Explorer or by a desktop entry — so the only moment a fork can
+/// say which fleet its build joins is while it is being built.
+///
+/// `build.rs` carries `cargo:rerun-if-env-changed` for this name. Without it
+/// `option_env!` is baked into a cached object file and a fork that changes the
+/// value gets a binary that silently keeps the previous address.
+const DEFAULT_SERVER: Option<&str> = option_env!("REEMOAT_DEFAULT_SERVER");
+
+/// The server a build suggests, normalized — or `None`.
+///
+/// ⚠ **A suggestion for the field, never a value this writes down.** The first
+/// draft seeded it: first run with a default wrote it to `server.json` and
+/// answered it, so the app opened straight on the sign-in screen. That is wrong
+/// twice. It skips the setup screen somebody should see once — the app decided
+/// which fleet they joined and told them afterwards — and it makes a keyring
+/// account (`credential#<origin>`) for an origin nobody confirmed.
+///
+/// As a suggestion both go away. Nothing is stored until somebody presses
+/// **Continue**, which is the act that adopts it; a later build changing the
+/// default changes only what the field opens on, which is harmless because the
+/// file already won. `read_server` stays the single reader of *which server*.
+///
+/// A malformed default is no default: the field opens empty and the setup screen
+/// asks, which is this file's posture everywhere — an app that cannot start
+/// because of a value one form re-enters is the worse failure.
+pub fn default_server() -> Option<String> {
+    normalize_origin(DEFAULT_SERVER?).ok()
+}
+
 /// The stored origin, or `None`.
 ///
 /// Every failure answers `None` — an unreadable or corrupt file is "no server
-/// chosen", which lands on the picker. The alternative is an app that cannot be
-/// started at all because of a file nobody can see, for a value one form re-enters.
+/// chosen", which lands on the setup screen. The alternative is an app that
+/// cannot be started at all because of a file nobody can see, for a value one
+/// form re-enters.
 pub fn read_server(dir: &Path) -> Option<String> {
     let text = fs::read_to_string(server_file(dir)).ok()?;
     let stored: Stored = serde_json::from_str(&text).ok()?;
@@ -196,8 +238,55 @@ pub fn normalize_origin(raw: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        erase_device, normalize_origin, read_device, read_server, write_device, write_server,
+        default_server, erase_device, normalize_origin, read_device, read_server, write_device,
+        write_server, DEFAULT_SERVER,
     };
+
+    /// A directory of this test's own. The one below keys on the process id
+    /// alone, which is fine while it is the only test writing — it is not any
+    /// more, and two tests sharing a directory is a pass that depends on order.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("reemoat-cfg-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A default is a suggestion and writes nothing.
+    ///
+    /// ⚠ This is the assertion the first draft failed: it seeded, so first run
+    /// with a default wrote the file and skipped the setup screen entirely. The
+    /// property that matters is that **nothing is on disk until somebody presses
+    /// Continue**, which is what makes a keyring account exist only for an origin
+    /// a person confirmed.
+    #[test]
+    fn a_default_is_a_suggestion_and_writes_nothing() {
+        let dir = scratch("suggest");
+        assert_eq!(read_server(&dir), None);
+        assert!(!dir.join("server.json").exists());
+    }
+
+    /// A choice already made is what `read_server` answers, default or no default.
+    #[test]
+    fn a_chosen_server_is_what_is_read_back() {
+        let dir = scratch("chosen");
+        write_server(&dir, "https://chosen.example").unwrap();
+        assert_eq!(read_server(&dir).as_deref(), Some("https://chosen.example"));
+    }
+
+    /// ⚠ **Vacuous here and loud in a fork**, which is the only place it can be
+    /// either: `option_env!` is evaluated in *this* build, so a repository with no
+    /// default asserts over `None` while a fork that typed its address wrong fails
+    /// this test on its own `cargo test`. It is the one thing standing between
+    /// that typo and a build that silently has no default at all.
+    #[test]
+    fn a_compiled_default_is_an_address() {
+        if let Some(raw) = DEFAULT_SERVER {
+            assert!(
+                default_server().is_some(),
+                "REEMOAT_DEFAULT_SERVER={raw} is not an address this can reach"
+            );
+        }
+    }
 
     /// The property the map exists for: two servers, two devices, neither
     /// reachable from the other's origin.

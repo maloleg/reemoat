@@ -130,6 +130,21 @@ export interface NativeBoot {
    * registers a device when it sees one and stores what comes back.
    */
   deviceId: string | null;
+  /**
+   * The address this build suggests, for the setup screen's field to open on.
+   *
+   * ⚠ **A suggestion, and never {@link NativeBoot.server}.** They answer
+   * different questions — *what shall the box open on* against *which fleet is
+   * this installation on* — and the first draft answered both with one field, by
+   * writing the compiled-in default into the shell's config on first run. That
+   * skipped the setup screen, so the app chose a fleet and said so afterwards,
+   * and it made a `credential#<origin>` keyring account for an origin nobody had
+   * confirmed. Nothing is written down until somebody presses Continue.
+   *
+   * `null` in a browser and on any build that compiled none in — which is every
+   * build from this repository.
+   */
+  defaultServer: string | null;
 }
 
 let boot: NativeBoot | null = null;

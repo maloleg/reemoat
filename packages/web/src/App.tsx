@@ -8,7 +8,6 @@ import { sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
 import { ChooseServer } from "./ui/ChooseServer";
 import { ForcedPasswordChange } from "./ui/ForcedPasswordChange";
-import { Gate } from "./ui/gate/Gate";
 import { StartSheet } from "./ui/NewSession";
 import { Sheet } from "./ui/Sheet";
 import { SessionBrowser } from "./ui/SessionBrowser";
@@ -206,45 +205,46 @@ export function App(): ReactNode {
    * env var and no route that reaches it, because in a browser the server is the
    * origin that served this page.
    *
-   * Above the documents and above the gate, because nothing on any screen below can
-   * be fetched until this is answered. `App` waits on `state.config` for a document
-   * route and `config` comes from `GET /v1/instance`, which needs a server — so
-   * below this, `/terms` in a freshly installed app would spin for ever.
+   * **Two states, one screen.** `server === null` is first run; `pickingServer` is
+   * somebody asking to change it — from the sign-in screen's own control, or from
+   * Settings → Account with a live session behind it. The second is why this arm
+   * had to widen rather than stay a first-run branch.
+   *
+   * Above the documents, because nothing on any screen below can be fetched until
+   * this is answered. `App` waits on `state.config` for a document route and
+   * `config` comes from `GET /v1/instance`, which needs a server — so below this,
+   * `/terms` would spin for ever. ⚠ **That was a sentence about a freshly
+   * installed app and is now a standing one**: with the picker reachable while
+   * signed in, "there is no usable config" is every frame it is open, not just
+   * the first ones after an install.
    *
    * Below every hook, which is the ⚠ two docblocks up: a render taking this arm must
    * run exactly as many hooks as one that does not.
    */
-  if (state.host !== null && state.host.server === null) return <ChooseServer />;
+  if (state.host !== null && (state.host.server === null || state.pickingServer)) return <ChooseServer />;
 
   /*
-   * **A URL somebody was mailed, above every phase.**
+   * **A document, above every phase.**
    *
-   * Above `signed_out` because that is the state on the *first frame* for the
-   * overwhelmingly common case — a reset link opened in a browser that has never
-   * signed in — so below it the reset screen would be unreachable in exactly its
-   * normal case. Above `loading` because a stale credential in `localStorage`
-   * makes `phase` `loading` before any request has been answered, and somebody
-   * clicking a link on the device whose session expired would watch a spinner
-   * for the full `CP_TIMEOUT_MS` while holding a short-lived token. And above
-   * the wall below, because somebody who cannot remember the temporary password
-   * cannot type it into a "current password" box — the link is their way out and
-   * it has to beat the wall.
+   * Above `signed_out` because that is the state on the *first frame* for
+   * somebody who has never signed in, so below it the documents would be
+   * unreachable in exactly their normal case. Above `loading` because a stale
+   * credential makes `phase` `loading` before any request has been answered, and
+   * somebody who asked what the terms are would watch a spinner for the full
+   * `CP_TIMEOUT_MS`. And above the wall below, because a contract is readable
+   * whether or not you owe a password change.
    *
-   * One branch and no predicate: `Gate` asks `gateOutranksSession` itself, where
-   * `webcheck` can import it. A predicate here would be a decision nothing
-   * asserts, which is what `settings.ts`'s own header forbids.
+   * ⚠ **This block used to be about a mailed link, and that half has moved off
+   * this bundle entirely.** `/confirm`, `/reset` and `/verify` are opened by a
+   * mail client, in a browser, and land on the control plane's own gate — the
+   * arm above records why there is nothing here to outrank any more.
    *
-   * ⚠ **That sentence was false for four releases and is now true.** The
-   * predicate existed, the driver asserted things about it, and *nothing read
-   * it* — `Gate` tested `!gateNeedsToken(screen)` directly, so the two agreed
-   * only because both said the same thing. Q3.598.
-   *
-   * **A document sits beside the gate and above the same phases**, for a
-   * narrower reason than a mailed link: it has to answer at all with no
-   * credential, because the sign-up form links to it and because it is the URL
-   * somebody is given when they ask what the terms are. Order between the two is
-   * arbitrary — `parseLegalDoc` and `parseGateScreen` are asserted disjoint — and
-   * saying so here is cheaper than somebody deriving it again.
+   * ⚠ **And nothing in this bundle links to a document now.** The consent line in
+   * the sign-up form was the only control that did, and that form is the
+   * browser's. The arm is kept because a document must still render where a
+   * `legal` route is parsed — the two parsers are asserted disjoint and the web
+   * build shares this file — but a reader who finds it should know it is reached
+   * by no control here rather than delete the wrong one.
    */
   if (route.name === "legal") {
     /*
@@ -278,7 +278,28 @@ export function App(): ReactNode {
     // Off: this address names nothing here, so it falls through to whatever `/`
     // would have drawn — the same answer every unknown path already gets.
   }
-  if (route.name === "gate") return <Gate screen={route.screen} state={state} />;
+  /*
+   * ⚠ **The gate arm is gone, and it took two screens with it rather than five.**
+   *
+   * `/register`, `/confirm`, `/forgot`, `/reset` and `/verify` are addresses the
+   * *control plane* serves, from `dist-gate`, over a closed list checked **before**
+   * the app's own fallback (`packages/control-plane/src/app.ts`). So no HTTP
+   * request anywhere has ever rendered this bundle's copy of them, and in the
+   * shell three of the five were unreachable outright — a mail client opens a
+   * link in a browser, and a Tauri window has no address bar. What this arm
+   * actually drew was the two screens `SignIn` itself created, client-side, with
+   * `navigate("/register")` and `navigate("/forgot")`.
+   *
+   * Those are anchors now, at the control plane's own origin: the system browser
+   * under the shell, a new tab elsewhere. So the app carries one sign-up form
+   * instead of two, one consent box instead of two, and one place to fix either.
+   *
+   * `Route` keeps its `gate` arm and `screenOf` keeps its case — deleting those is
+   * the eight-edits-and-a-case-table this file and `native-shell.md` both argue
+   * against, and the parse is what keeps `parseGateScreen` and `parseLegalDoc`
+   * assertably disjoint. A typed `/register` now falls through to `SignIn`, which
+   * is the answer every unknown path already gets.
+   */
 
   if (state.phase === "signed_out") {
     // An involuntary sign-out has its own sentence and wins over the revoke

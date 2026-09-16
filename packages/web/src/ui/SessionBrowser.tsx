@@ -1,7 +1,7 @@
 import { Bell, Check, ChevronRight, Folder as FolderIcon, Layers, ListFilter, Pin, Plus, Search } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
-import { installCommand } from "../enrollment";
+import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
 import { folderLabel } from "../paths";
@@ -297,7 +297,7 @@ export function SessionBrowser({
                   * could not fit in.
                   */}
                 <div className="lg:hidden">
-                  <p className="mt-3 text-xs text-muted">Run this on the machine you want to use:</p>
+                  <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
                   <div className="text-left">
                     <CommandLine command={installCommand(controlPlaneOrigin())} />
                   </div>

@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 140 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 351 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 59 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 67 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 141 | `###` |
-| | | **954** | |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 353 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 60 | `###` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 111 | `####` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 142 | `###` |
+| | | **960** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 954 rather than the 493
+dividers. So the count is over **both** depths, and it says 960 rather than the 496
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -21035,6 +21035,142 @@ present rather than of a decision.
 **Status.** Reversed an earlier decision, in part. `.claude/rules/native-shell.md`
 is the area; Q1.639 and Q4.116 are the two halves that actually cost something.
 
+#### Q3.606 — Why the app bundle carries no gate screen
+
+**Question.** `register`, `confirm`, `forgot`, `reset` and `verify` were built into
+`dist` *and* into `dist-gate` — two copies of one sign-up form, two consent boxes,
+two paths for a one-time link, and both to be fixed in pairs. Should the app keep
+its copy?
+
+**Decision.** No, and the measurement is what makes it easy: **the app's copy was
+already unreachable except through two of its own buttons.** `packages/control-plane/src/app.ts`
+checks `GATE_PATHS` *before* the app's SPA fallback, so `/register` is served from
+`dist-gate` even on a checkout running both bundles — no HTTP request has ever
+rendered `dist`'s gate. Under the shell, `/confirm`, `/reset` and `/verify` had no
+way in at all: a mail client opens a link in a browser, and a Tauri window has no
+address bar. What `App.tsx`'s gate arm actually drew was the two screens `SignIn`
+created client-side with `navigate("/register")` and `navigate("/forgot")`.
+
+So the arm is gone and both doors are **anchors** at `controlPlaneOrigin()`. The
+mechanism costs nothing new: `interceptExternalLinks` already captures absolute
+`http`/`https` clicks and hands them to `host_open_external`, so the shell opens
+the system browser and a browser build performs an ordinary navigation to the
+gate. **Zero new bridge surface; the command census stays at fifteen.**
+
+Three properties, each a real failure and each asserted:
+
+- **Absolute, never root-relative.** `openableHref` parses with no base, so a
+  relative href answers `null`, the interceptor never fires, the webview
+  navigates, Tauri's asset protocol falls back to `index.html`, and the app
+  redraws the sign-in screen with a changed URL — a silent no-op.
+- ⚠ **`target="_blank"`, which is the one that is easy to lose.** This bundle is
+  also what runs inside Telegram, where `<authority>/register` is the **same
+  origin** — so a plain anchor is a real navigation that leaves the mini app's
+  document and destroys the launch fragment `telegram.ts` latches against, landing
+  on a gate bundle that has no Telegram wiring at all. `_blank` answers all three
+  surfaces at once.
+- **`controlPlaneOrigin()`, never `location.origin`**, which under the shell is
+  `tauri://localhost`.
+
+**`ui/gate/GateCard.tsx` stays and is the named exception**: `ForcedPasswordChange`
+renders one, and that screen is the app's by decision. So the rule asserted is *no
+gate **screen***, not *nothing from that directory* — and `webcheck` walks both
+entry points' import closures rather than grepping one file, following dynamic
+imports too, because a `lazy()` chunk is every bit as present in `dist` as the
+entry. The paired check that `GateCard` **is** in both closures is the
+non-vacuity control and the record of the exception, so nobody later "fixes" the
+first check by moving the file.
+
+`Route` keeps its `gate` arm and `screenOf` its case. Deleting them is the
+eight-edits-and-a-case-table `native-shell.md` argues against, and the parse is
+what keeps `parseGateScreen` and `parseLegalDoc` assertably disjoint. A typed
+`/register` falls through to `SignIn`, the answer every unknown path already gets.
+
+**Measured, 2026-09-16.** The app's entry chunk went from **380,235 bytes to
+300,549** — 79,686 off, 21%, on the path to a login form, which is the same
+argument the `SessionView`/`Settings` split already made and for the same
+population: a phone on LTE. And `grep -ho "Create an account\|Choose a
+password\|acceptedTerms\|register/confirm"` over the built assets returns
+nothing, which is the property rather than the bytes.
+
+#### Q3.607 — Where the server is changed from, once one has been chosen
+
+**Question.** `state.host.server === null` drew the picker. What draws it
+afterwards?
+
+**Decision — and it began as a defect rather than a feature request.**
+`setNativeServer` had **exactly one call site**, and `clearSession` deliberately
+leaves the server alone. So a server that had been chosen could not be changed
+from inside the app at all: signing out returned you to the same one, and the only
+remedy was deleting the shell's config file by hand. Somebody who typed a
+reachable but wrong address was stuck there.
+
+**The first screen is a welcome, and that is where the question lives.** On a
+machine where nothing has happened yet it greets, says in one sentence what a
+server is, and offers an address box already holding what the build suggests;
+**Continue** adopts it and the sign-in form is next.
+
+⚠ **For one draft it was not a screen at all**, the default having been written
+down at first launch (Q4.121): the address appeared instead as a line with a
+*Change* link under the sign-in form's lead sentence. The argument for putting it
+there was real — a custom scheme has no address bar, so `cp.ts`'s *"the credential
+goes to one origin"* rule has nowhere else to be stated — and the screen was still
+wrong. A login form is not where somebody learns which fleet they are on, and a
+URL with a verb beside it reads as a thing to deal with before typing a password.
+The rule it was defending is satisfied better by the welcome, which answers that
+question immediately before the password is asked for and has nothing else on it.
+
+⚠ **And the first cut of that welcome built a one-way door in a new place, which
+is the same defect this entry opens with.** `Continue` adopts an address; with
+nothing on the sign-in form pointing back, somebody who typed a reachable but
+*wrong* one arrived at a password box with no route to the screen that sets it —
+Settings → Account needs a session, and getting one needs the right server. So the
+form carries a leading `‹ Server`: it names its destination and never the address,
+it is drawn only in the shell, and it is `web-shell.md`'s kind of back control —
+a fixed destination drawn as a chevron rather than `history.back()`. It is
+disabled while a sign-in is in flight, because `App.tsx` tests `pickingServer`
+above `phase` and a login landing behind that screen would leave somebody on a
+form nobody asked for.
+
+**Two sentences on the server screen were true in one state and false in
+another**, which is the class of defect a screen with two entrances grows. *"That
+address is ours"* is nonsense where no default was compiled in — every build from
+this repository, where the box opens empty. *"Forgets this computer's sign-in"*
+describes nothing when the screen is reached by that back control, there being no
+session. Each is gated on the fact it claims, and both are asserted.
+
+The second entrance is a **Server address** row under Settings → Account,
+immediately above Sign out because changing servers *is* signing out plus a
+redirection. `state.pickingServer` carries it, so it rides the store the screen
+already subscribes to and adds no hook above `App.tsx`'s branching — where a
+recorded `Minified React error #310` says one must not appear.
+
+**It stays a phase, not a `Route` arm and not a `SettingsLeaf`.** Both are routes;
+`parseGateScreen` and `parseSettingsRoute` are shared with the web build, which
+would then parse and draw a screen that can do nothing where the server is the
+origin that served the page. As a phase, `App.tsx` returns it above `<AppShell>`,
+so the settings sheet is *replaced* rather than nested — which is what makes
+Cancel put it back exactly where it was, the URL never having moved.
+
+**Cancel exists if and only if there is a server to go back to.** That single
+condition is what keeps the first-run state uncancellable, and it is the reason
+`signInReady` did not have to learn about servers: there is no path to a sign-in
+form with no server, so the guard is structural rather than a second predicate
+answering a question one arm above already answers.
+
+**Three things the editing entrance made necessary that first run never did.** The
+field opens on the current value, because an editing screen that opens empty is
+one where the safe act is typing it again from memory. Adopting an origin equal to
+the one already held reloads nothing — `host_set_server` returns early on a match,
+writing no file and erasing no credential, so re-typing your own address would
+otherwise be a sign-out charged for a spelling. And the screen says what changing
+servers costs, in two sentences: the credential for the old origin is erased in
+the same act, and *"your account there is untouched"* — true because **nothing
+here ends the session on the old server**. No `DELETE /v1/me/sessions/current` is
+sent, deliberately: it is a network call to a server somebody is leaving, which is
+often *why* they are leaving, and it must not stand in front of a server change.
+The row stays in that server's Settings → Devices.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -23116,6 +23252,67 @@ origin, which is a property of the *request*, so `GET /v1/admin/settings` is the
 one caller that can pass it and `cpctl admin settings` gets it for free.
 
 **Status.** Current.
+
+### Q4.121 — Where a fork's default server comes from, and why it is seeded rather than answered
+
+**Question.** The app opens on a server picker, which is right for a fork and wrong
+for a build somebody ships to their own users: they have to type an address they
+were not given. Where does a default come from, given that this repository must
+name nobody's control plane?
+
+**Decision.** `option_env!("REEMOAT_DEFAULT_SERVER")` in `config.rs`, **empty
+here**, and `nativecheck` asserts no file in the repository sets it — the rule
+`signingIdentity: null` already follows, applied to *which fleet a binary joins*.
+Environment at **compile** time rather than run time, because a bundle has no
+environment to read when Finder, Explorer or a desktop entry launches it.
+`build.rs` carries `cargo:rerun-if-env-changed` for the name, without which
+`option_env!` is baked into a cached object file and a fork that corrects its
+address gets a binary silently keeping the previous one.
+
+⚠ **A suggestion for a form field, and written down by nothing — which is the
+third answer, both of the first two having been built and taken back out.**
+
+*A fallback inside `read_server`* was the first, and is the worse of the two. The
+keyring account *is* the origin (`credential#<origin>`), and the only thing that
+ever erases a stale one is `host_set_server` erasing `previous`. So a build
+shipped with default A is signed in to A, the next build ships default B, the app
+silently talks to B — nobody having chosen anything — and `credential#A` is left
+in the operating system's keyring with **no code path able to reach it**. That is
+precisely the failure the `credential#<origin>` scheme exists to make impossible.
+
+*Seeding* — writing the default at first launch — fixed that and shipped for one
+draft, where it turned out to be wrong for a reason that has nothing to do with
+keyrings: **it skipped the setup screen.** With `server` non-null from the first
+frame, the app opened on the sign-in form and the address appeared there as a line
+with a *Change* link. The app had chosen somebody's fleet and mentioned it
+afterwards, in the place they were about to type a password. Rejected on sight by
+the owner (2026-09-16).
+
+So: **two functions, two questions.** `read_server` is *which fleet is this
+installation on* and stays the only reader `lib.rs` calls; `default_server` is
+*what shall the box open on*, crosses the bridge as its own `defaultServer` field,
+and is written down by nothing. **Continue is the act that adopts an address** —
+until somebody presses it there is no server, no keyring account and no fleet.
+A build can change what is confirmed; it cannot change what is skipped.
+`nativecheck` holds the two apart, because folding them is the edit that passes
+every other assertion in that file.
+
+**Rejected: a literal in the source.** It is one deployment's address in every
+fork's binary, which `docs/NATIVE.md` already refuses for the update endpoint on
+the same grounds — *where the software comes from* and *which fleet it joins* are
+two questions.
+
+**Rejected: `import.meta.env` on the page.** `native.ts` refuses build flags in
+that layer, `host_cp`'s base has to live in the host process where the page cannot
+reach it, and it is the same string the keyring account is built from. One
+authority, as `normalize_origin` already is.
+
+**What it costs.** A malformed value is no default: the box opens empty and the
+screen asks, which is this file's posture everywhere — an app that cannot start
+because of a value one form re-enters is the worse failure.
+`a_compiled_default_is_an_address` is vacuous here and loud in a fork, because
+`option_env!` is evaluated in that fork's own build: a typo fails their
+`cargo test` rather than shipping as no default at all.
 
 ## Invariants — rules that were defects first
 
@@ -25308,6 +25505,43 @@ docblock at all and has one now.
 **Status.** Current
 
 
+#### Q5.116 — The page gives up its credential before the host's origin moves
+
+**The defect, which the screen's second entrance created rather than revealed.**
+`host_set_server` moves the base **in the host process**, so from the instant it
+returns every `host_cp` call goes to the *new* origin — while the page still holds
+the old fleet's bearer in memory, and `location.assign("/")` has not happened yet.
+In that window the four-second poll, `refreshConfig`, or any `cpFetch` already in
+flight would hand **server A's session token to a host somebody has just typed
+in**. While `ChooseServer` was only ever drawn at `server === null` there was no
+credential and no window; as a settings screen there is both.
+
+**The rule.** `cp.clearSession()` runs **before** `setNativeServer`, never after.
+It is local, instant, cannot fail, and erases `credential#<old origin>` through
+the same call `host_set_server` was about to make one line later.
+
+**Priced, because the safe-looking order is the wrong one.** Clearing first costs
+one sign-in in the case where `setNativeServer` then fails on a full disk:
+somebody is signed out of a server they are still pointed at. Clearing second
+costs a credential disclosure to a host nobody has verified. The second is not a
+trade.
+
+**Asserted as source text, comparing two indices**, because it is invisible
+otherwise — every other assertion about this screen stays green either way, the
+request succeeds, and the only trace is a token in a stranger's log.
+
+⚠ **And the fix has a second ordering inside it, which the first draft got
+wrong.** Saving the address you are *already* on must give nothing up.
+`host_set_server` returns early on a matching origin — writing no file, erasing no
+credential — so the obvious place for that check is after it. That is too late:
+`clearSession()` has already run, and re-typing your own server signs you out. The
+host's early return protects the file and the keyring; it cannot protect a
+decision this page took two lines earlier. So the no-op exit sits **above** the
+clear, on exact equality against the canonical value the host already answered —
+deliberately nothing cleverer, because a looser comparison would be a second
+normalizer on the page, and two spellings of one origin is two credential keys.
+Both indices are asserted.
+
 ## Measured behaviour of the agents and the tools
 
 ### Q6.1 — Why did `session_started` land in the log *after* the first `prompt` event?
@@ -26613,6 +26847,30 @@ keeps a `started_new_turn` arm anyway, reported through `onWarning`, for an
 adapter that ignores the opt-in.
 
 **Status.** Current
+
+### Q6.108 — Closing the last window quits, on every platform including macOS
+
+**Measured by reading `tauri-runtime-wry` 2.11.4 rather than by running anything**,
+because the source is unambiguous: on `TaoWindowEvent::Destroyed`, when the window
+map is empty, it emits `RunEvent::ExitRequested` and — with nothing calling
+`prevent_exit()` — sets `ControlFlow::Exit`. There is no platform arm. Tauri does
+not implement AppKit's convention that an app outlives its windows.
+
+**What this corrects.** `lib.rs` hung the daemon's teardown on `RunEvent::Exit`
+and explained the choice as *"closing the window on macOS is not quitting"*. The
+code was right; the reason was a fact about AppKit that this framework does not
+honour. Per `CLAUDE.md`'s rule about the comment layer — what may still go is a
+comment that is *wrong* — the sentence is replaced rather than kept.
+
+**What follows for the product, and it is the reverse of the usual direction
+here.** ⌘W quits the app and takes its daemon with it, which is exactly what a
+Windows or Linux user expects and exactly what a Mac user does not. So the current
+behaviour is the *portable* one, and the macOS convention — stay running, come
+back from the dock, with `Reopen` handled — is a **deliberate non-goal** beside
+"no menu bar, no tray, no notifications" rather than something anybody had
+decided. Reversing it is not one line: it needs `prevent_exit()`, a `Reopen`
+handler, and an answer to whether the daemon survives a windowless app, which is a
+product question rather than a platform one.
 
 ## Open questions and deliberate non-goals
 
@@ -31792,3 +32050,39 @@ on `SESSION_SCOPED_ENV`'s list.
 
 **Status.** Fixed. The empty `unknown` Keychain item on an affected machine is
 inert but stays until deleted by hand.
+### Q7.142 — What is still not decided about the server address
+
+**No relay field, and it is refused by construction rather than deferred.** The
+obvious companion to an authority field is a relay one, and it is wrong: a relay is
+a property of a **machine**, not of a person. A daemon receives it once at
+enrollment (`identity.relay_url`) and never asks again; a client learns it
+**per machine** from `POST /v1/tokens`, resolved through `relay_tunnels.relay_id`
+→ `REEMOAT_CP_RELAY_URLS`, so two machines of one account legitimately sit on
+different relays. One field on a settings screen is one value for N machines.
+`native.ts` already said so — *"Not the relay, and never derived from this… a
+client that derived one from the other would break the first fleet that moved its
+relay"* — and this records that the screen was designed against it rather than
+having forgotten. If a per-machine override is ever wanted, its place is
+Settings → Machines → *that machine*, beside the "This device" switch.
+
+**No way back to the compiled default.** Once somebody saves an address the file
+wins for ever, which is the whole point of seeding (Q4.121) and also means there
+is no "reset to the shipped server" control. Deleting `server` from the shell's
+config is the remedy, and nothing surfaces it. Left open rather than built: the
+population that needs it is a fork's users on a build whose default moved, and
+nobody has one yet.
+
+**No deep-link handler, and none is needed.** `/confirm`, `/reset` and `/verify`
+are opened by a mail client in a browser and land on the control plane's own gate.
+`readPastedGateToken` was built for the case where an instance serves no web UI,
+and it works identically in a browser — so there is no URL-scheme registration, no
+Tauri plugin and no second arrival path to secure. `paseo` registers a `paseo:`
+scheme for *agent* deep links, which is a different feature from account recovery.
+
+**Unmeasured.** Nobody has switched servers on a real machine and watched
+`credential#<old origin>` disappear from the OS keyring. The Rust key *shape* is
+unit-tested and the erase is asserted at the call site, but writing and reading a
+real entry needs an unlocked login keychain, which a non-interactive shell does
+not have — the same limit every other keychain item in `credential.rs` has.
+`docs/NATIVE.md`'s hand checklist is where it happens.
+

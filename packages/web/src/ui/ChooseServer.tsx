@@ -1,10 +1,20 @@
 import { useState, type FormEvent, type ReactNode } from "react";
+import * as cp from "../cp";
 import { parseInstanceConfig } from "../instance";
 import { nativeBoot, probeServer, setNativeServer } from "../native";
+import { store } from "../store";
 import { Button, FIELD, SETTINGS_HEADING } from "./bits";
 
 /**
  * Which Reemoat this application talks to.
+ *
+ * **Two entrances, and neither is a URL.** `state.host.server === null` is first
+ * run; `state.pickingServer` is the control on the sign-in screen and the row
+ * under Settings → Account. The second one is new ground rather than polish:
+ * `setNativeServer` had exactly one call site and `clearSession` deliberately
+ * leaves the server alone, so **a server that had been chosen could not be
+ * changed from inside the app at all** — signing out returned you to the same
+ * one, and the only remedy was deleting the shell's config file by hand.
  *
  * **Reached by state, not by a URL**, which is why it is filed beside `SignIn.tsx`
  * rather than in `ui/gate/`. `ForcedPasswordChange` is the precedent and the
@@ -74,7 +84,41 @@ async function probe(address: string): Promise<Found> {
 }
 
 export function ChooseServer(): ReactNode {
-  const [address, setAddress] = useState("");
+  /*
+   * ⚠ **The field opens on the current value, and Cancel exists only where there
+   * is one.** Those two lines are what turn a first-run screen into an editing
+   * one, and the second is load-bearing beyond politeness: with no server chosen
+   * there is nothing to go back *to*, so the screen offers no way off — which is
+   * what keeps "a sign-in form is never drawn without a server" true by
+   * construction, and is why `signInReady` did not have to learn about servers.
+   *
+   * Read from `nativeBoot()` rather than taken as a prop, matching `durable`
+   * below and for its reason: this screen exists only in the shell, and the shell
+   * has answered by the time anything draws it.
+   */
+  const current = nativeBoot()?.server ?? null;
+  const editing = current !== null;
+  /*
+   * ⚠ **The field opens on a suggestion on first run and on the truth when
+   * editing, and those are two different values.** `defaultServer` is what this
+   * build was compiled to suggest; `server` is what this installation is on.
+   * Folding them into one — writing the default down at first launch — is what
+   * the first draft did, and it skipped this screen entirely: the app picked
+   * somebody's fleet and told them afterwards, on the sign-in screen, in a line
+   * nobody asked for.
+   */
+  const suggested = nativeBoot()?.defaultServer ?? null;
+  /*
+   * ⚠ **Whether there is a sign-in to lose, which is not the same as whether
+   * there is a server.** This screen is reached from Settings with a live session
+   * *and* from the back control on the sign-in form with none — and in the second
+   * state the sentence about forgetting this computer's sign-in describes
+   * something that does not exist. Read at render from the module that owns it;
+   * `cp.currentCredential()` is synchronous and is the same value `cpFetch`
+   * compares by identity.
+   */
+  const signedIn = cp.currentCredential() !== null;
+  const [address, setAddress] = useState(current ?? suggested ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const durable = nativeBoot()?.durable !== false;
@@ -83,6 +127,30 @@ export function ChooseServer(): ReactNode {
     event.preventDefault();
     const typed = address.trim();
     if (busy || typed.length === 0) return;
+    /*
+     * ⚠ **Nothing moved, so nothing is given up — and this has to be decided
+     * *before* the credential is cleared, not after.**
+     *
+     * `host_set_server` returns early on an origin equal to the one it holds, so
+     * the obvious place for this check is after it. That is wrong here, and it
+     * was written that way first: by then `clearSession()` has already run, so
+     * saving the address you are already on would sign you out. The host's early
+     * return protects the file and the keyring; it cannot protect a decision this
+     * page took two lines earlier.
+     *
+     * **Exact equality against the canonical value, and deliberately nothing
+     * cleverer.** `current` came from the host already normalized, and the field
+     * is seeded with it, so the no-op this exists for is a literal match. A looser
+     * comparison would be a second normalizer on the page — which is the one thing
+     * `native-shell.md` forbids, two spellings of one origin being two credential
+     * keys. Getting it wrong in the safe direction (`app.example` against
+     * `https://app.example`) costs the full path and one sign-in; there is no
+     * unsafe direction, because two different strings cannot compare equal.
+     */
+    if (typed === current) {
+      store.cancelServerPick();
+      return;
+    }
     setBusy(true);
     setError(null);
     void (async () => {
@@ -97,6 +165,27 @@ export function ChooseServer(): ReactNode {
         setBusy(false);
         return;
       }
+      /*
+       * ⚠ **The credential goes before the host's origin moves, and this ordering
+       * is the whole of why the editing entrance is safe.**
+       *
+       * `host_set_server` moves the base **in the host process**, so from the
+       * instant it returns every `host_cp` call goes to the *new* origin — while
+       * this page still holds the old fleet's bearer in memory. The four-second
+       * poll, `refreshConfig`, or any `cpFetch` already in flight would then hand
+       * server A's session token to a host somebody has just typed in. While this
+       * screen was only ever drawn at `server === null` there was no credential
+       * and no window; as a settings screen there is both.
+       *
+       * `clearSession()` is local, instant and cannot fail, and it erases
+       * `credential#<old origin>` through the same call `host_set_server` was
+       * about to make one line later. What it costs is that a `setNativeServer`
+       * failing on a full disk leaves somebody signed out of a server they are
+       * still pointed at — one sign-in. What the other order costs is a
+       * credential disclosure to a host nobody has verified. Priced, and stated
+       * here because the safe-looking order is the wrong one.
+       */
+      if (cp.currentCredential() !== null) cp.clearSession();
       try {
         await setNativeServer(typed);
       } catch (cause: unknown) {
@@ -104,6 +193,16 @@ export function ChooseServer(): ReactNode {
         setBusy(false);
         return;
       }
+      /*
+       * **The reload is unconditional from here**, including where the host
+       * answers the origin it already held. That happens only when somebody typed
+       * a different *spelling* of the server they are on — the exact-equality exit
+       * at the top caught the literal case — and by this line the credential is
+       * gone. Cancelling would put them back on a screen behind a session that no
+       * longer exists; reloading lands them on the sign-in form for the server
+       * they are in fact still pointed at, which is honest and is what the rest of
+       * this function already produces.
+       */
       /*
        * ⚠ **A reload rather than an in-memory unwind**, and `signOut` takes the same
        * path for the same reason: every machine connection, every minted token, every
@@ -125,8 +224,20 @@ export function ChooseServer(): ReactNode {
   return (
     <div className="flex min-h-full items-center justify-center p-6">
       <div className="w-full max-w-sm">
-        <h1 className="text-xl font-semibold">Reemoat</h1>
-        <p className="mt-1 text-sm text-muted">Which server should this connect to?</p>
+        {/*
+          ⚠ **Two arrivals, two headings, and the first one is a *welcome* rather
+          than a question.** This is the screen somebody sees before anything else
+          in the product, on a machine where nothing has happened yet — so it
+          greets, says what is about to happen, and asks one thing. Reached from
+          Settings it is the opposite: a change to something that already works,
+          where a welcome would read as having forgotten who you are.
+        */}
+        <h1 className="text-xl font-semibold">{editing ? "Server" : "Welcome to Reemoat"}</h1>
+        <p className="mt-1 text-sm text-muted">
+          {editing
+            ? "Change which server this connects to."
+            : "One thing to set up, and then you are in. Reemoat keeps your account and your machines on a server — this one, or your own."}
+        </p>
 
         <form onSubmit={submit}>
           <label htmlFor="server-address" className={`mt-4 block ${SETTINGS_HEADING}`}>
@@ -147,14 +258,60 @@ export function ChooseServer(): ReactNode {
             enterKeyHint="go"
             inputMode="url"
             placeholder="app.reemoat.com"
+            /* The first screen of the product is one field; focusing it is the
+               whole of what somebody is here to do. **Not when editing**: that
+               arrival replaces a sheet that has already placed focus, and taking
+               it is the defect `Sheet`'s own `[screen]` effect exists to avoid. */
+            autoFocus={!editing}
             className={field}
           />
 
           {error !== null && <p className="mt-2 text-sm text-danger">{error}</p>}
 
-          <Button type="submit" tone="primary" disabled={busy || address.trim().length === 0} className="mt-4 w-full">
-            {busy ? "Checking…" : "Continue"}
-          </Button>
+          {/*
+            ⚠ **What changing servers costs, said before rather than discovered
+            after.** `host_set_server` erases `credential#<previous>` in the same
+            act that adopts the new one, and `submit` clears this page's copy one
+            line earlier — so pointing somewhere else is signing out of here.
+
+            The second sentence is the half that stops the first from reading as
+            a threat, and it is exactly true: **nothing here ends the session on
+            the old server.** No `DELETE /v1/me/sessions/current` is sent, and
+            deliberately not — it is a network call to a server somebody is
+            leaving, which is often the reason they are leaving, and it must not
+            stand in front of a server change. The row stays in that server's
+            Settings → Devices, where its owner can retire it.
+          */}
+          {editing && signedIn && (
+            <p className="mt-3 text-sm text-muted">
+              Signing in to a different server forgets this computer&apos;s sign-in for{" "}
+              <span className="font-mono text-fg">{current}</span>. Your account there is untouched.
+            </p>
+          )}
+
+          {/*
+            Cancel last, which is the ordering rule `TwoStep` already argues on
+            every settings row: both controls lay out in one box, so the last
+            child occupies the same pixels whichever set is drawn, and a second
+            tap aimed at a control that looked inert lands on the way out rather
+            than on the act. `plain`, never `primary` — the affirmative here is
+            adopting a server, and two primaries is no primary.
+          */}
+          <div className="mt-4 flex gap-2">
+            <Button
+              type="submit"
+              tone="primary"
+              disabled={busy || address.trim().length === 0}
+              className="flex-1"
+            >
+              {busy ? "Checking…" : editing ? "Save" : "Continue"}
+            </Button>
+            {editing && (
+              <Button type="button" onClick={() => store.cancelServerPick()} disabled={busy}>
+                Cancel
+              </Button>
+            )}
+          </div>
         </form>
 
         {/*
@@ -164,10 +321,26 @@ export function ChooseServer(): ReactNode {
           own; the author runs one for people who would rather not.
         */}
         <div className="mt-8 space-y-2 text-sm text-muted">
-          <p>
-            A control plane holds your account and the machines you have added. Run one yourself, or use one somebody
-            runs for you.
-          </p>
+          {/*
+            ⚠ **What a server is used to be said here and is now in the lead
+            paragraph**, because on a welcome screen the explanation belongs above
+            the field rather than below the button. What is left here is the one
+            thing the lead cannot carry: that running your own is a real option
+            and not a footnote. First run only — somebody who arrived from
+            Settings has a working server and is not asking what one is.
+          */}
+          {!editing &&
+            (suggested === null ? (
+              <p>
+                A server holds your account and the machines you add. Use one somebody runs for you, or run your own
+                with <span className="font-mono">install.sh control-plane</span>.
+              </p>
+            ) : (
+              <p>
+                That address is ours. Run your own with <span className="font-mono">install.sh control-plane</span> and
+                point this at it instead.
+              </p>
+            ))}
           {/*
             ⚠ **The same sentence `cp.ts` already has for a browser with storage
             disabled, because it is the same state.** There a private window has no

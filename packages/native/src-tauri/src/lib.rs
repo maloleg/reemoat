@@ -145,8 +145,23 @@ pub fn run() {
              * plugin, agent and upload paths lazily, so the first one needed is an
              * `ENOENT` inside a daemon that goes on answering 200.
              *
-             * `RunEvent::Exit` rather than a window close, because closing the
-             * window on macOS is not quitting.
+             * `RunEvent::Exit` rather than a window-close handler, and the
+             * reason written here for four releases was wrong.
+             *
+             * ⚠ It said *"closing the window on macOS is not quitting"*. That is
+             * a fact about **AppKit**, which Tauri does not implement: measured
+             * in `tauri-runtime-wry`, destroying the last window emits
+             * `ExitRequested` and, with nothing calling `prevent_exit()`, sets
+             * `ControlFlow::Exit` — on every platform, macOS included. So ⌘W
+             * quits this app and takes its daemon with it, which is what
+             * Windows and Linux users expect and what a Mac user does not.
+             *
+             * The code is right either way and the event is still the one to
+             * hang this on: it is the single point every quit passes through,
+             * whether it came from a window close, the menu, or `AppHandle::exit`.
+             * What changes is that the macOS convention — stay running, come back
+             * from the dock — is a **deliberate non-goal** beside "no menu bar, no
+             * tray" rather than something this comment claimed was already true.
              */
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Some(host) = handle.try_state::<commands::Host>() {

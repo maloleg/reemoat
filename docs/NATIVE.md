@@ -13,6 +13,27 @@ is the operator's document and this is not in it for that reason.
 `.claude/rules/native-shell.md` is the document for *changing* this. This one is for
 building and shipping it.
 
+## What runs where
+
+**This app is two things, and conflating them is the main source of confusion
+here.** It is a **client** — it talks to a control plane, a relay and daemons —
+and it is a **daemon host**, carrying a Node runtime and a copy of `src/` so it
+can run a daemon on the computer it is installed on.
+
+| | Client | Daemon host |
+|---|---|---|
+| macOS | built, measured, shipping | built, measured, shipping |
+| Linux | compiles; the bundle layout is unverified | staging works; see *Open measurements* |
+| Windows | the near-term goal | **refused**, and the refusal is in `build-daemon.mjs` by name |
+
+Windows is refused as a *host* rather than merely unwritten: there is no way to
+stop a bundled daemon cleanly there — `TerminateProcess` gives `scripts/daemon.ts`
+no chance at its 20-second close, so every turn in flight is interrupted and every
+pending approval dropped — and `deploy/install.sh` is a shell script with no
+supervisor to install into. `deploy/bootstrap.sh`'s `detect_platform` draws the
+same line for the shell installer and is the authority `AGENT_HOST_OS` is held
+against.
+
 ## What it adds, and what it deliberately does not
 
 Five things a webview cannot do for itself:
@@ -48,6 +69,28 @@ pnpm native:build                     # a .app — not a .dmg, see below
 pnpm nativecheck                      # offline, no cargo, part of `pnpm check`
 cd packages/native/src-tauri && cargo test && cargo clippy -- -D warnings
 ```
+
+### Pointing a build at a server by default
+
+```bash
+REEMOAT_DEFAULT_SERVER=https://app.example pnpm native:build
+```
+
+**Unset in this repository, deliberately** — a fork inherits no address, which is
+`signingIdentity: null`'s rule applied to the question *which fleet does this
+binary join*. `nativecheck` asserts no file here sets it.
+
+It is baked in by `option_env!` and is therefore **not a secret**: it ends up in
+the binary as a string. `build.rs` carries `cargo:rerun-if-env-changed` for the
+name, without which cargo has no reason to recompile when the value moves.
+
+⚠ **It is a suggestion for the welcome screen's field and is written down by
+nothing.** The first screen is a welcome either way; with a default compiled in,
+its address box opens already holding it, and **Continue** is what adopts it.
+Setting this variable therefore changes what somebody confirms, never what they
+skip — a build cannot decide which fleet an installation joins. A malformed value
+is no default: the box opens empty and the screen asks. A fork's typo fails its
+own `cargo test` rather than shipping.
 
 ⚠ **The separate install is not a mistake.** `packages/native` sits under
 `packages/` and is **excluded from the pnpm workspace** — the three things that
@@ -100,8 +143,8 @@ happens on a machine with a daemon installed.
 | Platform | Needs |
 |---|---|
 | macOS (desktop) | Xcode **Command Line Tools** and a Rust toolchain. That is all: the linker, the SDK and `codesign` all ship in CLT, and `xcodebuild` is only needed for iOS |
-| Windows | Rust, the MSVC build tools, and WebView2 (present on Windows 11) |
-| Linux | Rust plus `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`, `libsoup-3.0-dev`, `patchelf` |
+| Windows | Rust, the MSVC build tools, and WebView2 (present on Windows 11). A **client** build; the daemon host is refused — see *What runs where* |
+| Linux | Rust plus `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`, `libsoup-3.0-dev`, `patchelf`, and — ⚠ missing from this table until 2026-09-16 — `libssl-dev` and `pkg-config`, because `reqwest` takes `default-tls`, which is Security.framework on macOS and **OpenSSL** here |
 | iOS | full **Xcode** *and* `rustup` |
 | Android | Android SDK + NDK (`ANDROID_HOME`, `NDK_HOME`) *and* `rustup` |
 
@@ -215,8 +258,13 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
 
 1. `pnpm cp`, then `pnpm web` — sign in at `127.0.0.1:5173` first, so a native
    regression is distinguishable from a broken control plane.
-2. `pnpm native:build`, run the app. The server picker appears; a typo is refused
-   with a sentence and leaves you on the picker.
+2. `pnpm native:build`, run the app. The first screen is the **welcome** — a
+   greeting, one sentence about what a server is, and an address box. This build
+   compiles no default, so the box is empty; a typo is refused with a sentence and
+   leaves you here, and there is no Cancel, there being nothing to go back to.
+   Build once more with `REEMOAT_DEFAULT_SERVER` set: the same screen, with the
+   box already holding that address. **Continue**, and the sign-in form is next —
+   which names no server, that question having just been answered.
 3. Sign in. Then, in the webview inspector: `localStorage.length === 0`. **That is
    the one property no offline assertion can reach.**
 4. The empty-fleet screen's install command names **the server you chose**, not
@@ -245,11 +293,69 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
     answers *item could not be found*.
 14. Point the picker at a second control plane, sign in, quit, relaunch, switch
     back. Each server keeps its own credential.
+15. On the sign-in screen, tap **‹ Server**. The welcome screen comes back with
+    the current address in the box and a **Cancel** that returns here — this is
+    the only route back for somebody who confirmed a reachable but wrong address,
+    Settings needing a session they cannot get. Then tap **Create one**. The **system browser** opens
+    `<server>/register` — not a window inside the app, and the app's own window is
+    unchanged behind it. Same for **Forgot password?**.
+16. Signed in: Settings → Account → **Server address** → Change. The screen
+    replaces the whole sheet, opens on the current address and offers **Cancel**,
+    which returns to the settings sheet still open at the same section. Submit the
+    address unchanged: nothing reloads and nothing is signed out. Then change it
+    for real and confirm the app reloads
+    signed out, and that
+    `security find-generic-password -s com.reemoat.app -a 'credential#<the first origin>'`
+    answers *item could not be found* while the second server's entry is there.
+17. The app carries no sign-up form at all:
+    `grep -c "Create an account" packages/web/dist/assets/*.js` answers `0`.
 
 ## Open measurements
 
 Recorded here rather than discovered, in the column this repository keeps them in:
 
+- **The Linux bundle layout, and whether it reaches the staged runtime.** Read off
+  `tauri-utils`: a `.deb` or AppImage puts resources at `/usr/lib/<productName>/`
+  while the executable is at `/usr/bin/<productName>`. Two things follow, and
+  neither is fixed here — fixing them blind on a macOS checkout is how a guess
+  becomes a measurement. `Payload::locate` takes `node` from
+  `exe.parent()?.join("node")`, which there is `/usr/bin/node` — the
+  distribution's. And `placeRuntime`'s shim probes `../../../../MacOS/node` and
+  `../../../node`, neither of which resolves from
+  `/usr/lib/Reemoat/daemon/node_modules/.bin`, so it falls to `exec node "$@"`
+  with the payload's own `.bin` first on PATH — i.e. it re-execs itself.
+  `tauri build --no-bundle` touches neither, so CI would stay green over both.
+  The instrument: `tauri build --bundles deb` on a Linux box, install it,
+  `ls -l /usr/bin/node`, then `node_modules/.bin/node --version` from inside the
+  installed payload.
+- **What Windows staging costs, when it is wanted.** Five items, not the three the
+  refusal used to name: a `zip` rather than a tarball (`tar -xf` reads both, so
+  not a new dependency); `node.exe` at the archive root rather than under `bin/`;
+  `npm-cli.js` at the root rather than under `lib/node_modules`; an `.exe` suffix
+  on the staged external binary; and `.cmd` shims — npm writes real files rather
+  than symlinks there, so `regenerateShims`' symlink loop finds nothing to
+  rewrite, and `deploy/agents.sh`'s `$(dirname -- "$(command -v npm)")/node` is a
+  shell idiom with no Windows meaning. None of it is worth doing before a daemon
+  can be stopped cleanly there.
+- **A graceful stop with no `SIGTERM`.** Four options were weighed and the shape
+  that wins is an **in-band request over a channel the parent already owns**:
+  `daemon.rs` spawns with `.stdin(Stdio::null())`, so make it a pipe, have the
+  supervisor write a line, and have `scripts/daemon.ts` treat it as the shutdown
+  it already knows how to do. No signal, no port, no auth, no new route, and the
+  channel is private to the parent by construction. It must act on the **line**
+  rather than on EOF, because `pnpm daemon < /dev/null` is also EOF. Rejected:
+  `GenerateConsoleCtrlEvent` (the shipped app sets `windows_subsystem = "windows"`
+  and therefore has no console, and it delivers `SIGBREAK` rather than `SIGTERM`);
+  a job object (`TerminateProcess` for every member — it solves orphaning, not
+  gracefulness); and an HTTP route (every daemon route needs a token whose `aud`
+  is the machine, and at `RunEvent::Exit` there is no page left to mint one).
+- **A Linux CI leg**, which is cheap and is deliberately not here yet. `cargo fmt`,
+  `clippy`, `cargo test` and `tauri build --no-bundle` on `ubuntu-latest` would be
+  the first time five things are compiled at all: `keyring`'s secret-service
+  backend and its zbus tree, `reqwest`'s native-tls against OpenSSL, wry against
+  WebKitGTK, the capability ACL on a second platform, and `build-daemon.mjs`'s
+  Linux staging path end to end. It would **not** catch the bundle layout above.
+  It is held with the rest of the build work rather than because it is hard.
 - **An `http://` control plane with a `ws://` relay.** `tauri://localhost` is a
   secure context, so mixed-content rules may refuse the relay legs — which are
   direct webview calls, not proxied. The failure would be a signed-in app whose

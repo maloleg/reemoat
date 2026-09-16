@@ -260,8 +260,15 @@ jobs:
   # The native shell, compiled. Its own job for the two reasons the `image` job
   # gives — it is not offline-in-one-process (cargo fetches crates) and it is
   # minutes rather than seconds — plus one of its own: it is the **first non-Linux
-  # runner in this repository**, because the platform this app is primarily built
-  # for is macOS and a Linux compile would not exercise the Apple bundle at all.
+  # runner in this repository**, and the only one that exercises the Apple bundle.
+  #
+  # ⚠ **It is not "the platform this app is primarily built for", which is what
+  # this comment used to say.** The app is a client on macOS, Windows and Linux;
+  # what is macOS-only is *this runner*, and the sentence was the CI file's own
+  # copy of the assumption. `docs/NATIVE.md`'s *What runs where* is the real
+  # answer, and its *Open measurements* carries what a `ubuntu-latest` leg would
+  # compile for the first time — five things this job cannot reach — and why that
+  # leg is held with the rest of the build work rather than added here.
   #
   # It does not `needs: check`. What it catches that nothing else can is a
   # capability file naming a permission that does not exist — `tauri-build`

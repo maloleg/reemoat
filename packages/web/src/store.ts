@@ -19,6 +19,7 @@ import {
   startLocalDaemon,
   type NativeBoot,
 } from "./native";
+import { hostPlatform, localNetworkDetail } from "./platform";
 import { mayAddMachine } from "./quota";
 import { mergeOptimistic } from "./sessionOrder";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
@@ -886,11 +887,6 @@ const FOREIGN_ENV_DETAIL =
   "so they were left alone. Sign in to that server instead, or move ~/.reemoat/daemon.env aside to set " +
   "this computer up here.";
 
-/** Said when macOS is refusing this app the network its server is on. */
-const LOCAL_NETWORK_DETAIL =
-  "macOS is not letting Reemoat reach servers on this network, so the daemon could not sign in. " +
-  "Allow it under System Settings → Privacy & Security → Local Network, then reopen Reemoat.";
-
 /** Said when another daemon holds this computer and ours could not start. */
 const ANOTHER_DAEMON_DETAIL =
   "Another Reemoat daemon is already running on this computer, so the one Reemoat started could not. " +
@@ -1010,6 +1006,20 @@ export interface AppState {
    * branch is the only place it is read.
    */
   host: NativeBoot | null;
+  /**
+   * Whether somebody has asked to change which control plane this talks to.
+   *
+   * **`false` in a browser for ever**, exactly as {@link AppState.host} is `null`
+   * there: the server *is* the origin that served the page, so there is nothing
+   * to change and no control that offers to.
+   *
+   * State rather than a route, which is `ChooseServer`'s whole argument — a
+   * `Route` arm would be parsed by the web build too, offering a screen that can
+   * do nothing there, and would take a silent new arm in three switches. It lives
+   * here rather than in the component because two entrances reach it: the control
+   * on the sign-in screen, and Settings → Account once somebody is signed in.
+   */
+  pickingServer: boolean;
   /**
    * Which machine, if any, is the computer this app is running on.
    *
@@ -1160,6 +1170,7 @@ class AppStore implements StreamSink {
     phase: cp.currentCredential() === null && !nativeHydrating() ? "signed_out" : "loading",
     setup: null,
     host: null,
+    pickingServer: false,
     localMachineId: null,
     me: null,
     machines: [],
@@ -1720,6 +1731,12 @@ class AppStore implements StreamSink {
        * the one measured on this Mac: a leftover `deploy/install.sh` LaunchAgent
        * holding `reemoat.db`, so our child loses `claimDaemonLock` and dies while
        * its daemon stays up and announced.
+       *
+       * ⚠ **The LaunchAgent is the macOS instance of this, not the whole of it.**
+       * `managed_unit` in `daemon.rs` looks in `~/.config/systemd/user` as well,
+       * so the same failure arrives on Linux through a user unit — and
+       * `managed_unit_detail` already answers it with `systemctl --user disable
+       * --now`. The sentence below names neither, deliberately.
        */
       if (state.status === "foreign") {
         this.patch({ setup: { step: "failed", said: ANOTHER_DAEMON_DETAIL } });
@@ -1736,7 +1753,13 @@ class AppStore implements StreamSink {
          * process's own status, not its words.
          */
         /*
-         * ⚠ **The one failure whose remedy is a switch rather than a wait.**
+         * ⚠ **The one failure whose remedy is a switch rather than a wait — on
+         * one platform.** The *classification* is errno-based and therefore
+         * platform-neutral (`localNetworkBlocked`, `src/enroll.ts`), so this exit
+         * arrives on any Unix; the *remedy* below has been measured on exactly
+         * one, which is why `platform.ts` chooses the sentence and only its macOS
+         * arm names an operating system.
+         *
          * Measured 2026-09-15 on macOS 15: the daemon is a child of this app, so
          * this app is the responsible process for Local Network Privacy — and
          * until that is granted, a connect to a control plane on a private subnet
@@ -1747,7 +1770,17 @@ class AppStore implements StreamSink {
          * everything else it printed rather than appended to this sentence.
          */
         if (state.exitCode === DAEMON_EXIT.localNetworkBlocked) {
-          this.patch({ setup: { step: "failed", said: `${LOCAL_NETWORK_DETAIL} ${LOGS_POINTER}` } });
+          /*
+           * ⚠ **The sentence is chosen by platform because the classifier is
+           * not.** `localNetworkBlocked` in `src/enroll.ts` keys on an errno to a
+           * private address, so this exit arrives on any Unix — while the string
+           * that used to be here named macOS's Local Network Privacy pane
+           * unconditionally, which on a Linux box behind a firewall is a remedy
+           * pointing at a screen that does not exist. `platform.ts` holds all
+           * four arms and the argument for why only one of them names an OS.
+           */
+          const said = `${localNetworkDetail(hostPlatform(this.snapshot.host?.platform))} ${LOGS_POINTER}`;
+          this.patch({ setup: { step: "failed", said } });
           return;
         }
         if (!retried && state.exitCode === DAEMON_EXIT.codeRefused) {
@@ -2178,6 +2211,31 @@ class AppStore implements StreamSink {
   async signOut(): Promise<void> {
     await cp.logout();
     window.location.href = "/";
+  }
+
+  /**
+   * Open the screen that says which control plane this installation talks to.
+   *
+   * Two callers and one of them is new ground: the sign-in screen's own control,
+   * and Settings → Account for somebody already signed in. Before this there was
+   * exactly one way to reach `ChooseServer` — `state.host.server === null` — so a
+   * server that had been chosen **could not be changed from inside the app at
+   * all**, and signing out did not help, `clearSession` deliberately leaving the
+   * server alone. The only remedy was deleting the shell's config file by hand.
+   *
+   * **Nothing is torn down here, and that is what makes Cancel honest.** The poll
+   * keeps running, the sockets stay up, the transcript stays where it was; this
+   * only decides which screen is drawn. Everything is given up at the moment of
+   * *adoption*, immediately before the reload, which is `ChooseServer`'s own
+   * argument applied to a second entrance.
+   */
+  pickServer(): void {
+    this.patch({ pickingServer: true });
+  }
+
+  /** Back to whatever was on screen. See {@link AppStore.pickServer}. */
+  cancelServerPick(): void {
+    this.patch({ pickingServer: false });
   }
 
   /* ---------------------------------------------------------------- *

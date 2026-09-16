@@ -117,7 +117,7 @@ export const TERMS_EN: LegalDocument = {
             "A machine running macOS or Linux with Node.js version 24 or newer, which you either provide or rent from us.",
             "The agent command-line tools themselves, installed on that machine. The daemon installs and updates them from each vendor's own distribution channel unless you switch that off.",
             "Your own account with at least one agent vendor, or an inference provider key.",
-            "A modern browser, or Telegram, for the supervising screen. There is no desktop application.",
+            "A modern browser, Telegram, or the desktop app, for the supervising screen.",
             "An outbound network connection from the machine to our relay. There is no inbound connection to your machine and no port to open.",
           ],
         },

@@ -102,6 +102,25 @@ export function enrollmentLines(controlPlaneUrl: string, code: string): string {
  * `SOURCE_URL` and the release asset's name; `webcheck` pins this function. Two
  * strings on purpose, and neither may quietly become the other.
  */
+/**
+ * The machines this command can be run on, as a clause a screen puts beside it.
+ *
+ * ⚠ **This is about the *other* computer, and that is why it must never branch on
+ * what this client is running on.** A Windows client adding a Linux machine is the
+ * ordinary case — the app is a client on three platforms and a daemon host on the
+ * ones `deploy/bootstrap.sh` can install a supervisor into. Reading
+ * `nativeBoot()?.platform` here would be exactly the conflation this constant
+ * exists to end.
+ *
+ * `detect_platform` in `deploy/bootstrap.sh` is the authority: it accepts `Darwin`
+ * and `Linux` and refuses everything else with a sentence. There is deliberately
+ * **no Windows equivalent** — `install.sh` is a shell script and there is no
+ * supervisor there to install into — so the honest thing is for the screen to say
+ * which machines the command is for rather than print a `curl` into a PowerShell
+ * prompt. `webcheck` holds this string and that script's cases to each other.
+ */
+export const AGENT_HOST_OS = "macOS or Linux";
+
 export function installCommand(controlPlaneUrl: string): string {
   // One trailing slash, removed once. `location.origin` never carries one, but
   // this also takes a URL off the wire (`controlPlaneUrl` on a created machine

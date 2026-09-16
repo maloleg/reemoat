@@ -12,6 +12,7 @@ import * as cp from "../../cp";
 import { agentWasRecorded, describeAgent, deviceLine } from "../../device";
 import { errorText } from "../../http";
 import { mailUsable, type InstanceConfig } from "../../instance";
+import { nativeBoot } from "../../native";
 import { navigate } from "../../router";
 import { settingsLeafPath, settingsPath } from "../../settings";
 import { store } from "../../store";
@@ -131,6 +132,8 @@ export function AccountSection({
        * "On the server too" rather than "everywhere": other devices keep their
        * sign-ins, and the Devices list above is where those are ended.
        */}
+      <ServerRow />
+
       <section className={SETTINGS_SECTION}>
         <h2 className={SETTINGS_HEADING}>Sign out</h2>
         <p className="mt-1 text-xs text-muted">Ends this sign-in on the server too.</p>
@@ -193,6 +196,60 @@ function FactRow({
       </span>
       <span className="shrink-0">{action}</span>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Which server this is
+ * ------------------------------------------------------------------ */
+
+/**
+ * The control plane this installation talks to, and the way to change it.
+ *
+ * **Immediately above Sign out, because they are the same kind of act.** Changing
+ * servers *is* signing out, plus a redirection: `host_set_server` erases
+ * `credential#<previous>` in the same act that adopts the next one, and
+ * `ChooseServer` clears this page's copy one line before that. Filed anywhere
+ * else it would read as a preference.
+ *
+ * **The second of the screen's two entrances**, the first being the control on
+ * the sign-in screen. Before both, `setNativeServer` had exactly one call site —
+ * `state.host.server === null` — so a server that had been chosen could not be
+ * changed from inside the app at all, and signing out did not help: `clearSession`
+ * deliberately leaves the server alone.
+ *
+ * ⚠ **Not a `SettingsLeaf`, and it must not become one.** A leaf is a *route*,
+ * `parseSettingsRoute` is shared with the web build, and every argument
+ * `ChooseServer`'s own docblock makes against a `Route` arm applies unchanged.
+ * `store.pickServer()` sets state and `App.tsx` returns the screen above
+ * `<AppShell>`, so the sheet is replaced rather than nested — which means Cancel
+ * puts it back exactly where it was, the URL never having moved.
+ *
+ * ⚠ **"Server address", not "Server".** The admin band already has a section
+ * called Server — registration, the domains, the machine limit — and two things
+ * called the same on one settings screen is the collision that gets tidied the
+ * wrong way. These answer different questions: *which* server, against *that
+ * server's* settings.
+ *
+ * Absent in a browser rather than disabled, which is `visibleSections`' idiom: a
+ * control that can never do anything on this client is not a control.
+ */
+function ServerRow(): ReactNode {
+  const server = nativeBoot()?.server ?? null;
+  if (server === null) return null;
+  return (
+    <section className={SETTINGS_SECTION}>
+      <h2 className={SETTINGS_HEADING}>Server address</h2>
+      <FactRow
+        value={<span className="truncate font-mono">{server}</span>}
+        subline="Changing it signs this computer out."
+        action={
+          <Button size="sm" onClick={() => store.pickServer()}>
+            Change
+          </Button>
+        }
+      />
+    </section>
   );
 }
 
