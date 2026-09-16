@@ -80,6 +80,42 @@ function capture(text: string, re: RegExp): string | null {
   return re.exec(text)?.[1] ?? null;
 }
 
+/**
+ * Rust source with `cargo fmt`'s line breaking taken back out.
+ *
+ * ⚠ **Every assertion in this file that reads a `.rs` file reads *formatted*
+ * source, and nothing in this job knows that.** `cargo fmt --check` is a step of
+ * the `native` job, which needs a Rust toolchain; this driver is in the `check`
+ * job and deliberately runs no cargo. So the two can disagree indefinitely, and
+ * they did: the assertions below were written against source that had never been
+ * through `rustfmt`, and the first run of `cargo fmt` broke nine of them at once
+ * by wrapping three expressions past `max_width = 100`. Either job could be made
+ * green on its own and never both.
+ *
+ * The rule this restores is that **an assertion is about what the code says, not
+ * about where the lines end**. Only rustfmt's four line-breaking artefacts are
+ * undone, so a pattern can be written the way the expression reads:
+ *
+ *   - runs of whitespace become one space — the wrap itself;
+ *   - space around a `.` is dropped — a broken method chain puts the dot first;
+ *   - space after `(` is dropped — arguments pushed onto their own lines;
+ *   - a trailing `,` before `)` is dropped — rustfmt adds one when it wraps a
+ *     call and there is none in the single-line form.
+ *
+ * ⚠ **For code, never for prose.** Collapsing whitespace around a `.` also runs
+ * two sentences of a docblock together, so an assertion whose subject is a
+ * *comment* must read the raw text. `wrap_comments` and `normalize_comments` are
+ * both `false` under default rustfmt, which is what makes that safe: the comment
+ * layer is not reflowed, so nothing about it needs this.
+ */
+function flat(rust: string): string {
+  return rust
+    .replace(/\s+/g, " ")
+    .replace(/ ?\. ?/g, ".")
+    .replace(/\( /g, "(")
+    .replace(/,? \)/g, ")");
+}
+
 const NATIVE = "packages/native";
 const TAURI_DIR = `${NATIVE}/src-tauri`;
 const CONF = `${TAURI_DIR}/tauri.conf.json`;
@@ -422,6 +458,94 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
     capture(ts, /export const ANNOUNCE_VERSION = (\d+);/),
     capture(rs, /const ANNOUNCE_VERSION: u32 = (\d+);/),
   );
+}
+
+/* ------------------------------------------------------------------ *
+ * The second pair: what the shell hands the page at first paint
+ *
+ * `Boot` in `commands.rs` is serialized straight into `NativeBoot` in
+ * `native.ts`, and **nothing compared them** — which is the same hole the pair
+ * above exists to close, on the one struct every launch reads.
+ *
+ * ⚠ **The specific failure, and it is silent in five checkers at once.** `Boot`
+ * carries no `#[serde(rename_all = "camelCase")]`; every camelCase field names
+ * itself with its own `rename`. So a `pub device_id: Option<String>` added
+ * without one serializes as `device_id`, `boot.deviceId` is `undefined` for ever,
+ * and `tsc`, `cargo`, `cargo test`, `webcheck` and the command census below are
+ * all green. The app then decides on every single launch that it has no device,
+ * registers another, and walks into the account's device limit — with the only
+ * evidence being a list of identically-named rows. `local.rs`'s docblock names
+ * this class in so many words: *"A field renamed on one side is not a compile
+ * error anywhere… Nobody would find it."*
+ *
+ * The reader is the one above, extracted: a field's JSON name is the `rename` on
+ * the line before it where there is one and its own name where there is not.
+ * ------------------------------------------------------------------ */
+
+{
+  const ts = read("packages/web/src/native.ts");
+
+  const declared = capture(ts, /export interface NativeBoot \{([\s\S]*?)\n\}/);
+  check("the page's side of the boot payload was readable", declared !== null, true);
+  const pageKeys = [...(declared ?? "").matchAll(/^\s{2}(\w+)[?]?:/gm)].map((m) => m[1] ?? "").sort();
+
+  const boot = capture(commandsRs, /pub struct Boot \{([\s\S]*?)\n\}/);
+  check("and the shell's side of it", boot !== null, true);
+  const hostKeys: string[] = [];
+  let pending: string | null = null;
+  for (const line of (boot ?? "").split("\n")) {
+    const rename = /serde\(rename = "(\w+)"\)/.exec(line);
+    if (rename !== null) {
+      pending = rename[1] ?? null;
+      continue;
+    }
+    const field = /^\s{4}pub (\w+): /.exec(line);
+    if (field === null) continue;
+    hostKeys.push(pending ?? field[1] ?? "");
+    pending = null;
+  }
+  hostKeys.sort();
+
+  check("both sides were found to have fields", [pageKeys.length > 0, hostKeys.length > 0], [true, true]);
+  check("and the shell sends exactly what the page declares", hostKeys, pageKeys);
+
+  /*
+   * And the negative control, because the reader above is what the assertion
+   * rests on: a struct that renames nothing must come back with its Rust
+   * spellings, or the reader is silently answering the page's names whatever the
+   * source says and the comparison is vacuous.
+   */
+  const renames = [...(boot ?? "").matchAll(/serde\(rename = "(\w+)"\)/g)].length;
+  check(
+    "the reader is actually reading renames rather than assuming them",
+    renames > 0 && hostKeys.some((key) => /[A-Z]/.test(key)),
+    true,
+  );
+  /*
+   * ⚠ **Comments stripped first, and that is not fussiness.** Written against the
+   * raw text this fails immediately — on the docblock of the very field that
+   * explains why there is no `rename_all`. A source-text assertion that cannot
+   * tell code from prose about the code is the shape `webcheck` already carries
+   * `stripComments` for, and the failure here is the loud direction; the quiet
+   * one is the same reader passing over a *commented-out* attribute.
+   *
+   * The attribute would sit in the derive above `pub struct`, outside the body
+   * captured above, so the preamble is included.
+   */
+  const bootDecl = capture(commandsRs, /((?:#\[[^\]]*\]\s*)*pub struct Boot \{[\s\S]*?\n\})/) ?? "";
+  const bootCode = bootDecl
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+  check(
+    "and `rename_all` is still absent, which is why each field needs its own",
+    /#\[serde\([^)]*rename_all/.test(bootCode),
+    false,
+  );
+  // The negative control for the strip itself: the prose that mentions the
+  // attribute is in the file, so a reader that saw nothing would pass above for
+  // the wrong reason.
+  check("the strip had something to remove", bootDecl.length > bootCode.length, true);
 }
 
 process.stdout.write("\nthe commands, declared against registered\n");
@@ -1095,7 +1219,7 @@ check(
    */
   check("the poll carries no daemon output", /pub detail:/.test(daemonRs), false);
   check("and asks the ring for a bit instead", /pub fn printed_anything\(&self\) -> bool/.test(daemonRs), true);
-  check("which is what tells `exited` from `absent`", /if supervisor\.printed_anything\(\) \{ "exited" \} else \{ "absent" \}/.test(commandsRs), true);
+  check("which is what tells `exited` from `absent`", /if supervisor\.printed_anything\(\) \{ "exited" \} else \{ "absent" \}/.test(flat(commandsRs)), true);
   check("and the page's mirror of the struct dropped it too", /detail/.test(/export interface DaemonState \{[\s\S]*?\n\}/.exec(read("packages/web/src/native.ts"))?.[0] ?? "x detail"), false);
   /*
    * ⚠ **And it never refuses.** A screen whose whole subject is "what did it say"
@@ -1139,7 +1263,7 @@ check(
    * adapters and the runtime must resolve with no profile at all — so the fix
    * cannot be to move it, and this pins that it was not moved by mistake.
    */
-  check("the payload's bin is still first on the daemon's PATH", /parts\.push\(payload\.root\.join\("node_modules"\)\.join\("\.bin"\)/.test(daemonRs), true);
+  check("the payload's bin is still first on the daemon's PATH", /parts\.push\(payload\.root\.join\("node_modules"\)\.join\("\.bin"\)/.test(flat(daemonRs)), true);
 }
 
 /*
@@ -1159,7 +1283,16 @@ check(
  * Three assertions, because the interesting part is not that the line exists.
  */
 {
-  const start = /pub fn start\(&mut self[\s\S]*?\n    \}/.exec(daemonRs)?.[0] ?? "";
+  /*
+   * ⚠ **Captured from the raw source rather than through {@link flat}, and the
+   * `\\s*` is load-bearing.** The body is asserted below by *position* as well as
+   * by content, and flattening the whole file would make one index compare across
+   * every function before this one. So only the signature is relaxed — rustfmt
+   * puts each parameter on its own line once the line passes `max_width` — and
+   * `\n    \}` still finds the function's own close, because every block inside
+   * it is indented deeper.
+   */
+  const start = /pub fn start\(\s*&mut self[\s\S]*?\n    \}/.exec(daemonRs)?.[0] ?? "";
   check("the supervisor's spawn was found to read", start.length > 0, true);
   check("it still builds the environment rather than inheriting one", /\.env_clear\(\)/.test(start), true);
   check("and it names who the daemon is", /command\.env\("USER", &name\);/.test(start), true);

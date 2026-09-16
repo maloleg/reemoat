@@ -5,6 +5,7 @@ import { isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createControlPlaneApp, drainDeferred, DEFAULT_TOKEN_TTL_SECONDS, MIN_TOKEN_TTL_SECONDS } from "./app.js";
+import { pruneDevices } from "./devices.js";
 import { pruneEmailTokens } from "./emails.js";
 import { ensureSigningKey, newApiKey, newId, pruneEnrollmentCodes } from "./keys.js";
 import { pruneMailOutbox, startMailPump } from "./mail/outbox.js";
@@ -468,6 +469,15 @@ pruneRegistrations(store.db);
 pruneEmailTokens(store.db);
 pruneMailOutbox(store.db);
 pruneEnrollmentCodes(store.db);
+/*
+ * And the retired installations, which is `pruneSessions`' shape rather than
+ * `pruneRegistrations`': the live set is already bounded by the per-user cap, so
+ * this is housekeeping over rows nothing can adopt again. It also collects any
+ * device belonging to a user who is gone — a backstop under the by-hand sweep in
+ * `DELETE /v1/admin/users/:id`, exactly as `pruneSessions` collects orphaned
+ * origins under its own.
+ */
+pruneDevices(store.db);
 
 /**
  * How often the five sweeps above run again.
@@ -509,6 +519,7 @@ const sweepTimer = setInterval(() => {
     pruneEmailTokens(store.db);
     pruneMailOutbox(store.db);
     pruneEnrollmentCodes(store.db);
+    pruneDevices(store.db);
   } catch (error) {
     console.error(`sweep failed: ${describeError(error)}`);
   }
@@ -543,40 +554,77 @@ const tunnels = relayEmbedded
 const relayView: RelayView = tunnels ?? dbRelayView(store.db);
 
 /*
- * The built web client, if there is one.
+ * The built web client, if this deployment serves one.
  *
- * Resolved from this file rather than the working directory, because `pnpm cp`
- * runs from the package root while a bare `tsx src/main.ts` does not, and a UI
- * that appears or vanishes depending on where you started the process is a
- * miserable thing to debug. `REEMOAT_CP_WEB=0` opts out; a path overrides.
+ * ⚠ **The default is OFF, and that is a reversal.** This variable used to opt
+ * *out* of serving; it opts *in* now, because the native app is the production
+ * client and `deploy/docker/Dockerfile` no longer builds the bundle into the
+ * image at all. "Production does not need a browser UI" was a sentence in a
+ * README while the default served one; it is a property of the code now, which is
+ * the only version of it worth having.
  *
- * **Off is a supported deployment rather than a broken one.** A fleet reached by
- * the native app needs the API, the relay and nothing else, and every route
- * outside the two registrations `app.ts` gates on `webRoot` is unaffected — an
- * unrouted path then answers the same JSON envelope every other refusal does.
- * `docs/API.md` names the two modes.
+ * **Off is the supported deployment rather than a degraded one.** A fleet reached
+ * by the app needs the API, the relay and nothing else, and every route outside
+ * the two registrations `app.ts` gates on `webRoot` is unaffected — an unrouted
+ * path answers the same JSON envelope every other refusal does. `docs/API.md`
+ * names both shapes.
  *
- * ⚠ **The affirmative spellings mean "the default", not "a directory called 1"** —
- * the trap `REEMOAT_CP_INSTALL` below carries a paragraph about, which said in so
- * many words that this variable *"has the same shape and the same trap"* and then
- * did not close it. Only the negative spelling was ever documented, so
- * `REEMOAT_CP_WEB=1` is the natural thing for somebody to write, and read as a
- * path it resolves to `<cwd>/1`, fails `existsSync`, and serves a permanent 404
- * that looks exactly like an image built without the bundle. Same three words on
- * each side as the installer's, because two spellings of one idea in one file is
- * how the next variable gets a third. Case-sensitive, matching it: a *path* is
- * case-significant on the filesystems this runs on, and lowercasing before the
- * path arm would be a quieter bug than the one being fixed.
+ * ⚠ **What this costs, and where it is paid.** `/confirm`, `/reset` and `/verify`
+ * are URLs a *mail client* opens, in a browser, so on an API-only instance they
+ * land on that JSON 404 — and `POST /v1/forgot` is the only remedy this service
+ * has for a forgotten password. The remedy is in the client: the gate screens
+ * take a pasted link or code (`readPastedGateToken`). `mail.public_url` is the
+ * other half and `mailConfigured` reports when it points here with nothing to
+ * render, because an operator serving the client elsewhere has to move it too.
+ *
+ * **Resolved from this file rather than the working directory** when a path is
+ * relative, because `pnpm cp` runs from the package root while a bare
+ * `tsx src/main.ts` does not, and a UI that appears or vanishes depending on
+ * where you started the process is a miserable thing to debug.
+ *
+ * ⚠ **`REEMOAT_CP_WEB=1` no longer means anything and is warned about rather than
+ * guessed at.** While there was a bundle inside the image, the affirmative
+ * spellings meant "the built-in default" and the trap was that a *path* reading
+ * resolved to `<cwd>/1` and 404'd for ever. With the bundle gone there is no
+ * default to name, so `1`/`true`/`yes` would be a path that does not exist — the
+ * same permanent silent 404 wearing the opposite clothes. It is kept as a
+ * recognised spelling **only** so it can be answered with a sentence; the
+ * negative spellings stay because an env file that says `0` is still saying what
+ * it means. `deploycheck` pins that this predicate and `REEMOAT_CP_INSTALL`'s no
+ * longer agree, and why.
  */
+/*
+ * The gate — the only HTML this service serves by default.
+ *
+ * Resolved from this file rather than the working directory, for `webRoot`'s
+ * reason below. **No environment variable**, deliberately: sign-up, confirming a
+ * mailed link and resetting a password all begin in a *mail client*, so they have
+ * nowhere else to land — `POST /v1/forgot` is the only remedy this service has
+ * for a forgotten password, and with SMTP configured an account does not exist
+ * until `/confirm` is opened. A switch that could turn those off would be a
+ * switch that breaks account recovery, which is not a configuration anybody
+ * should be able to reach by accident.
+ *
+ * Absent is still survivable rather than fatal — `app.ts` checks `existsSync` and
+ * simply serves no HTML — because a checkout that has not run `pnpm --filter
+ * @reemoat/web build:gate` is an ordinary state and the API must not refuse to
+ * start over it. The startup line below says which it got.
+ */
+const gateRoot = fileURLToPath(new URL("../../web/dist-gate", import.meta.url));
+
 const webEnv = (process.env["REEMOAT_CP_WEB"] ?? "").trim();
-const webOff = webEnv === "0" || webEnv === "false" || webEnv === "no";
-const webDefault = webEnv === "1" || webEnv === "true" || webEnv === "yes";
+const webOff = webEnv.length === 0 || webEnv === "0" || webEnv === "false" || webEnv === "no";
+const webMeaningless = webEnv === "1" || webEnv === "true" || webEnv === "yes";
 const webRoot =
-  webOff
-    ? null
-    : webEnv.length > 0 && !webDefault
-      ? (isAbsolute(webEnv) ? webEnv : join(process.cwd(), webEnv))
-      : fileURLToPath(new URL("../../web/dist", import.meta.url));
+  webOff || webMeaningless ? null : isAbsolute(webEnv) ? webEnv : join(process.cwd(), webEnv);
+if (webMeaningless) {
+  console.warn(
+    `REEMOAT_CP_WEB=${webEnv} no longer names anything: this image carries no web bundle,\n` +
+      "  so there is no built-in default for it to mean. Serving no browser UI is the\n" +
+      "  supported shape — the Reemoat app carries its own copy. To serve one anyway,\n" +
+      "  build packages/web and give this variable that directory's path.",
+  );
+}
 
 /*
  * `deploy/bootstrap.sh`, which `GET /install.sh` serves with this instance's own
@@ -702,6 +750,40 @@ if (machineOfferUrl !== null && !isBrowserReachable(machineOfferUrl)) {
   );
 }
 
+/**
+ * Where this instance publishes a build of the Reemoat app, or nothing.
+ *
+ * Environment-only, unset by default, validated the way the two values above
+ * are — `machineOfferUrl`'s shape and every one of its arguments. It is rendered
+ * into an `href` on the gate, so the scheme is checked rather than inferred from
+ * `new URL` parsing, and a bad value is warned about rather than fatal: an
+ * instance that names no build is the ordinary state.
+ *
+ * ⚠ **Unset is the honest answer for this repository today**, not a gap somebody
+ * forgot to fill. Nothing here publishes a signed build: `tauri.conf.json` has
+ * `signingIdentity: null`, no updater artifacts and `targets: ["app"]` with no
+ * `dmg`, the build is arm64-only, and `deploy/ci-release.sh` uploads no app
+ * asset at all. So a compiled-in default would be a button that downloads
+ * nothing — on every fork, under a licence that hands them the source. The gate
+ * says "this server does not publish a build" and points at building from
+ * source, which is true.
+ *
+ * ⚠ **Not a `SETTING_KEYS` row**, for `REEMOAT_CP_MACHINES_OFFER_URL`'s reason
+ * rather than the catalogue's: there is no CSP to disagree with — a download is
+ * a navigation, not a `fetch` — but it points at one particular build published
+ * by whoever runs this deployment, and `SETTING_KEYS` is drawn on the Server
+ * settings screen of *every* instance including every fork.
+ */
+const appDownloadUrl = (process.env["REEMOAT_CP_APP_DOWNLOAD_URL"] ?? "").trim() || null;
+if (appDownloadUrl !== null && !isBrowserReachable(appDownloadUrl)) {
+  console.warn(
+    `REEMOAT_CP_APP_DOWNLOAD_URL must be an absolute http:// or https:// URL, got "${appDownloadUrl}".\n` +
+      "  It becomes a link on the page somebody lands on after signing up, so it needs a\n" +
+      "  scheme a browser will follow. Ignoring it: the gate will say this server publishes\n" +
+      "  no build and point at building from source, which is the default.",
+  );
+}
+
 /*
  * Whether this deployment publishes the built-in legal documents as its own.
  *
@@ -735,7 +817,9 @@ const app = createControlPlaneApp({
   pluginCatalogueUrl: pluginCatalogueUrl !== null && isBrowserReachable(pluginCatalogueUrl) ? pluginCatalogueUrl : null,
   // The same shape and the same reason: one predicate decides, and a warned
   // value reaches the app as the absent one rather than as itself.
+  gateRoot,
   machineOfferUrl: machineOfferUrl !== null && isBrowserReachable(machineOfferUrl) ? machineOfferUrl : null,
+  appDownloadUrl: appDownloadUrl !== null && isBrowserReachable(appDownloadUrl) ? appDownloadUrl : null,
   legalDocuments,
 });
 
@@ -820,12 +904,33 @@ const server = serve({ fetch: fetchWithProxyWarning, hostname: host, port }, (in
     console.log(`browsers are routed per machine: ${named}`);
     console.log(`  this relay answers as "${relayId}"; a machine on any other id falls back to ${relayUrl}`);
   }
+  /*
+   * ⚠ **Three states, not two, and the third is the one worth printing.** A path
+   * that does not exist looks identical from outside to a deployment that meant
+   * to serve nothing — both answer the JSON envelope at `/` — so the line says
+   * which. Not fatal: the API must not refuse to start over a directory only the
+   * browser UI needs, which is the argument `bootstrapScript` makes immediately
+   * below for the installer.
+   */
+  /*
+   * The gate first, because it is the one a person can be sent a link to. Its
+   * absence is the failure worth naming loudly: a control plane serving no gate
+   * mails links that answer the error envelope, and nobody finds out until
+   * somebody cannot sign up.
+   */
+  console.log(
+    existsSync(gateRoot)
+      ? `gate: ${gateRoot}`
+      : `gate: NOT BUILT (${gateRoot}) — sign-up and password recovery links will not open.\n` +
+        "  Build it with: pnpm --filter @reemoat/web build:gate",
+  );
   console.log(
     webRoot === null
-      ? "web ui: disabled"
+      ? "web ui: none — this is the API and the relay; the Reemoat app is the client"
       : existsSync(webRoot)
         ? `web ui: ${webRoot}`
-        : `web ui: not built (${webRoot}) — run: pnpm --filter @reemoat/web build`,
+        : `web ui: REEMOAT_CP_WEB names ${webRoot}, which is not there — serving none.\n` +
+          "  Build it with: pnpm --filter @reemoat/web build",
   );
 
   /*

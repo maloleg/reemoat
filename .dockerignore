@@ -57,22 +57,39 @@
 # from a real container.
 !deploy/bootstrap.sh
 
+# The gate's build inputs — `gate.html` and the sources it reaches, not the app's
+# `index.html`. The twin of each is a COPY in the Dockerfile's `gate` stage, and
+# the pair is the "written down twice" trap `CLAUDE.md` names: missing here the
+# build fails at COPY with "not found", missing there it succeeds and ships a page
+# with two `<link>`s pointing at 404s.
+#
+# ⚠ **`index.html` is deliberately absent**, and that absence is the deployment:
+# it is the app's entry point, it is compiled into the Reemoat binary by Tauri,
+# and the control plane's image has no business carrying it. A `!packages/web/index.html`
+# added here would put the whole product back in the build context.
+#
+# `package.json` is here for a reason of its own rather than for the gate build:
+# `--frozen-lockfile` verifies the lockfile against **every** importer in
+# `pnpm-workspace.yaml` before installing the filtered subset, so without it this
+# is not the workspace the lockfile describes and the install fails outright, in
+# the `manifests` stage, before anything else runs.
 !packages/web/package.json
 !packages/web/tsconfig.json
-!packages/web/vite.config.ts
-!packages/web/index.html
+!packages/web/vite.gate.config.ts
+!packages/web/gate.html
 !packages/web/src
-# The favicon and the touch icon. Vite copies this directory to the root of
-# `dist` verbatim, and `index.html` names both files — so without this the page
-# ships with two `<link>`s pointing at 404s, which is what happened the first
-# time: the build succeeded, `dist` was correct on the build host, and the
-# container served JSON errors for `/favicon.svg`.
+# The favicon and the touch icon. Vite copies this directory to the root of the
+# build output verbatim, and `gate.html` names both files.
 !packages/web/public
 
-# Re-deny what a directory allow just let back in. A `!packages/web/src` above
-# would otherwise readmit a stray `.env` or a `dist` somebody built in there.
+# Re-deny what a directory allow just let back in. A `!packages/control-plane/src`
+# above would otherwise readmit a stray `.env` or a `dist` somebody built in there.
 **/node_modules
 **/dist
+# `dist-gate` is built *inside* the image by the `gate` stage. Denying it here
+# stops a stale copy from a developer's machine reaching the build context and
+# being shadowed — `**/dist` does not match it, the name being a different word.
+**/dist-gate
 **/.env
 **/.env.*
 **/*.db

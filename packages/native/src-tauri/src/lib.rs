@@ -12,8 +12,8 @@
 
 mod commands;
 mod config;
-mod daemon;
 mod credential;
+mod daemon;
 mod local;
 mod proxy;
 
@@ -81,6 +81,8 @@ pub fn run() {
             commands::host_set_server,
             commands::host_credential_set,
             commands::host_credential_clear,
+            commands::host_device_set,
+            commands::host_device_clear,
             commands::host_cp,
             commands::host_copy_text,
             commands::host_open_external,

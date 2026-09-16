@@ -561,6 +561,25 @@ export function useRoute(): Route {
 }
 
 /**
+ * The address, for a surface that routes on the pathname and not on a {@link Route}.
+ *
+ * ⚠ **The gate needs this and may not have {@link useRoute}.** `GateApp`'s own
+ * docblock refuses the `Route` union — every arm of it is a screen the gate bundle
+ * does not contain — so it read `window.location.pathname` during render instead,
+ * and subscribed to nothing that changes when the address does. The result was a
+ * surface whose every control worked and whose screen never moved: `navigate` push
+ * the entry, `tell()` notified this module's listeners, and the gate was not among
+ * them. Browser Back was dead the same way.
+ *
+ * So: the subscription without the vocabulary. `getSnapshot` reads the live
+ * pathname rather than a cached field because `Object.is` compares two equal
+ * strings as equal, which is all `useSyncExternalStore` asks of it.
+ */
+export function usePathname(): string {
+  return useSyncExternalStore(subscribe, () => window.location.pathname);
+}
+
+/**
  * The path an open overlay is drawn over — where its ✕ goes.
  *
  * Deliberately **not** `history.back()`, which `Header.tsx` deleted for reasons

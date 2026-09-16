@@ -49,6 +49,10 @@ const USAGE = `cpctl — drive the Reemoat control plane
   passwd                                    change your own password
   key                                       mint yourself an API key
   keys [--revoke <keyId>]                   your API keys, and how to retire one
+  devices [--revoke <deviceId>]             the apps signed in to this account. Retiring one ends
+                                            its sign-ins and touches no other device. There is no
+                                            way to register one here: an API key has no session
+                                            for a device to belong to
   email [<address>]                         your address; setting one sends a confirmation
   me                                        who this credential belongs to
   machines                                  machines you may reach
@@ -649,6 +653,62 @@ async function main(): Promise<void> {
           out(`${key.id}  ${key.prefix}…  ${(key.revokedAt === null ? "live" : "revoked").padEnd(7)}  ${usedText(key.lastUsedAt)}`);
         }
         out("Retire one with: cpctl keys --revoke <id>");
+      });
+      return;
+    }
+    /*
+     * The installations signed in to this account, and retiring one.
+     *
+     * **A read and a revoke, and deliberately no way to register.** The route
+     * that registers refuses an API key outright — a device is a *signed-in
+     * installation*, a key has no session for one to hang off, and this command
+     * is the thing that holds keys. So the list here is an operator's view of a
+     * table somebody else writes, which is `keys`' shape pointed the other way.
+     *
+     * Retiring one from here is the remedy when the app itself is the thing you
+     * have lost, which is exactly the case a terminal is for.
+     */
+    case "devices": {
+      const retire = values.revoke;
+      if (typeof retire === "string") {
+        const body = await api<{ revoked: boolean; sessionsRevoked: number }>(`/v1/me/devices/${retire}`, {
+          method: "DELETE",
+        });
+        show(body, () => {
+          out(`retired ${retire}`);
+          out(`${body.sessionsRevoked} sign-in(s) on it were ended. Other devices are untouched.`);
+        });
+        return;
+      }
+      const list = await api<{
+        devices: {
+          id: string;
+          name: string;
+          platform: string;
+          lastSeenAt: number | null;
+          revokedAt: number | null;
+          current: boolean;
+        }[];
+        limit: number;
+      }>("/v1/me/devices");
+      show(list, () => {
+        if (list.devices.length === 0) {
+          out("no devices. One is registered when you sign in from the app.");
+          return;
+        }
+        for (const device of list.devices) {
+          // The retired rows are listed rather than filtered, for the route's
+          // own reason: "was that laptop retired, and when" is the question this
+          // gets asked for, and a list one row shorter cannot answer it.
+          const state = device.revokedAt === null ? "live" : `retired ${new Date(device.revokedAt).toISOString()}`;
+          const seen = device.lastSeenAt === null ? "never used" : `last seen ${new Date(device.lastSeenAt).toISOString()}`;
+          out(
+            `${device.id}  ${device.name}  ${device.platform.padEnd(8)}  ${state.padEnd(34)}  ${seen}` +
+              (device.current ? "  (this one)" : ""),
+          );
+        }
+        out(`${list.devices.filter((d) => d.revokedAt === null).length} live of ${list.limit} allowed.`);
+        out("Retire one with: cpctl devices --revoke <id>   (its sign-ins end; no other device is touched)");
       });
       return;
     }

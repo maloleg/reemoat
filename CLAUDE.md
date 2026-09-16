@@ -36,9 +36,13 @@ LTE, a tab is discarded. The daemon is the source of truth and the agent must
 never notice a client leaving.
 
 Node >= 24, ESM, TypeScript strict. Everything in `src/`, `scripts/` and
-`packages/control-plane` runs straight off `tsx` with no build step;
-`packages/web` is bundled by Vite, inside the control plane's image — the only
-thing here that compiles anything.
+`packages/control-plane` runs straight off `tsx` with no build step. `packages/web`
+is bundled by Vite **twice, into two directories**: `dist` is the whole app and
+goes into the Reemoat binary, `dist-gate` is sign-up, the mailed-link screens, the
+legal documents and the handoff page, and goes into the control plane's image. The
+Authority serves the second at **nine addresses** and the app at none — a closed
+list rather than an SPA fallback, so the product is not in the image to be served.
+`REEMOAT_CP_WEB` names a built app for a checkout. Q4.118, `docs/AUTHORITY.md`.
 
 **No test framework.** `typecheck`, `authcheck`, `daemoncheck`, `relaycheck`,
 `webcheck`, `nativecheck`, `pincheck`, `deploycheck`, `docscheck`, `imagecheck` and
@@ -62,7 +66,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 945 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 954 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -191,8 +195,17 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   rather than told, driven as the sequence that actually
                                      #   happens — latch the launch version, wipe the fragment
                                      #   the way a navigation does, then ask. Both drivers were
-                                     #   green for months over code no phone could reach
-pnpm nativecheck                     # packages/native: that the frontend is a path inside the
+                                     #   green for months over code no phone could reach.
+                                     #   Newest: devices — the three shapes a pasted mailed link may
+                                     #   take and everything it refuses locally rather than sending,
+                                     #   that signing out **keeps** the device while a retirement
+                                     #   gives it up, that the two storage keys are different names
+                                     #   and neither is a swept legacy one, and that the id is kept
+                                     #   in the shell's config rather than its keyring — read off
+                                     #   both languages, since nothing typed can hold it
+pnpm nativecheck                     # packages/native: the Boot payload's keys against NativeBoot's,
+                                     #   which is the census a missing `serde(rename)` slips past in
+                                     #   five checkers at once; that the frontend is a path inside the
                                      #   binary and not a URL, that OS file drops still reach the
                                      #   webview (the assertion with no other symptom), that the
                                      #   capability list is empty and no plugin the Rust side drives
@@ -243,7 +256,12 @@ pnpm cp                              # the control plane + relay in one process 
                                      #   REEMOAT_CP_RELAY_MODE=embedded is the default and is what this is;
                                      #   the deployed shape is two containers, see compose.sh below
 pnpm web                             # the web UI in dev; Vite proxies /v1 to the control plane
-pnpm web:build                       # → packages/web/dist, which `pnpm cp` then serves at /
+pnpm web:build                       # → packages/web/dist, the whole app. `pnpm cp` serves it only
+                                     #   when REEMOAT_CP_WEB names that path; the image never carries it
+pnpm --dir packages/web build:gate   # → packages/web/dist-gate, the nine addresses a browser may reach.
+                                     #   This one IS in the image and is served with no switch: /confirm,
+                                     #   /reset and /verify are opened by a mail client and have nowhere
+                                     #   else to land
 
 pnpm --dir packages/native install   # the native shell's own node_modules. **The root install does
                                      #   not do this** — `packages/native` is under `packages/` and
@@ -404,6 +422,8 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `relay.md` | `src/relay/`, `src/server.ts`, `packages/control-plane/src/relay/`, `packages/web/src/stream.ts`, `machine.ts`, `localRoute.ts`, `src/announce.ts` | Why there is no direct path in, and the one exception · what bounds it, and how a daemon says where it is · what the tunnel carries and what it must never parse · a socket's lifetime, rotation and cursor · the h2 and flow-control measurements |
 | `http-and-routes.md` | `src/server.ts`, `src/http.ts`, `src/cors.ts`, `packages/web/src/http.ts`, `packages/control-plane/src/app.ts` | The error envelope every service answers in · which non-2xx is not an error · what a route retry may replay · every `pnpm client` verb |
 | `auth-and-tokens.md` | `src/auth.ts`, `src/token.ts`, `src/enroll.ts`, `packages/control-plane/src/keys.ts` | What a signature proves and what it does not · why the daemon makes exactly one control-plane request, ever · every credential this fleet mints and how each stops being one |
+| `authority.md` | `packages/control-plane/src/app.ts`, `main.ts`, `store.ts`, `schema.sql` | What this service is responsible for and what may never arrive in it · the two ratchets that hold that line, and the one exception named by literal · why it serves no browser UI by default · the three rules a migration owes |
+| `cp-devices.md` | `packages/control-plane/src/devices.ts`, `sessions.ts`, `packages/web/src/ui/settings/DevicesSection.tsx`, `packages/native/src-tauri/src/config.rs` | What a device is and what it deliberately decides nothing about · why a retired id is ignored rather than refused · why the device check is a second statement and never a join · where the id lives on the client, and why not the keyring |
 | `cp-accounts.md` | `packages/control-plane/src/app.ts`, `settings.ts`, `registration.ts`, `packages/web/src/ui/gate/` | Who may exist and who may sign up · disable against delete · the settings table and which side won · every `cpctl` verb |
 | `cp-credentials.md` | `packages/control-plane/src/password.ts`, `sessions.ts`, `throttle.ts`, `net.ts` | The positional gate · what a password change must prove · what a guessing counter is keyed on and what the address half is worth · which 401 signs you out |
 | `cp-machines.md` | `packages/control-plane/src/machines.ts`, `quota.ts`, `packages/web/src/quota.ts` | Who owns a machine and what a name may collide with · the ceiling against the limit · what a revoke gives back · adding a daemon for somebody else |

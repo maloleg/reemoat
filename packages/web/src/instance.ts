@@ -69,6 +69,24 @@ export interface InstanceConfig {
   offer: string | null;
 
   /**
+   * Where this instance publishes a build of the Reemoat app, or `null`.
+   *
+   * `offer`'s shape, `offer`'s argument, and one reason of its own. An address
+   * rather than a flag because the gate renders it into an `href` and has no
+   * other way to learn it; env-only and unset by default because a URL compiled
+   * into this bundle would be one project's download appearing on every fork's
+   * sign-up screen, under a licence that hands them the build.
+   *
+   * ⚠ **`null` is the honest and expected state, not a degraded one.** This
+   * repository publishes no signed build today — `tauri.conf.json` has
+   * `signingIdentity: null`, no updater artifacts and no `dmg` target, and
+   * `ci-release.sh` uploads nothing — so an instance that names no address is
+   * simply telling the truth. The handoff page says so and points at building
+   * from source, rather than drawing a button that downloads nothing.
+   */
+  appDownload: string | null;
+
+  /**
    * Whether this instance publishes the built-in Terms, Acceptable Use Policy
    * and Privacy Policy.
    *
@@ -197,12 +215,20 @@ export function parseInstanceConfig(body: unknown): InstanceConfig | null {
    * not an explicit yes is a no.
    */
   const legal = read(read(body, "legal"), "documents");
+  /*
+   * Read exactly as `offer` is, through the same guard and for its reason
+   * verbatim: this ends up in an `href` somebody taps, a scheme-less value is a
+   * *relative* path this origin would answer with the gate's own HTML, and
+   * `new URL` parses `javascript:` and `data:` without throwing.
+   */
+  const appDownload = read(read(body, "app"), "download");
   return {
     registration: enabled ? "open" : "off",
     email: configured,
     source,
     catalogue: typeof catalogue === "string" && isAbsoluteHttpUrl(catalogue) ? catalogue : null,
     offer: typeof offer === "string" && isAbsoluteHttpUrl(offer) ? offer : null,
+    appDownload: typeof appDownload === "string" && isAbsoluteHttpUrl(appDownload) ? appDownload : null,
     legal: legal === true,
   };
 }

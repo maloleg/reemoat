@@ -66,8 +66,14 @@ import { join } from "node:path";
  *     start, and what is asserted is that nothing scrapeable is printed, that
  *     the password itself never reaches the log, that the source marker is there
  *     to say so, and that the password nobody printed is the one that signs in.
- *   * **The SPA fallback serves the same bytes as `/`.** The invariant that a
- *     cached copy once broke, now asserted against a real bundle.
+ *   * **The gate is served and the app is not.** Two facts the image holds at
+ *     once, and only a real container can tell them apart: `/register`,
+ *     `/confirm`, `/reset` and the legal documents answer a page, because they
+ *     are opened by a *mail client* and have nowhere else to land; `/` and every
+ *     address belonging to the app answer the error envelope, because the
+ *     Reemoat binary carries its own copy of the product and this image carries
+ *     none. Every offline driver can be green over an image that ships the whole
+ *     product behind a route guard — which is the state this replaced.
  *   * **The shape it is actually deployed in: two containers from this one
  *     image.** The first bullet's argument, which is the highest-value line in
  *     this file, now has a *second* entry point to be true of —
@@ -490,19 +496,62 @@ const jwks1 = JSON.parse((await get("/v1/jwks")).body) as { keys: { kid: string 
 const kid1 = jwks1.keys[0]?.kid ?? "";
 ok("a signing key exists", kid1.startsWith("k_"), kid1);
 
-// The web UI, and the invariant a cached copy once broke.
-const index = await get("/");
-ok("/ serves the built web UI", index.status === 200 && index.body.includes("<!doctype html"), `status ${index.status}`);
-const spa = await get("/m/m_x/s/s_y");
-check("a client-side route serves the same index.html", spa.body === index.body, true);
 /*
- * **This used to assert a 404 and now asserts a 401, and the change is
- * deliberate.** `app.ts` gates the whole of `/v1` behind one middleware placed
- * after the four public routes, so an unknown path under it is refused before the
- * SPA fallback is ever reached. The subject of this check is unchanged — the
- * fallback must not swallow the API and answer HTML — and both statuses prove it;
- * a stranger simply stops learning which routes exist as well.
+ * ⚠ **The gate is served and the app is not, proved from inside a real
+ * container.**
+ *
+ * This read "`/` serves the built web UI" and is now two assertions, because the
+ * image carries two different answers. The **gate** — sign-up, the mailed-link
+ * screens, the legal documents, the handoff — is in the image and served by this
+ * process at a closed list of addresses, because `/confirm`, `/reset` and
+ * `/verify` are opened by a *mail client* and have nowhere else to land. The
+ * **app** is not in the image at all: the Reemoat binary carries its own copy.
+ *
+ * Only a real container can prove either. Every offline driver can be green over
+ * an image that still ships the whole product behind a route guard, which is
+ * exactly the state this replaced — and over one that ships no gate, which is a
+ * fleet whose password resets all dead-end.
  */
+const register = await get("/register");
+ok(
+  "/register serves the gate",
+  register.status === 200 && register.body.includes("<!doctype html"),
+  `status ${register.status}`,
+);
+const handoff = await get("/app");
+ok("and /app is the handoff", handoff.status === 200 && handoff.body.includes("<!doctype html"), `status ${handoff.status}`);
+const terms = await get("/terms");
+ok("and the legal documents are readable with no credential", terms.status === 200, `status ${terms.status}`);
+
+/*
+ * ⚠ **And the app's own addresses are refused**, which is the half the split
+ * exists for: a gate that quietly answered these would be the whole product
+ * served from the control plane again.
+ */
+const index = await get("/");
+ok(
+  "/ answers the error envelope rather than a page",
+  index.status === 404 && index.body.includes('"not_found"'),
+  `status ${index.status}`,
+);
+const deep = await get("/m/m_x/s/s_y");
+ok("as does a deep link the app would own", deep.status === 404 && deep.body === index.body, `status ${deep.status}`);
+/*
+ * And the app bundle is genuinely absent rather than merely unserved — a `dist`
+ * left in the image would be one `REEMOAT_CP_WEB=/app/packages/web/dist` away
+ * from the old behaviour, which is a different deployment from the one claimed.
+ * The gate's own directory is asserted present in the same breath, so "no bundle"
+ * cannot be satisfied by an image that carries neither.
+ */
+const bundles = docker([
+  "exec",
+  `${PROJECT}-cp`,
+  "sh",
+  "-c",
+  "test -e /app/packages/web/dist && echo app || echo no-app; test -e /app/packages/web/dist-gate && echo gate || echo no-gate",
+]).trim();
+check("the image carries the gate and not the app", bundles.split("\n").map((line) => line.trim()), ["no-app", "gate"]);
+
 /*
  * **`GET /install.sh`, and this is the only place it is proved at all.**
  *

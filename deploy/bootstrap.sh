@@ -941,8 +941,8 @@ wait_for_confirmation() {
   die "still not signed in after five tries, and five is the whole budget before
   this control plane starts blocking sign-ins for the account you just made.
 
-  Open the link, then sign in at $CP/ and add a machine there — or re-run this
-  with --api-key once you have one."
+  Open the link, then sign in to the Reemoat app pointed at $CP and add a
+  machine there — or re-run this with --api-key once you have one."
 }
 
 register() {

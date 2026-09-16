@@ -334,17 +334,17 @@ process.stdout.write("\nwhich settings screen a URL names\n");
 
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
-  check("a plain user sees four sections", visibleSections(plain).map((s) => s.id), ["account", "keys", "machines", "logs"]);
+  check("a plain user sees five sections", visibleSections(plain).map((s) => s.id), ["account", "devices", "keys", "machines", "logs"]);
   check(
-    "an admin sees seven",
+    "an admin sees eight",
     visibleSections(admin).map((s) => s.id),
-    ["account", "keys", "machines", "logs", "server", "email", "users"],
+    ["account", "devices", "keys", "machines", "logs", "server", "email", "users"],
   );
-  // Seven ids, and this is the count the plan named three ways before it was one:
+  // Eight ids, and this is the count the plan named three ways before it was one:
   // the union, the table and the `SectionBody` switch. The switch ends in a
   // `never` arm and the union is the table's element type, so this line is the
   // table's own claim.
-  check("and the table has exactly seven entries", SECTION_SPECS.length, 7);
+  check("and the table has exactly eight entries", SECTION_SPECS.length, 8);
   /*
    * ⚠ **Logs is the one section nobody is gated out of and nobody else can see.**
    * It is `adminOnly: false`, because what it draws is this computer's own daemon
@@ -448,7 +448,7 @@ process.stdout.write("\nwhich settings screen a URL names\n");
    * phase when the control plane is unreachable but machines are already known,
    * and never sets `me`. So this fails closed rather than optimistically.
    */
-  check("and somebody we could not identify sees four", visibleSections(null).map((s) => s.id), ["account", "keys", "machines", "logs"]);
+  check("and somebody we could not identify sees five", visibleSections(null).map((s) => s.id), ["account", "devices", "keys", "machines", "logs"]);
   /*
    * The default the pane draws where the URL names no section — `Settings.tsx`
    * renders it at `sm` and above, and the rail highlights the same constant.
@@ -1492,12 +1492,15 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
     .filter(([, n]) => n > 0)
     .sort(([a], [b]) => (a < b ? -1 : 1));
   check(
-    "the fourteen confirmations are the primitive's, by file",
+    "the fifteen confirmations are the primitive's, by file",
     sites,
     [
       ["AccountSection.tsx", 1],
       ["AgentBuilder.tsx", 1],
       ["AgentsPanel.tsx", 1],
+      // One per device row, drawn per row rather than once for the list: the
+      // question names the device, which is what `TwoStep` is for.
+      ["DevicesSection.tsx", 1],
       ["EmailSection.tsx", 1],
       ["MachineAgentsSection.tsx", 1],
       ["MachineSection.tsx", 1],
@@ -1507,9 +1510,12 @@ process.stdout.write("\nthe two-step confirmation is one primitive\n");
       ["UsersSection.tsx", 3],
     ],
   );
-  // Fifteen until Q1.631 took the admin key panel and, with it, the two-step arm
-  // `KeyRow` carried for somebody else's credential.
-  check("fourteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 14);
+  // Fifteen, then fourteen when Q1.631 took the admin key panel and with it the
+  // two-step arm `KeyRow` carried for somebody else's credential, and fifteen
+  // again with the device row's Retire — the one confirmation on this list that
+  // is offered on your *own* row, because retiring the computer you are giving
+  // away is exactly what somebody reaches for and there is no other door to it.
+  check("fifteen in all", sites.reduce((sum, [, n]) => sum + n, 0), 15);
   check(
     "and every one of those files imports it from bits",
     sites.filter(([name]) => !/import \{[^}]*\bTwoStep\b[^}]*\} from "\.\.?\/bits"/.test(swept.find(([n]) => n === name)?.[1] ?? "")).map(([name]) => name),

@@ -53,9 +53,18 @@ id_ed25519*
 .claude/hooks/
 .claude/agents/
 
-# Build output. The control plane serves packages/web/dist when it is there and
-# says how to build it when it is not, so there is nothing to check in.
+# Build output, both of it. `packages/web` builds twice into two directories:
+# `dist` is the whole app, which Tauri compiles into the Reemoat binary, and
+# `dist-gate` is the nine addresses the control plane serves a browser. Each is
+# built from source by whoever needs it — the Dockerfile builds the gate in its
+# own stage — so there is nothing to check in, and a stale copy of either is the
+# thing this line exists to keep out of a commit.
+#
+# `dist/` alone does not match `dist-gate`: it is a different word, not a
+# subdirectory. The same surprise is written down in `.dockerignore`, where the
+# consequence is a developer's stale build reaching the image context.
 dist/
+dist-gate/
 
 # A packaged plugin. `docs/PLUGINS.md` tells somebody to build one in the
 # repository root — `tar -czf board.tgz -C plugins/board .` — so the documented

@@ -439,8 +439,19 @@ process.stdout.write("\nthe three documents, and the box that points at them\n")
    * is in `ready`, and `submit` is unchanged because it already refuses when
    * `ready` is false.
    */
-  const readyBlock = gate.slice(gate.indexOf("const ready"), gate.indexOf("const submit"));
-  report("the submit predicate was found", readyBlock.length > 0, `${readyBlock.length} chars`);
+  /*
+   * ⚠ **The end anchor searches from the start one, and it did not.** Both
+   * declarations live inside `Register`, but `indexOf("const submit")` found the
+   * *first* one in the whole file — so the day any earlier component in `Gate.tsx`
+   * declared a `submit`, this slice ran backwards, came back empty, and the
+   * assertion under it went red about the consent box while the consent box was
+   * fine. A reader that fails for a reason it does not name is the shape this
+   * file's own header calls crying wolf; passing `start` makes the window
+   * `Register`'s own whichever else exist.
+   */
+  const readyAt = gate.indexOf("const ready");
+  const readyBlock = gate.slice(readyAt, gate.indexOf("const submit", readyAt));
+  report("the submit predicate was found", readyAt >= 0 && readyBlock.length > 0, `${readyBlock.length} chars`);
   check("the form will not send without the box ticked", /\(!wantsConsent \|\| accepted\);/.test(readyBlock), true);
 
   /*

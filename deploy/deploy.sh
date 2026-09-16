@@ -7,9 +7,11 @@
 #
 # It is one script for two services because they share a repository and nothing
 # else. What each one does on an update has almost no overlap — the control plane
-# builds the web UI it serves and the daemon builds nothing at all — so the
-# per-service work is separated below rather than merged into a list of steps that
-# happen to be skipped half the time.
+# builds an image and the daemon builds nothing at all — so the per-service work
+# is separated below rather than merged into a list of steps that happen to be
+# skipped half the time. (What that image builds is the **gate** — sign-up, the
+# mailed-link screens, the legal documents — and not the app, which the Reemoat
+# binary carries itself.)
 #
 # CI is wired to this now, and it calls exactly this script with `--ref <sha>` —
 # `.github/workflows/deploy.yml`, for the control plane only. Keeping the logic
@@ -68,7 +70,7 @@ done
 #
 # Derived from what is installed, not from a flag with a default. A host running
 # only the daemon should not have to remember to say so on every deploy, and a
-# default of "all" would have it building a web UI nothing there serves.
+# default of "all" would have it building an image nothing there runs.
 
 # **Refused before anything else, because the next step deletes the program the
 # old unit runs.** A host whose control plane is still a launchd plist or a
@@ -77,7 +79,7 @@ done
 # success, and `git reset --hard` would remove `deploy/run-cp.sh`, which is
 # `@EXEC@` in every already-rendered control-plane unit. Nothing breaks until the
 # next reboot, at which point launchd execs a missing file and retries it every
-# ten seconds for ever, taking the fleet's identity, relay and web UI with it.
+# ten seconds for ever, taking the fleet's identity and its relay with it.
 #
 # Not a warning. The whole point of the refusal is that the damage is invisible
 # at the time and unattributable later.
@@ -387,14 +389,20 @@ UNITS="^deploy/$INIT_SYSTEM/"
 # decided by the cost, not by the artifact**, and once that is said out loud it
 # is fine for the two services to disagree about `pnpm-lock.yaml`.
 #
-# `^packages/web/` is on this list, and it is the row that gets worse. A web-only
-# change used to restart *nothing* — the SPA fallback re-reads index.html from
-# disk per request precisely so it could — and with the bundle baked into the
-# image it becomes a rebuild and a recreate. The alternative, bind-mounting
-# `dist` from the host, preserves the old behaviour and destroys the property
-# that makes containerising worth doing, because the image would no longer be the
-# deployment. There is no escape hatch today — `REEMOAT_CP_WEB` names a path
-# inside the container and nothing mounts a host directory there.
+# `^packages/web/` is on this list, and what it now covers is the **gate** rather
+# than the app: sign-up, the mailed-link screens, the legal documents and the
+# handoff page, built by the Dockerfile's `gate` stage. The app itself is not in
+# the image at all — it is compiled into the Reemoat binary — so a change to a
+# screen somebody sees *after* signing in costs no deploy here.
+#
+# It stays the whole prefix rather than a narrower pattern, and that is deliberate
+# after being got wrong once: the gate is built from `packages/web/src`, which is
+# most of that directory, and `gate.html`, `vite.gate.config.ts`, `tsconfig.json`
+# and `public/` are all COPYed too. A pattern naming only some of them is a
+# pattern that misses a rebuild — and `cp_image_fingerprint` then inspects an image
+# that was never built, the deploy prints "unchanged", and what is running is not
+# what was shipped. That is the green-deploy-of-stale-bytes failure recorded above
+# for the duplicated image-ref default, reached from a different direction.
 #
 # `tsconfig.json` is on the list because the image copies it and `tsx` resolves
 # it: `packages/control-plane` has no tsconfig of its own, so the root one is

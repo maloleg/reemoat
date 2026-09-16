@@ -182,7 +182,7 @@ plugin_failed` for anything the plugin's own code raised.
 
 ---
 
-## The control plane — 60 routes
+## The control plane — 64 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -210,7 +210,8 @@ these, so a new route is private by doing nothing. "Public" is not
 |---|---|
 | `GET /v1/me` | Who this credential is, and what it may reach |
 | `POST /v1/me/password` | Requires the current one, even under a valid session |
-| `GET` · `DELETE /v1/me/sessions` · `DELETE /v1/me/sessions/:id` · `DELETE /v1/me/sessions/current` | Where you are signed in |
+| `GET` · `DELETE /v1/me/sessions` · `DELETE /v1/me/sessions/:id` · `DELETE /v1/me/sessions/current` | Where you are signed in. Each row names the **device** it belongs to where there is one, and falls back to what the `User-Agent` says where there is not |
+| `GET` · `POST /v1/me/devices` · `DELETE /v1/me/devices/:id` | The installations registered on this account. A **device** is not a session and not a credential: a session is one bearer token with an expiry, a device is the computer or phone that keeps producing them, and holding its id proves nothing — it is read only after a session token has already resolved. Registering binds the caller's current session, adopts an id it already holds, and **ignores one it does not** rather than refusing (an id that was retired would otherwise close a sign-in loop with no exit); it refuses an API key with `409 device_needs_session`, because a key has no session for a device to hang off, and `409 device_limit` at the cap — a **refusal** rather than an eviction, so that somebody holding one live session cannot sign every device of the owner out. `POST /v1/login` carries the same block optionally and answers `deviceId`. The listing includes **recently retired** rows, because the question it exists to answer is usually asked after something has gone wrong. Retiring one ends every session bound to it and **no other device's**; `404 device_not_found` covers "no such device" and "not yours" alike. Devices are **not** an authorization subject — a grant is `(user, machine)`, so every device of one person reaches the same fleet — and `relay/authorize.ts` reads no device row, so a revocation stops that installation here on the next request and leaves a machine token already minted alone for its remaining ~300s. `SECURITY.md` carries the windows |
 | `GET` · `POST /v1/me/keys` · `DELETE /v1/me/keys/:keyId` | API keys |
 | `PUT /v1/me/email` · `POST /v1/me/email/verify` | The address is the recovery channel: a session changes it alone, an API key proves the password first |
 
@@ -245,41 +246,53 @@ password change is refused all of it by a second positional gate.
 | `GET /v1/admin/relay` | Which tunnels are up, and how long an offline machine has been that way |
 | `GET /v1/admin/fleet` | What every machine is *running*, connected or not — the daemon build, the protocol it agreed, and which build of each agent CLI it would launch (`agents`, harness → version, as of its last dial; `null` from a daemon older than the field). The inventory a protocol change or an agent rollout is planned from |
 
-### The web UI
+### Outside `/v1`
 
 | Route | What it is |
 |---|---|
 | `GET /install.sh` | The one-line installer — `deploy/bootstrap.sh` with **this instance's own origin** substituted in and shell-quoted, so a self-hosted control plane hands out a script that points at itself. Unauthenticated by path rather than by position: `callerAuth` is mounted on `/v1/*` and has never seen anything outside it. `text/plain`, so it can be read in a browser before it is piped into a shell; `no-store`, because the body varies by `Host`. A missing file is a 404, not a 500. `REEMOAT_CP_INSTALL=0` turns it off |
 
-`GET *` serves `packages/web/dist` with an SPA fallback, from disk, per request.
-`REEMOAT_CP_WEB=0` turns it off — and takes the security headers with it, which
-you then have to send yourself. See `packages/control-plane/.env.example`.
+**`GET /register` · `/confirm` · `/forgot` · `/reset` · `/verify` · `/terms` ·
+`/acceptable-use` · `/privacy` · `/app`** serve the **gate** — a page each, from
+`packages/web/dist-gate`, which is in the image and served by this same process.
+Not an SPA fallback: the list is closed, and every other path answers the error
+envelope. That is what makes these nine addresses the whole of what a browser can
+reach.
 
-## Deployment modes
+The gate exists because its flows have nowhere else to land: `/confirm`, `/reset`
+and `/verify` are opened by a **mail client**, in a browser, and `POST /v1/forgot`
+is the only remedy this service has for a forgotten password. `/app` is where every
+one of them ends — the page that says the product is an app and, where
+`REEMOAT_CP_APP_DOWNLOAD_URL` names one, offers the build.
 
-Two, and the second is a supported shape rather than a degraded one.
+`GET *` additionally serves the whole app with an SPA fallback **only when
+`REEMOAT_CP_WEB` names a built copy**, which by default it does not and inside the
+official image it cannot: that image carries no app bundle.
+
+## What is served to a browser
 
 | | Serves | Reached by |
 |---|---|---|
-| **Full** | the API, the relay, and the web client at `/` | anything: a browser, the desktop app, a phone |
-| **API-only** (`REEMOAT_CP_WEB=0`) | the API and the relay | the desktop app, and any client that speaks the routes above |
+| **The deployment** | the API, the relay, and the **gate** at nine addresses | the Reemoat app; a browser for sign-up and recovery |
+| **A checkout with `REEMOAT_CP_WEB=<path>`** | the same, plus the whole app at `/` | anything |
 
 The desktop app carries its own copy of the interface, compiled into the binary,
-and **never downloads one** — which is what makes the second mode possible: a fleet
-whose clients are all native needs no public web UI at all. `docs/NATIVE.md`
-records how that invariant is held and what asserts it.
+and **never downloads one** — which is what keeps the first row's app column
+empty. `docs/NATIVE.md` records how that invariant is held and what asserts it.
 
-Two registrations are gated on the bundle being served, and nothing else is.
 `/health`, every `/v1` route, `/install.sh`, the relay listener and the tunnel
-endpoint all behave identically either way. A path that names no route then answers
-the same error envelope as every other refusal instead of a page, which is the
-right answer and also the first thing an operator sees.
+endpoint behave identically in both rows.
 
-What an API-only instance stops sending is the **document** security headers — the
-CSP, `frame-ancestors`, the cache directives — because they are set on an HTML
-response and there is no longer one. If you serve the client from somewhere else,
-you are taking those over with it; `packages/control-plane/.env.example` carries
-the minimum set verbatim.
+⚠ **`mail.public_url` must point at whatever serves the gate.** The confirmation,
+reset, verify and invitation links are built from it, and they are opened in a
+browser — so pointed at something that does not serve those nine addresses they
+land on the error envelope. `GET /v1/admin/settings` reports it as a problem when
+it points at a control plane serving none, and the gate itself takes a **pasted
+link or code** for the case a mail client rewrites the URL and drops the fragment
+the token rides on.
 
 `REEMOAT_CP_INSTALL=0` is a **separate** switch for `/install.sh`. Turning off the
-interface does not turn off the route the next machine joins through.
+app bundle does not turn off the route the next machine joins through — and the two
+no longer spell their values the same way: `REEMOAT_CP_INSTALL=1` still means the
+built-in default, because `deploy/bootstrap.sh` really is in the image, while
+`REEMOAT_CP_WEB=1` names nothing and is answered with a sentence at startup.

@@ -3,12 +3,13 @@ import { authFailure } from "./account";
 import { ApiError, readJson, withTimeout } from "./http";
 import { parseInstanceConfig } from "./instance";
 import type { CpInit } from "./native";
-import { cpSend, inNativeShell, setNativeCredential } from "./native";
+import { cpSend, inNativeShell, nativeBoot, setNativeCredential, setNativeDevice } from "./native";
 import type { ConfigField, InstanceConfig } from "./instance";
 import type {
   AdminUser,
   CreatedMachine,
   CreatedUser,
+  DeviceRecord,
   EnrollmentCode,
   IssuedToken,
   MachineRecord,
@@ -73,6 +74,25 @@ const CREDENTIAL_STORAGE = "reemoat.credential";
  * the rename, and then they are deleted rather than updated.
  */
 const LEGACY_STORAGE = ["remoslop.credential", "remoslop.apiKey"];
+
+/**
+ * Which device this browser is registered as, on this origin.
+ *
+ * **Deliberately a separate key rather than a field beside the credential**, and
+ * not merely for tidiness: it survives a sign-out. That is the whole behaviour —
+ * signing out ends a session, and the computer you signed out of is still the same
+ * computer, so the next sign-in re-binds the same row rather than registering a
+ * second one for one machine.
+ *
+ * `LEGACY_STORAGE` has no twin here and never will: nothing wrote this under an
+ * older name, so there is nothing to adopt and nothing to sweep.
+ *
+ * A browser origin scopes this for free, which is why it needs no origin in the
+ * key — the asymmetry with the native shell, where one webview origin serves every
+ * server and `config.rs` keys the same value by origin, is `native-shell.md`'s and
+ * is not an inconsistency.
+ */
+const DEVICE_STORAGE = "reemoat.device";
 
 const CP_TIMEOUT_MS = 10_000;
 
@@ -250,6 +270,12 @@ export function clearSession(): void {
   credential = null;
   // Removed from the keyring rather than blanked, and before anything else: this is
   // the path `store.signOut()` takes, and it ends in a full reload.
+  //
+  // ⚠ **The device is deliberately left alone here.** Signing out ends a session;
+  // the computer is still the same computer, and the row on the server is still
+  // live. Clearing it would make every sign-out register a second device for one
+  // machine, which walks an account into its device limit. `forgetDevice` is the
+  // separate act, called on `device_revoked` alone.
   if (inNativeShell()) {
     setNativeCredential(null);
     return;
@@ -259,6 +285,59 @@ export function clearSession(): void {
     for (const key of LEGACY_STORAGE) window.localStorage.removeItem(key);
   } catch {
     // Nothing to do; the in-memory value is already cleared.
+  }
+}
+
+/**
+ * Which installation this client is registered as, or `null`.
+ *
+ * In the shell this comes from `NativeBoot` — the shell's own configuration file,
+ * **not its keyring**, so it survives a machine whose credential store silently
+ * discards writes (`config.rs` carries that argument). In a browser it is
+ * `localStorage`, which the origin already scopes.
+ */
+export function currentDevice(): string | null {
+  if (inNativeShell()) return nativeBoot()?.deviceId ?? null;
+  try {
+    const held = window.localStorage.getItem(DEVICE_STORAGE);
+    return held === null || held.length === 0 ? null : held;
+  } catch {
+    // Private browsing, or storage disabled. The app registers a device per
+    // session instead, which is the same degraded mode the credential has.
+    return null;
+  }
+}
+
+/** Remember the device the control plane just bound this session to. */
+export function rememberDevice(id: string): void {
+  if (inNativeShell()) {
+    setNativeDevice(id);
+    return;
+  }
+  try {
+    window.localStorage.setItem(DEVICE_STORAGE, id);
+  } catch {
+    // See `currentDevice`: in-memory-only is a working degraded mode.
+  }
+}
+
+/**
+ * Give up the stored device id.
+ *
+ * Called on `device_revoked` and on nothing else — see `clearSession`, which
+ * deliberately does not. The server declines to bind a retired id and registers a
+ * fresh device instead, so this is belt rather than the only guard; what it buys
+ * is that the client stops presenting something it has been told is finished.
+ */
+export function forgetDevice(): void {
+  if (inNativeShell()) {
+    setNativeDevice(null);
+    return;
+  }
+  try {
+    window.localStorage.removeItem(DEVICE_STORAGE);
+  } catch {
+    // Nothing to do.
   }
 }
 
@@ -432,15 +511,96 @@ export function consumePasswordReset(token: string, newPassword: string): Promis
  * special case in exactly the place that must not have any.
  */
 export async function login(name: string, password: string): Promise<Me> {
+  /*
+   * The installation, named in the same request that signs in.
+   *
+   * **One round trip rather than two**, which is the argument `GET /v1/me` already
+   * makes for computing `canAddMachine` server-side: this is the cold-start path
+   * and a second call to bind a device would sit on it every time.
+   *
+   * The stored id is offered rather than asserted — the control plane adopts it
+   * where it is this account's and still live, and **registers a fresh one
+   * otherwise rather than refusing**. That is what stops a retired id closing a
+   * sign-in loop, so a client must never treat its own id as the answer:
+   * `body.deviceId` is what to keep.
+   *
+   * Absent in a browser with storage disabled and in a shell whose configuration
+   * could not be read, both of which simply register.
+   */
+  const device = describeDevice();
   const response = await cpSend("/v1/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name, password }),
+    body: JSON.stringify(device === null ? { name, password } : { name, password, device }),
     signal: withTimeout(CP_TIMEOUT_MS),
   });
-  const body = await readJson<SessionToken>(response);
+  const body = await readJson<SessionToken & { deviceId?: string | null }>(response);
   setSession(body.token);
+  if (typeof body.deviceId === "string") rememberDevice(body.deviceId);
   return body.user;
+}
+
+/**
+ * What this installation should be called, or `null` where it is not one.
+ *
+ * `null` in a browser: a tab is not an installation somebody chose to register,
+ * and naming it after its `User-Agent` would put a guess in a list whose whole
+ * value is that its rows were named by a person. The sessions list already
+ * describes a browser through `device.ts`, which is the right surface for it.
+ *
+ * In the shell the name is the computer's own — the same string `machineLabelFor`
+ * uses when this app buys a machine — because that is the word somebody will
+ * recognise in a list of three.
+ */
+function describeDevice(): { id?: string; name: string; platform: string } | null {
+  const boot = nativeBoot();
+  if (!inNativeShell() || boot === null) return null;
+  const name = boot.hostName ?? "This computer";
+  const held = currentDevice();
+  return held === null ? { name, platform: boot.platform } : { id: held, name, platform: boot.platform };
+}
+
+/* ------------------------------------------------------------------ *
+ * Devices
+ * ------------------------------------------------------------------ */
+
+/**
+ * Register this installation, or adopt the one it already holds.
+ *
+ * Called by `store.bootstrap()` when a session was restored from storage rather
+ * than just minted — `login` binds one itself, so this is the path for a client
+ * that came back with a credential and no device, which is every client upgrading
+ * to this release.
+ *
+ * Answers `null` where there is nothing to register: a browser, or a shell that
+ * could not describe itself. The caller treats that as "no device", which is an
+ * ordinary state rather than a failure.
+ */
+export async function registerDevice(): Promise<string | null> {
+  const device = describeDevice();
+  if (device === null) return null;
+  const body = await cpFetch<{ id: string }>("/v1/me/devices", { method: "POST", body: JSON.stringify(device) });
+  rememberDevice(body.id);
+  return body.id;
+}
+
+/** The installations on this account — live, and recently retired. */
+export async function devices(): Promise<{ devices: DeviceRecord[]; limit: number }> {
+  return await cpFetch<{ devices: DeviceRecord[]; limit: number }>("/v1/me/devices");
+}
+
+/**
+ * Retire one installation, ending every sign-in on it.
+ *
+ * ⚠ **Retiring the one you are holding is allowed and ends this session**, which
+ * is what somebody reaching for it on a machine they are giving away wants — and
+ * refusing would mean the last device on an account could never be retired. The
+ * caller is what confirms; this does not guess.
+ */
+export function revokeDevice(id: string): Promise<{ revoked: boolean; sessionsRevoked: number }> {
+  return cpFetch<{ revoked: boolean; sessionsRevoked: number }>(`/v1/me/devices/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 /**

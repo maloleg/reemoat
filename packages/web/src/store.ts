@@ -1501,6 +1501,25 @@ class AppStore implements StreamSink {
      * *Before* `resume("bootstrap")`, so a machine created here is in the registry
      * by the time the first resume runs rather than four seconds later.
      */
+    /*
+     * Make sure this installation is registered, if it is one.
+     *
+     * ⚠ **After the `try`, for `beginSetUp`'s reason verbatim.** Inside it, any
+     * refusal — a full device cap, a network blip, a shell that could not
+     * describe itself — throws into the catch above, which with no connections
+     * forces `phase` back to `"loading"`: an account with no machines yet would
+     * get a spinner and an outage banner because a *bookkeeping* call failed.
+     *
+     * ⚠ **And its own catch, which is what makes that placement sufficient.**
+     * `beginSetUp` is awaited and can throw; a rejection here would reach the same
+     * place by a different route.
+     *
+     * `login` binds a device itself, in the request that signs in, so this is the
+     * path for a session restored from storage — which is every client on the
+     * release this ships in, and every launch after a restart.
+     */
+    await this.ensureDevice();
+
     await this.beginSetUp();
 
     this.startPolling();
@@ -1508,19 +1527,28 @@ class AppStore implements StreamSink {
   }
 
   /**
-   * Make this computer a machine, if it is not one and this app can do it.
+   * Register this installation with the control plane, once, if it has none.
    *
-   * **The whole of "the daemon stops being a thing you install".** Everything it
-   * needs already existed separately: the control plane hands back a machine, a
-   * grant and a single-use code in one answer; the host process can write the env
-   * file and start the daemon; and the daemon announces itself when it is up. This
-   * is the twenty lines that put them in a row.
+   * Silent on every failure. What a refusal costs is one unregistered launch: the
+   * app works, the sessions list simply describes this client through its
+   * `User-Agent` rather than by name, and the next start asks again.
    *
-   * ⚠ **It never throws and never reports through `cpError`.** Every arm below
-   * either returns or lands in the one catch, which writes `setup` and nothing
-   * else. A person whose account is full, or whose daemon will not start, still has
-   * a working app pointed at every other machine they have.
+   * ⚠ **`password_change_required` is not a failure here and must not become
+   * one.** The route is registered *above* the control plane's second gate so an
+   * admin-created account can reach it — but a control plane that has not been
+   * updated answers 403, and this client has to keep working against one.
+   * `cp.machines()` makes the identical allowance in `bootstrap` above.
    */
+  private async ensureDevice(): Promise<void> {
+    if (cp.currentDevice() !== null) return;
+    try {
+      await cp.registerDevice();
+    } catch {
+      // Bookkeeping. A device is how somebody *recognises* this client in a list;
+      // nothing in the app depends on having one.
+    }
+  }
+
   /**
    * The setup run in flight, so two bootstraps cannot both buy a machine.
    *
@@ -1540,6 +1568,20 @@ class AppStore implements StreamSink {
     return this.settingUp;
   }
 
+  /**
+   * Make this computer a machine, if it is not one and this app can do it.
+   *
+   * **The whole of "the daemon stops being a thing you install".** Everything it
+   * needs already existed separately: the control plane hands back a machine, a
+   * grant and a single-use code in one answer; the host process can write the env
+   * file and start the daemon; and the daemon announces itself when it is up. This
+   * is the twenty lines that put them in a row.
+   *
+   * ⚠ **It never throws and never reports through `cpError`.** Every arm below
+   * either returns or lands in the one catch, which writes `setup` and nothing
+   * else. A person whose account is full, or whose daemon will not start, still has
+   * a working app pointed at every other machine they have.
+   */
   private async setUpThisComputer(): Promise<void> {
     /*
      * `null` in a browser, for ever — this is the native shell's `host_boot`
@@ -2090,6 +2132,21 @@ class AppStore implements StreamSink {
   handleSignedOut(failure: AuthFailure): void {
     this.stopPolling();
     for (const id of [...this.connections.keys()]) this.dropMachine(id);
+    /*
+     * ⚠ **One failure asks for a second act, and only one.** `device_revoked`
+     * means the *installation* was retired, not merely the session, so the stored
+     * device id is finished and has to go — otherwise the next sign-in offers a
+     * dead id, the server hands back a fresh device by its adopt-or-register
+     * rule, and this app quietly registers a new one on every launch while
+     * presenting an id nothing will ever adopt.
+     *
+     * Every other failure here leaves it alone, deliberately. Signing out is not
+     * a statement about the computer, and `session_revoked` — which is what the
+     * per-user session cap produces — leaves the device perfectly valid; giving
+     * the id up there would spend a device slot every time somebody signed in on
+     * an eleventh browser.
+     */
+    if (failure === "device_revoked") cp.forgetDevice();
     this.patch({ phase: "signed_out", me: null, cpError: null, authError: signedOutText(failure) });
   }
 

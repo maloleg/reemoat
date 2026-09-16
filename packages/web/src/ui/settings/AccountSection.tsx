@@ -107,7 +107,7 @@ export function AccountSection({
             its own password.
           */}
           <EmailRow me={me} config={config} />
-          <Devices />
+          <SignIns />
         </>
       )}
 
@@ -548,8 +548,25 @@ function EmailForm({ onDone }: { onDone: () => void }): ReactNode {
  * **Inside Account rather than a section of its own** (decision 1B): every verb
  * here is a sign-out, and for an API-key credential the whole section is one
  * sentence — a rail row for that fails the subtraction test.
+ *
+ * ⚠ **This was called `Devices` and its heading said Devices, and neither is
+ * true any more.** A registered installation is now a real entity with its own
+ * section, and two things called Devices on one settings screen is the collision
+ * that gets tidied the wrong way — Q1.630's own argument, *"a session is a person
+ * signed in and listed under Devices"*, would have pointed at whichever the
+ * reader happened to open.
+ *
+ * **Decision 1B stands and only the name moved**, which is worth saying because
+ * the new section looks like it reverses it. That argument is about a *session*
+ * list whose only verb is sign-out; a device survives a sign-out, retiring one is
+ * a decision about a computer rather than a tab, and it carries retired rows and
+ * a limit this list has nothing to say about.
+ *
+ * Each row now prefers the **device's** name where the session has one, falling
+ * back to `device.ts`'s reading of the `User-Agent` where it does not — one was
+ * written by a person, the other is a guess at a header.
  */
-function Devices(): ReactNode {
+function SignIns(): ReactNode {
   const [rows, setRows] = useState<SessionRecord[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -575,13 +592,16 @@ function Devices(): ReactNode {
       // The number the server actually revoked, not the number this button
       // was labelled with — the list is a poll old, and `revokedCount` is
       // the answer to what just happened.
-      toast("ok", count === 1 ? "1 device signed out." : `${count} devices signed out.`);
+      // "sign-in", not "device": this ends sessions, and a device keeps working
+      // — it just asks for the password again. Saying "devices signed out" here
+      // beside a Devices section that retires them is two acts under one word.
+      toast("ok", count === 1 ? "1 other sign-in ended." : `${count} other sign-ins ended.`);
       refresh();
     });
 
   return (
     <section className={SETTINGS_SECTION}>
-      <h2 className={SETTINGS_HEADING}>Devices</h2>
+      <h2 className={SETTINGS_HEADING}>Signed in</h2>
       {/*
        * One placeholder row while the first listing is in flight, so the heading
        * never stands over nothing and the rows arriving do not shove Sign out
@@ -611,7 +631,7 @@ function Devices(): ReactNode {
         <>
           <div className="mt-2">
             {rows.map((row) => (
-              <DeviceRow key={row.id} row={row} onChanged={refresh} />
+              <SignInRow key={row.id} row={row} onChanged={refresh} />
             ))}
           </div>
 
@@ -642,7 +662,7 @@ function Devices(): ReactNode {
   );
 }
 
-function DeviceRow({ row, onChanged }: { row: SessionRecord; onChanged: () => void }): ReactNode {
+function SignInRow({ row, onChanged }: { row: SessionRecord; onChanged: () => void }): ReactNode {
   const [busy, setBusy] = useState(false);
   const now = Date.now();
   const ip = row.ip !== null && row.ip !== undefined && row.ip !== "unknown" ? row.ip : null;
@@ -659,7 +679,17 @@ function DeviceRow({ row, onChanged }: { row: SessionRecord; onChanged: () => vo
             className="min-w-0 truncate text-sm font-medium"
             title={agentWasRecorded(row.userAgent) && describeAgent(row.userAgent) === null ? (row.userAgent ?? undefined) : undefined}
           >
-            {deviceLine(row.userAgent)}
+            {/*
+             * The device's own name wins, and it is a different *kind* of fact
+             * from the fallback beside it. `deviceLine` reads a `User-Agent`,
+             * which is a claim a request makes about itself; a device name was
+             * written by somebody who had already signed in and appears in a list
+             * they can retire rows from. Neither is evidence — a stolen session
+             * can register a device and call it anything — but only one of them
+             * is a word this person chose, which is the whole question this list
+             * answers.
+             */}
+            {row.deviceName ?? deviceLine(row.userAgent)}
           </span>
           {/* Which row you are on is the one thing here that is certain, so it is
               the badge and not the title — the title is what the agent said. And

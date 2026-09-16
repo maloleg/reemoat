@@ -1,11 +1,33 @@
-//! Which control plane this installation talks to.
+//! Which control plane this installation talks to, and what that server calls it.
 //!
 //! **Not a secret, and deliberately not in the keyring.** A server address is a
 //! preference; the credential for it is the secret, and it lives in
 //! `credential.rs` keyed on the origin this file stores. Keeping them apart is
 //! what makes a machine whose keyring is unusable still remember *which* server
 //! it was pointed at — it just asks for the password again.
+//!
+//! **The device id is here for exactly that reason, and not beside the
+//! credential.** It is an identifier the control plane handed back, not a secret:
+//! holding one authorizes nothing, because every request still carries the
+//! session token and the id is only read *after* that token has resolved. Put it
+//! in the keyring instead and the cost lands precisely on the machines
+//! `credential::probe` exists to detect — a Linux box with no unlocked collection
+//! silently discards every write, so that installation would register a brand new
+//! device on every launch and burn through the account's device limit without ever
+//! reading one back. It would also put a second keychain read on the first-paint
+//! path, which on an ad-hoc-signed development build is a second prompt per build.
+//!
+//! ⚠ This reverses the narrowest half of the "no device id" position
+//! `credential.rs` still states — *"a value generated at first run and persisted
+//! **is** device identity, arriving by accident"*. What changed is that it is no
+//! longer an accident: the control plane has a `devices` table, the id comes from
+//! there rather than from a local generator, and a person can see and retire the
+//! row. The three refusals that entry makes *at the interface* — no `list()`, no
+//! private key through a `String`, no first-run generation — all still stand, and
+//! the keyring seam stays reserved for the device **key** that has none of these
+//! properties.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +37,25 @@ use url::Url;
 #[derive(Serialize, Deserialize, Default)]
 struct Stored {
     server: Option<String>,
+    /// The device this app is registered as, per server.
+    ///
+    /// **A map rather than one current value**, and that is the one place this
+    /// file's shape departs from `credential.rs`'s. `host_set_server` erases the
+    /// previous origin's *credential* because a credential this app will not
+    /// present is one it has no reason to hold. The same act on a device id would
+    /// be destructive rather than tidy: the row on that server is not deleted by
+    /// anything here, so forgetting the id leaves an installation the person can
+    /// no longer recognise in their own list and spends a second slot the next
+    /// time they point back. Retaining it leaks nothing, because it is not a
+    /// secret.
+    ///
+    /// `BTreeMap` rather than `HashMap` so the file is stable on disk — a
+    /// preferences file that reorders itself on every write is one nobody can
+    /// diff. Absent in every file written before this field existed, which
+    /// `Default` answers with an empty map: no migration, and an app that has
+    /// never registered is indistinguishable from one upgrading, correctly.
+    #[serde(default)]
+    devices: BTreeMap<String, String>,
 }
 
 pub fn server_file(dir: &Path) -> PathBuf {
@@ -36,12 +77,63 @@ pub fn read_server(dir: &Path) -> Option<String> {
 }
 
 pub fn write_server(dir: &Path, origin: &str) -> Result<(), String> {
+    let mut stored = read_stored(dir);
+    stored.server = Some(origin.to_string());
+    write_stored(dir, &stored)
+}
+
+/// The whole file, or its defaults.
+///
+/// Every failure answers `Default`, which is `read_server`'s posture applied one
+/// level up and for its reason: an unreadable or hand-edited file must land on
+/// the picker and an empty device map, never stop the app starting. It is read
+/// whole and written whole because the two fields are written by different acts —
+/// choosing a server and registering a device — and a partial write would be the
+/// one that silently discards the other.
+fn read_stored(dir: &Path) -> Stored {
+    fs::read_to_string(server_file(dir))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Stored>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_stored(dir: &Path, stored: &Stored) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let text = serde_json::to_string_pretty(&Stored {
-        server: Some(origin.to_string()),
-    })
-    .map_err(|e| e.to_string())?;
+    let text = serde_json::to_string_pretty(stored).map_err(|e| e.to_string())?;
     fs::write(server_file(dir), text).map_err(|e| format!("could not write the server file: {e}"))
+}
+
+/// The device this installation is registered as on `origin`, or `None`.
+///
+/// Keyed on the **canonical** origin, exactly as the keyring account is, so one
+/// server is one entry however its address was typed. A value stored under a
+/// spelling `normalize_origin` no longer produces is simply never read — which is
+/// the same cost a credential under a stale key already carries.
+pub fn read_device(dir: &Path, origin: &str) -> Option<String> {
+    read_stored(dir).devices.get(origin).cloned()
+}
+
+pub fn write_device(dir: &Path, origin: &str, device: &str) -> Result<(), String> {
+    let mut stored = read_stored(dir);
+    stored
+        .devices
+        .insert(origin.to_string(), device.to_string());
+    write_stored(dir, &stored)
+}
+
+/// Give up the device recorded for one server.
+///
+/// Called when the control plane says that installation has been retired — at
+/// which point keeping the id is actively harmful, because the next sign-in would
+/// offer it again. The server refuses to bind a retired id and registers a fresh
+/// device instead, so this is belt rather than the only guard; what it buys is
+/// that the app stops presenting something it has been told is finished.
+pub fn erase_device(dir: &Path, origin: &str) -> Result<(), String> {
+    let mut stored = read_stored(dir);
+    if stored.devices.remove(origin).is_none() {
+        return Ok(());
+    }
+    write_stored(dir, &stored)
 }
 
 /// What somebody typed, turned into the one canonical spelling — or a sentence
@@ -103,7 +195,78 @@ pub fn normalize_origin(raw: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_origin;
+    use super::{
+        erase_device, normalize_origin, read_device, read_server, write_device, write_server,
+    };
+
+    /// The property the map exists for: two servers, two devices, neither
+    /// reachable from the other's origin.
+    #[test]
+    fn a_device_is_scoped_to_its_server() {
+        let dir = std::env::temp_dir().join(format!("reemoat-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_server(&dir, "https://a.example").unwrap();
+        write_device(&dir, "https://a.example", "dv_aaa").unwrap();
+        write_device(&dir, "https://b.example", "dv_bbb").unwrap();
+
+        assert_eq!(
+            read_device(&dir, "https://a.example").as_deref(),
+            Some("dv_aaa")
+        );
+        assert_eq!(
+            read_device(&dir, "https://b.example").as_deref(),
+            Some("dv_bbb")
+        );
+        assert_eq!(read_device(&dir, "https://c.example"), None);
+        // And the server survives a device write — the two fields are written by
+        // different acts and a partial write is the one that loses the other.
+        assert_eq!(read_server(&dir).as_deref(), Some("https://a.example"));
+
+        // Changing servers keeps both, which is where this deliberately differs
+        // from the credential: the row on the old server still exists.
+        write_server(&dir, "https://b.example").unwrap();
+        assert_eq!(
+            read_device(&dir, "https://a.example").as_deref(),
+            Some("dv_aaa")
+        );
+
+        erase_device(&dir, "https://a.example").unwrap();
+        assert_eq!(read_device(&dir, "https://a.example"), None);
+        assert_eq!(
+            read_device(&dir, "https://b.example").as_deref(),
+            Some("dv_bbb")
+        );
+        // Erasing what is not there is the outcome the caller wanted.
+        erase_device(&dir, "https://a.example").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file written before this field existed, and one somebody edited into
+    /// nonsense: both answer "no device" rather than stopping the app.
+    #[test]
+    fn a_file_without_devices_reads_as_none() {
+        let dir = std::env::temp_dir().join(format!("reemoat-cfg-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            super::server_file(&dir),
+            r#"{"server":"https://a.example"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_server(&dir).as_deref(), Some("https://a.example"));
+        assert_eq!(read_device(&dir, "https://a.example"), None);
+        // And a device can still be added to it, which is the migration.
+        write_device(&dir, "https://a.example", "dv_new").unwrap();
+        assert_eq!(
+            read_device(&dir, "https://a.example").as_deref(),
+            Some("dv_new")
+        );
+        assert_eq!(read_server(&dir).as_deref(), Some("https://a.example"));
+
+        std::fs::write(super::server_file(&dir), "not json at all").unwrap();
+        assert_eq!(read_device(&dir, "https://a.example"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn one_server_is_one_spelling() {

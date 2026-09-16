@@ -154,7 +154,12 @@ pub fn env_contents(control_plane: &str, enroll_code: &str) -> String {
      * which is correct for the ordinary case of a control plane with a public
      * certificate.
      */
-    for name in ["NODE_EXTRA_CA_CERTS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"] {
+    for name in [
+        "NODE_EXTRA_CA_CERTS",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+    ] {
         if let Some(value) = std::env::var_os(name).and_then(|v| v.into_string().ok()) {
             // Refused rather than escaped: a newline would let one value write a
             // second assignment into a file `sh` sources, and nothing here needs a
@@ -213,23 +218,34 @@ pub fn is_alive(base: &str, instance_id: &str) -> bool {
     };
     // `local::read` already refused anything but `127.0.0.1` and `::1`, so this
     // parses back what it built rather than trusting the file.
-    let Ok(address) = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() else {
+    let Ok(address) = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    else {
         return false;
     };
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(address, port), PROBE_TIMEOUT)
-    else {
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::new(address, port),
+        PROBE_TIMEOUT,
+    ) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(PROBE_TIMEOUT));
     let _ = stream.set_write_timeout(Some(PROBE_TIMEOUT));
     // HTTP/1.0 with an explicit close, so the answer ends at EOF and this needs no
     // chunked or keep-alive handling of its own.
-    let request = format!("GET /health HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("GET /health HTTP/1.0\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
     let mut raw = Vec::new();
-    if (&mut stream).take(PROBE_LIMIT).read_to_end(&mut raw).is_err() {
+    if (&mut stream)
+        .take(PROBE_LIMIT)
+        .read_to_end(&mut raw)
+        .is_err()
+    {
         return false;
     }
     let text = String::from_utf8_lossy(&raw);
@@ -284,8 +300,15 @@ pub fn managed_unit(home: &Path) -> Option<PathBuf> {
             continue;
         };
         let found = entries.flatten().map(|entry| entry.path()).find(|path| {
-            let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
-            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("").to_lowercase();
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             (extension == "plist" || extension == "service") && name.contains("reemoat")
         });
         if found.is_some() {
@@ -310,13 +333,22 @@ pub fn managed_unit(home: &Path) -> Option<PathBuf> {
 /// it at the next reboot. Moving the file is what settles it both ways, so that is
 /// what is asked for; the unload is there to stop one that is running this minute.
 pub fn managed_unit_detail(unit: &Path) -> String {
-    let name = unit.file_name().and_then(|value| value.to_str()).unwrap_or("the unit");
+    let name = unit
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("the unit");
     let remedy = if unit.extension().and_then(|value| value.to_str()) == Some("plist") {
         let label = name.trim_end_matches(".plist");
-        format!("launchctl bootout gui/$(id -u)/{label} 2>/dev/null; mv {} ~/{name}.off", unit.display())
+        format!(
+            "launchctl bootout gui/$(id -u)/{label} 2>/dev/null; mv {} ~/{name}.off",
+            unit.display()
+        )
     } else {
         let label = name.trim_end_matches(".service");
-        format!("systemctl --user disable --now {label}; mv {} ~/{name}.off", unit.display())
+        format!(
+            "systemctl --user disable --now {label}; mv {} ~/{name}.off",
+            unit.display()
+        )
     };
     format!(
         "This computer already has a Reemoat daemon installed as a background service, at {}. \
@@ -346,7 +378,9 @@ pub fn managed_unit_detail(unit: &Path) -> String {
 pub fn is_writable_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
-        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
 }
 
 /// There is no env file on this computer.
@@ -410,7 +444,10 @@ pub fn env_rewritten(existing: &str, control_plane: &str, enroll_code: &str) -> 
      * enrollment code would sign those clients out for a reason that has nothing
      * to do with them.
      */
-    let mode = match parse_env(existing).get("REEMOAT_AUTH").map(|value| value.trim().to_lowercase()) {
+    let mode = match parse_env(existing)
+        .get("REEMOAT_AUTH")
+        .map(|value| value.trim().to_lowercase())
+    {
         Some(found) if found == "both" => "both",
         _ => "signed",
     };
@@ -425,7 +462,8 @@ pub fn env_rewritten(existing: &str, control_plane: &str, enroll_code: &str) -> 
         let owned = if line.trim_start().starts_with('#') {
             None
         } else {
-            line.split_once('=').and_then(|(key, _)| OWNED_KEYS.iter().position(|k| *k == key.trim()))
+            line.split_once('=')
+                .and_then(|(key, _)| OWNED_KEYS.iter().position(|k| *k == key.trim()))
         };
         match owned {
             Some(index) => {
@@ -530,7 +568,11 @@ fn claim_file(dir: &Path) -> PathBuf {
 pub fn read_claim(dir: &Path, origin: &str) -> Option<String> {
     let text = std::fs::read_to_string(claim_file(dir)).ok()?;
     let claims: Claims = serde_json::from_str(&text).ok()?;
-    claims.machines.get(origin).filter(|id| !id.is_empty()).cloned()
+    claims
+        .machines
+        .get(origin)
+        .filter(|id| !id.is_empty())
+        .cloned()
 }
 
 pub fn write_claim(dir: &Path, origin: &str, machine_id: &str) -> Result<(), String> {
@@ -540,9 +582,12 @@ pub fn write_claim(dir: &Path, origin: &str, machine_id: &str) -> Result<(), Str
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    claims.machines.insert(origin.to_string(), machine_id.to_string());
+    claims
+        .machines
+        .insert(origin.to_string(), machine_id.to_string());
     let text = serde_json::to_string_pretty(&claims).map_err(|e| e.to_string())?;
-    std::fs::write(claim_file(dir), text).map_err(|e| format!("could not write the machine file: {e}"))
+    std::fs::write(claim_file(dir), text)
+        .map_err(|e| format!("could not write the machine file: {e}"))
 }
 
 /// This computer's name, for naming the machine it is about to become.
@@ -623,10 +668,17 @@ fn login_name() -> Option<String> {
             if entry.is_null() {
                 None
             } else {
-                std::ffi::CStr::from_ptr((*entry).pw_name).to_str().ok().map(str::to_owned)
+                std::ffi::CStr::from_ptr((*entry).pw_name)
+                    .to_str()
+                    .ok()
+                    .map(str::to_owned)
             }
         };
-        for candidate in [from_passwd, std::env::var("USER").ok(), std::env::var("LOGNAME").ok()] {
+        for candidate in [
+            from_passwd,
+            std::env::var("USER").ok(),
+            std::env::var("LOGNAME").ok(),
+        ] {
             match candidate {
                 Some(name) if !name.trim().is_empty() => return Some(name),
                 _ => continue,
@@ -636,7 +688,9 @@ fn login_name() -> Option<String> {
     }
     #[cfg(not(unix))]
     {
-        std::env::var("USERNAME").ok().filter(|name| !name.trim().is_empty())
+        std::env::var("USERNAME")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
     }
 }
 
@@ -738,16 +792,30 @@ pub fn login_shell_path(shell: Option<&str>) -> Option<String> {
 /// `~/.local/bin` should not take precedence over a deliberate install.
 pub fn daemon_path(payload: &Payload, home: &Path, user_path: Option<&str>) -> String {
     let mut parts: Vec<String> = Vec::new();
-    parts.push(payload.root.join("node_modules").join(".bin").display().to_string());
+    parts.push(
+        payload
+            .root
+            .join("node_modules")
+            .join(".bin")
+            .display()
+            .to_string(),
+    );
     match user_path {
         Some(p) if !p.trim().is_empty() => parts.push(p.trim().to_string()),
         // The fallback, and it is deliberately the bare system default rather than
         // a guess at where somebody keeps things. Homebrew is named because it is
         // where `git` lives on most developer Macs that have it from Homebrew
         // rather than from the Command Line Tools.
-        _ => parts.push("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()),
+        _ => {
+            parts.push("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string())
+        }
     }
-    for managed in [".local/bin", ".codex/bin", ".opencode/bin", ".reemoat/toolchain/bin"] {
+    for managed in [
+        ".local/bin",
+        ".codex/bin",
+        ".opencode/bin",
+        ".reemoat/toolchain/bin",
+    ] {
         parts.push(home.join(managed).display().to_string());
     }
     parts.join(":")
@@ -757,9 +825,15 @@ pub fn daemon_path(payload: &Payload, home: &Path, user_path: Option<&str>) -> S
 
 /// How many lines of the child's output are kept to explain a failure.
 ///
-/// The same size `src/plugins/runtime.ts` keeps for a plugin's ring and for the
-/// same reason: enough to carry a startup banner and the sentence that replaced
-/// it, not enough to be a log file nobody rotates.
+/// The same *shape* as the ring `src/plugins/runtime.ts` keeps for a plugin, and
+/// deliberately ten times the size: `PLUGIN_LOG_LINES` is 20 because a plugin's
+/// ring only has to carry the sentence that killed it onto one failure row, while
+/// this is the startup transcript a person reads on Settings → Logs. Enough to
+/// carry a banner and everything after it, not enough to be a log file nobody
+/// rotates.
+///
+/// ⚠ **And unlike that ring, no per-line clip is applied here.** `runtime.ts`
+/// also holds `MAX_LOG_LINE_CHARS`; this keeps a pathological line whole.
 const LOG_LINES: usize = 200;
 
 /// How long a stopping daemon is given before it is killed outright.
@@ -885,7 +959,10 @@ impl Supervisor {
     /// notice could draw them; the notice draws a sentence now and the lines are
     /// Settings → Logs's (Q7.140), so what is left on the poll is this boolean.
     pub fn printed_anything(&self) -> bool {
-        self.log.lock().map(|held| !held.is_empty()).unwrap_or(false)
+        self.log
+            .lock()
+            .map(|held| !held.is_empty())
+            .unwrap_or(false)
     }
 
     /// The whole ring, as lines, for the screen whose subject is the ring.
@@ -923,19 +1000,33 @@ impl Supervisor {
     /// a handle to is a wrapper, the daemon is a grandchild, and stopping the app
     /// would leave the real daemon reparented with nothing reaping it. `--import`
     /// runs the daemon in the process we spawned, so the handle is the daemon.
-    pub fn start(&mut self, payload: &Payload, home: &Path, env: &BTreeMap<String, String>) -> Result<(), String> {
+    pub fn start(
+        &mut self,
+        payload: &Payload,
+        home: &Path,
+        env: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
         if self.owns_running() {
             return Ok(());
         }
         // A new child's outcome is not the old one's; a stale code read as this
         // one's would send the caller down a branch for a failure that is over.
         self.last_exit = None;
-        let path = daemon_path(payload, home, login_shell_path(std::env::var("SHELL").ok().as_deref()).as_deref());
+        let path = daemon_path(
+            payload,
+            home,
+            login_shell_path(std::env::var("SHELL").ok().as_deref()).as_deref(),
+        );
 
         let mut command = Command::new(&payload.node);
         command
             .current_dir(&payload.root)
-            .args(["--enable-source-maps", "--import", "tsx", "scripts/daemon.ts"])
+            .args([
+                "--enable-source-maps",
+                "--import",
+                "tsx",
+                "scripts/daemon.ts",
+            ])
             /*
              * A clean environment, built rather than inherited. This process's own
              * is a GUI app's: it carries Tauri's variables, whatever launchd set,
@@ -1046,10 +1137,18 @@ impl Supervisor {
             }
         }
 
-        let mut child = command.spawn().map_err(|e| format!("could not start the daemon: {e}"))?;
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("could not start the daemon: {e}"))?;
         for stream in [
-            child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
-            child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+            child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
         ]
         .into_iter()
         .flatten()
@@ -1168,11 +1267,18 @@ mod tests {
     /// the non-empty half is still asserted.
     #[test]
     fn login_name_is_this_account() {
-        let answered = super::login_name().expect("a uid always has an account name on a developer machine");
-        assert!(!answered.trim().is_empty(), "an empty name is the `unknown` bug with extra steps");
+        let answered =
+            super::login_name().expect("a uid always has an account name on a developer machine");
+        assert!(
+            !answered.trim().is_empty(),
+            "an empty name is the `unknown` bug with extra steps"
+        );
         if let Ok(from_env) = std::env::var("USER") {
             if !from_env.trim().is_empty() {
-                assert_eq!(answered, from_env, "getpwuid and $USER must not disagree about who this is");
+                assert_eq!(
+                    answered, from_env,
+                    "getpwuid and $USER must not disagree about who this is"
+                );
             }
         }
     }
@@ -1188,7 +1294,9 @@ mod tests {
         assert!(text.contains("NODE_EXTRA_CA_CERTS=/tmp/dev-ca.crt"));
         // And it is still a file `run-daemon.sh` can source.
         assert_eq!(
-            parse_env(&text).get("NODE_EXTRA_CA_CERTS").map(String::as_str),
+            parse_env(&text)
+                .get("NODE_EXTRA_CA_CERTS")
+                .map(String::as_str),
             Some("/tmp/dev-ca.crt")
         );
     }
@@ -1196,13 +1304,21 @@ mod tests {
     #[test]
     fn a_value_carrying_a_newline_is_refused_rather_than_escaped() {
         // SAFETY: as above.
-        unsafe { std::env::set_var("NODE_EXTRA_CA_CERTS", "/tmp/ok.crt\nREEMOAT_AUTH=shared_secret") };
+        unsafe {
+            std::env::set_var(
+                "NODE_EXTRA_CA_CERTS",
+                "/tmp/ok.crt\nREEMOAT_AUTH=shared_secret",
+            )
+        };
         let text = env_contents("https://cp.example", "ec_abc");
         unsafe { std::env::remove_var("NODE_EXTRA_CA_CERTS") };
         // The whole value is dropped, so the injected assignment never lands and
         // the mode stays what this file says it is.
         assert!(!text.contains("shared_secret"));
-        assert_eq!(parse_env(&text).get("REEMOAT_AUTH").map(String::as_str), Some("signed"));
+        assert_eq!(
+            parse_env(&text).get("REEMOAT_AUTH").map(String::as_str),
+            Some("signed")
+        );
     }
 
     #[test]
@@ -1213,8 +1329,14 @@ mod tests {
         assert!(text.contains("REEMOAT_ENROLL_CODE=ec_abc"));
         // Round-trips through the reader that stands in for `run-daemon.sh`.
         let parsed = parse_env(&text);
-        assert_eq!(parsed.get("REEMOAT_AUTH").map(String::as_str), Some("signed"));
-        assert_eq!(parsed.get("REEMOAT_ENROLL_CODE").map(String::as_str), Some("ec_abc"));
+        assert_eq!(
+            parsed.get("REEMOAT_AUTH").map(String::as_str),
+            Some("signed")
+        );
+        assert_eq!(
+            parsed.get("REEMOAT_ENROLL_CODE").map(String::as_str),
+            Some("ec_abc")
+        );
     }
 
     #[test]
@@ -1228,7 +1350,10 @@ mod tests {
              MALFORMED\n\
              =novalue\n",
         );
-        assert_eq!(parsed.get("REEMOAT_TOKEN").map(String::as_str), Some("quoted value"));
+        assert_eq!(
+            parsed.get("REEMOAT_TOKEN").map(String::as_str),
+            Some("quoted value")
+        );
         assert_eq!(
             parsed.get("REEMOAT_CONTROL_PLANE").map(String::as_str),
             Some("https://cp.example")
@@ -1240,12 +1365,19 @@ mod tests {
     }
 
     fn payload_at(root: &str) -> Payload {
-        Payload { root: PathBuf::from(root), node: PathBuf::from("/nowhere/node") }
+        Payload {
+            root: PathBuf::from(root),
+            node: PathBuf::from("/nowhere/node"),
+        }
     }
 
     #[test]
     fn the_payloads_bin_comes_first_so_npm_and_node_are_siblings() {
-        let path = daemon_path(&payload_at("/app/daemon"), Path::new("/home/x"), Some("/usr/bin:/bin"));
+        let path = daemon_path(
+            &payload_at("/app/daemon"),
+            Path::new("/home/x"),
+            Some("/usr/bin:/bin"),
+        );
         assert!(path.starts_with("/app/daemon/node_modules/.bin:"));
         // `agents.sh` resolves node as npm's sibling; if anything preceded the
         // payload's bin, the two could come from different installs.
@@ -1255,11 +1387,18 @@ mod tests {
 
     #[test]
     fn the_users_own_path_is_kept_and_the_managed_dirs_are_appended() {
-        let path = daemon_path(&payload_at("/app/daemon"), Path::new("/home/x"), Some("/opt/mine/bin"));
+        let path = daemon_path(
+            &payload_at("/app/daemon"),
+            Path::new("/home/x"),
+            Some("/opt/mine/bin"),
+        );
         let parts: Vec<&str> = path.split(':').collect();
         assert!(parts.contains(&"/opt/mine/bin"));
         let mine = parts.iter().position(|p| *p == "/opt/mine/bin").unwrap();
-        let managed = parts.iter().position(|p| *p == "/home/x/.local/bin").unwrap();
+        let managed = parts
+            .iter()
+            .position(|p| *p == "/home/x/.local/bin")
+            .unwrap();
         // Appended, never prepended: a file dropped into a writable directory must
         // not win over what the person deliberately installed.
         assert!(mine < managed);
@@ -1274,7 +1413,11 @@ mod tests {
 
     #[test]
     fn a_blank_shell_answer_is_treated_as_no_answer() {
-        let path = daemon_path(&payload_at("/app/daemon"), Path::new("/home/x"), Some("   "));
+        let path = daemon_path(
+            &payload_at("/app/daemon"),
+            Path::new("/home/x"),
+            Some("   "),
+        );
         assert!(path.contains("/usr/bin"));
     }
 
@@ -1283,7 +1426,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("reemoat-claim-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         write_claim(&dir, "https://a.example", "m_aaaa").unwrap();
-        assert_eq!(read_claim(&dir, "https://a.example").as_deref(), Some("m_aaaa"));
+        assert_eq!(
+            read_claim(&dir, "https://a.example").as_deref(),
+            Some("m_aaaa")
+        );
         // A machine created against one fleet is meaningless to another, and
         // handing it over would re-mint a code for somebody else's machine id.
         assert_eq!(read_claim(&dir, "https://b.example"), None);
@@ -1291,8 +1437,14 @@ mod tests {
         // the file is a map: somebody with a work fleet and a personal one would
         // otherwise spend a permanent machine slot on every switch between them.
         write_claim(&dir, "https://b.example", "m_bbbb").unwrap();
-        assert_eq!(read_claim(&dir, "https://b.example").as_deref(), Some("m_bbbb"));
-        assert_eq!(read_claim(&dir, "https://a.example").as_deref(), Some("m_aaaa"));
+        assert_eq!(
+            read_claim(&dir, "https://b.example").as_deref(),
+            Some("m_bbbb")
+        );
+        assert_eq!(
+            read_claim(&dir, "https://a.example").as_deref(),
+            Some("m_aaaa")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1333,9 +1485,16 @@ mod tests {
         unsafe { std::env::remove_var(PAYLOAD_OVERRIDE) };
 
         if cfg!(debug_assertions) {
-            assert_eq!(found.root, checkout, "a development build follows the checkout");
+            assert_eq!(
+                found.root, checkout,
+                "a development build follows the checkout"
+            );
         } else {
-            assert_eq!(found.root, bundle.join("daemon"), "a release build ignores the variable");
+            assert_eq!(
+                found.root,
+                bundle.join("daemon"),
+                "a release build ignores the variable"
+            );
         }
         // ⚠ The runtime is the bundled one in both cases: what the override swaps
         // is the code, never the Node it runs under.
@@ -1381,9 +1540,15 @@ mod tests {
         let home = scratch("unit");
         let agents = home.join("Library").join("LaunchAgents");
         std::fs::create_dir_all(&agents).unwrap();
-        assert!(managed_unit(&home).is_none(), "an empty directory is not a unit");
+        assert!(
+            managed_unit(&home).is_none(),
+            "an empty directory is not a unit"
+        );
         std::fs::write(agents.join("com.example.other.plist"), "").unwrap();
-        assert!(managed_unit(&home).is_none(), "somebody else's agent is not ours");
+        assert!(
+            managed_unit(&home).is_none(),
+            "somebody else's agent is not ours"
+        );
         // Renamed, because a unit somebody renamed still respawns.
         let ours = agents.join("io.Reemoat.daemon.plist");
         std::fs::write(&ours, "").unwrap();
@@ -1400,13 +1565,23 @@ mod tests {
          * could not end. Detection is by file, so the remedy has to move the file.
          */
         for detail in [&plist, &service] {
-            assert!(detail.contains("mv "), "the remedy must remove what the check looks at: {detail}");
+            assert!(
+                detail.contains("mv "),
+                "the remedy must remove what the check looks at: {detail}"
+            );
         }
     }
 
     #[test]
     fn a_value_that_could_write_a_second_assignment_is_refused() {
-        for bad in ["ec_a\nNODE_OPTIONS=--import=data:x", "ec_$(id)", "ec_`id`", "ec_a'b", "", "ec_a b"] {
+        for bad in [
+            "ec_a\nNODE_OPTIONS=--import=data:x",
+            "ec_$(id)",
+            "ec_`id`",
+            "ec_a'b",
+            "",
+            "ec_a b",
+        ] {
             assert!(!is_writable_value(bad), "{bad:?} should be refused");
         }
         for good in ["ec_AbC-123_x.y", "m_01HQ", "https://cp.example"] {
@@ -1430,13 +1605,21 @@ mod tests {
          * ever, since nothing rewrites a file it believes belongs to somebody else.
          */
         let home = scratch("cfg-roundtrip");
-        for origin in ["https://cp.example", "http://127.0.0.1:7890", "https://cp.example:8443"] {
+        for origin in [
+            "https://cp.example",
+            "http://127.0.0.1:7890",
+            "https://cp.example:8443",
+        ] {
             std::fs::write(env_path(&home), env_contents(origin, "ec_abc")).unwrap();
             assert_eq!(config_state(&home, Some(origin)), CONFIG_HERE, "{origin}");
             // And the same after a code refresh, which takes the other write path.
             let existing = std::fs::read_to_string(env_path(&home)).unwrap();
             std::fs::write(env_path(&home), env_rewritten(&existing, origin, "ec_next")).unwrap();
-            assert_eq!(config_state(&home, Some(origin)), CONFIG_HERE, "{origin} rewritten");
+            assert_eq!(
+                config_state(&home, Some(origin)),
+                CONFIG_HERE,
+                "{origin} rewritten"
+            );
         }
     }
 
@@ -1446,14 +1629,19 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             use std::io::{Read, Write};
-            let Ok((mut socket, _)) = listener.accept() else { return };
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
             let mut seen = [0u8; 1024];
             let read = socket.read(&mut seen).unwrap_or(0);
             // ⚠ The property this whole shape exists for: nothing is offered to
             // whatever answered. Asserted on the server side, where the bytes
             // actually arrive, rather than on the request string.
             let sent = String::from_utf8_lossy(&seen[..read]).to_lowercase();
-            assert!(!sent.contains("authorization"), "the probe must carry no credential");
+            assert!(
+                !sent.contains("authorization"),
+                "the probe must carry no credential"
+            );
             let _ = socket.write_all(
                 format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}")
                     .as_bytes(),
@@ -1487,19 +1675,30 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         assert!(!is_alive(&format!("http://127.0.0.1:{port}"), "i_live"));
-        assert!(!is_alive("http://127.0.0.1", "i_live"), "no port is not a daemon");
+        assert!(
+            !is_alive("http://127.0.0.1", "i_live"),
+            "no port is not a daemon"
+        );
         assert!(!is_alive("not a url", "i_live"));
     }
 
     #[test]
     fn a_file_naming_this_server_is_adopted_rather_than_provisioned() {
         let home = scratch("cfg-here");
-        std::fs::write(env_path(&home), "REEMOAT_CONTROL_PLANE='https://cp.example'\n").unwrap();
+        std::fs::write(
+            env_path(&home),
+            "REEMOAT_CONTROL_PLANE='https://cp.example'\n",
+        )
+        .unwrap();
         // Quoted, because `lib.sh`'s `sq` writes it that way — and the spelling is
         // compared after `normalize_origin`, so a trailing slash or a default port
         // is the same server rather than a different one.
         assert_eq!(config_state(&home, Some("https://cp.example")), CONFIG_HERE);
-        std::fs::write(env_path(&home), "REEMOAT_CONTROL_PLANE=https://cp.example:443/\n").unwrap();
+        std::fs::write(
+            env_path(&home),
+            "REEMOAT_CONTROL_PLANE=https://cp.example:443/\n",
+        )
+        .unwrap();
         assert_eq!(config_state(&home, Some("https://cp.example")), CONFIG_HERE);
     }
 
@@ -1515,10 +1714,18 @@ mod tests {
             "REEMOAT_CONTROL_PLANE=:::\n",
         ] {
             std::fs::write(env_path(&home), text).unwrap();
-            assert_eq!(config_state(&home, Some("https://cp.example")), CONFIG_ELSEWHERE, "{text}");
+            assert_eq!(
+                config_state(&home, Some("https://cp.example")),
+                CONFIG_ELSEWHERE,
+                "{text}"
+            );
         }
         // And with no server chosen yet, every file is somebody else's.
-        std::fs::write(env_path(&home), "REEMOAT_CONTROL_PLANE=https://cp.example\n").unwrap();
+        std::fs::write(
+            env_path(&home),
+            "REEMOAT_CONTROL_PLANE=https://cp.example\n",
+        )
+        .unwrap();
         assert_eq!(config_state(&home, None), CONFIG_ELSEWHERE);
     }
 
@@ -1540,15 +1747,27 @@ mod tests {
                         NODE_EXTRA_CA_CERTS='/Users/x/.reemoat/dev-ca.crt'\n";
         let text = env_rewritten(existing, "https://cp.example", "ec_new");
         let parsed = parse_env(&text);
-        assert_eq!(parsed.get("REEMOAT_ENROLL_CODE").map(String::as_str), Some("ec_new"));
-        assert_eq!(parsed.get("REEMOAT_AUTH").map(String::as_str), Some("signed"));
+        assert_eq!(
+            parsed.get("REEMOAT_ENROLL_CODE").map(String::as_str),
+            Some("ec_new")
+        );
+        assert_eq!(
+            parsed.get("REEMOAT_AUTH").map(String::as_str),
+            Some("signed")
+        );
         assert_eq!(
             parsed.get("NODE_EXTRA_CA_CERTS").map(String::as_str),
             Some("/Users/x/.reemoat/dev-ca.crt")
         );
         assert_eq!(parsed.get("REEMOAT_PORT").map(String::as_str), Some("7887"));
-        assert!(text.contains("# a comment"), "the installer's own prose survives");
-        assert!(!text.contains("ec_old"), "the dead code is gone, not shadowed");
+        assert!(
+            text.contains("# a comment"),
+            "the installer's own prose survives"
+        );
+        assert!(
+            !text.contains("ec_old"),
+            "the dead code is gone, not shadowed"
+        );
     }
 
     #[test]
@@ -1561,24 +1780,45 @@ mod tests {
             "ec_new",
         );
         assert_eq!(text.matches("REEMOAT_ENROLL_CODE=").count(), 1);
-        assert_eq!(parse_env(&text).get("REEMOAT_ENROLL_CODE").map(String::as_str), Some("ec_new"));
+        assert_eq!(
+            parse_env(&text)
+                .get("REEMOAT_ENROLL_CODE")
+                .map(String::as_str),
+            Some("ec_new")
+        );
     }
 
     #[test]
     fn a_commented_out_assignment_is_prose_rather_than_a_key() {
         // `.env.example` ships `# REEMOAT_AUTH=shared_secret`, and rewriting that
         // into a live assignment would switch a mode nobody asked to switch.
-        let text = env_rewritten("# REEMOAT_AUTH=shared_secret\n", "https://cp.example", "ec_new");
+        let text = env_rewritten(
+            "# REEMOAT_AUTH=shared_secret\n",
+            "https://cp.example",
+            "ec_new",
+        );
         assert!(text.contains("# REEMOAT_AUTH=shared_secret"));
-        assert_eq!(parse_env(&text).get("REEMOAT_AUTH").map(String::as_str), Some("signed"));
+        assert_eq!(
+            parse_env(&text).get("REEMOAT_AUTH").map(String::as_str),
+            Some("signed")
+        );
     }
 
     #[test]
     fn a_file_missing_a_key_gains_it_rather_than_starting_without_it() {
         let text = env_rewritten("REEMOAT_HOST=127.0.0.1\n", "https://cp.example", "ec_new");
         let parsed = parse_env(&text);
-        assert_eq!(parsed.get("REEMOAT_AUTH").map(String::as_str), Some("signed"));
-        assert_eq!(parsed.get("REEMOAT_CONTROL_PLANE").map(String::as_str), Some("https://cp.example"));
-        assert_eq!(parsed.get("REEMOAT_HOST").map(String::as_str), Some("127.0.0.1"));
+        assert_eq!(
+            parsed.get("REEMOAT_AUTH").map(String::as_str),
+            Some("signed")
+        );
+        assert_eq!(
+            parsed.get("REEMOAT_CONTROL_PLANE").map(String::as_str),
+            Some("https://cp.example")
+        );
+        assert_eq!(
+            parsed.get("REEMOAT_HOST").map(String::as_str),
+            Some("127.0.0.1")
+        );
     }
 }

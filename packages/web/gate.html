@@ -1,0 +1,69 @@
+<!doctype html>
+<!--
+  The second entry point, and the one the control plane serves.
+
+  `index.html` is the **app**: it is compiled into the Reemoat binary by Tauri and
+  the control plane's image does not carry it. This one is the **gate** — signing
+  up, confirming a mailed link, resetting a password, the legal documents, and the
+  page that hands somebody over to the app. Two builds, two `dist` directories,
+  no shared chunks: see `vite.gate.config.ts` for why they are separate builds
+  rather than two inputs to one.
+
+  ⚠ **The `<head>` is a near copy of `index.html`'s and that is deliberate.** Every
+  tag in it is a decision with a measurement behind it — the viewport's
+  `interactive-widget`, the theme colour that must track `--color-ink`, the
+  favicons that may not be `data:` URIs under this document's own CSP — and each
+  applies to this document for exactly the reasons it applies to that one. A
+  shared partial would need a templating step this package does not have; what
+  keeps them honest instead is `webcheck`, which reads both files and asserts the
+  head tags match.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- `viewport-fit=cover` plus the safe-area padding in index.css: without both,
+         the bottom action bar sits under the iPhone home indicator, which is
+         exactly where the approve buttons are. -->
+    <!-- `interactive-widget=resizes-content` because the default,
+         `resizes-visual`, does not move the layout viewport when the software
+         keyboard opens: `AppShell`'s `h-dvh` and the composer's sticky
+         `bottom-0` stay where they were, so on Chrome/Android the box you are
+         typing in is behind the keyboard — and on a plan card, whose whole
+         point is typing an answer, so are Send and the approvals. Nothing
+         repositions them; `Composer` compensates for its own height cap alone,
+         and that cap reads `visualViewport` and is unaffected either way.
+         Browsers that do not know the key ignore it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="color-scheme" content="light" />
+    <!-- One tag, because there is one palette. It is `--color-ink` from
+         `index.css`, duplicated here because a `<meta>` cannot read a CSS
+         variable — if `--color-ink` moves, move this too. There were two of these,
+         one per theme, and before that one unconditional `#0b0d10` that matched
+         neither, so an iOS home-screen launch drew a chrome bar in a near-black
+         nobody had chosen. The `media` attributes went with the dark palette. -->
+    <meta name="theme-color" content="#f9f8f6" />
+    <!-- Nothing here should ever be indexed or previewed; it is a control surface. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <!--
+      Files under `public/`, never a `data:` URI, and that is a CSP fact rather
+      than a preference: this document is served with `img-src 'self' blob:`
+      (`packages/control-plane/src/app.ts`), which refuses a `data:` favicon
+      outright — the landing page inlines its own because it is served without
+      that header. Vite copies `public/` to the root of `dist`, which is the
+      directory `serveStatic` draws from, so both of these are same-origin.
+
+      The SVG is the mark knocked out of a dark rounded badge, so it survives a
+      light *and* a dark tab strip; the PNG is the same badge at 512px, which is
+      what iOS uses when this is added to a home screen. There is no `.ico` —
+      every browser that reaches this app reads one of these two.
+    -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- The name, capitalised, matching the rail's own heading and the landing. -->
+    <title>Reemoat</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/gate-main.tsx"></script>
+  </body>
+</html>

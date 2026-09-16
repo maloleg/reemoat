@@ -767,10 +767,20 @@ function LocalPath({ machineId, name }: { machineId: MachineId; name: string }):
         {name} is running on this computer, so this app can reach it over a loopback connection
         instead of out to the relay and back.
       </p>
+      {/*
+        * ⚠ **The closing clause was "Everywhere else it stops at once" and it had
+        * to go.** It was true of the two causes named in front of it — a grant and
+        * a machine being switched off are both read live by the relay before each
+        * request. Retiring a *device* is a third cause and behaves the same way on
+        * **both** paths, because `relay/authorize.ts` reads no device row by
+        * design, so the old sentence would have been a promise this feature
+        * quietly broke. Rewritten as what is true of all three rather than
+        * enumerated, which is also what stops the next cause invalidating it.
+        */}
       <p className="mt-2 text-sm text-muted">
         While it does, the relay is not checking each request — so if the owner takes your access
         away, or switches the machine off, this app can keep reaching it from here for up to about
-        six minutes. Everywhere else it stops at once.
+        six minutes. Retiring this device has the same delay, here and everywhere else.
       </p>
     </>
   );

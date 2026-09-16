@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 134 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 140 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 351 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 56 | `###` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 59 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 67 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 141 | `###` |
-| | | **945** | |
+| | | **954** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 945 rather than the 484
+dividers. So the count is over **both** depths, and it says 954 rather than the 493
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3863,6 +3863,245 @@ reasonably assumes the other follows.
 quoting, which until now was proved by `imagecheck` alone, in docker, with the
 bundle present — and that a browser at `/` gets the error envelope rather than a
 page or a bare 404.
+
+### Q1.642 — What a device is, and why it is not an authorization subject
+
+**Question.** Somebody signs in from a laptop and a phone. Revoking the laptop
+without revoking the phone had nothing to act on: the only per-sign-in record was
+`user_session_origins`, whose two fields — an IP address and a `User-Agent` — are
+a claim the *caller* makes about itself and are documented as recognition, never
+identification. What should a first-class Device be, and what should it decide?
+
+**Decision.** A `devices` row per installation, owned by a user: an id, a name,
+a platform, when it was registered and when it was retired. `user_sessions`
+gains a nullable `device_id`. Retiring one ends every session bound to it and
+refuses any later sign-in that offers its id.
+
+**And a device decides nothing about access.** A grant stays `(user_id,
+machine_id)`, so every device of one person reaches exactly the same fleet, and
+`relay/authorize.ts` reads no device row. That is the requirement stated from the
+other end — *MacBook and iPhone signed into one account see the same machines* —
+and it is also what keeps the relay out of this feature entirely.
+
+**Why a device id is not a credential.** It is an identifier this service hands
+back. It is stored unhashed and returned in full, unlike everything in `keys.ts`,
+because holding one authorizes nothing: every request still carries the session
+token, and the id is read only *after* that token has resolved, to ask whether the
+installation has been retired. That single fact decides where the client keeps it
+— see Q1.643 — and it is why this table needs none of `keys.ts`' machinery.
+
+**What per-device revocation is, precisely.** A grouping key over sessions, plus a
+bind refusal. It is immediate at the control plane and it does **not** shorten the
+window on a machine token already minted, because nothing in the token-verifying
+half reads a device. Stated in `SECURITY.md` as a table rather than implied,
+because "revoke the laptop" reads as stronger than it is.
+
+**Rejected: a `public_key` column now.** The brief asked that a key be attachable
+later *without another schema redesign*, and `migrate()` is exactly that
+guarantee — so the column buys nothing today and costs something real: a column
+nothing writes reads as *these rows are key-attested*, which is an unenforced
+security claim sitting in the table per-device revocation is argued from.
+
+**Rejected: a `last_seen_at` column.** It needs a writer and both available
+writers are failures this package already carries intervals to avoid —
+per-request is the fsync-per-request that `user_sessions.last_seen_at` and
+`api_keys.last_used_at` both exist to bound, and write-at-registration makes
+"last seen" a date that never moves. The screen reads
+`MAX(user_sessions.last_seen_at)` over the device's own sessions instead: a value
+that already exists, already disciplined, and no new write on the authentication
+path.
+
+**Status.** Current. `.claude/rules/cp-devices.md` is the area.
+
+### Q1.643 — Where the client keeps its device id, and why not the keyring
+
+**Question.** The native shell has an OS keyring (`credential.rs`) and an ordinary
+preferences file (`config.rs`). A device id has to survive a restart. Which one?
+
+**Decision. The configuration file**, as a map keyed on the server's origin
+beside `server`. `credential.rs` is untouched.
+
+**Why, and it is a measurement rather than a preference.** `credential::probe`
+exists because a store that *accepts* a write and loses it is the failure that
+reads as working — a Linux box with no D-Bus session or no unlocked collection is
+the ordinary case, and the app already draws a sentence for it. Put the device id
+there and that same machine registers a **brand new device on every launch**,
+never reading one back, and walks straight into the account's device limit — with
+the only evidence being a list of identically-named rows. `config.rs`'s own header
+had already written the rule: *"Not a secret, and deliberately not in the keyring.
+A server address is a preference; the credential for it is the secret."* A device
+id is on the preference side of that line, and Q1.642 says why.
+
+**Secondary cost avoided:** `host_boot` would go from one keychain read to two on
+the first-paint path, which on an ad-hoc-signed development build is two prompts
+per `cargo build`.
+
+**A map rather than one current value**, which is the single place this file's
+shape departs from the credential's. `host_set_server` erases the previous
+origin's *credential* because a credential this app will not present is one it has
+no reason to hold. The same act on a device id would be destructive rather than
+tidy: the row on that server is not deleted by anything here, so forgetting the id
+leaves an installation the person can no longer recognise in their own list and
+spends a second slot the next time they point back. Retaining it leaks nothing.
+
+**⚠ This reverses Q7.136, and only its narrowest half.** That entry refused a
+device id on the grounds that *"a value generated at first run and persisted is
+device identity, arriving by accident, and it would be a new fact about a person
+that nothing in this fleet has agreed to record."* What changed is that it is no
+longer an accident and the fleet has agreed: there is a `devices` table, the id
+comes from it rather than from a local generator, and a person can see and retire
+the row. The three refusals that entry makes **at the interface** all stand — no
+`list()`, no private key through a `String`, no first-run generation — and the
+keyring seam stays reserved for the device *key*, which has none of these
+properties.
+
+**Measured, and it is the failure mode this decision is really about.** `Boot` in
+`commands.rs` carries no `#[serde(rename_all)]`; every camelCase field names
+itself. So `pub device_id` without an explicit `rename` serializes as `device_id`,
+`boot.deviceId` is `undefined` for ever, and `tsc`, `cargo`, `cargo test`,
+`webcheck` and the command census are **all green** while the app registers a new
+device on every launch. `nativecheck` gained a `Boot` ↔ `NativeBoot` key-set
+census for exactly that, which is the shape it already ran for
+`LocalAnnounce` ↔ `Stored` and whose docblock names the class: *"A field renamed
+on one side is not a compile error anywhere… Nobody would find it."*
+
+**Status.** Current.
+
+### Q1.644 — Why the device check is a second statement rather than a join
+
+**Question.** `resolveSession` runs on every authenticated request, on the process
+that in embedded mode also carries every relay tunnel. Checking whether a
+session's device has been retired is one more fact about the same row. Why not
+join it?
+
+**Decision. A second cached statement, run only when the row carries a
+`device_id`.** The audited single-table query is left byte-identical.
+
+**Measured, against `node:sqlite`.** `devices` shares `id` and `revoked_at` with
+`user_sessions`, and `resolveSession` reads its row by **bare key**. Written the
+natural way — `SELECT s.*, d.revoked_at FROM …` — the row object comes back with
+`revoked_at: null` for a session whose own value is set, because the device's NULL
+overwrote it. So **session revocation stops working for everybody**: signing out,
+sign-out-everywhere, a password change and both admin sweeps keep answering 200
+while the revoked token goes on authenticating. Written with bare column names
+instead it throws `ambiguous column name: id` at `prepare` — which is lazy, so the
+container starts green and then answers a plain-text 500 to every signed-in
+request, there being no `app.onError` on this service.
+
+**What the second statement costs**: nothing for a browser, an API key or any
+session that predates devices, because it is conditional on `device_id` being
+non-NULL; one primary-key lookup for a native one. Cheaper than the join it
+replaces, and it makes the aliasing trap structurally impossible rather than a
+thing somebody has to remember. `callerAuth`'s own joined statement already writes
+`k.id AS key_id` for this reason, and `listSessions` qualifies every column.
+
+**The assertion that holds it.** `relaycheck` drives session revocation **on a
+session that has a live device** — the one case a join would break while every
+other assertion in the file stayed green.
+
+**Status.** Current.
+
+### Q1.645 — Why a retired device id is ignored rather than refused
+
+**Question.** A client offers a device id that has been retired. Refuse the
+sign-in, or register a fresh device?
+
+**Decision. Register a fresh one, on both doors** — `POST /v1/login` and
+`POST /v1/me/devices` — and never answer an error for it.
+
+**Why refusing is a trap.** A client keeps the id it was given. Answer an error
+and it signs in, is refused on its very next request, signs out, signs in again
+with the same stored id, and the loop closes with no exit but somebody deleting a
+keychain entry or a JSON file by hand. Every variant of "refuse it" is that same
+loop wearing a different status code.
+
+**What it gives up: nothing.** The retired row stays retired and its sessions stay
+ended. Revocation retires *that installation's access*, not the computer's right
+to ask again with a password — which is also the honest description of what
+retiring a device means to the person doing it.
+
+**The same rule closes a second hole**, which is why it is one rule rather than
+two: an id belonging to *another account* takes the same path. Without it, one
+account could bind its session to a stranger's device row — after which the
+victim's Revoke signs the attacker out (harmless) and the attacker's session
+inherits the victim's `revoked_at`, so the victim can be signed out at will by
+somebody they have never met. Every lookup carries `user_id`, on both statements
+of both routes, and `relaycheck` drives both halves.
+
+**Status.** Current.
+
+### Q1.646 — Why the device cap refuses where the session cap evicts
+
+**Question.** `MAX_SESSIONS_PER_USER` is 10 and evicts the oldest rather than
+refusing the newest, on the stated argument that *"being unable to sign in on a
+new device because of an old one is the wrong failure."* Should `MAX_DEVICES_PER_USER`
+do the same?
+
+**Decision. No — it refuses, `409 device_limit`.**
+
+**The sessions argument does not transfer, and the reason is one word.** A session
+*is* the thing you are trying to get, so refusing one refuses the sign-in. A
+device is not: a sign-in succeeds perfectly well with no device bound, so refusing
+the *registration* costs a sentence saying "retire one" and nothing else.
+`POST /v1/login` swallows the cap for exactly that reason and hands back a session
+with `deviceId: null`.
+
+**And eviction here would be a weapon rather than a convenience.** Anybody holding
+one live session — which is precisely the case per-device revocation exists to
+contain — could call `POST /v1/me/devices` twenty times and evict, retire and sign
+out every real device the owner has, while their own newest session survived the
+sweep. The owner's remedy is the one thing they would no longer be signed in to
+reach.
+
+**The two numbers differ and the relationship is stated** rather than left for
+somebody to "correct": 20 devices against 10 sessions. At most ten devices hold a
+live session at once; the eleventh sign-in retires the oldest *session* and leaves
+its device registered, which is right — that installation asks for a password
+again and keeps its identity. `session_revoked` and `device_revoked` are separate
+codes so the client can tell those two apart.
+
+**Status.** Current.
+
+### Q1.647 — What the Authority is, and what stops the line moving
+
+**Question.** The control plane holds identity and the daemons hold the work. That
+was true by accident: nothing stopped the next feature putting a session title or
+a transcript index here "just for the list". Should the division be named, and can
+it be enforced?
+
+**Decision. Named in `docs/AUTHORITY.md`, and enforced by two ratchets in
+`relaycheck`** — not by renaming the directory.
+
+**The rename is refused and it is worth saying why.** `packages/control-plane` is
+named in the Dockerfile and its `.dockerignore` twin, `RELAY_INPUTS`,
+`compose.yml`, every deploy script, a dozen `paths:` globs and every relative
+import in two packages. That is the blanket sweep `CLAUDE.md`'s `remoslop` warning
+is about, for no behaviour at all. What was missing was never a name.
+
+**The two ratchets.** *What it imports*: `packages/control-plane/src/**` reaches
+the repository root for exactly five files — `src/{token,auth,cors,http}.js` and
+`src/relay/protocol.js`, all wire vocabulary — which is the **same list**
+`deploy/docker/Dockerfile` COPYs, so the two cannot drift without an image that
+fails at runtime inside a container. *What it answers*: no route path names
+`sessions`, `prompts`, `agents`, `worktrees`, `files`, `diffs` or `events`.
+
+**The exception is named rather than pattern-matched around.** The four
+`/v1/me/sessions` routes are exempt by literal, because a sign-in is a credential
+with an expiry — precisely this service's business — and it collides with the
+daemon's *agent session* on one English word and nothing else. Listing them is
+what keeps `/v1/sessions` refused: the exemption is strings somebody has to add
+to, on a line that says what it is.
+
+**Neither is a security boundary**, and both say so — `plugins.md` makes the same
+disclaimer about `manifest.scopes`. What they buy is that the shape stays legible,
+which for a division of responsibility is the whole of what a check can buy.
+
+**Three lightweight facts the Authority does keep**, named so the next idea can be
+measured against them: tunnel presence, what a daemon announced about itself on
+the handshake, and mail waiting to go out. Each is about reachability or is this
+service's own.
+
+**Status.** Current. `.claude/rules/authority.md` is the rule.
 
 ## Session lifecycle, questions and attachments
 
@@ -22749,6 +22988,135 @@ build tree would read every vendored crate in it.
 and that the extension list still reads `rs` and still refuses `toml`, from the side
 that knows why each of the three is there.
 
+### Q4.118 — What the control plane serves a browser, now that the app is the client
+
+**Question.** The Reemoat app carries its own copy of the interface and never
+downloads one, so the control plane serving the whole product at `/` is a copy
+nobody in the ordinary path loads. But three flows *begin in a mail client* —
+`/confirm`, `/reset`, `/verify` — and one is the only remedy this service has for
+a forgotten password. What should a browser be able to reach?
+
+**Decision. The gate and nothing else.** Nine addresses: the five gate screens,
+the three legal documents, and `/app`, the page that hands somebody over to the
+app. Served by the **Authority itself** — same process, same port, same container
+— from `packages/web/dist-gate`. Every other path answers the error envelope,
+including `/` and every address belonging to the app.
+
+**⚠ Not an SPA fallback, and that is the whole shape of it.** The app's fallback
+answers *any* unrouted path with `index.html`; this one answers a **closed list**.
+So the product is not merely hidden behind routing — it is not in the image, and
+no request can produce it.
+
+**Two builds rather than two inputs to one, and the reason is chunking.**
+`rollupOptions.input = {app, gate}` emits shared chunks, so shipping only the gate
+would mean computing its reachable chunk set out of Vite's manifest and keeping
+that walk correct for ever. Two builds have no shared chunks to separate:
+`dist/` is the app, `dist-gate/` is the gate, and the Dockerfile copies one
+directory and can carry no part of the other by accident. What it costs is modules
+emitted twice — paid on disk, never on the wire, since no browser loads both.
+
+**Measured, 2026-09-15.** The gate is 270 kB (83 kB gzipped) against the app's
+380 kB entry chunk. Most of the remainder is React (~140 kB) and `store.ts`'s
+import closure, which `Gate` reaches through six calls; a gate decoupled from the
+store measures 194 kB. That refactor is **not done** — it is a size decision
+rather than a correctness one, and `Gate` is heavily asserted.
+
+⚠ **The bytes were never the argument.** What the split buys is that the image
+*cannot* serve the product, which is true at 270 kB and would be true at 370 kB.
+A route guard over the whole bundle would have given the smaller diff and none of
+the property.
+
+**`REEMOAT_CP_WEB` inverts and keeps one meaning: serve the app too.** Unset,
+`0`, `false`, `no` — no app. A path — the app from there, which is a checkout or a
+mounted directory. ⚠ **`1`/`true`/`yes` name nothing now**: with no app bundle in
+the image there is no built-in default for them to mean, and read as a path they
+resolve to `<cwd>/1` — the permanent silent 404 Q1.641 closed, wearing the
+opposite clothes. They are recognised only so they can be answered with a sentence
+at startup, and the constant is `webMeaningless` rather than `webDefault` so a
+reader grepping the old name finds nothing and has to read why. `deploycheck`
+therefore asserts this predicate and `REEMOAT_CP_INSTALL`'s **disagree**, where it
+used to assert they agreed: `deploy/bootstrap.sh` really is in the image, so that
+one really does still have a default, and holding the two to each other now would
+force one of them to lie.
+
+**What `CP_IMAGE_INPUTS` does.** It keeps the whole `^packages/web/` prefix,
+because the gate is built from `packages/web/src` plus `gate.html`,
+`vite.gate.config.ts`, `tsconfig.json` and `public/`. ⚠ It was briefly narrowed to
+the manifest alone while the image carried no web build at all, and narrowing it
+again would be the green-deploy-of-stale-bytes failure this file records twice
+already: a pattern that misses a rebuild leaves `cp_image_fingerprint` inspecting
+an image that was never built.
+
+**Status.** Current. `.claude/rules/authority.md` is the rule; `imagecheck`
+asserts both halves from inside a real container, because every offline driver can
+be green over an image that ships the whole product behind a route guard.
+
+### Q4.119 — Where somebody goes after signing up, when there is no build to give them
+
+**Question.** Every gate flow ends by pointing at the app, because the app is the
+product. What does that page link to?
+
+**Decision. `REEMOAT_CP_APP_DOWNLOAD_URL`, env-only, unset by default**, published
+on `GET /v1/instance` as `app.download` — `REEMOAT_CP_MACHINES_OFFER_URL`'s shape
+and every one of its arguments. An address rather than a flag, because a client
+that renders a link cannot be told "there is one" and left to invent where it goes.
+
+**⚠ Unset is the truthful state and the one this repository ships in.** Nothing
+here publishes a signed build: `tauri.conf.json` has `signingIdentity: null`, no
+updater artifacts and `targets: ["app"]` with no `dmg`, the build is arm64-only,
+and `deploy/ci-release.sh` uploads no app asset. So the page says *this server
+does not publish a build* and points at building from source, which is true — and
+a compiled-in default would be a button that downloads nothing on every fork,
+under a licence that hands them the source.
+
+**Not a `SETTING_KEYS` row.** The catalogue is env-only because the CSP is built
+once and a database-owned value could name an origin the document refuses; this
+one has no such problem — a download is a navigation, not a `fetch` — and is
+env-only for the *offer's* reason instead: it names one particular build published
+by whoever runs this deployment, and `SETTING_KEYS` is drawn on the Server
+settings screen of every instance, forks included.
+
+⚠ **Publishing builds is separate work and has an ordering constraint.** The
+updater keypair must be generated **before** the first public build, or that build
+can never be updated in place by a later one that has it — `docs/NATIVE.md`
+carries it. Signing and notarization are the rest.
+
+**Status.** Current. The page draws the download where an address is configured
+and the source instruction where none is.
+
+### Q4.120 — The mailed link that arrives without its fragment
+
+**Question.** The token rides the URL fragment so it never reaches a server log
+and so a mail gateway that `GET`s every link learns nothing. Mail clients and link
+scanners also **rewrite** URLs, and the fragment is exactly the part they drop.
+What does somebody do then?
+
+**Decision. The gate screens take a pasted link or code.** `readPastedGateToken`
+accepts a whole URL, a bare `#t=…` fragment, or the token alone, and refuses
+everything else **locally** rather than sending a guess — `readGateToken`'s own
+rule one function over: somebody who pasted the wrong thing is told that, instead
+of being told their link did not work.
+
+**Why it is not a second way to do one thing.** The card it sits on already
+existed for exactly this state — `gateUsable(screen, null)` and
+`incompleteLinkRemedy` — and its only previous remedy was "ask for a new one",
+which sends somebody back through a flow whose *next* mail the same client will
+rewrite the same way. Pasting the original works on the first try.
+
+⚠ **A session token pasted by mistake is refused by shape.** `cpctl login` prints
+an `rs_`, and somebody with both in a terminal can reach for the wrong one;
+`isGateToken` admits `et_` and `pr_` only, so the value never leaves the page.
+
+**And `mail.public_url` is the operator's half of the same problem.**
+`mailConfigured` gained a non-blocking problem when it points at a control plane
+serving no gate — worded without the words *"is not set"*, because `isMissing`
+keys on those and a sentence carrying them would stop the instance sending mail at
+all over a value merely aimed at the wrong host. The comparison needs the API's own
+origin, which is a property of the *request*, so `GET /v1/admin/settings` is the
+one caller that can pass it and `cpctl admin settings` gets it for free.
+
+**Status.** Current.
+
 ## Invariants — rules that were defects first
 
 These are load-bearing. Each was a real defect before it was a rule, and none of
@@ -31076,7 +31444,20 @@ feature. And there is **no device id**: a value generated at first run and persi
 *is* device identity arriving by accident, and it would be a new fact about a person
 that nothing in this fleet has agreed to record.
 
-**Status.** Deliberate non-goal. `docs/NATIVE.md` carries what turning on signed
+⚠ **The third refusal is reversed, and the first two are not. See Q1.643.** There is
+a device id now — but it is not generated at first run and it is not persisted here.
+The control plane has a `devices` table, the id comes from it, and a person can see
+the row and retire it, so the fact about them is one the fleet has agreed to record
+and they can act on. It lives in `config.rs` beside the server address rather than in
+this store, on `credential.rs`'s own argument for the split: it is an identifier
+rather than a secret, and a keyring that silently discards writes — which
+`credential::probe` exists to detect — would make the app register a new device on
+every launch. So `CREDENTIAL` is still a set of one, `read`/`write` still carry a
+`String`, there is still no `list`, and the seam this entry reserved is still
+reserved for the device **key**, which has none of those properties.
+
+**Status.** Amended 2026-09-15 — the "no device id" half is superseded by Q1.643.
+The `SecretStore` seam and its two interface refusals are current. `docs/NATIVE.md` carries what turning on signed
 updates would take, including the one step that has to happen before a first public
 build.
 

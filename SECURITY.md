@@ -302,6 +302,37 @@ grant revoked mid-stream does not tear down a live WebSocket; the daemon's own
 expiry re-check on the ping tick closes it when the token dies. Every ordinary
 request is refused immediately.
 
+**Retiring a device is a control-plane act, and it does not reach a token already
+minted.** A *device* is the installation somebody signs in from — the computer or
+the phone — and retiring one ends every session bound to it and refuses any future
+sign-in that offers its id. What it deliberately does **not** do is enter the
+token-verifying half of the system: `relay/authorize.ts` reads users, machines and
+grants live and reads no device row, because permissions belong to the **person**
+and a device authenticates as one. So per-device revocation is a grouping key over
+sessions plus a bind refusal, not a new boundary, and the windows are the ones
+above:
+
+| Path | When a retired device stops |
+|---|---|
+| Any control-plane request | next request |
+| Minting a machine token | next request |
+| A machine token already minted | ≤ 300 s + 60 s leeway, from the last mint |
+| A WebSocket already open | that, plus one 20 s ping tick |
+| Loopback to a local daemon | the same ≤ 360 s, with no control-plane hop at all |
+
+⚠ **And a device id is not a credential.** It is an identifier this service hands
+back, stored unhashed and returned in full: holding one authorizes nothing,
+because every request still carries the session token and the id is read only
+*after* that token has resolved. That is why the client keeps it in ordinary
+configuration rather than an OS keyring — which also means it is **not** protected
+at rest on the client, and does not need to be.
+
+⚠ **A caller on an API key has no device**, so nothing that came in on one appears
+in a device list and nothing there revokes one. An API key is retired by its
+holder, from the keys screen or `cpctl keys --revoke`, and by nobody else — an
+admin has no verb over anybody's keys (Q1.631). The Devices screen says so rather
+than implying it is the complete inventory of what can reach an account.
+
 **Registration is a user-enumeration oracle, knowingly** (Q7.78). A taken name
 answers `409`, because a name is the login and a form nobody can complete is not a
 form. What bounds it: every branch of the route costs the same scrypt, so it is
@@ -347,8 +378,17 @@ it is swept.
 inferred from the schema: a login name, a password hash, an optional email
 address, and — per sign-in — the IP address and `User-Agent` the session arrived
 with (`user_session_origins`), which are recorded for recognition and are never
-used to authorize anything. Sessions and their origins are swept 7 days after
-revocation; email tokens and unconfirmed sign-ups are swept on expiry.
+used to authorize anything. **And now a name per registered device**: what
+somebody calls the computer or phone they signed in from, plus the platform it
+reported. Both are caller-supplied and clamped at ingest, neither authorizes
+anything, and the name is usually a host name — which on a personal machine is
+frequently a person's own. It is listed to its owner, it is retired by them, and
+`DELETE /v1/admin/users/:id` sweeps every device row of a deleted account by hand,
+because nothing in this database cascades. Sessions and their origins are swept 7
+days after revocation; a retired device is swept after 30 — longer because that
+list is read *after* something has gone wrong rather than as a live inventory, and
+a list one row shorter cannot say whether a laptop was retired or never registered.
+Email tokens and unconfirmed sign-ups are swept on expiry.
 `enrollment_codes` is swept 7 days after a code is used or expires, whichever
 applies — `used_from` is the only forensic trail here, so a code is not dropped on
 the tick of expiry.

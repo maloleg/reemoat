@@ -40,6 +40,18 @@ function document(parts: { heading: string; paragraphs: string[]; action?: { lab
       : `\n    <p style="margin:24px 0"><a href="${esc(parts.action.url)}" ` +
         `style="display:inline-block;padding:12px 20px;border-radius:8px;` +
         `background:#111;color:#fff;text-decoration:none">${esc(parts.action.label)}</a></p>` +
+        /*
+         * One line in `document()` rather than seven in the templates, which is
+         * what this helper exists for: seven templates may not become seven
+         * layouts, and they may not become seven remedies either.
+         *
+         * The browser is the right destination and the only one named: the control
+         * plane serves the **gate** — these three addresses and the legal
+         * documents — even on a deployment that serves no app. If a mail client
+         * rewrites the URL and drops the `#` the token rides on, the page it lands
+         * on has a field for pasting the original, which is the remedy rather than
+         * a second address to name here.
+         */
         `\n    <p style="margin:0 0 16px;color:#666;font-size:13px">` +
         `If the button does not work, paste this into your browser:<br>` +
         `<span style="word-break:break-all">${esc(parts.action.url)}</span></p>`;

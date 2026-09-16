@@ -178,10 +178,34 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   -- Set by signing out, by "sign out everywhere", and by a password change. Rows
   -- are revoked rather than deleted for the same reason `users` rows are: a list
   -- somebody is shown should be able to say a session ended rather than forget it.
-  revoked_at   INTEGER
+  revoked_at   INTEGER,
+  -- Which installation this sign-in belongs to, or NULL — see `devices` below.
+  --
+  -- NULL is the honest answer for three real states a reader must not conflate: a
+  -- session that predates this column, one presented by an API key (which has no
+  -- session at all, so it can have no device), and a browser that registered none.
+  -- Nothing authenticates on this value; it is read after the token has resolved,
+  -- to ask whether that device has since been revoked.
+  --
+  -- Added by `migrate()` in `store.ts` on an existing database — this CREATE only
+  -- reaches a fresh one, which is `users.password_changed_at`'s arrangement one
+  -- table up and is why both spellings have to exist.
+  device_id    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_sessions_prefix ON user_sessions (prefix);
+-- ⚠ **The index on `device_id` is NOT here, and it is the one index in this file
+-- that could not be.** Every statement in this file runs *before* `migrate()` —
+-- `applyControlPlaneSchema` is schema, then version, then migrate — so an index
+-- naming a column that migrate has not added yet fails with
+-- `no such column: device_id` on every database that already existed, which is
+-- every deployment there is. It lives in `store.ts`'s `migrate()`, immediately
+-- after the `ALTER` that makes it possible, and that function's header says so.
+--
+-- Worth stating here because the rule one screen up is the opposite one:
+-- `CREATE INDEX IF NOT EXISTS` is idempotent, so an index on an *existing*
+-- column is a `schema.sql` change while a new column is not. The exception is
+-- exactly an index over a migrated column, and nothing but a comment marks it.
 -- The session list and both revoke sweeps are all "this user's, newest first", so
 -- none of them is a scan of every session in the fleet.
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions (user_id, created_at);
@@ -213,6 +237,66 @@ CREATE TABLE IF NOT EXISTS user_session_origins (
   ip         TEXT,
   user_agent TEXT
 );
+
+-- An installation of the app, registered by the person using it.
+--
+-- **A device is not a session and not a credential.** A session is one bearer
+-- token with an expiry; a device is the computer or phone that keeps signing in,
+-- and it outlives every session bound to it. That distinction is the whole
+-- feature: `user_session_origins` one table up can only ever say what a caller
+-- *claimed* about itself ("Chrome on macOS"), which `cp-credentials.md` calls
+-- recognition rather than identification — so "sign this laptop out and leave my
+-- phone alone" had no row to act on. This is that row.
+--
+-- **Holding a device id proves nothing.** It is an identifier this service handed
+-- back, not a secret: every request still carries the session token, and
+-- `devices.id` is only ever read *after* that token has resolved. So it is stored
+-- unhashed, returned in full, and kept on the client in ordinary configuration
+-- rather than in an OS keyring — see `packages/native/src-tauri/src/config.rs`,
+-- whose header makes the same argument for the server address.
+--
+-- **What it is NOT, stated because the shape invites the reading.** It is not an
+-- authorization subject: a grant is `(user_id, machine_id)` and stays that way, so
+-- two devices of one person reach exactly the same machines. `relay/authorize.ts`
+-- reads no row here and must not learn to — revocation therefore stops a device at
+-- this service on the next request, and does nothing to a machine token already
+-- minted for its remaining ~300s. `SECURITY.md` carries the window.
+--
+-- **No `public_key` column, and its absence is the design rather than an
+-- oversight.** A device key is the next phase's; adding the column now would put
+-- an unenforced claim — *these rows are key-attested* — in the very table
+-- per-device revocation is argued from, while nothing signs anything. `migrate()`
+-- in `store.ts` is what makes adding it later a one-line change instead of a
+-- schema redesign, which is the only property that had to be preserved.
+--
+-- **No `last_seen_at` column either**, and this one is a measurement rather than a
+-- preference. It would need a writer, and both available writers are failures this
+-- package has already paid for: per-request is the fsync-per-request that
+-- `user_sessions.last_seen_at` and `api_keys.last_used_at` both carry intervals to
+-- avoid, and writing it only at registration makes "last seen" a date that never
+-- moves. The Devices screen reads `MAX(user_sessions.last_seen_at)` over the
+-- device's own sessions instead — a value that already exists, already has its
+-- fifteen-minute discipline, and adds nothing to the authentication path.
+--
+-- Rows are revoked rather than deleted, exactly as `user_sessions` rows are, and
+-- swept by `pruneDevices` after `DEVICE_REVOKED_RETENTION_MS`. `user_id` carries
+-- no foreign key because `store.ts` sets `PRAGMA foreign_keys = OFF`; the sweep in
+-- `DELETE /v1/admin/users/:id` is by hand, like every other per-user table.
+CREATE TABLE IF NOT EXISTS devices (
+  id         TEXT PRIMARY KEY,          -- dv_<hex>
+  user_id    TEXT    NOT NULL,
+  -- What the person calls it, and what the platform reported. Both are
+  -- caller-supplied and both are clamped at ingest in `devices.ts`, for
+  -- `user_session_origins`' reason: the bound belongs where the value enters the
+  -- database rather than where somebody remembers to apply it. Neither is ever
+  -- branched on — `platform` is a label on a row, not a capability.
+  name       TEXT    NOT NULL,
+  platform   TEXT    NOT NULL,
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id, created_at);
 
 -- Who created a machine, and what they call it.
 --

@@ -65,6 +65,7 @@ await import("./webcheck.interrupted-and-spawn-routes.js");
 await import("./webcheck.history-and-cursor.js");
 await import("./webcheck.elicitation-and-links.js");
 await import("./webcheck.accounts-and-credentials.js");
+await import("./webcheck.devices.js");
 // Beside the credential section, because it is the same subject through a second
 // transport — and above `closeWss()`, which is where the socket-driving sections end.
 await import("./webcheck.native-bridge.js");

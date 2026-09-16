@@ -1,10 +1,18 @@
 //! Everything the webview may ask this process to do, and nothing else.
 //!
-//! Twelve, and the list is short on purpose: an app-defined command is not
+//! Fifteen, and the list is short on purpose: an app-defined command is not
 //! ACL-gated, so this file *is* the capability surface. `pnpm nativecheck` holds
 //! it to the set `packages/web/src/native.ts` actually calls, in both directions —
 //! a command nobody calls is a door nobody is watching, and a call with no command
 //! behind it is a runtime failure no offline check would otherwise see.
+//!
+//! ⚠ **That number is prose and nothing asserts it, which is why it was wrong.**
+//! It read *twelve* while thirteen were registered — `host_daemon_log` arrived and
+//! the sentence did not move — and a count restated in a comment is exactly the
+//! kind of claim `docs/DECISIONS.md` records this repository learning not to keep.
+//! What the driver compares is the two *lists*, which is the property that
+//! matters; this sentence is a reader's orientation, and if it disagrees with
+//! `generate_handler!` in `lib.rs`, the handler is right.
 
 use std::sync::Mutex;
 
@@ -80,7 +88,9 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
      * knows — the same rule `host_cp` keeps.
      */
     let origin = host.origin();
-    let claimed = origin.as_deref().and_then(|origin| daemon::read_claim(&host.config_dir, origin));
+    let claimed = origin
+        .as_deref()
+        .and_then(|origin| daemon::read_claim(&host.config_dir, origin));
     /*
      * ⚠ **Answered on every state read, because the caller's *first* decision
      * depends on it.** A store that cannot see an existing env file creates a
@@ -89,7 +99,12 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
      */
     let config = daemon::config_state(&home, origin.as_deref()).to_string();
     let Ok(mut supervisor) = host.supervisor.lock() else {
-        return daemon::DaemonState { status: "absent".to_string(), claimed, config, ..Default::default() };
+        return daemon::DaemonState {
+            status: "absent".to_string(),
+            claimed,
+            config,
+            ..Default::default()
+        };
     };
     let ours = supervisor.owns_running();
     /*
@@ -107,7 +122,8 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
      * Not asked when this app owns the child: the handle is better evidence than a
      * probe, and it keeps a round trip off the one-second polling path.
      */
-    let announced = announced.filter(|found| ours || daemon::is_alive(&found.base, &found.instance_id));
+    let announced =
+        announced.filter(|found| ours || daemon::is_alive(&found.base, &found.instance_id));
 
     let mut state = match (announced, ours) {
         (Some(found), true) => daemon::DaemonState {
@@ -124,7 +140,11 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
             claimed,
             ..Default::default()
         },
-        (None, true) => daemon::DaemonState { status: "starting".to_string(), claimed, ..Default::default() },
+        (None, true) => daemon::DaemonState {
+            status: "starting".to_string(),
+            claimed,
+            ..Default::default()
+        },
         (None, false) => {
             let exit_code = supervisor.exit_code();
             daemon::DaemonState {
@@ -133,7 +153,12 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
                 // started and is gone; an empty one, that nothing was ever tried
                 // here. The lines themselves are `host_daemon_log`'s — this poll
                 // asks the ring for a bit and never for its contents (Q7.140).
-                status: if supervisor.printed_anything() { "exited" } else { "absent" }.to_string(),
+                status: if supervisor.printed_anything() {
+                    "exited"
+                } else {
+                    "absent"
+                }
+                .to_string(),
                 machine_id: None,
                 claimed,
                 ..Default::default()
@@ -171,7 +196,10 @@ pub fn host_daemon_start(
     app: AppHandle,
     host: State<'_, Host>,
 ) -> Result<daemon::DaemonState, String> {
-    let home = app.path().home_dir().map_err(|_| "no home directory".to_string())?;
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|_| "no home directory".to_string())?;
     let payload = daemon::Payload::locate(&resource_dir(&app), &exe_path())
         .ok_or_else(|| "this build carries no daemon".to_string())?;
 
@@ -231,9 +259,14 @@ pub fn host_daemon_start(
          * already holds makes `CONFIG_HERE` true by construction rather than by
          * agreement between two services.
          */
-        let control_plane = origin.clone().ok_or_else(|| "no server has been chosen yet".to_string())?;
-        let dir = env_file.parent().ok_or_else(|| "bad env path".to_string())?;
-        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+        let control_plane = origin
+            .clone()
+            .ok_or_else(|| "no server has been chosen yet".to_string())?;
+        let dir = env_file
+            .parent()
+            .ok_or_else(|| "bad env path".to_string())?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         /*
          * ⚠ **A rewrite, not a replacement, when there is already a file.** The one
          * measured here carried a private CA path its owner had added by hand —
@@ -247,10 +280,13 @@ pub fn host_daemon_start(
         };
         write_private(&env_file, &text)?;
     } else if !env_file.exists() {
-        return Err("a control plane and an enrollment code are needed to set this machine up".into());
+        return Err(
+            "a control plane and an enrollment code are needed to set this machine up".into(),
+        );
     }
 
-    let text = std::fs::read_to_string(&env_file).map_err(|e| format!("could not read {}: {e}", env_file.display()))?;
+    let text = std::fs::read_to_string(&env_file)
+        .map_err(|e| format!("could not read {}: {e}", env_file.display()))?;
     let env = daemon::parse_env(&text);
     host.supervisor
         .lock()
@@ -258,7 +294,11 @@ pub fn host_daemon_start(
         .start(&payload, &home, &env)?;
     Ok(daemon::DaemonState {
         status: "starting".to_string(),
-        claimed: if machine_id.is_empty() { None } else { Some(machine_id) },
+        claimed: if machine_id.is_empty() {
+            None
+        } else {
+            Some(machine_id)
+        },
         // True by construction: every path that reaches here either wrote a file
         // naming this server or adopted one that already did.
         config: daemon::CONFIG_HERE.to_string(),
@@ -323,13 +363,18 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
      * target closes both: the mode is never wrong because it is set at creation,
      * and every reader sees either the whole old file or the whole new one.
      */
-    let dir = path.parent().ok_or_else(|| format!("{} has no directory", path.display()))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("daemon.env");
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("daemon.env");
     let tmp = dir.join(format!("{name}.tmp.{}", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -338,10 +383,15 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&tmp).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    let mut file = options
+        .open(&tmp)
+        .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
     // `sync_all` rather than a plain close: a rename that beats its own contents to
     // disk is the failure this shape exists to prevent.
-    if let Err(e) = file.write_all(contents.as_bytes()).and_then(|()| file.sync_all()) {
+    if let Err(e) = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("could not write {}: {e}", tmp.display()));
     }
@@ -354,7 +404,9 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
 
 /// Where `bundle.resources` landed, in a bundle and in `tauri dev` alike.
 fn resource_dir(app: &AppHandle) -> std::path::PathBuf {
-    app.path().resource_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    app.path()
+        .resource_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 /// This process's own executable, whose directory holds `bundle.externalBin`.
@@ -398,12 +450,32 @@ pub struct Boot {
     /// `false` where this machine's keyring took a canary and lost it — see
     /// `credential::probe`.
     pub durable: bool,
+    /// The device this installation is registered as on that server, or `None`.
+    ///
+    /// ⚠ **The `rename` is load-bearing and its absence is invisible.** This
+    /// struct carries no `rename_all` — every camelCase field names itself, which
+    /// is `local.rs`'s convention too — so `device_id` without this line
+    /// serializes as `device_id`, `boot.deviceId` reads `undefined` for ever, and
+    /// `tsc`, `cargo`, `nativecheck`, `webcheck` and `cargo test` all stay green.
+    /// The app would then decide on every launch that it has no device, register
+    /// one, and walk into the account's device limit. `nativecheck` compares this
+    /// struct's serialized keys against `NativeBoot`'s for exactly that reason.
+    ///
+    /// It comes from `config.rs` rather than the keyring, and that is what makes
+    /// it survive a machine whose credential store silently discards writes.
+    #[serde(rename = "deviceId")]
+    pub device_id: Option<String>,
 }
 
 #[tauri::command]
 pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
     let server = host.origin();
     let credential = server.as_deref().and_then(credential::read);
+    // Read from the same origin the credential was, and in the same breath, so
+    // the two cannot answer about different servers.
+    let device_id = server
+        .as_deref()
+        .and_then(|origin| config::read_device(&host.config_dir, origin));
     Boot {
         server,
         credential,
@@ -411,15 +483,10 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
         host_name: daemon::host_name(),
         app_version: app.package_info().version.to_string(),
         durable: host.durable,
+        device_id,
     }
 }
 
-/// Adopt a server, and give up the previous one's sign-in in the same act.
-///
-/// The erase is not tidiness. A credential this app is no longer going to present
-/// is one it has no reason to keep, and doing it here — rather than on some later
-/// sign-out that may never happen — is what makes "no credential is retained for a
-/// server you are not using" true of the act rather than of an intention.
 /// Is there a daemon on *this computer*, and which machine is it?
 ///
 /// A separate call rather than a field on {@link Boot}, because a daemon can start
@@ -430,12 +497,34 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
 /// `None` for every failure, including the ordinary one of there being no daemon
 /// here. `local::read` is where the refusals are, and loopback is enforced inside
 /// it so the page never sees the parts an address was built from.
+///
+/// ⚠ **`is_alive` before the base leaves this process, because the caller spends a
+/// machine token on it.** `machine.ts`'s `proveLocal` sends `Authorization: Bearer`
+/// to whatever this answers, and `.claude/rules/relay.md` states what that costs
+/// if the listener is not the daemon: a 300-second bearer, spendable **through the
+/// relay from anywhere**. The file being unplantable by another uid closes only
+/// half of it — `src/announce.ts` cannot remove its file on a SIGKILL, a crash or a
+/// power cut, `REEMOAT_PORT` is a fixed 7887 by decision, and anything may hold an
+/// ordinary port afterwards. `host_daemon_state` already applies exactly this
+/// filter, with a ⚠ saying exactly this; it was the *status* path that had the
+/// proof and the token-bearing path that did not.
+///
+/// It costs one `/health` round trip against `PROBE_TIMEOUT`, and `localRoute.ts`
+/// asks this once per route resolution — a wake or a fifteen-second retry, never
+/// the four-second poll. It is paid on *this* thread, which is the main one until
+/// this command is `#[tauri::command(async)]`.
 #[tauri::command]
 pub fn host_local_daemon(app: AppHandle) -> Option<LocalDaemon> {
     let home = app.path().home_dir().ok()?;
-    local::read(&home)
+    local::read(&home).filter(|found| daemon::is_alive(&found.base, &found.instance_id))
 }
 
+/// Adopt a server, and give up the previous one's sign-in in the same act.
+///
+/// The erase is not tidiness. A credential this app is no longer going to present
+/// is one it has no reason to keep, and doing it here — rather than on some later
+/// sign-out that may never happen — is what makes "no credential is retained for a
+/// server you are not using" true of the act rather than of an intention.
 #[tauri::command]
 pub fn host_set_server(url: String, host: State<'_, Host>) -> Result<String, String> {
     let origin = config::normalize_origin(&url)?;
@@ -465,6 +554,39 @@ pub fn host_credential_clear(host: State<'_, Host>) -> Result<(), String> {
         return Ok(());
     };
     credential::erase(&origin)
+}
+
+/// Remember which device this server registered us as.
+///
+/// Scoped to the chosen origin, like the credential beside it, so an id issued by
+/// one control plane can never be offered to another — which matters more than it
+/// looks: that id names a row in *that* server's table, and presenting it
+/// elsewhere would at best register a stranger's-looking device and at worst be a
+/// value from a fleet this person does not administer.
+///
+/// Unlike the credential, this is **not** erased when the server changes. See
+/// `config.rs`: the row on the old server still exists, so forgetting the id
+/// leaves an installation nobody can recognise in their own list and spends a
+/// second slot the next time they point back.
+#[tauri::command]
+pub fn host_device_set(value: String, host: State<'_, Host>) -> Result<(), String> {
+    let origin = host.origin().ok_or("no server has been chosen")?;
+    config::write_device(&host.config_dir, &origin, &value)
+}
+
+/// Give up the device recorded for the chosen server.
+///
+/// Called when the control plane answers `device_revoked` — the one refusal that
+/// means this installation's id is finished rather than its session. Without it
+/// the next sign-in would offer the retired id again; the server declines to bind
+/// it and registers a fresh device, so the loop terminates either way, but the app
+/// would go on presenting something it has been told is dead.
+#[tauri::command]
+pub fn host_device_clear(host: State<'_, Host>) -> Result<(), String> {
+    let Some(origin) = host.origin() else {
+        return Ok(());
+    };
+    config::erase_device(&host.config_dir, &origin)
 }
 
 /// The `/v1/*` leg. See `proxy.rs` for why it is the only one here.

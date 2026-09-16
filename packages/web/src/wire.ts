@@ -2547,7 +2547,64 @@ export interface SessionRecord {
    */
   ip?: string | null;
   userAgent?: string | null;
+  /**
+   * The installation this sign-in belongs to, or `null`.
+   *
+   * Optional for `ip`'s reason — a control plane that predates devices sends
+   * neither key — and nullable because a sign-in from a browser or a mailed link
+   * belongs to no registered installation and says so.
+   *
+   * ⚠ **`deviceName` is the one field on this row that is not caller-supplied in
+   * `userAgent`'s sense**, and the list prefers it for exactly that: a `User-Agent`
+   * is a claim a request makes about itself, while a device name was written by
+   * somebody who had already signed in. It is still not *evidence* — a stolen
+   * session can register a device and call it anything — but it is the string a
+   * person can recognise, which is the only question this list answers.
+   */
+  deviceId?: string | null;
+  deviceName?: string | null;
   /** Whether this row is the credential making the request. */
+  current: boolean;
+}
+
+/**
+ * One installation signed in to this account.
+ *
+ * **Not a session and not a credential.** A session is a bearer token with an
+ * expiry; a device is the computer or phone that keeps producing them, and it
+ * outlives every one of them — which is the whole point, because "sign this laptop
+ * out and leave my phone alone" had nothing to act on before. Holding the id
+ * authorizes nothing: every request still carries the session token, and the id is
+ * read only after that token has resolved.
+ *
+ * **It is not an authorization subject either.** A grant is `(user, machine)`, so
+ * every device of one person reaches the same fleet — `web-shell.md`'s "one bearer
+ * credential, short-lived per-machine tokens" is unchanged by any of this.
+ */
+export interface DeviceRecord {
+  id: string;
+  name: string;
+  platform: string;
+  createdAt: number;
+  /**
+   * When it was retired, or `null`.
+   *
+   * Retired rows are **listed**, deliberately: the question this screen gets
+   * opened for is usually asked after something has gone wrong, and a list one row
+   * shorter cannot tell "I retired that laptop on Tuesday" from "that laptop was
+   * never registered".
+   */
+  revokedAt: number | null;
+  /**
+   * When a sign-in on it was last used, or `null` for one that never held a live
+   * session.
+   *
+   * Derived by the control plane from the sessions bound to it rather than stored
+   * on the row — see the `devices` table comment in `schema.sql`. So it moves at
+   * most once every fifteen minutes, like everything else that reads it.
+   */
+  lastSeenAt: number | null;
+  /** Whether this row is the installation making the request. */
   current: boolean;
 }
 

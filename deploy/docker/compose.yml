@@ -151,6 +151,34 @@ services:
   control-plane:
     <<: *cp-common
 
+    # ⚠ **Serving a browser UI from this container, and why the line is commented
+    # rather than live.**
+    #
+    # The image no longer builds `packages/web`, so there is nothing inside to
+    # serve — deliberately: the Reemoat app carries its own interface and
+    # `REEMOAT_CP_WEB` is off by default. An operator who wants the browser UI
+    # anyway builds the bundle on the host and mounts it, which is the trade
+    # `deploy/README.md` has named as available-but-unbuilt since the day the
+    # image existed.
+    #
+    # It cannot be live with a `${…:-}` default the way the environment line
+    # below is: compose resolves a bind mount's **source path** before it starts
+    # anything, and there is no value that means "no mount". An unset variable
+    # would therefore fail `compose config` — every verb, on every deployment
+    # that does not want a UI, which is now the default one.
+    #
+    # ⚠ **Uncommenting it means listing `cp-state` here too.** These two lines
+    # replace the anchor's `volumes:` rather than extending it — YAML merge keys
+    # do not merge sequences — so dropping the first would take the database and
+    # the fleet's signing key with it.
+    #
+    # volumes:
+    #   - cp-state:/var/lib/reemoat
+    #   - ${REEMOAT_CP_WEB}:/srv/web:ro
+    #
+    # …and then `REEMOAT_CP_WEB=/srv/web` in the env file, which is the path
+    # *inside* the container. The host path is the left half of the mount.
+
     environment:
       # **The in-container bind, pinned.** Measured: `environment:` wins over
       # `env_file:`. So a REEMOAT_CP_HOST left over in the operator's file — and
@@ -186,6 +214,21 @@ services:
       # *carried* from the env file, because a fleet whose daemons enrolled
       # against a non-default issuer checks `iss` against exactly that value.
       REEMOAT_CP_DB: "/var/lib/reemoat/control-plane.db"
+      # No browser UI, and **`:-` rather than a pin**, which is the one difference
+      # from the three above it.
+      #
+      # Those are pinned because an operator's value would be *wrong*: a loopback
+      # bind inside a namespace is unreachable by anybody, an embedded relay here
+      # binds a port nothing publishes, and a relocated database is a fresh one
+      # with a new signing key. This is a **preference**, and one the volume below
+      # exists to let somebody exercise — so it defaults off and gets out of the
+      # way rather than beating the env file, which is `environment:`'s measured
+      # behaviour and the reason every other line here is a pin.
+      #
+      # Off is now also `main.ts`'s own default, so this line is a statement
+      # rather than a switch. It stays because the alternative is an operator
+      # reading `compose config` and finding nothing at all about the UI.
+      REEMOAT_CP_WEB: "${REEMOAT_CP_WEB:-0}"
 
     ports:
       # ------------------------------------------------------------------

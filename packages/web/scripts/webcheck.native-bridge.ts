@@ -189,14 +189,22 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
     ),
   ].sort();
   /*
-   * One command name is built by a conditional rather than written as a literal —
-   * the credential set/clear pair — so it is named here too. Written out rather
-   * than pattern-matched: a name this census cannot see is a name the pin does not
-   * cover, and saying which one is cheaper than a cleverer regex.
+   * Two command names are built by a conditional rather than written as a literal
+   * — the credential set/clear pair and the device set/clear pair, each an
+   * `invoke(value === null ? "…_clear" : "…_set", …)` — so they are named here
+   * too. Written out rather than pattern-matched: a name this census cannot see
+   * is a name the pin does not cover, and saying which ones is cheaper than a
+   * cleverer regex.
+   *
+   * ⚠ **This list is the thing to edit when a conditional pair is added**, and it
+   * is easy to miss because the failure names the *shell* — "a command the shell
+   * registers is not called" — for commands that are called on every launch. The
+   * person hitting it will look in `nativecheck`, which holds the other direction
+   * of the same census and has nothing to say about this.
    */
   const conditional = [
     ...new Set(
-      [...native.matchAll(/"(host_credential_(?:set|clear))"/g)]
+      [...native.matchAll(/"(host_(?:credential|device)_(?:set|clear))"/g)]
         .map((m) => m[1])
         .filter((c): c is string => c !== undefined),
     ),

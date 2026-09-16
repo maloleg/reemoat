@@ -14,6 +14,7 @@ import { navigate, useOrigin } from "../../router";
 import { IconButton } from "../bits";
 import { AccountSection, EmailScreen, PasswordScreen } from "./AccountSection";
 import { EmailSection } from "./EmailSection";
+import { DevicesSection } from "./DevicesSection";
 import { KeysSection, NewKeyScreen } from "./KeysSection";
 import { LogsSection } from "./LogsSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
@@ -339,6 +340,15 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
       return <AccountSection me={state.me} config={state.config} />;
     case "keys":
       return <KeysSection me={state.me} />;
+    /*
+     * The second section that takes nothing, and for a different reason from
+     * `LogsSection` below: everything it draws is one listing it fetches itself,
+     * and the store holds no copy of it — a device list changes when somebody
+     * retires one, not on the four-second poll, so putting it in the store would
+     * be state with no reader keeping it fresh.
+     */
+    case "devices":
+      return <DevicesSection />;
     /*
      * The one section that takes nothing. Everything it draws comes from the host
      * bridge — which is a fact about *this computer* rather than about this

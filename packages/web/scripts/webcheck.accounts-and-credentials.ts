@@ -84,6 +84,18 @@ process.stdout.write("\nwhen a failed call ends the session\n");
     [401, "missing_api_key"],
     [401, "session_expired"],
     [401, "session_revoked"],
+    /*
+     * ⚠ **The newest, and it is the pair `session_revoked` one line up must not
+     * be folded into.** Both end this session; only this one also means the
+     * *installation* was retired, so the client has to give up its stored device
+     * id as well — otherwise the next sign-in offers a dead id, the server hands
+     * back a fresh device by its adopt-or-register rule, and the app quietly
+     * re-registers on every launch. The other direction is worse in a quieter
+     * way: `session_revoked` is what the per-user session cap produces, and a
+     * client that dropped its device id there would spend a device slot every
+     * time somebody signed in on an eleventh browser.
+     */
+    [401, "device_revoked"],
     [403, "forbidden"],
     [403, "machine_over_limit"],
     [403, "machine_revoked"],
@@ -110,14 +122,39 @@ process.stdout.write("\nwhen a failed call ends the session\n");
     [503, "overloaded"],
   ];
   check(
-    "six codes end a session, and no more",
+    "seven codes end a session, and no more",
     SURFACE.filter(([status, code]) => authFailure(err(status, code)) !== null).map(([, code]) => code),
-    ["api_key_revoked", "invalid_api_key", "missing_api_key", "session_expired", "session_revoked", "user_disabled"],
+    [
+      "api_key_revoked",
+      "invalid_api_key",
+      "missing_api_key",
+      "session_expired",
+      "session_revoked",
+      "device_revoked",
+      "user_disabled",
+    ],
   );
   check(
     "and each of those says which kind of ending it is",
     SURFACE.map(([status, code]) => authFailure(err(status, code))).filter((f) => f !== null),
-    ["credentials", "credentials", "credentials", "expired", "credentials", "disabled"],
+    ["credentials", "credentials", "credentials", "expired", "credentials", "device_revoked", "disabled"],
+  );
+  /*
+   * ⚠ **The two that end a session differently, side by side.** This is the pair
+   * the table above can only say something about by counting; said here it is a
+   * deletion somebody has to make on purpose. A session retired by the per-user
+   * cap leaves the device valid — sign in again and the same row is re-bound — and
+   * a retired *device* does not.
+   */
+  check(
+    "a retired device is its own ending, and a revoked session is not",
+    [authFailure(err(401, "device_revoked")), authFailure(err(401, "session_revoked"))],
+    ["device_revoked", "credentials"],
+  );
+  check(
+    "and each has a sentence of its own that names what happened",
+    [signedOutText("device_revoked") === signedOutText("credentials"), signedOutText("device_revoked").length > 0],
+    [false, true],
   );
   // The three the brief for this section exists for, restated as one line so that
   // deleting any of them is a visible deletion rather than a table edit.

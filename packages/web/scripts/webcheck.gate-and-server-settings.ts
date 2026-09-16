@@ -217,10 +217,10 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
    * operator's documents decides what the sign-up form *asks for*, never whether
    * somebody may sign in or recover an account.
    */
-  const off = { registration: "off", email: false, source: null, catalogue: null, offer: null, legal: false } as const;
-  const offMail = { registration: "off", email: true, source: null, catalogue: null, offer: null, legal: false } as const;
-  const openLocal = { registration: "open", email: false, source: null, catalogue: null, offer: null, legal: false } as const;
-  const openMail = { registration: "open", email: true, source: null, catalogue: null, offer: null, legal: false } as const;
+  const off = { registration: "off", email: false, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
+  const offMail = { registration: "off", email: true, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
+  const openLocal = { registration: "open", email: false, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
+  const openMail = { registration: "open", email: true, source: null, catalogue: null, offer: null, appDownload: null, legal: false } as const;
 
   /* ---- the wire body actually becomes one of those ---- */
 
@@ -296,6 +296,11 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       "VERSION",
       "pluginCatalogueUrl",
       "machineOfferUrl",
+      // Injected for `machineOfferUrl`'s reason: it is a free variable of that
+      // handler, so a driver that did not name it would fail with a
+      // `ReferenceError` rather than an assertion — which is the loud failure
+      // this construction is built to produce.
+      "appDownloadUrl",
       "legalDocuments",
       "db",
       "c",
@@ -308,6 +313,10 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
       VERSION,
       catalogue,
       offer,
+      // Always `null` here. What the fixtures are about is the registration and
+      // mail matrix; the download address has one parser and it is driven
+      // directly in `webcheck.devices.ts`.
+      null,
       legal,
       {},
       { json: (value: unknown) => value },
@@ -1026,23 +1035,23 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
   const plain = { id: "u_1", name: "ada", isAdmin: false };
   const admin = { id: "u_2", name: "root", isAdmin: true };
 
-  check("a non-admin sees four rows", navRows(plain).map((row) => row.spec.id), ["account", "keys", "machines", "logs"]);
+  check("a non-admin sees five rows", navRows(plain).map((row) => row.spec.id), ["account", "devices", "keys", "machines", "logs"]);
   /*
    * THE case, and it is invisible to the only people who could report it: a
    * heading computed from the static table renders "Server" above nothing for a
    * non-admin, and only an admin ever sees this nav in a correct state.
    */
   check("and no heading floats over nothing", navRows(plain).every((row) => row.heading === null), true);
-  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "keys", "machines", "logs"]);
+  check("an unknown viewer is treated as a non-admin", navRows(null).map((row) => row.spec.id), ["account", "devices", "keys", "machines", "logs"]);
   check(
-    "an admin sees seven",
+    "an admin sees eight",
     navRows(admin).map((row) => row.spec.id),
-    ["account", "keys", "machines", "logs", "server", "email", "users"],
+    ["account", "devices", "keys", "machines", "logs", "server", "email", "users"],
   );
   check(
     "with the heading on the first row of its group only",
     navRows(admin).map((row) => row.heading),
-    [null, null, null, null, "server", null, null],
+    [null, null, null, null, null, "server", null, null],
   );
   const adminIndex = (id: string): number => navRows(admin).findIndex((row) => row.spec.id === id);
   check("and Server sits above Users", adminIndex("server") < adminIndex("users"), true);

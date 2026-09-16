@@ -2349,6 +2349,15 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   for (const envOnly of [
     "REEMOAT_CP_PLUGIN_CATALOGUE_URL",
     "REEMOAT_CP_MACHINES_OFFER_URL",
+    /*
+     * The offer's twin, and it earns the list for the same reason plus one of its
+     * own: it names one particular build published by whoever runs *this*
+     * deployment, and there is no compiled-in default because this repository
+     * publishes no signed build at all. Unset is the truthful state, so an
+     * operator who wants the handoff page to offer a download has to discover
+     * this variable — and a `.env.example` is the only place that can happen.
+     */
+    "REEMOAT_CP_APP_DOWNLOAD_URL",
     // The third member, and the same argument at its sharpest: the documents this
     // switch publishes name one party, so a row on every fork's Server settings
     // screen would offer somebody else's contract as a toggle.
@@ -2396,18 +2405,48 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * itself is otherwise unasserted. What this fails on is a third variable of this
    * shape arriving with a fourth spelling, which is the way the next one goes
    * wrong.
+   *
+   * ⚠ **The two no longer agree, and the asymmetry is now the thing asserted.**
+   * `REEMOAT_CP_WEB` defaults to **off** since the image stopped carrying a web
+   * bundle: with nothing built in, there is no "the default" for an affirmative
+   * spelling to name, so `1`/`true`/`yes` would resolve to a path called `1` —
+   * exactly the permanent silent 404 this pair was written to close. It is
+   * recognised and *answered with a sentence* instead, which is why the constant
+   * is named `webMeaningless` rather than `webDefault`: a reader who greps for
+   * the old name finds nothing and has to read why.
+   *
+   * `REEMOAT_CP_INSTALL` is untouched — `deploy/bootstrap.sh` really is still in
+   * the image, so it really does still have a default to mean. Holding the two to
+   * each other now would force one of them to lie.
    */
   {
     const mainTs = readFileSync(join(repoRoot, "packages/control-plane/src/main.ts"), "utf8");
-    const spellings = (name: string, sense: "Off" | "Default"): string[] => {
+    const spellings = (name: string, sense: "Off" | "Default" | "Meaningless"): string[] => {
       const found = new RegExp(`const ${name}${sense} =([^;]+);`).exec(mainTs)?.[1] ?? "";
       return [...found.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").sort();
     };
     check("the web switch spells off three ways", spellings("web", "Off"), ["0", "false", "no"]);
     check("and the installer switch spells it the same three", spellings("install", "Off"), ["0", "false", "no"]);
-    check("the web switch spells the default three ways", spellings("web", "Default"), ["1", "true", "yes"]);
     check(
-      "and the installer switch spells it the same three",
+      "the web switch still recognises the three affirmatives, so it can answer them",
+      spellings("web", "Meaningless"),
+      ["1", "true", "yes"],
+    );
+    // And there is no `webDefault` any more, which is what says the arm was
+    // removed rather than renamed around a check that kept passing.
+    check("and names no default of its own", /const webDefault\b/.test(mainTs), false);
+    /*
+     * The half that makes "off by default" a property rather than a comment: with
+     * the variable unset, `webOff` must hold. A regex, because the alternative is
+     * importing a module that starts a server.
+     */
+    check(
+      "an unset value is off",
+      /const webOff = webEnv\.length === 0 \|\|/.test(mainTs),
+      true,
+    );
+    check(
+      "and the installer switch still has a default to mean",
       spellings("install", "Default"),
       ["1", "true", "yes"],
     );
@@ -4952,9 +4991,31 @@ process.stdout.write("\nwhat the control plane's migration is allowed to do\n");
    */
   const statements = [...body.matchAll(/"([A-Z]+ [^"]*)"/g)].map((m) => m[1] ?? "");
   check("the migration names some SQL at all", statements.length > 0, true);
+  /*
+   * Three shapes, and the third is named rather than the pattern being loosened.
+   *
+   * `ALTER … ADD COLUMN` and `PRAGMA table_info` are the two that cannot make an
+   * older build wrong, which is the property this assertion is really about.
+   * `CREATE INDEX IF NOT EXISTS` is the third with that property — it changes no
+   * row, no column and no meaning, an older build never uses it, and it is
+   * idempotent so two processes racing on one file both succeed.
+   *
+   * ⚠ **It is here because one index genuinely could not live in `schema.sql`.**
+   * That file runs *before* this function, so an index naming a column this
+   * function adds fails with `no such column` against every database that
+   * already exists — `openControlStore` throws, `main.ts` exits 2, and the unit
+   * restarts into a crash loop. `idx_user_sessions_device` is that index. The
+   * spelling is pinned, `IF NOT EXISTS` included: a bare `CREATE INDEX` here
+   * would throw on the second open and is not the thing being allowed.
+   */
   check(
-    "and every statement it names is a read or an ADD COLUMN",
-    statements.filter((sql) => !/^ALTER TABLE \w+ ADD COLUMN /.test(sql) && !/^PRAGMA \w+\(/.test(sql)),
+    "and every statement it names is a read, an ADD COLUMN, or an idempotent index",
+    statements.filter(
+      (sql) =>
+        !/^ALTER TABLE \w+ ADD COLUMN /.test(sql) &&
+        !/^PRAGMA \w+\(/.test(sql) &&
+        !/^CREATE INDEX IF NOT EXISTS \w+ ON \w+ \(/.test(sql),
+    ),
     [],
   );
   /*

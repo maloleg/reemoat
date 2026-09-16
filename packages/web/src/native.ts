@@ -116,6 +116,20 @@ export interface NativeBoot {
    * it must draw the same words.
    */
   durable: boolean;
+  /**
+   * Which device this installation is registered as on that server, or `null`.
+   *
+   * ⚠ **Not out of the keyring**, unlike {@link NativeBoot.credential} beside it,
+   * and the difference is the whole reason it works: a device id is an identifier
+   * the control plane handed back rather than a secret, so it lives in ordinary
+   * configuration — which means it survives `durable: false`, the very state where
+   * a keyring-held one would be discarded on every launch and this app would
+   * register a fresh device each time until the account hit its limit.
+   *
+   * `null` is an ordinary state and the only one at first run: `store.bootstrap()`
+   * registers a device when it sees one and stores what comes back.
+   */
+  deviceId: string | null;
 }
 
 let boot: NativeBoot | null = null;
@@ -306,6 +320,30 @@ export function setNativeCredential(value: string | null): void {
 }
 
 /**
+ * Save or forget which device this server registered us as.
+ *
+ * Written to the shell's configuration rather than its keyring — see
+ * {@link NativeBoot.deviceId} — and fire-and-forget for `setNativeCredential`'s
+ * reason: losing it costs one extra registration on the next launch, which is a
+ * degraded mode rather than a failure.
+ *
+ * ⚠ **It updates {@link boot} as well as the file, and that is not an
+ * optimisation.** `hostReady` settles once, at import, and `nativeBoot()` answers
+ * that same snapshot for the life of the process — so an app that signed out and
+ * back in without quitting would re-read a `deviceId` from before it registered,
+ * decide it had none, and register a *second* device for one computer. The object
+ * is replaced rather than mutated because `store.ts` hands it to React as
+ * `state.host`, and an identical reference never re-renders.
+ */
+export function setNativeDevice(value: string | null): void {
+  if (!inNativeShell()) return;
+  if (boot !== null) boot = { ...boot, deviceId: value };
+  void invoke(value === null ? "host_device_clear" : "host_device_set", value === null ? {} : { value }).catch(
+    () => undefined,
+  );
+}
+
+/**
  * A daemon running on *this computer*, as the host process found it.
  *
  * The daemon writes `~/.reemoat/daemon.json` from its own listening callback
@@ -491,10 +529,12 @@ export async function daemonLog(): Promise<readonly string[]> {
  * it on stdin for the same reason: argv is readable by every account on the host,
  * and a code is a full machine identity until it is redeemed.
  *
- * A rejection is a sentence, not a status: the host refuses rather than
- * overwriting when an env file already exists, because rewriting one re-enrolls a
- * machine that is already enrolled and redeeming a code retires its live tunnel
- * key.
+ * A rejection is a sentence, not a status. ⚠ **And the host does not simply
+ * refuse when an env file already exists** — the sentence that used to stand here
+ * said it did, and `host_daemon_start`'s own docblock records the measurement that
+ * killed it. The three cases are its, not this module's: a code *rewrites* the
+ * file, preserving every key this app does not own; no code with a file naming
+ * this server is adoption; a file naming another server is the only refusal.
  */
 export async function startLocalDaemon(enrollCode: string, machineId: string): Promise<DaemonState> {
   /*

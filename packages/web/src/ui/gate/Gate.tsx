@@ -8,6 +8,7 @@ import {
   gateUsable,
   incompleteLinkRemedy,
   readGateToken,
+  readPastedGateToken,
   signupScreen,
   type GateScreen,
 } from "../../gate";
@@ -78,6 +79,75 @@ function FieldLabel({ htmlFor, children }: { htmlFor: string; children: string }
   );
 }
 
+/**
+ * Carry a mailed link across by hand.
+ *
+ * ⚠ **Why this is a control and not a gap.** `/confirm`, `/reset` and `/verify`
+ * are URLs a *mail client* opens, in a browser — and the control plane's default
+ * deployment now serves no web UI, so there is nothing at that address to render
+ * them. Without this, sign-up and password recovery both dead-end on a JSON 404,
+ * and `POST /v1/forgot` is documented as the **only** remedy for a forgotten
+ * password. `readPastedGateToken` is what makes it one small control: a whole
+ * link, a bare fragment or the code alone all resolve to the same token.
+ *
+ * **It refuses locally rather than sending a guess.** A paste that is not
+ * token-shaped never becomes a request — `isGateToken` decides — so the person
+ * is told the code looks wrong instead of the server answering about something
+ * nobody typed, which is `readGateToken`'s own rule applied one door along.
+ *
+ * `type="text"`, not `password`: this is a value somebody is copying and needs to
+ * be able to see they pasted, and it is single-use and already in their mailbox.
+ */
+function PasteLink({ onToken }: { onToken: (token: string) => void }): ReactNode {
+  const [value, setValue] = useState("");
+  const [rejected, setRejected] = useState(false);
+
+  const submit = (event: FormEvent): void => {
+    event.preventDefault();
+    const token = readPastedGateToken(value);
+    if (token === null) {
+      setRejected(true);
+      return;
+    }
+    onToken(token);
+  };
+
+  return (
+    <form onSubmit={submit} className="mt-4">
+      <label htmlFor="gate-paste" className={label}>
+        Link or code
+      </label>
+      <input
+        id="gate-paste"
+        // Off on all four: this is a one-time value out of a mailbox, and a
+        // browser offering to complete it from a previous one would offer a
+        // token that has already been spent.
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        className={FIELD}
+        value={value}
+        onChange={(event) => {
+          setValue(event.target.value);
+          // Cleared on the next keystroke rather than left standing: the
+          // refusal is about what was in the box, and the box has changed.
+          setRejected(false);
+        }}
+        placeholder="https://…#t=et_… or et_…"
+      />
+      {rejected && (
+        <p className="mt-1.5 text-xs text-danger">
+          That does not look like one of our links. Copy the whole link from the email.
+        </p>
+      )}
+      <Button type="submit" tone="primary" className="mt-3 w-full" disabled={value.trim().length === 0}>
+        Continue
+      </Button>
+    </form>
+  );
+}
+
 export function Gate({ screen, state }: { screen: GateScreen; state: AppState }): ReactNode {
   /*
    * Read once, from the fragment, and never from the path. `readGateToken`
@@ -85,7 +155,14 @@ export function Gate({ screen, state }: { screen: GateScreen; state: AppState })
    * arrives here as `null` and produces a sentence rather than a request the
    * server answers about a token nobody typed.
    */
-  const [token] = useState(() => readGateToken(window.location.hash));
+  const [fromUrl] = useState(() => readGateToken(window.location.hash));
+  /*
+   * The token somebody pasted, which outranks the one in the URL only by being
+   * the one that exists: the two are never both present, because a screen with a
+   * token in its fragment never draws the field.
+   */
+  const [pasted, setPasted] = useState<string | null>(null);
+  const token = fromUrl ?? pasted;
 
   if (gateNeedsToken(screen) && !gateUsable(screen, token)) {
     // The remedy is per screen and used to be `/forgot` for all three, which is
@@ -94,13 +171,31 @@ export function Gate({ screen, state }: { screen: GateScreen; state: AppState })
     return (
       <GateCard
         title="This link is incomplete"
-        lead="It was cut short on its way here. Links are single-use, so ask for a new one."
+        lead="Some mail apps cut the end off a link. Paste the whole one from your email, or ask for a new one."
         footer={<BackToSignIn />}
       >
+        {/*
+         * ⚠ **The remedy for a link that arrived without its fragment**, which is
+         * a real and unremarkable thing for a mail client or a link scanner to
+         * do: the token rides the `#` precisely so it never reaches a server log,
+         * and that is exactly the part a URL rewriter drops.
+         *
+         * Before this the card could only say "ask for a new one" — which sends
+         * somebody back through a flow whose *next* mail will be rewritten the
+         * same way by the same client. Pasting the original link works on the
+         * first try, and `readPastedGateToken` takes a whole URL, a bare `#t=…`
+         * fragment or the code alone, so it does not matter which part of the
+         * mail they managed to select.
+         *
+         * It refuses locally rather than sending a guess — `readGateToken`'s own
+         * rule one function over: somebody who pasted the wrong thing is told
+         * that, instead of being told their link did not work.
+         */}
+        <PasteLink onToken={setPasted} />
         {remedy === null ? (
           <></>
         ) : (
-          <Button tone="primary" className="mt-4 w-full" onClick={() => navigate(remedy.path, true)}>
+          <Button className="mt-3 w-full" onClick={() => navigate(remedy.path, true)}>
             {remedy.label}
           </Button>
         )}

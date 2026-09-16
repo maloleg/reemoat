@@ -10,7 +10,7 @@ import { ApiError } from "./http";
  * app, and getting one wrong is invisible until it happens to a person mid-turn.
  */
 
-export type AuthFailure = "credentials" | "disabled" | "expired";
+export type AuthFailure = "credentials" | "disabled" | "expired" | "device_revoked";
 
 /**
  * Whether an answered request means this credential is finished.
@@ -84,6 +84,26 @@ export function authFailure(error: unknown): AuthFailure | null {
    */
   if (error.code === "invalid_password" || error.code === "invalid_login") return null;
   if (error.code === "session_expired") return "expired";
+  /*
+   * This installation was retired, which is the one 401 that asks for a second
+   * act beyond signing in again.
+   *
+   * ⚠ **It is a member of its own and must not be folded into `"credentials"`.**
+   * Every other refusal here means *the credential is finished*; this one means
+   * **the stored device id is finished too**. Folded, the client would sign out,
+   * sign back in offering the same retired id, be handed a fresh device by the
+   * server's adopt-or-register rule — and go on presenting a dead id for ever,
+   * with the app quietly re-registering on every launch.
+   *
+   * ⚠ **And `session_revoked` must stay out of this arm**, which is the same rule
+   * read from the other end: a session retired by the per-user cap leaves the
+   * device perfectly valid, so a client that gave its id up there would register
+   * a second device for one computer every time somebody signed in on an
+   * eleventh. Two codes, two behaviours; the control plane splits them for
+   * exactly this, and `resolveSession` asks about the device *first* so the
+   * distinction survives a revocation that ends both.
+   */
+  if (error.code === "device_revoked") return "device_revoked";
   /*
    * Everything else that is a 401, which is `session_revoked`,
    * `api_key_revoked`, `invalid_api_key`, `missing_api_key` and anything a later
@@ -175,6 +195,20 @@ export function signedOutText(failure: AuthFailure): string {
       return "This account has been disabled.";
     case "credentials":
       return "You were signed out. Sign in again.";
+    case "device_revoked":
+      /*
+       * Named as an act somebody did, rather than as something that happened.
+       *
+       * The generic sentence one arm up would be true and useless here: the
+       * person most likely to see this is the one who just retired this computer
+       * from another device, and the second most likely is somebody whose
+       * account owner did it for them. Both need to know it was **this
+       * computer**, or the obvious reading is that the service logged them out.
+       *
+       * It ends on what works, because it does: signing in registers this
+       * installation again, and nothing about the account has changed.
+       */
+      return "This device was signed out and retired. Sign in again to use it.";
   }
 }
 

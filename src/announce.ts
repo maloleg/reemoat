@@ -37,10 +37,12 @@ export const ANNOUNCE_VERSION = 1;
 /**
  * The file's whole content.
  *
- * ⚠ **This shape is written down twice** — here, and as `LocalDaemon` in
- * `packages/native/src-tauri/src/commands.rs`, which is the only reader. A field
- * renamed on one side and not the other is a local route that silently stops
- * being offered, with no error anywhere, so `nativecheck` reads both off disk and
+ * ⚠ **This shape is written down twice** — here, and as `Stored` in
+ * `packages/native/src-tauri/src/local.rs`, which is the only reader. Not
+ * `LocalDaemon` beside it: that is the smaller thing the reader hands the page,
+ * and it carries neither `v` nor `host` nor `port` nor `authMode`. A field renamed
+ * on one side and not the other is a local route that silently stops being
+ * offered, with no error anywhere, so `nativecheck` reads both off disk and
  * asserts the key sets are the same. Same hazard and the same remedy as
  * `OPENABLE`/`OPENABLE_SCHEMES` one file over.
  */

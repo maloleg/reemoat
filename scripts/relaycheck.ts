@@ -5,7 +5,7 @@ import { Duplex, PassThrough } from "node:stream";
 import { connect as netConnect, createServer as netCreateServer, type AddressInfo, type Socket } from "node:net";
 import { TLSSocket, createServer as tlsCreateServer } from "node:tls";
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { WebSocket, WebSocketServer } from "ws";
@@ -65,6 +65,12 @@ import {
 } from "../packages/control-plane/src/keys.js";
 import { KEY_TOUCH_INTERVAL_MS, createControlPlaneApp } from "../packages/control-plane/src/app.js";
 import { applyControlPlaneSchema } from "../packages/control-plane/src/store.js";
+import {
+  DEVICE_REVOKED_RETENTION_MS,
+  MAX_DEVICES_PER_USER,
+  adoptDevice,
+  pruneDevices,
+} from "../packages/control-plane/src/devices.js";
 import { readAgentClisHeader, readDaemonVersionHeader, recordDaemonBuild } from "../packages/control-plane/src/machines.js";
 import { callerAddressOf, forwardingIgnored } from "../packages/control-plane/src/net.js";
 import { isBrowserReachable, parseRelayUrls } from "../packages/control-plane/src/relay/routing.js";
@@ -77,6 +83,7 @@ import {
   mintSession,
   pruneSessions,
   resolveSession,
+  revokeSession,
   touchSession,
 } from "../packages/control-plane/src/sessions.js";
 import {
@@ -2710,6 +2717,168 @@ process.stdout.write("\nrouting a browser to the relay that holds the machine\n"
  * daemons claiming one identity.
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * The Authority boundary, as a ratchet
+ *
+ * This service is the **Authority**: it holds who somebody is, which devices
+ * they signed in from, which machines exist, who owns them and who may reach
+ * them. It holds none of the *work* — no agent, no session, no worktree, no
+ * prompt, no response, no diff, no shell. Those are the daemon's, on the
+ * machine they belong to, and `docs/AUTHORITY.md` is where that division is
+ * written down.
+ *
+ * ⚠ **Until now that division was true by accident.** Nothing stopped the next
+ * feature putting a transcript index here "just for the list", and the cost of
+ * finding out later is not a refactor — it is that a control-plane outage starts
+ * taking work with it, and that the fleet's signing key sits in the same process
+ * as somebody's source. Both halves below are ratchets: they compare against what
+ * the tree already is, so the day somebody widens either, the widening is the
+ * diff rather than a discovery.
+ *
+ * Neither is a security boundary, and neither pretends to be — `plugins.md` says
+ * the same thing about `manifest.scopes`. What they buy is that the shape stays
+ * legible, which for a division of responsibility is the whole of what a check
+ * can buy.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat the Authority may reach\n");
+{
+  /*
+   * **Half one: what it imports.**
+   *
+   * Measured: `packages/control-plane/src/**` reaches the repository root for
+   * exactly five files, all of them wire vocabulary. The same five are the ones
+   * `deploy/docker/Dockerfile` COPYs into the runtime stage — which is what keeps
+   * these two lists from drifting apart, and why a sixth import is a change to
+   * both or an image that fails at runtime inside a container.
+   *
+   * What the allowlist refuses by construction is anything under `src/session`,
+   * `src/registry`, `src/acp/` or `src/runtime/`: the modules that *are* the work.
+   */
+  const ALLOWED = ["src/auth.js", "src/cors.js", "src/http.js", "src/relay/protocol.js", "src/token.js"];
+
+  const cpSrc = new URL("../packages/control-plane/src/", import.meta.url);
+  const walk = (dir: URL): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) out.push(...walk(new URL(`${entry.name}/`, dir)));
+      else if (entry.name.endsWith(".ts")) out.push(readFileSync(new URL(entry.name, dir), "utf8"));
+    }
+    return out;
+  };
+  const sources = walk(cpSrc);
+  report("there are sources to sweep at all", sources.length > 5, `${String(sources.length)} files`);
+
+  // Any relative import climbing out of `packages/control-plane`, however many
+  // `../` it takes — the count differs between `src/` and `src/relay/`, so
+  // matching a fixed depth would silently skip half the tree.
+  const reached = [
+    ...new Set(
+      sources.flatMap((text) => [...text.matchAll(/from "(?:\.\.\/)+(src\/[^"]+)"/g)].map((m) => m[1] ?? "")),
+    ),
+  ].sort();
+  report("and imports that climb out were found", reached.length > 0, reached.join(", "));
+  check("the Authority reaches exactly the wire vocabulary and nothing else", reached, ALLOWED);
+  /*
+   * And the negative control, because "the list matches" passes trivially if the
+   * reader sees nothing: a module that genuinely is the work must not be in it.
+   */
+  check(
+    "nothing it imports is a session, a registry, an agent or a runtime",
+    reached.filter((path) => /^src\/(session|registry|acp\/|runtime\/)/.test(path)),
+    [],
+  );
+
+  /*
+   * **Half two: what it answers.**
+   *
+   * A route path is the other way a responsibility arrives — a
+   * `GET /v1/sessions` here would be the same mistake wearing an HTTP verb, and
+   * it would read as convenient right up until somebody's prompt was in this
+   * database. Read off `app.ts`'s own registrations, which is the list
+   * `docs/API.md` describes and `docscheck` counts.
+   */
+  const appTs = readFileSync(new URL("../packages/control-plane/src/app.ts", import.meta.url), "utf8");
+  const paths = [
+    ...new Set([...appTs.matchAll(/^\s*app\.(?:get|post|put|patch|delete)\("([^"]+)"/gm)].map((m) => m[1] ?? "")),
+  ];
+  report("the route table was readable", paths.length > 20, `${String(paths.length)} routes`);
+  check(
+    "no route here names an agent's work",
+    // Sorted, so the assertion is about the *set* rather than about the order
+    // `app.ts` happens to register them in — which is a fact about the gate's
+    // positional rule and has nothing to do with this question.
+    paths.filter((path) => /\/(sessions?|prompts?|agents?|worktrees?|files?|diffs?|events?)(\/|$)/.test(path)).sort(),
+    [
+      /*
+       * ⚠ **The four `/v1/me/sessions` routes are the exception and are named
+       * rather than pattern-matched around.** A *sign-in* is this service's
+       * business — it is a credential with an expiry, which is the thing this
+       * service exists to issue — and it collides with the daemon's *agent
+       * session* on one English word and nothing else. Listing them here rather
+       * than loosening the pattern is what keeps `/v1/sessions` refused: the
+       * exemption is four strings somebody would have to add to.
+       */
+      "/v1/me/sessions",
+      "/v1/me/sessions/:id",
+      "/v1/me/sessions/current",
+    ],
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * The gate's addresses, as a hand mirror
+ *
+ * `app.ts` decides which paths a browser may be served a page at, and the list
+ * is a **copy** of the client's own two tables — `GATE_SCREENS` in
+ * `packages/web/src/gate.ts` and `LEGAL_DOCS` in `packages/web/src/legal.ts`.
+ * It has to be a copy: two packages, two tsconfigs, and the runtime image
+ * carries no web `src` at all, which is `wire.ts`'s situation pointing the other
+ * way and is solved the same way — copy by hand, and have a driver read both
+ * sides off disk.
+ *
+ * ⚠ **A path missing from the server's list is a dead link in an email.** The
+ * route answers the JSON envelope, and somebody who clicked "confirm your
+ * account" sees `{"error":…}` — with sign-up and password recovery both
+ * dead-ended, since `POST /v1/forgot` is the only remedy this service has for a
+ * forgotten password and an account does not exist until `/confirm` is opened.
+ * That asymmetry is why this is checked in one direction more loudly than the
+ * other: an *extra* path here costs somebody landing on the handoff page.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe gate's addresses, on both sides\n");
+{
+  const appSource = readFileSync(new URL("../packages/control-plane/src/app.ts", import.meta.url), "utf8");
+  const clientList = (file: string, name: string): string[] => {
+    const text = readFileSync(new URL(`../packages/web/src/${file}`, import.meta.url), "utf8");
+    const found = new RegExp(`${name}[^=]*=\\s*\\[([^\\]]*)\\]`).exec(text)?.[1] ?? "";
+    return [...found.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").sort();
+  };
+  const serverList = (name: string): string[] => {
+    const found = new RegExp(`const ${name} = \\[([^\\]]*)\\]`).exec(appSource)?.[1] ?? "";
+    return [...found.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").sort();
+  };
+
+  const screensClient = clientList("gate.ts", "GATE_SCREENS");
+  const screensServer = serverList("GATE_SCREEN_PATHS");
+  report("both sides of the screen list were read", screensClient.length > 0 && screensServer.length > 0, screensClient.join(","));
+  check("every gate screen the client can draw is a path the server serves", screensServer, screensClient);
+
+  const docsClient = clientList("legal.ts", "LEGAL_DOCS");
+  const docsServer = serverList("LEGAL_DOC_PATHS");
+  report("and both sides of the document list", docsClient.length > 0 && docsServer.length > 0, docsClient.join(","));
+  check("every legal document likewise", docsServer, docsClient);
+
+  /*
+   * And the handoff, which is the server's own address rather than a mirror —
+   * asserted to *exist* and to be outside both lists, because a value that
+   * collided with a gate screen would shadow it.
+   */
+  const handoff = /const APP_HANDOFF_PATH = "([^"]+)"/.exec(appSource)?.[1] ?? "";
+  report("the handoff has an address", handoff.length > 0, `/${handoff}`);
+  check("which is neither a screen nor a document", [...screensClient, ...docsClient].includes(handoff), false);
+}
+
 process.stdout.write("\nthe control plane's routes\n");
 {
   const app = createControlPlaneApp({
@@ -4789,14 +4958,20 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
   const listedAt = (userId: string, sessionId: string, at: number): boolean =>
     listSessions(db, userId, at).some((row) => row.id === sessionId);
   {
-    const absolute = mintSession(db, sleeper, anonymous, T0);
+    const absolute = mintSession(db, sleeper, anonymous, null, T0);
     // `last_seen_at` moved forward so the idle arm cannot fire first and the
     // absolute one is what is being read. Both answer `expired`, and they are
     // separately reachable — which is why both are driven rather than one.
     db.prepare("UPDATE user_sessions SET last_seen_at = ? WHERE id = ?").run(T0 + SESSION_TTL_MS, absolute.id);
     check("a session resolves while it is live", resolveSession(db, absolute.token, T0), {
       ok: true,
-      session: { id: absolute.id, userId: sleeper },
+      // `deviceId: null` rather than an absent key, and the difference is the
+      // assertion: this is a session minted with no installation — a browser, a
+      // mailed link, or a row from before `devices` existed — and the resolver
+      // has to say so rather than leave the caller to guess. `callerAuth` copies
+      // it onto `Caller`, where a missing field would read as "no device" for a
+      // session that has one.
+      session: { id: absolute.id, userId: sleeper, deviceId: null },
     });
     check("and is expired past its absolute TTL", resolveSession(db, absolute.token, T0 + SESSION_TTL_MS + 1), {
       ok: false,
@@ -4805,7 +4980,7 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
     check("the listing drops it too", [listedAt(sleeper, absolute.id, T0), listedAt(sleeper, absolute.id, T0 + SESSION_TTL_MS + 1)], [true, false]);
   }
   {
-    const idle = mintSession(db, sleeper, anonymous, T0);
+    const idle = mintSession(db, sleeper, anonymous, null, T0);
     /*
      * The idle arm alone: still inside the thirty days, unused for more than the
      * fourteen. This is the one the SQL cannot answer — `listSessions` filters
@@ -4831,12 +5006,12 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
    * fourteen-day-old tab in a loop it cannot explain.
    */
   {
-    const stale = mintSession(db, sleeper, anonymous);
+    const stale = mintSession(db, sleeper, anonymous, null);
     db.prepare("UPDATE user_sessions SET expires_at = ? WHERE id = ?").run(Date.now() - 1, stale.id);
     check("an expired session is a 401 the client can act on", await outcome(await send("/v1/me", { headers: bearer(stale.token) })), [401, "session_expired"]);
   }
   {
-    const forgotten = mintSession(db, sleeper, anonymous);
+    const forgotten = mintSession(db, sleeper, anonymous, null);
     db.prepare("UPDATE user_sessions SET last_seen_at = ? WHERE id = ?").run(Date.now() - SESSION_IDLE_MS - 1, forgotten.id);
     check("and so is one nobody has used for a fortnight", await outcome(await send("/v1/me", { headers: bearer(forgotten.token) })), [401, "session_expired"]);
   }
@@ -4852,7 +5027,7 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
     // Distinct `now` per mint, so `ORDER BY created_at DESC` has no ties to
     // resolve — the direction being asserted is the whole point and a tie would
     // make it luck.
-    const tokens = Array.from({ length: MAX_SESSIONS_PER_USER + 2 }, (_, i) => mintSession(db, crowded, anonymous, T0 + i));
+    const tokens = Array.from({ length: MAX_SESSIONS_PER_USER + 2 }, (_, i) => mintSession(db, crowded, anonymous, null, T0 + i));
     const live = Number(
       db.prepare("SELECT COUNT(*) AS n FROM user_sessions WHERE user_id = ? AND revoked_at IS NULL").get(crowded)?.["n"] ?? 0,
     );
@@ -4880,7 +5055,7 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
      * relay tunnel, against a database running `synchronous = FULL` — an fsync
      * per request, to record something nothing authenticates against.
      */
-    const touched = mintSession(db, sleeper, anonymous, T0);
+    const touched = mintSession(db, sleeper, anonymous, null, T0);
     const lastSeen = (): number =>
       Number(db.prepare("SELECT last_seen_at FROM user_sessions WHERE id = ?").get(touched.id)?.["last_seen_at"] ?? -1);
     check("a session starts marked as seen now", lastSeen(), T0);
@@ -4897,9 +5072,9 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
   {
     const holder = newId("u");
     db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, 'holder', 0, ?)").run(holder, now);
-    const first = mintSession(db, holder, anonymous);
-    const second = mintSession(db, holder, anonymous);
-    const third = mintSession(db, holder, anonymous);
+    const first = mintSession(db, holder, anonymous, null);
+    const second = mintSession(db, holder, anonymous, null);
+    const third = mintSession(db, holder, anonymous, null);
 
     const one = (await (await send(`/v1/me/sessions/${second.id}`, { method: "DELETE", headers: bearer(first.token) })).json()) as Record<string, unknown>;
     check("signing one device out answers a boolean", one, { revoked: true });
@@ -4916,6 +5091,454 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
     const all = (await (await send("/v1/me/sessions", { method: "DELETE", headers: bearer(first.token) })).json()) as Record<string, unknown>;
     check("signing out everywhere answers a count", all, { revokedCount: 1 });
     check("and does not also answer under the boolean's name", "revoked" in all, false);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Devices: one installation retired without touching the others
+ *
+ * The feature this section exists for is a single sentence — *revoke Rina's
+ * iPhone and leave her MacBook alone* — and almost everything below is about the
+ * ways that sentence can be true while something else is quietly broken.
+ *
+ * Four of these assertions have a specific defect behind them rather than a
+ * requirement:
+ *
+ *   - **Session revocation still bites on a session that has a live device.**
+ *     The obvious implementation joins `devices` onto `resolveSession`'s cached
+ *     statement, which selects unqualified and reads by bare key — so
+ *     `row["revoked_at"]` becomes the *device's*, NULL for a live device, and
+ *     every session revocation in the service silently stops working while
+ *     every other assertion here still passes. Measured against `node:sqlite`:
+ *     `SELECT s.*, d.revoked_at …` returns `revoked_at: null` for a session row
+ *     whose own value is set. This is the assertion that fails when somebody
+ *     "simplifies" the second statement away.
+ *   - **A revoked id on `POST /v1/login` registers a fresh device.** Answering
+ *     an error instead closes a loop with no exit: the client keeps the id it
+ *     was given, signs in, is refused on its next request, signs out, and
+ *     arrives back with the same id for ever.
+ *   - **Another account's device id is ignored on login and 404s on delete.**
+ *     A device id is a short opaque string a client chooses to send; without the
+ *     owner clause on both, one account can bind to another's row (and then be
+ *     signed out at will by its owner) or revoke a stranger's laptop outright.
+ *   - **The cap refuses rather than evicting.** Eviction would let anybody
+ *     holding one live session sign every real device of the owner out.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\ndevices, and retiring one\n");
+{
+  const app = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry });
+  const send = (path: string, init: RequestInit = {}): Promise<Response> => Promise.resolve(app.request(path, init));
+  const bearer = (token: string): Record<string, string> => ({
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+  });
+  const json = async (response: Response): Promise<Record<string, unknown>> =>
+    (await response.json()) as Record<string, unknown>;
+  const outcome = async (response: Response): Promise<[number, string]> => [
+    response.status,
+    ((await response.json()) as { error?: { code?: string } }).error?.code ?? "ok",
+  ];
+
+  /*
+   * A password this section can sign in with. `POST /v1/login` is the only route
+   * that carries a device at mint, so it has to be driven for real rather than
+   * through `mintSession` — the binding happens inside the route.
+   */
+  const PASSWORD = "device-section-password";
+  const hash = await hashPassword(PASSWORD, "authenticated");
+  const signUp = (name: string): string => {
+    const id = newId("u");
+    db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, ?, 0, ?)").run(id, name, now);
+    db.prepare("INSERT INTO user_passwords (user_id, hash, updated_at) VALUES (?, ?, ?)").run(id, hash, now);
+    return id;
+  };
+  const signIn = async (name: string, device?: { id?: string; name: string; platform: string }): Promise<Record<string, unknown>> =>
+    json(
+      await send("/v1/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(device === undefined ? { name, password: PASSWORD } : { name, password: PASSWORD, device }),
+      }),
+    );
+
+  const rina = signUp("rina-devices");
+
+  /* -- two installations, one account ------------------------------------ */
+
+  const macbook = await signIn("rina-devices", { name: "MacBook Pro", platform: "macos" });
+  check("signing in with a device answers the id it bound", typeof macbook["deviceId"], "string");
+  const macbookId = String(macbook["deviceId"]);
+  const macbookToken = String(macbook["token"]);
+
+  const iphone = await signIn("rina-devices", { name: "iPhone", platform: "ios" });
+  const iphoneId = String(iphone["deviceId"]);
+  const iphoneToken = String(iphone["token"]);
+  check("a second sign-in from a different installation is a different device", macbookId !== iphoneId, true);
+
+  const listed = async (token: string): Promise<{ id: string; name: string; revokedAt: number | null; current: boolean }[]> => {
+    const body = await json(await send("/v1/me/devices", { headers: bearer(token) }));
+    return body["devices"] as { id: string; name: string; revokedAt: number | null; current: boolean }[];
+  };
+  check(
+    "both are listed, newest first",
+    (await listed(macbookToken)).map((row) => row.name),
+    ["iPhone", "MacBook Pro"],
+  );
+  check(
+    "and the row this request came through says so",
+    (await listed(macbookToken)).filter((row) => row.current).map((row) => row.name),
+    ["MacBook Pro"],
+  );
+
+  /*
+   * Adoption: the same id offered again is the same row, not a second one. This
+   * is what the app does on every start, so a client that registered once and
+   * then re-presented its id must not grow the list by one per launch.
+   */
+  const again = await signIn("rina-devices", { id: macbookId, name: "MacBook Pro", platform: "macos" });
+  check("offering an id already held adopts it rather than registering again", again["deviceId"], macbookId);
+  check("so the list has not grown", (await listed(macbookToken)).length, 2);
+
+  /* -- a sign-in that names no device ------------------------------------ */
+
+  const bare = await signIn("rina-devices");
+  check("a sign-in naming no device binds none", bare["deviceId"], null);
+  check("and still works", typeof bare["token"], "string");
+  check("and did not invent a row", (await listed(macbookToken)).length, 2);
+
+  /* -- the sentence this whole feature is bought for ---------------------- */
+
+  const revoked = await json(await send(`/v1/me/devices/${iphoneId}`, { method: "DELETE", headers: bearer(macbookToken) }));
+  check("retiring one device answers what it ended", revoked, { revoked: true, sessionsRevoked: 1 });
+  check(
+    "⭐ the other device's session is untouched",
+    (await send("/v1/me", { headers: bearer(macbookToken) })).status,
+    200,
+  );
+  check(
+    "and the retired one's session is refused, by its own code",
+    await outcome(await send("/v1/me", { headers: bearer(iphoneToken) })),
+    [401, "device_revoked"],
+  );
+  check(
+    "a retired device is still listed, with the date it was retired",
+    (await listed(macbookToken)).filter((row) => row.id === iphoneId).map((row) => row.revokedAt !== null),
+    [true],
+  );
+
+  /* -- ⭐ the aliasing trap ----------------------------------------------- */
+
+  {
+    /*
+     * The assertion that is green either way unless it is written down.
+     *
+     * A session with a **live** device, revoked the ordinary way. With the
+     * device check as a second statement this is unremarkable; with it folded
+     * into `resolveSession`'s own query as a join, `row["revoked_at"]` answers
+     * about the device — which is `null` here — and this is the only thing in
+     * the file that notices that every session revocation in the service has
+     * stopped working.
+     */
+    const live = await signIn("rina-devices", { name: "Desk", platform: "linux" });
+    const token = String(live["token"]);
+    check("a session on a live device resolves", (await send("/v1/me", { headers: bearer(token) })).status, 200);
+    revokeSession(db, String(live["sessionId"]));
+    check(
+      "⭐ and session revocation still bites on it — the join that would break this is why there are two statements",
+      await outcome(await send("/v1/me", { headers: bearer(token) })),
+      [401, "session_revoked"],
+    );
+    check(
+      "while its device is untouched, because a session is not the installation",
+      (await listed(macbookToken)).filter((row) => row.name === "Desk").map((row) => row.revokedAt),
+      [null],
+    );
+  }
+
+  /* -- ⭐ a retired id must not close a loop ------------------------------ */
+
+  {
+    const reused = await signIn("rina-devices", { id: iphoneId, name: "iPhone", platform: "ios" });
+    check("signing in with a retired id is not refused", typeof reused["token"], "string");
+    check("⭐ and it registers a fresh device rather than binding the dead one", reused["deviceId"] !== iphoneId, true);
+    check(
+      "so the next request works, which is the loop not happening",
+      (await send("/v1/me", { headers: bearer(String(reused["token"])) })).status,
+      200,
+    );
+    check(
+      "and the retired row stays retired",
+      (await listed(macbookToken)).filter((row) => row.id === iphoneId).map((row) => row.revokedAt !== null),
+      [true],
+    );
+  }
+
+  /* -- ⭐ somebody else's device ------------------------------------------ */
+
+  {
+    signUp("mallory-devices");
+    const mallory = await signIn("mallory-devices", { name: "Mallory's box", platform: "linux" });
+    const malloryToken = String(mallory["token"]);
+
+    const bound = await signIn("mallory-devices", { id: macbookId, name: "Mallory's box", platform: "linux" });
+    check("⭐ naming another account's device id binds a fresh row instead", bound["deviceId"] !== macbookId, true);
+    check(
+      "so the victim's device still belongs to the victim",
+      (await listed(macbookToken)).some((row) => row.id === macbookId),
+      true,
+    );
+    check(
+      "⭐ and deleting another account's device is the same 404 as one that does not exist",
+      await outcome(await send(`/v1/me/devices/${macbookId}`, { method: "DELETE", headers: bearer(malloryToken) })),
+      await outcome(await send("/v1/me/devices/dv_000000000000000", { method: "DELETE", headers: bearer(malloryToken) })),
+    );
+    check(
+      "which leaves it working",
+      (await send("/v1/me", { headers: bearer(macbookToken) })).status,
+      200,
+    );
+  }
+
+  /* -- what a device is not ----------------------------------------------- */
+
+  {
+    const key = newApiKey();
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      newId("ak"),
+      rina,
+      key.prefix,
+      key.hash,
+      now,
+    );
+    check(
+      "an API key cannot register a device, because it has no session to bind one to",
+      await outcome(
+        await send("/v1/me/devices", {
+          method: "POST",
+          headers: bearer(key.key),
+          body: JSON.stringify({ name: "cpctl", platform: "linux" }),
+        }),
+      ),
+      [409, "device_needs_session"],
+    );
+    check(
+      "and it can still read the list, which is how somebody finds out",
+      (await send("/v1/me/devices", { headers: bearer(key.key) })).status,
+      200,
+    );
+  }
+
+  /* -- clamped at ingest --------------------------------------------------- */
+
+  {
+    const long = await signIn("rina-devices", { name: "n".repeat(4000), platform: "p".repeat(400) });
+    const row = (await listed(macbookToken)).find((entry) => entry.id === String(long["deviceId"]));
+    report(
+      "a caller-supplied name is clamped where it enters the database",
+      (row?.name.length ?? 0) <= 128,
+      `${String(row?.name.length ?? 0)} chars`,
+    );
+    void (await send(`/v1/me/devices/${String(long["deviceId"])}`, { method: "DELETE", headers: bearer(macbookToken) }));
+  }
+
+  /* -- ⭐ the cap refuses, and evicts nothing ------------------------------ */
+
+  {
+    const capped = signUp("capped-devices");
+    const session = await signIn("capped-devices", { name: "first", platform: "linux" });
+    const token = String(session["token"]);
+    const firstId = String(session["deviceId"]);
+
+    // Straight to the table: the route is throttled at 60 writes a minute and
+    // this needs twenty-odd, which would be measuring the throttle rather than
+    // the cap. `adoptDevice` is the function the route calls.
+    for (let i = 1; i < MAX_DEVICES_PER_USER; i += 1) {
+      adoptDevice(db, capped, null, { name: `d${String(i)}`, platform: "linux" });
+    }
+    check(
+      "at the cap, registering another is refused",
+      await outcome(
+        await send("/v1/me/devices", {
+          method: "POST",
+          headers: bearer(token),
+          body: JSON.stringify({ name: "one too many", platform: "linux" }),
+        }),
+      ),
+      [409, "device_limit"],
+    );
+    check(
+      "⭐ and nothing was evicted — the refusal is what stops one session signing every device out",
+      (await json(await send("/v1/me/devices", { headers: bearer(token) })))["devices"] instanceof Array
+        ? ((await json(await send("/v1/me/devices", { headers: bearer(token) })))["devices"] as unknown[]).length
+        : -1,
+      MAX_DEVICES_PER_USER,
+    );
+    check(
+      "a sign-in still succeeds at the cap, which is why the refusal is affordable",
+      typeof (await signIn("capped-devices", { name: "another", platform: "linux" }))["token"],
+      "string",
+    );
+    check(
+      "and that sign-in simply carries no device",
+      (await signIn("capped-devices", { name: "another", platform: "linux" }))["deviceId"],
+      null,
+    );
+    // Retiring one makes room at once — the slot is counted live rather than
+    // consumed, which `machine_owners` had to learn the hard way.
+    void (await send(`/v1/me/devices/${firstId}`, { method: "DELETE", headers: bearer(token) }));
+    const after = await signIn("capped-devices", { name: "after retiring one", platform: "linux" });
+    check("retiring one makes room immediately", typeof after["deviceId"], "string");
+  }
+
+  /* -- a session that predates devices ------------------------------------- */
+
+  {
+    /*
+     * The migration case, and it is the one every existing deployment is in on
+     * the day this ships: `device_id` is NULL for every row already in the
+     * table. It must authenticate exactly as it did, and the second statement
+     * must not run for it at all.
+     */
+    const legacy = mintSession(db, rina, { ip: null, userAgent: null }, null);
+    check(
+      "a session with no device authenticates unchanged",
+      (await send("/v1/me", { headers: bearer(legacy.token) })).status,
+      200,
+    );
+    check(
+      "and the resolver says so rather than leaving it unsaid",
+      resolveSession(db, legacy.token).ok ? (resolveSession(db, legacy.token) as { session: { deviceId: string | null } }).session.deviceId : "refused",
+      null,
+    );
+  }
+
+  /* -- the sessions list names its device ---------------------------------- */
+
+  {
+    const named = await signIn("rina-devices", { name: "Studio", platform: "macos" });
+    const rows = (await json(await send("/v1/me/sessions", { headers: bearer(String(named["token"])) })))[
+      "sessions"
+    ] as { current: boolean; deviceName: string | null; deviceId: string | null }[];
+    const current = rows.find((row) => row.current);
+    check("a session row names the installation it belongs to", current?.deviceName, "Studio");
+    check("and carries its id, so a client can group by device", current?.deviceId, named["deviceId"]);
+    check(
+      "a session with no device says null rather than inventing a name",
+      rows.filter((row) => row.deviceId === null).every((row) => row.deviceName === null),
+      true,
+    );
+  }
+
+  /* -- ⭐ two devices, one fleet -------------------------------------------- */
+
+  {
+    /*
+     * The requirement in one assertion: a grant is `(user_id, machine_id)`, so
+     * two installations of one account reach exactly the same machines. It is
+     * already true — this is what stops it quietly becoming false the day
+     * somebody reaches for `caller.deviceId` in a listing.
+     */
+    const fleetUser = signUp("fleet-devices");
+    grant(fleetUser, mine);
+    const a = await signIn("fleet-devices", { name: "laptop", platform: "macos" });
+    const b = await signIn("fleet-devices", { name: "phone", platform: "ios" });
+    check("two devices of one account are two rows", a["deviceId"] !== b["deviceId"], true);
+    const machinesFor = async (token: string): Promise<unknown> =>
+      ((await json(await send("/v1/machines", { headers: bearer(token) })))["machines"] as { id: string }[])
+        .map((row) => row.id)
+        .sort();
+    check(
+      "⭐ and they see the same fleet, because a grant belongs to the person",
+      await machinesFor(String(a["token"])),
+      await machinesFor(String(b["token"])),
+    );
+    report(
+      "which is a real machine rather than two empty lists agreeing",
+      ((await machinesFor(String(a["token"]))) as string[]).length > 0,
+      `${String(((await machinesFor(String(a["token"]))) as string[]).length)} machine(s)`,
+    );
+  }
+
+  /* -- deleting the account takes the devices with it ----------------------- */
+
+  {
+    const doomed = signUp("doomed-devices");
+    const session = await signIn("doomed-devices", { name: "about to go", platform: "linux" });
+    check("the account has a device", typeof session["deviceId"], "string");
+    const adminKey = newApiKey();
+    const adminId = newId("u");
+    db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, 'devices-admin', 1, ?)").run(adminId, now);
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      newId("ak"),
+      adminId,
+      adminKey.prefix,
+      adminKey.hash,
+      now,
+    );
+    void (await send(`/v1/admin/users/${doomed}`, { method: "DELETE", headers: bearer(adminKey.key) }));
+    check(
+      "their devices are gone",
+      db.prepare("SELECT COUNT(*) AS n FROM devices WHERE user_id = ?").get(doomed)?.["n"],
+      0,
+    );
+  }
+
+  /* -- the sweep ------------------------------------------------------------ */
+
+  {
+    const swept = signUp("swept-devices");
+    const id = adoptDevice(db, swept, null, { name: "old", platform: "linux" });
+    db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(
+      Date.now() - DEVICE_REVOKED_RETENTION_MS - 1,
+      id,
+    );
+    const kept = adoptDevice(db, swept, null, { name: "recent", platform: "linux" });
+    db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(Date.now(), kept);
+    pruneDevices(db);
+    check(
+      "a device retired long ago is swept",
+      db.prepare("SELECT id FROM devices WHERE id = ?").get(id),
+      undefined,
+    );
+    check(
+      "and one retired recently is kept, because the list still has to say it happened",
+      db.prepare("SELECT id FROM devices WHERE id = ?").get(kept) !== undefined,
+      true,
+    );
+  }
+
+  /* -- the migration, on a database written before any of this --------------- */
+
+  {
+    /*
+     * `applyControlPlaneSchema` is schema, then version, then migrate. A database
+     * written by the previous release has `user_sessions` with no `device_id`,
+     * and the guard that adds it must read **`user_sessions`'** own columns: the
+     * natural transcription reuses the `machines`-keyed `has()`, which answers
+     * "missing" for ever and re-attempts the ALTER on every open by both
+     * processes rather than once.
+     */
+    const old = new DatabaseSync(":memory:");
+    old.exec(
+      "CREATE TABLE user_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, prefix TEXT NOT NULL, " +
+        "token_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, " +
+        "last_seen_at INTEGER NOT NULL, revoked_at INTEGER)",
+    );
+    old.exec("INSERT INTO user_sessions VALUES ('s_old', 'u_old', 'rs_pre', 'h', 1, 2, 3, NULL)");
+    applyControlPlaneSchema(old);
+    const columns = new Set(old.prepare("PRAGMA table_info(user_sessions)").all().map((row) => String(row["name"])));
+    check("an existing sessions table gains the column", columns.has("device_id"), true);
+    check(
+      "the row that was there keeps its values and answers null for the new one",
+      old.prepare("SELECT id, device_id FROM user_sessions WHERE id = 's_old'").get(),
+      { id: "s_old", device_id: null },
+    );
+    // Idempotent, which is what a second process opening the same file does.
+    applyControlPlaneSchema(old);
+    check("and applying the schema again changes nothing", old.prepare("SELECT COUNT(*) AS n FROM user_sessions").get()?.["n"], 1);
+    check("the devices table arrives with it", old.prepare("PRAGMA table_info(devices)").all().length > 0, true);
+    old.close();
   }
 }
 
@@ -8142,9 +8765,9 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
     const holder = newId("u");
     db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, 'cpctl-sessions', 0, ?)").run(holder, now);
     const anonymous = { ip: null, userAgent: null };
-    const first = mintSession(db, holder, anonymous);
-    mintSession(db, holder, anonymous);
-    mintSession(db, holder, anonymous);
+    const first = mintSession(db, holder, anonymous, null);
+    mintSession(db, holder, anonymous, null);
+    mintSession(db, holder, anonymous, null);
 
     const body = await (
       await send("/v1/me/sessions", { method: "DELETE", headers: { authorization: `Bearer ${first.token}` } })
@@ -8267,15 +8890,21 @@ process.stdout.write("\nwhat an API-only instance still sends\n");
   check("and no policy is spent on a body that is not a document", mine.headers.get("content-security-policy"), null);
 
   /*
-   * **The first impression of an API-only instance, asserted.**
+   * **The first impression of an instance serving no app, asserted.**
    *
-   * `REEMOAT_CP_WEB=0` is a supported deployment — the native app carries its own
-   * copy of the interface — and what somebody typing the address into a browser
+   * The deployed shape — the Reemoat app carries its own copy of the interface,
+   * so `webRoot` is unset — and what somebody typing the address into a browser
    * then gets is this. It must be the envelope every other refusal answers in and
    * not Hono's bare 404: the first is a service saying it serves no UI, the second
    * is indistinguishable from a service that is broken. `app.notFound` is what
-   * provides it, and it is registered *outside* the `webRoot` guard; a future edit
-   * that moved it inside would pass every other assertion in this file.
+   * provides it, and it is registered *outside* both the `gateRoot` and `webRoot`
+   * guards; a future edit that moved it inside would pass every other assertion
+   * in this file.
+   *
+   * ⚠ **This app is built with no `gateRoot` either**, which is the case being
+   * described: nothing at all is served. The section below drives an instance
+   * that *does* carry a gate, and the two together are what say the app's own
+   * addresses are refused in both.
    */
   const bare = await Promise.resolve(app.request("/"));
   check("a browser at the root is refused in the envelope", bare.status, 404);
@@ -8291,6 +8920,96 @@ process.stdout.write("\nwhat an API-only instance still sends\n");
   // are the two an operator and a client respectively reach for first.
   check("health is unaffected by there being no bundle", (await Promise.resolve(app.request("/health"))).status, 200);
   check("and so is the instance document every client boots on", (await Promise.resolve(app.request("/v1/instance"))).status, 200);
+}
+
+/* ------------------------------------------------------------------ *
+ * The gate, served — and the app, not
+ *
+ * The deployed shape has both facts at once, and each is worthless without the
+ * other. A control plane that serves the gate keeps sign-up and password
+ * recovery working, because `/confirm`, `/reset` and `/verify` are opened by a
+ * **mail client** and have nowhere else to land. A control plane that serves the
+ * *app* would be the thing this whole split exists to stop.
+ *
+ * Driven against a `dist-gate` built here rather than the real one: the assertion
+ * is about which addresses the server answers with a page, which is `app.ts`'s
+ * decision, and tying it to a bundle somebody has to have run `pnpm build:gate`
+ * for would make it skip silently on a fresh checkout.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe gate is served and the app is not\n");
+{
+  const root = tmp("relaycheck-gate-");
+  mkdirSync(join(root, "assets"), { recursive: true });
+  writeFileSync(join(root, "gate.html"), "<!doctype html><html><body>gate</body></html>");
+  writeFileSync(join(root, "assets", "gate-abc123.js"), "export default 1;\n");
+
+  const app = createControlPlaneApp({
+    db,
+    issuer: ISSUER,
+    tokenTtlSeconds: 300,
+    relayUrl,
+    relay: registry,
+    gateRoot: root,
+  });
+  const get = async (path: string): Promise<[number, string]> => {
+    const response = await Promise.resolve(app.request(path));
+    return [response.status, (response.headers.get("content-type") ?? "").split(";")[0] ?? ""];
+  };
+
+  /* -- what a mailed link lands on --------------------------------------- */
+
+  for (const path of ["/register", "/confirm", "/forgot", "/reset", "/verify"]) {
+    check(`${path} is served a page`, await get(path), [200, "text/html"]);
+  }
+  for (const path of ["/terms", "/acceptable-use", "/privacy"]) {
+    check(`${path} is served a page`, await get(path), [200, "text/html"]);
+  }
+  check("and so is the handoff", await get("/app"), [200, "text/html"]);
+  // The bundle's own files, or the page it serves references chunks nobody can
+  // fetch — which is a blank screen with the reason in a console nobody has open.
+  check("the bundle's assets are served", await get("/assets/gate-abc123.js"), [200, "text/javascript"]);
+
+  /* -- ⭐ and what is not ------------------------------------------------- */
+
+  /*
+   * The app's own addresses, refused. This is the assertion the split exists for:
+   * a gate that quietly answered these would be the whole product served from the
+   * control plane again, and every other check in this file would stay green.
+   */
+  for (const path of ["/", "/settings", "/new", "/m/m_x/s/s_y", "/p/m_x/board"]) {
+    check(`${path} belongs to the app and is refused`, await get(path), [404, "application/json"]);
+  }
+  check("an unknown path is refused too", await get("/nope"), [404, "application/json"]);
+  /*
+   * An unrouted `/v1` path answers **401**, not 404, and that is the positional
+   * gate rather than a quirk: `app.use("/v1/*", callerAuth(db))` is registered
+   * above every private route, so a caller with no credential is refused before
+   * anything asks whether the path names a route. What this asserts is the part
+   * that could regress — that it is refused *as an API*, in the envelope, and
+   * never falls through to the gate's fallback and a page of HTML.
+   */
+  check("an unrouted API path is refused as an API", await get("/v1/nope"), [401, "application/json"]);
+  check("and so is /health with a typo, which names no route either", await get("/healthz"), [404, "application/json"]);
+
+  /* -- the document headers come back with the document -------------------- */
+
+  /*
+   * ⚠ **A CSP again, and it matters beyond this page.** `nativecheck` derives the
+   * Tauri shell's own `connect-src`/`img-src` directive names from *this* header,
+   * so a control plane that served no HTML at all would leave that comparison
+   * anchored to something nothing produced. Serving the gate keeps the anchor
+   * real, which is a second reason the header is asserted here rather than only
+   * on the app.
+   */
+  const page = await Promise.resolve(app.request("/register"));
+  report(
+    "a served page carries the document policy",
+    (page.headers.get("content-security-policy") ?? "").includes("frame-ancestors 'none'"),
+    (page.headers.get("content-security-policy") ?? "").slice(0, 48),
+  );
+  check("and refuses to be framed", page.headers.get("x-frame-options"), "DENY");
+  check("and is not cached without revalidation", page.headers.get("cache-control"), "no-cache");
 }
 
 /* ------------------------------------------------------------------ *
@@ -11637,7 +12356,7 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
       .run(pia, await hashPassword(piaPassword, "authenticated"), Date.now());
     const piaKey = seedKey(pia);
     const piaSession = {
-      authorization: `Bearer ${mintSession(gdb, pia, { ip: null, userAgent: null }).token}`,
+      authorization: `Bearer ${mintSession(gdb, pia, { ip: null, userAgent: null }, null).token}`,
       "content-type": "application/json",
     };
 
