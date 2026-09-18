@@ -609,6 +609,90 @@ export function Badge({
 }
 
 /**
+ * The twelve faces this app draws, and why they are a list rather than one glyph.
+ *
+ * There is no avatar anywhere on this wire — `Me` is `{id, name, isAdmin, via,
+ * hasPassword}` — so the account has no picture and never will. A single letter in
+ * a box was the honest answer and it read as a placeholder; a face reads as a
+ * person, which is what the box is standing in for.
+ *
+ * ⚠ **Deterministic, never `Math.random()`.** The face is derived from the name,
+ * so it is the same on every render, every reload and every device — a picture that
+ * changed when the list polled would be the one thing on this screen that moves for
+ * no reason, and it would make the avatar useless as a thing to recognise. Pure and
+ * exported so `webcheck` can assert exactly that.
+ *
+ * **No zero-width-joiner sequences and no variation selectors in the list.** Those
+ * render as two glyphs, or as a black-and-white silhouette, on whichever platform
+ * has not shipped the pair — and a broken face is worse than a letter. Every entry
+ * here is a single code point.
+ */
+const FACES = ["🧑", "👩", "👨", "🧔", "👱", "🧓", "🤠", "🦸", "🧙", "🧚", "👮", "👷"] as const;
+
+export function personEmoji(name: string | null): string {
+  const seed = name?.trim() ?? "";
+  if (seed === "") return FACES[0];
+  // A plain sum of code points. It does not need to be a good hash — it needs to
+  // be the *same* hash next time, and to spread a dozen names over a dozen faces.
+  let total = 0;
+  for (const ch of seed) total += ch.codePointAt(0) ?? 0;
+  return FACES[total % FACES.length] ?? FACES[0];
+}
+
+/**
+ * A rounded square with a mark in it, standing in for a picture that does not exist.
+ *
+ * Two callers want two different marks and two different sizes, which is why both
+ * are props rather than two components: the shape, the radius and the centring are
+ * the thing being shared, and a second copy of them is how the account's box and a
+ * machine's box drift apart by two pixels.
+ *
+ * The **account** takes `glyph` — a face from `personEmoji` — at `md`, because it is
+ * the one picture on the screen and Telegram-shaped drawers open with a real avatar
+ * rather than a chip. A **machine** takes the default at `sm`: a machine is not a
+ * person, so it keeps its initial, and `sm` is the size the rail's tiles were built
+ * around.
+ *
+ * The first *grapheme*, not the first char: a name starting with an emoji or a
+ * combining pair renders half a character under `name[0]`, and `[...name]` is the
+ * one spelling that iterates code points rather than UTF-16 units.
+ *
+ * **The geometry is the primitive's and the tone is the caller's.** Neither caller
+ * wants the same fill — identity is at rest, while a machine tile spends `raised` at
+ * two strengths to say which one is selected — so the fill arrives as `className`.
+ */
+export function Monogram({
+  name,
+  glyph,
+  size = "sm",
+  className = "",
+}: {
+  name: string | null;
+  /** Drawn instead of the initial. The account's face; a machine has none. */
+  glyph?: string;
+  size?: "sm" | "md";
+  className?: string;
+}): ReactNode {
+  const letter = name === null ? "" : [...name.trim()][0]?.toUpperCase() ?? "";
+  /*
+   * The radius travels with the size because it is really travelling with the
+   * *subject*: `md` is a person and is round, the way an avatar is everywhere;
+   * `sm` is a machine and keeps the rounded square, which is the shape the rail's
+   * folders are drawn in. One prop rather than two, because there is no caller
+   * that wants a round machine or a square person.
+   */
+  const box = size === "md" ? "h-10 w-10 rounded-full text-lg" : "h-7 w-7 rounded-md text-2xs font-semibold";
+  return (
+    <span
+      aria-hidden="true"
+      className={`inline-flex shrink-0 items-center justify-center ${box} ${className}`}
+    >
+      {glyph ?? letter}
+    </span>
+  );
+}
+
+/**
  * Why a machine has no route, in the words shown to a person.
  *
  * This used to name which of two paths a machine was reached on, because "direct

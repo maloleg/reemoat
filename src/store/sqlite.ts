@@ -735,9 +735,25 @@ function migrateCredentialsToV6(db: DatabaseSync): void {
  * single-use, so at most one of the two can have enrolled at all. And after the
  * lock fix, the process that created the *later* key is exactly the one
  * `claimDaemonLock` now refuses: retiring its row is undoing the write the fixed
- * lock would have prevented. It is a deterministic best estimate rather than a
- * proof, which is why the print names the escape hatch instead of claiming the
- * machine is fixed.
+ * lock would have prevented.
+ *
+ * ⚠ **But it is a guess from a timestamp about a fact that lives on the
+ * Authority, and there is a second population it gets backwards.** A machine
+ * whose operator already ran `cpctl admin clearkey` restarted, announced
+ * `active()` — the **newest** — and had the Authority pin *that*. It works today,
+ * on two live rows, and keeping the oldest here would retire the pinned key and
+ * make a working machine a permanent 409, repairable only by another `clearkey`.
+ * Flipping the `ORDER BY` only trades that population for the other one.
+ *
+ * **So the guess is deliberately not load-bearing.** This still has to pick one
+ * row — the index below admits exactly one — but the pick is a *starting point*
+ * rather than a verdict: `RelayTunnel`'s 409 handler asks `machinekey.ts`'s
+ * rotator for another key this store holds, `SqliteMachineKeyStore.promote`
+ * swaps which row is live, and the dial happens again. Each `kth` is tried at
+ * most once per process, so a two-row file resolves in one extra dial in either
+ * direction, and a machine holding **one** key has nothing to promote and behaves
+ * exactly as it did before, sentence included. The print below says that rather
+ * than claiming the machine is fixed.
  *
  * **Retired rather than deleted**, so the private half stays on disk: a machine
  * that really had been working on the newer key loses nothing that cannot be put
@@ -780,8 +796,9 @@ function migrateMachineKeysToOneLive(db: DatabaseSync): void {
     console.error(
       `Reemoat: this database held ${losers.length + 1} live machine keys, which only two daemons ` +
         `racing on one file could produce. Kept the oldest (${kept}); retired ${losers.join(", ")}. ` +
-        "If this machine is still refused on every dial, the control plane pinned one of the " +
-        "retired keys: clear it with `cpctl admin clearkey <machineId>` and restart this daemon.",
+        "Which one the control plane pinned is not knowable from here and is not guessed: if the " +
+        "dial is refused 409, this daemon promotes a retired key and dials again, once per key. " +
+        "`cpctl admin clearkey <machineId>` is still the way back if every one of them is refused.",
     );
   }
   // Unconditional and `IF NOT EXISTS`, so a fresh file gets it too and there is
@@ -867,18 +884,18 @@ export interface DaemonRow {
  * for the losing racer means passing a *stale* observation, and only a caller
  * that owns the observation can do that.
  *
- * ⚠ **And nothing outside this file calls it.** This said `scripts/daemoncheck.*`
- * was the only other caller and was "the entire reason this is not a closure
- * inside `claimDaemonLock`" — that driver was never written. No file but this one
- * calls it, and `claimDaemonLock` one screen below is the only caller it has ever
- * had. So the compare-and-set is asserted **nowhere**,
- * and a regression to the unconditional `DO UPDATE` it replaced — the one whose
- * measurement is in `claimDaemonLock`'s docblock — would be caught by no driver
- * in this repository. Closing that needs both halves of one case and neither
- * alone: a *stale* observation must answer `false` with the racer's row still
- * standing (an unconditional write turns that one `true`), and the *matching*
- * observation must answer `true` (which is what fails against a statement that
- * never updates anything at all).
+ * ⚠ **The driver this seam was exported for did not exist for four releases, and
+ * now does.** This block said `scripts/daemoncheck.*` was the only other caller
+ * and that being so was "the entire reason this is not a closure inside
+ * `claimDaemonLock`" — while no file but this one called it, so the
+ * compare-and-set was asserted nowhere and a regression to the unconditional `DO
+ * UPDATE` it replaced, the one whose measurement is in `claimDaemonLock`'s
+ * docblock, would have been caught by nothing. `daemoncheck.store-and-worktrees`
+ * drives it now, and it takes **both halves of one case** because neither
+ * discriminates alone: a *stale* observation must answer `false` with the racer's
+ * row still standing (an unconditional write turns that one `true`), and the
+ * *matching* observation must answer `true` (which is what fails against a
+ * statement that never updates anything at all).
  */
 export function takeDaemonRow(db: DatabaseSync, claimant: DaemonRow, observed: DaemonRow | null): boolean {
   const result = db
@@ -2810,6 +2827,17 @@ export interface StoredMachineKey {
  * responder to hold two keys at once; that is one line, and it is much cheaper
  * than the failure class the index closes today.
  *
+ * **`all()` and `promote()` are the *sequential* rotation that does exist**, and
+ * they are the reason `migrateMachineKeysToOneLive`'s guess is no longer
+ * load-bearing. Only one row is ever live, so nothing overlaps and the index
+ * stands untouched; what `promote` buys is that *which* row is live can be
+ * decided by evidence — a 409 at the dial — instead of by a timestamp. It retires
+ * the incumbent and un-retires the candidate inside one transaction, in that
+ * order, because the reverse leaves two live rows for the length of a statement
+ * and the index refuses it. `machinekey.ts`'s rotator is the only caller and it
+ * tries each `kth` at most once per process, which is what keeps this a walk over
+ * a finite set rather than a redial loop.
+ *
  * Like `SqliteIdentityStore`, every method here **throws rather than swallowing**,
  * with exactly one exception: `save` absorbs the live-row index's constraint
  * failure and nothing else, because losing that particular race means the winner's
@@ -2820,32 +2848,97 @@ export interface StoredMachineKey {
  */
 export class SqliteMachineKeyStore {
   private readonly activeStmt: StatementSync;
+  private readonly allStmt: StatementSync;
   private readonly saveStmt: StatementSync;
   private readonly retireStmt: StatementSync;
+  private readonly retireOthersStmt: StatementSync;
+  private readonly reviveStmt: StatementSync;
 
-  constructor(db: DatabaseSync) {
+  constructor(private readonly db: DatabaseSync) {
     this.activeStmt = db.prepare(
       "SELECT kth, public_key, private_key, created_at, retired_at FROM machine_keys " +
         "WHERE retired_at IS NULL ORDER BY created_at DESC, kth ASC LIMIT 1",
+    );
+    this.allStmt = db.prepare(
+      "SELECT kth, public_key, private_key, created_at, retired_at FROM machine_keys " +
+        "ORDER BY created_at ASC, kth ASC",
     );
     this.saveStmt = db.prepare(
       "INSERT INTO machine_keys (kth, public_key, private_key, created_at) VALUES (?, ?, ?, ?) " +
         "ON CONFLICT(kth) DO NOTHING",
     );
     this.retireStmt = db.prepare("UPDATE machine_keys SET retired_at = ? WHERE kth = ? AND retired_at IS NULL");
+    this.retireOthersStmt = db.prepare(
+      "UPDATE machine_keys SET retired_at = ? WHERE retired_at IS NULL AND kth <> ?",
+    );
+    this.reviveStmt = db.prepare("UPDATE machine_keys SET retired_at = NULL WHERE kth = ?");
   }
 
   /** The key this machine answers on now, or `null` before one is generated. */
   active(): StoredMachineKey | null {
     const row = this.activeStmt.get();
     if (!row) return null;
-    return {
-      kth: String(row["kth"]),
-      publicKey: String(row["public_key"]),
-      privateKey: String(row["private_key"]),
-      createdAt: Number(row["created_at"] ?? 0),
-      retiredAt: row["retired_at"] == null ? null : Number(row["retired_at"]),
-    };
+    return rowToMachineKey(row);
+  }
+
+  /**
+   * Every key this machine has ever held, oldest first, retired ones included.
+   *
+   * **The retired ones are the point.** A key is retired rather than deleted
+   * precisely so its private half survives — `migrateMachineKeysToOneLive` says so
+   * — and this is what makes that survival reachable by code instead of only by
+   * hand. The caller is `machinekey.ts`'s rotator, deciding what else to announce
+   * after the Authority refused what `active()` answered.
+   *
+   * Oldest first rather than `active()`'s newest first, and the difference is not
+   * cosmetic: this is a *candidate walk*, so the order is the order the candidates
+   * are tried in, and the population this exists for — a file that lost the
+   * two-daemon startup race — has exactly two rows whose only distinguishing fact
+   * is which came first.
+   */
+  all(): StoredMachineKey[] {
+    return this.allStmt.all().map(rowToMachineKey);
+  }
+
+  /**
+   * Make one key the only live one, and answer whether it is now.
+   *
+   * ⚠ **The two statements are ordered, and the reverse order cannot run at all.**
+   * `MACHINE_KEY_LIVE_INDEX` is unique over `retired_at IS NULL` and SQLite checks
+   * a unique index at the end of each *statement*, not at COMMIT — so un-retiring
+   * the candidate while the incumbent is still live is `SQLITE_CONSTRAINT_UNIQUE`,
+   * every time. Retiring first leaves zero live rows for the width of one
+   * statement, which the partial index is happy with, and the transaction is what
+   * keeps that window invisible to anything else on the file.
+   *
+   * **`ROLLBACK` when the candidate does not exist, and that arm is the whole
+   * reason this is a transaction rather than two `run` calls.** A `kth` naming no
+   * row leaves the second UPDATE with `changes: 0` while the first has already
+   * retired the incumbent — a machine with a table full of keys and none of them
+   * live, which `active()` answers `null` for and `ensureMachineKey` repairs by
+   * minting a *fresh* static the Authority has never seen. That is the permanent
+   * 409 this whole area exists to avoid, reached by trying to fix one.
+   *
+   * Idempotent: promoting the row that is already live matches it again and
+   * answers `true` rather than moving anything.
+   */
+  promote(kth: string, now = Date.now()): boolean {
+    this.db.exec("BEGIN");
+    try {
+      this.retireOthersStmt.run(now, kth);
+      const promoted = Number(this.reviveStmt.run(kth).changes) > 0;
+      this.db.exec(promoted ? "COMMIT" : "ROLLBACK");
+      return promoted;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Nothing to roll back — the BEGIN itself failed. Same argument as
+        // `SqliteAgentStripStore.replace`: this method's only caller is the
+        // tunnel's 409 handler, which opens no transaction of its own.
+      }
+      throw error;
+    }
   }
 
   /**
@@ -2888,10 +2981,29 @@ export class SqliteMachineKeyStore {
     }
   }
 
-  /** Retire one key by name. Nothing calls this yet; a rotation would. */
+  /**
+   * Retire one key by name.
+   *
+   * Still no caller in `src/`: the rotation that exists is `promote`, which
+   * retires the incumbent with its own `kth <> ?` statement inside the same
+   * transaction rather than by calling this. What this is for is the *other*
+   * direction — taking a key out of service with nothing to put in its place —
+   * and `daemoncheck` is the only thing that executes it.
+   */
   retire(kth: string, now = Date.now()): void {
     this.retireStmt.run(now, kth);
   }
+}
+
+/** One `machine_keys` row, as every read here shapes it. */
+function rowToMachineKey(row: Record<string, unknown>): StoredMachineKey {
+  return {
+    kth: String(row["kth"]),
+    publicKey: String(row["public_key"]),
+    privateKey: String(row["private_key"]),
+    createdAt: Number(row["created_at"] ?? 0),
+    retiredAt: row["retired_at"] == null ? null : Number(row["retired_at"]),
+  };
 }
 
 /**

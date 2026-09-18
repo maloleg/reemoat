@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 353 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 365 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 61 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 113 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 143 | `###` |
-| | | **966** | |
+| | | **978** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 966 rather than the 500
+dividers. So the count is over **both** depths, and it says 978 rather than the 500
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -9249,11 +9249,17 @@ published, so the reader's locale must not decide what the agent is called.
 
 #### Q3.518 — An agent that never published an effort control, against one that withdrew it
 
-**Decision.** Draw the slot anyway. `drawnControls` synthesizes `NO_LEVELS` — an
-empty `thought_level` select whose id is namespaced `reemoat:` — and names it in
+**Decision.** Draw the slot anyway. `drawnControls` synthesizes an empty
+`thought_level` select whose id is namespaced `reemoat:` and names it in
 `unavailable`, so `Absent` draws it through `chipParts`/`chipInner` like every other
 withdrawn control and its menu carries `unavailableHint`'s sentence. No second code
 path, no new component, and nothing new on any wire.
+
+⚠ **This was a constant of its own and it is `placeholderFor` now — see
+Q3.615.** The effort slot was the only one synthesized, on the reasoning below;
+every standard slot is synthesized now, for a reason this entry could not have
+seen. Nothing here is reversed: the argument for keeping *this* slot is unchanged
+and is the one the generalisation was built on top of.
 
 **Why.** Q3.404 keeps the slot of a control the agent *drops*, because a button that
 vanishes moves everything beside it and explains nothing. claude and kimi drop it;
@@ -21322,6 +21328,497 @@ sent, deliberately: it is a network call to a server somebody is leaving, which 
 often *why* they are leaving, and it must not stand in front of a server change.
 The row stays in that server's Settings → Devices.
 
+#### Q3.608 — Why the desktop rail became two columns, and why the machines went inside it
+
+**Question.** The machines were a horizontal pill strip above the session list.
+The owner asked for Telegram's arrangement: a narrow vertical strip of folders on
+the far left, the chat list beside it, the conversation on the right. Where does
+that third column attach?
+
+**Decision.** **Inside the existing `<aside>`**, as its first child, with
+`--rail-w` measuring both columns. `MachineColumn` is 72px and `SessionBrowser`
+takes the rest.
+
+**Why, and it is `RailHandle` rather than taste.** The handle divides the *rail*
+from the *conversation*, and that join is the aside's trailing edge whichever way
+its own children are arranged — so `left: var(--rail-w)` stays correct with no
+edit, and so do every one of the pinned assertions about it.
+
+**Rejected: a sibling column before the aside.** It forces the handle onto a
+`calc` of two lengths, and the second length is then written twice — once in
+`rail.ts` in device pixels and once in a class string. That is precisely the
+`19.5rem`/`312` defect `index.css` records at the top of the file: two spellings
+of one width that agree only at a 16px root, both asserted, producing a 78px snap
+on every load for readers on a larger font. Reintroducing it one file over,
+deliberately, was not available. It also costs a second bound, a second
+`localStorage` key and a second CSS variable for a column nobody can drag.
+
+**The bounds are stated as arithmetic.** `MACHINE_COLUMN_PX` plus the three
+numbers they were — 240 / 312 / 480 — so `rail.ts`'s argument for its floor ("a
+session row is a status dot, a title, a relative time and a kebab… at 240px it
+still shows enough of a name to tell two sessions apart") stays an unchanged claim
+**about the list**. `webcheck` asserts the *subtraction* where a literal used to
+be, which additionally pins that the column was added exactly once to each bound.
+
+**The migration is `clampRailWidth` and nothing else.** A `reemoat.railWidth`
+written before the column existed meant the list, and nothing can tell such a
+value from one written after — but every path reads it through the one clamp, so
+anything under the new floor comes up to it and anything above keeps its total
+width with the list 72px narrower. Bumping the storage key would have thrown the
+preference away for everybody to fix it for nobody.
+
+**Status.** Current
+
+#### Q3.609 — What a horizontal strip carries that a vertical one may not
+
+**Question.** `MachineTabs` is kept verbatim for the phone. What does the desktop
+column copy from it?
+
+**Decision.** Four things do not come across, and three of them are *wrong* rather
+than merely unnecessary on a vertical axis.
+
+**`.no-scrollbar`.** Its licence in `index.css` is granted to "a strip dragged
+sideways whose contents announce there is more of them by being cut off at the
+edge", and that same docblock says outright: never on a vertical list, where a bar
+is the only thing saying how much more there is. The column takes the app-wide
+thin bar under a fine pointer, which is the ordinary appearance of a vertical
+scroller — and which is how the latent defect recorded against the phone's strip
+(that class plus a desktop pointer) stops applying to a desktop at all.
+
+**`.edge-fade` and its `ResizeObserver`.** The `is-cut` arithmetic is
+`scrollWidth - clientWidth`, which on a vertical box is zero for ever: the
+gradient would never light, and nothing would fail. That silence is why it is a
+`webcheck` assertion rather than a comment. Dropping it also leaves the column
+with no `clientWidth` read at all, which is the property `AppShell`'s
+no-breakpoint-in-JavaScript rule is really about.
+
+**`overscroll-contain`.** Chrome ends the scroll chain at a box carrying
+containment even when it cannot move — 400px of wheel travel against 0px on the
+same gesture, measured — and a fleet of one puts a single entry in this column.
+
+**`lone`.** The one-machine full-width pill has no vertical analogue, and it also
+gated the observer's dependency array and whether the fade mounted at all: three
+coupled behaviours behind one boolean.
+
+**What does come across** is the scroll-into-view, keyed on `[selected]` rather
+than running on every render — the rail re-renders on the four-second poll and on
+every stream event — and the ordering, which stays `machineTabs`': by name, never
+by reachability or activity.
+
+⚠ **There was never a `wheel` listener here to carry over.** A mouse has no
+gesture for a horizontal box, so on a desktop the phone's strip cannot be scrolled
+at all; `AgentStrip` is the component that had to add a non-passive listener for
+it. The vertical axis closes that gap for free, which makes this a gain rather
+than a loss.
+
+**Rejected: one component with an axis prop.** `SessionBrowser`'s own docblock
+argues the shape — *"The `variant` prop is gone with the split: its only remaining
+job was row density, and the mount already knows the width, so a prop that could
+disagree with the CSS no longer exists."* Two presentations over one data source
+is that argument one level up. `machineTabs`, `allTab`, `currentView` and
+`selectMachine` are untouched, so the two cannot disagree about which machine is
+selected.
+
+**How the selected machine is drawn, and it took two passes.** The band is
+**full-bleed** — `bg-raised` across the whole 72px, with the chip inside it
+stepping up to `surface`, which is the one tone above `raised` this palette has —
+plus `font-medium text-fg` on the label. Three signals, because with the palette
+this delicate one is not enough and these cost nothing.
+
+⚠ **The first pass put the fill on the 28px chip alone and it was reported as not
+visible**, which it was not: a tone step that small, on a strip whose entire job is
+saying which machine you are reading, is something you go looking for. The second
+pass inset the band as a rounded pill and cost eight pixels of every label —
+`server-fra` and `server-hel` both elided to `server-…`, which is the one failure a
+folder rail cannot have, since the label is the only thing telling two machines
+apart. Full-bleed at `px-0.5` leaves 68px of the 72 for the name, four more than
+the strip had before any of this.
+
+**Status.** Current
+
+#### Q3.610 — Why the fleet-wide magnifier is gone
+
+**Question.** Q3.211 drew a *disabled* magnifier in the rail header, deliberately,
+as the not-built fleet-wide search — distinct from the box below it, which filters
+this machine's chats by title. The header is one row now. Does the magnifier stay?
+
+**Decision.** No. It is deleted, and this reverses Q3.211.
+
+**Why the earlier decision does not survive the merge.** Q3.211's argument was
+that the two controls answer different questions and must not be conflated — and
+it was right *about two controls on two rows*. With both in one row, forty pixels
+apart, a dead magnifier beside a live field is not a distinction; it is the
+conflation, drawn. Q3.211 itself records the middle step: the magnifier was once
+wired to focus the box below, which was "a shortcut to something already on screen,
+and a conflation of two different questions". One row makes that shortcut the
+default reading whether or not anything is wired.
+
+**What replaces it.** Fleet-wide search, when built, is a **scope** of the one box
+— searching under the `All` entry — rather than a second control. That spelling
+only became available with this layout: `All` is now permanently on screen at the
+top of the machine column rather than a pill that can scroll away.
+
+⚠ **No `webcheck` assertion covered the old control**, which is why this reversal
+is cheap and also why it is written down: the replacement *is* asserted, in both
+directions — the refusing label absent, the working field present — so deleting
+the wrong one of the two fails.
+
+**Status.** Reverses Q3.211
+
+#### Q3.611 — Why the menu drawer is not a route
+
+**Question.** Every pop-up in this app is a route, and the rule behind that is
+Android's Back. The hamburger opens a full-height left drawer. Is it a route?
+
+**Decision.** No, and it is the first modal layer in this app that is not one.
+
+**Why.** `/menu` is a URL nobody is at for more than a second: all three of its
+rows are themselves routes, so the drawer is a launcher rather than a place, and a
+shared or reloaded link to it would open a panel over the home screen with nothing
+behind the decision. Against that, a new `Route` arm is compile-enforced in four
+switches and **accepted in silence by three** — `isSheet`'s `||` chain,
+`isOverlayPath`'s literal list, and `sheetUpLabel`'s early return — a class of
+omission `overlay.ts`'s own docblock records as having been reachable twice.
+
+**What it costs, stated plainly.** Android's Back would otherwise navigate the app
+*behind* a visible drawer, which is worse than failing to close it. The remedy is
+one effect on `usePathname()` in `App`: Back closes the drawer **and** navigates,
+which is one press doing two things. That is the known limitation, and it is the
+price of not minting a dead-end URL.
+
+⚠ **The effect may not be keyed on the `route` prop.** `AppShell` is handed
+`route={background}`, and every destination in the drawer is an overlay path — so
+`background` does not change when a row navigates and a listener on it would fire
+never. Each row also calls `onClose()` before `navigate()`, which is the brace;
+the effect is the belt and the Back behaviour.
+
+**Status.** Known limitation
+
+#### Q3.612 — What the menu drawer may contain
+
+**Question.** `ProfileMenu` set a test for its rows: *a row must be a destination,
+it must be reached from nowhere else, and it must be about **you** rather than
+about what is on screen.* Does a drawer change it?
+
+**Decision.** No. All three clauses survive, and the drawer holds **Settings** and
+**Plugins** — the same two destinations the popover held.
+
+**⚠ There was an `Account` row for one revision, and it was removed by the owner
+on sight.** It was added on the argument that the drawer's head is *inert* — you
+no longer press your own name to open anything — so without a row nothing in the
+panel reached your account. That argument is real and it is not enough: Account is
+`DEFAULT_SECTION`, so `settingsPath()` already opens on it, and the row was the
+same door drawn twice one line apart. The middle clause of the test caught it and
+the test was overruled rather than re-read. This entry is the correction.
+
+**What follows for the next row.** The test is unchanged, so the bar is what it
+was: a destination, reached from nowhere else, about you. The head being inert is
+not a licence to duplicate a destination that is one tap away — it is the reason
+the head is a *heading*.
+
+**Rejected: make the head itself the link.** It keeps the panel's only destination
+on the one element that does not look like one, which is the discoverability
+problem the session row's kebab was added to solve.
+
+**What is unchanged.** No Language row and no ellipsis of extras — there is no i18n
+and `index.css` refuses a theme switcher. `Sign out` is last, separated, **above
+the version**, and drawn even when `me === null`, because `bootstrap`'s catch keeps
+`phase: "ready"` with no `me` during a control-plane outage and that is the worst
+moment for the way out to disappear. One tap, no two-step confirm: the confirming
+pattern is a *row* pattern and does not fit a panel this narrow.
+
+**And the foot carries the build and nothing else.** The product mark was there for
+one revision and came out with the Account row: a wordmark at the foot of a menu is
+a thing to look at rather than to read, and the fact the line carries — which build
+you are running — was the smaller half of it.
+
+⚠ **`useDismissible("sheet")`, and `TaskPanel` is the precedent that must not be
+copied.** That panel registers `"menu"` on purpose, because at `xl` it docks
+*beside* the conversation with no scrim and `inert` on `#root` would kill the
+transcript it was opened to read alongside. This one is scrim-backed at every
+width. With `"menu"`, `shortcutsEnabled` stays true and `j`/`k` walk the session
+list behind an opaque panel — `inert` stops taps and focus but not a `window`
+keydown, which `keyboard.ts` records.
+
+**Status.** Current
+
+#### Q3.613 — What was lost with the rail footer
+
+**Question.** The account row, the `?` help popover and the plugin launcher all
+left the footer for the drawer. Is anything actually gone?
+
+**Decision.** One thing: `HelpButton`'s legend, and it is not re-homed.
+
+**What it held.** The only documentation anywhere in this app of `j`, `k` and `/`
+— and, more load-bearing, the only statement that none of them fire while a text
+field has focus, which on this screen is most of the time.
+
+**Why it is not moved into the drawer.** The drawer takes rows that are *places to
+go*, which is the test Q3.612 argues; a legend is not one. And this legend had
+already been deleted once, from under the New session button, because it
+advertised the shortcuts as a feature, listed an `r` that has never been bound,
+and said nothing about the typing caveat — *"a legend that is wrong more often
+than it is right teaches people to ignore legends."*
+
+**So the shortcuts stay bound and become undiscoverable.** Named here so it is not
+found later as a defect. If it returns, `CommandMenu` is where it belongs: that is
+already the keyboard surface, and a legend beside the keys it describes cannot go
+stale in the way a legend in a footer did.
+
+**The plugin launcher is a demotion rather than a loss** — the market's rows link
+through to the same screens — and the rule it was written for is untouched: the
+rail is the sessions, and a plugin able to add rows to the list would open a hole
+in `waitingFloor`, which is computed by subtraction precisely so that a new
+section cannot.
+
+**Status.** Current
+
+#### Q3.613b — The face, and the way the drawer leaves
+
+**Question.** The account box drew a letter and the panel vanished on close. Both
+were reported as looking unfinished. What replaced them?
+
+**The face.** `personEmoji` maps the account name onto one of twelve single-code-
+point faces. ⚠ **Derived, never `Math.random()`** — this rail re-renders on the
+four-second poll and on every stream event, so a rolled face would change several
+times a minute, which makes an avatar useless as a thing to recognise and is the
+one element on the screen that would move for no reason. Pure and exported, so the
+driver asserts stability rather than inferring it from two equal calls; `Math.random`
+is asserted *absent* from the module, because two calls agreeing is exactly what a
+cached random value would also do. No zero-width joiners and no variation selectors
+in the list: those render as two glyphs, or as a monochrome silhouette, on whichever
+platform has not shipped the pair, and a broken face is worse than the letter.
+
+**The exit.** Opening is a CSS animation on mount and needs no state; leaving cannot
+be, because an unmounted element does not animate. So a close keeps the panel on
+screen until its own `animationend` and then drops it. `AgentConfigBar` keeps its
+picker mounted past dismissal for the same reason — neither layer is a route, so
+neither has a view-transition snapshot to leave behind — but not on the same clock:
+read 2026-09-19, its `dismiss` still ends on a flat `window.setTimeout(…,
+SHEET_EXIT_MS)`. ⚠ **This clause said the two carried "the same shape", and the
+rewrite above is what made that false**, since what changed here was precisely the
+half they no longer share. What they do share is the extra lifetime and the
+argument for it, and nothing asserts even that.
+
+⚠ **`DRAWER_EXIT_MS` is the ceiling on that wait rather than the wait, and this
+entry said otherwise for a release.** A flat timer is a constant standing in for a
+duration that is not constant: under `prefers-reduced-motion` `index.css` collapses
+every animation to `0.01ms !important`, so the panel is gone within a frame while
+the timer holds the `"sheet"` layer — and therefore `inert` on `#root` — for the
+remaining 260ms, leaving the app untappable and deaf to `j`/`k` over a screen with
+no drawer on it. That is the mirror of registering the layer on `open`, which had
+the app live *under* a visible panel, and neither is visible to anything pointing at
+the screen. The timer stays as the backstop, because an `animationend` that never
+arrives — a cancelled animation, a backgrounded tab — would otherwise strand `inert`
+for ever, which is worse than either window.
+
+⚠ **A distinct keyframe, never the arrival with `reverse` composed onto it** —
+`sheet-out`'s entry records what that does: it slides out and does not slide back.
+⚠ **And `both`**, which is the half that is invisible when it is missing: without a
+fill the panel snaps back to rest for the frames between the animation ending and
+React dropping the element, a flash of the full drawer after it has already left.
+The duration lives in two files that cannot see each other, so `webcheck` reads the
+stylesheet's and asserts the component's `DRAWER_EXIT_MS` against it — the same pin
+`--rail-w`/`RAIL_DEFAULT` carries, for the same reason.
+
+**Status.** Current
+
+#### Q3.614 — Where the app's version comes from
+
+**Question.** The drawer's footer says what build this is. There was no version
+readable from the browser bundle at all. What supplies it?
+
+**Decision.** A Vite `define` reading `packages/web/package.json`, surfaced through
+`src/version.ts` behind a `typeof` guard.
+
+**Why not a literal.** `pincheck` already holds that manifest against the root, the
+other two workspace manifests, `DAEMON_VERSION`, the control plane's `VERSION` and
+the CHANGELOG's newest dated heading — seven copies of which six are asserted
+against each other. A constant in `src/` would be the eighth, asserted by nothing,
+and the one nobody greps for at a release.
+
+⚠ **`typeof` is the whole trick and not defensive style.** `webcheck` imports this
+package's modules under plain `tsx` with no Vite, so `__APP_VERSION__` is not
+defined there: a bare reference — or `__APP_VERSION__ === undefined`, which reads
+as the careful spelling — throws `ReferenceError` during *module evaluation*,
+taking down every check that transitively imports the file with an error naming
+neither the file nor the identifier. The driver asserts the fallback the guard
+produces, so the guard cannot rot into a comment.
+
+**`vite.gate.config.ts` deliberately gets no `define`.** That file's own rule is
+that it sets no build config asserting something the code does not say, and none of
+the gate's nine addresses draws a version. The guard means an accidental import
+edge would not throw — it would answer `"dev"` — so the gate's value-graph walk
+asserts the edge does not exist: a shipped bundle quietly claiming to be a
+development build is worse than one that fails to build.
+
+**Rejected: `NativeBoot.appVersion`.** It is `null` in a browser for ever, so the
+line would be blank for almost everybody, and `native-shell.md`'s rule is "one
+bundle, two shells" — a value that differs between them is a value that makes the
+footer lie about which shell you are in. It keeps having no reader, now by
+decision.
+
+**Rejected: a field on `GET /v1/instance`.** That is the control plane's version
+rather than this bundle's, it costs a wire type and a service change to answer a
+different question, and `GateCard.tsx` carries a tombstone for the `SourceNotice`
+that drew exactly this class of fact and was taken off every screen.
+
+**Status.** Current
+
+#### Q3.615 — The composer with no controls at all
+
+**Question.** A screenshot: the message box, the paperclip, Send, and nothing else.
+No mode, no model, no effort, no `…`. Under what circumstances is that allowed?
+
+**Decision.** None. `drawnControls` synthesizes a placeholder for every standard
+slot nothing already occupies, in **every** state, so the strip is the same shape on
+every session.
+
+**What produced it.** Two branches returned an empty set, and both were deliberate:
+a live agent publishing nothing, and an absent agent with nothing remembered. The
+argument was that an agent publishing nothing already *is* the sentence "this agent
+has no controls", and a row that is not drawn cannot have a slot missing from it.
+
+**Why that argument is wrong.** It compares an agent against itself. The reader is
+comparing this session against the last one they opened — and a composer that grows
+and shrinks a whole row between sessions is the shape change Q3.402, Q3.417 and
+Q3.404 each refuse in a narrower form. A width that moves was worth a rule; a row
+that appears and disappears is the same defect one size up.
+
+**⚠ And the second branch was not rare, which is what made it urgent.** `heldConfig`
+lives in the tab's `rows` map and nothing persists it; the daemon deliberately
+restores no `agentConfig` from disk, answering with an empty set until a resume
+re-reads it from a live agent. So **every reload of a session whose agent is away**
+landed there — interrupted, parked, failed to start, and permanently for an ended
+one, since nothing will ever publish again. The reported screenshot is the other
+journey: a session whose agent had not finished starting.
+
+**The synthesis is `ALWAYS_DRAWN`, derived rather than listed.** Four tables in
+`agentConfig.ts` already almost name these three categories and each says something
+slightly different on purpose; a literal array would be the fifth and the one
+nothing forces into step. Filtering `CATEGORY_SLOT` for its two visible slots yields
+exactly `mode`, `model` and `thought_level`, and excludes the hidden and nested
+categories without naming either.
+
+**Asserted as a property, not as cases.** `webcheck` crosses all nine session
+statuses with every shape of published and remembered config — 81 combinations —
+and asserts not one empties the strip. The four checks that used to *codify* the
+empty strip are turned around rather than deleted: the cases are still worth
+naming, they have the opposite answer now.
+
+**Status.** Reverses the empty-strip half of Q3.518
+
+#### Q3.616 — A nested control whose host cannot be opened
+
+**Question.** `collaboration_mode` is drawn inside `mode`'s menu. What happens when
+`mode` is unavailable?
+
+**Decision.** It is demoted to `…`, which is the answer a *missing* host already
+had. `splitOptions` takes the `unavailable` set and stops counting an unavailable
+control as a host.
+
+**⚠ This was a live defect before anything was synthesized, and nothing saw it.**
+`Absent` takes `{ option }` and draws a chip and one sentence — no `nested` prop, no
+`ChoiceSection` — and nothing else in the renderer reads `slots.nested`. So a host
+routed to `Absent` left its nested control drawn **nowhere**; `commands.ts` skips an
+empty select, so it was not in the `/` menu either. On codex that is the plan
+switch, silently gone for as long as the agent had withdrawn `mode`. The existing
+guard for this shape was applied to the model fold and never to the host search.
+
+**Why demotion rather than teaching `Absent` to nest.** The second answer makes
+`Absent` a two-shape component and costs the property its docblock rests on — that
+it draws a slot through `chipParts` and `chipInner`, the same two calls the live
+chip makes. Unavailable and absent are the same fact from the reader's side: there
+is no menu to nest into.
+
+**Status.** Current
+
+#### Q3.617 — What a reload costs the agent's controls
+
+**Question.** The strip keeps the last set a running agent published, so it stays
+the same shape while the agent is away. That memory is in `rows`. What happens on
+F5?
+
+**Decision.** `configMemory.ts` writes it through to `localStorage`, keeping **only
+the selected choice** of each control, and `rememberHeld` in `store.ts` reads it
+back where `holdConfig` answers `undefined`.
+
+**Why it was worth fixing.** Q3.405's memory answers within one tab. `heldConfig`
+is a field on a row in a `Map`, the daemon deliberately restores no `agentConfig`
+from disk, and so a reload of any session whose agent is away fell through to
+placeholders reading `—` on values that had been on screen a second earlier.
+Permanently, for an ended session. Reported from a screenshot of exactly that.
+
+**Why only the selected choice.** `chipValue` names a value through the *choice*
+that carries it, never through the raw value — without one the model chip reads
+`openai/gpt-5` instead of `GPT-5`, and for a model it mines the choice's
+description to split `Opus 5 · Best for…` into a name. So a memory of the value
+alone restores the chip and draws it wrong, which is worse than a dash. Keeping the
+whole option is not available either: opencode publishes **362** models on one
+control, and a few hundred sessions of that is megabytes into a budget shared with
+the credential. The count is asserted at one rather than "contains the right one".
+
+**⚠ Why this is safe here and refused on the daemon.** `registry.ts` declines to
+persist `agentConfig` because a stale copy would put a control on screen that the
+next `set_config_option` rejects. That argument is about a value the daemon would
+**send**. Nothing read back here is ever sent: `drawnControls` answers `stale` for
+a memory and `Select` is `disabled` under it, so the worst case is a chip naming a
+model that has since gone — readable, and one live answer away from being
+corrected. The two are the same data with opposite blast radii.
+
+**What it deliberately does not do.** It restores the *reading*, not the setting. A
+daemon restart still brings a session back on the agent's own defaults, because
+nothing persists the chosen values where the daemon can replay them — Q3.618. And
+it is one browser: the same session on a phone still draws dashes until its agent
+speaks.
+
+**Bounds and hygiene.** 120 sessions, most recently seen first — two machines'
+worth of the 60-per-machine the rail draws at once — applied on **write**, because
+a read-time bound answers differently as storage fills and makes a chip appear on
+one load and not the next. Cleared on sign-out: a model name and an effort level
+are not secret, but they are a record of what somebody was doing, and leaving them
+for the next person to sign in on that browser is how a per-tab convenience becomes
+a disclosure. Every read and write is in a `try`/`catch` on `rail.ts`'s grounds.
+
+**Where it lives.** `src/configMemory.ts`, the fourth module of `attach.ts`'s shape
+and the first that touches storage — module state with subscribers, in `src/`
+because `store.ts` imports it. Deliberately not a field on the store: `store.ts`
+writes to no storage at all, and that is a property worth keeping.
+
+**Status.** Current
+
+#### Q3.618 — Why the chosen settings still do not survive a daemon restart
+
+**Question.** Q3.617 restores what the controls *read*. Why not what they *are*?
+
+**Decision.** Not built. The daemon keeps `agentConfigState` in memory and the
+`sessions` table has no column for it, so a restart brings every session back on the
+agent's own defaults.
+
+**What already works, and is easy to mistake for this.** A **parked** session keeps
+its config — `doStop` clears it for every reason except `parked` — so its chips stay
+live and tappable, a tap is recorded by `recordDeferredConfig` rather than refused,
+and the wake replays it. That path is intact. What does not survive is a restart of
+the daemon *process*, which is what a deploy is.
+
+**What it would take.** A nullable `agent_config_json` column holding the chosen
+values only, on `ultracode`'s precedent — additive, `SCHEMA_VERSION` unmoved, a
+column an older daemon never selects — written only from `setConfigOption`, which is
+where `ultracodeChoice` is written and is what keeps an agent's *own* mode switch
+out of it. claude switches to `plan` from its own hook, so writing on
+`onConfigChanged` instead would remember a mode nobody chose. `resume` already calls
+`restoreConfig(wanted)`, which compares against the returning agent and skips what
+it no longer offers, so it is already tolerant of a stale bag.
+
+**Why it is not done anyway.** Two costs that are the feature's, not the
+implementation's. A choice is re-applied to a binary that may have moved —
+`deploy/agents.sh` refreshes the CLIs daily, and a model id that survived with a
+changed meaning is re-applied silently. And a restart stops being honest: a session
+resumed a week later comes back on choices made in a conversation that is long
+finished, including an expensive model, with nothing on screen saying why.
+
+**Status.** Deliberate non-goal for now
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -22119,8 +22616,10 @@ screens down with it.
 
 **Status.** Current — amended when the plugin subsystem landed, and again when
 the migration's third print, sessions cut by a cap that used to be per-person,
-became `onPruned` (Q2.222): the prune reports through a callback of its own now,
-and the migration prints twice. The count is stated here rather than only in
+became `onPruned` (Q2.222): the prune reports through a callback of its own now.
+`sqlite.ts` prints **three** times again since — `migrateMachineKeysToOneLive`
+retires a racer's machine key, which is a repair rather than the v6 migration and
+destroys nothing, the private half staying on disk — and the count is here not only in
 `CLAUDE.md` because a rule with a number in it is a rule that goes stale
 silently, and this is the sentence people quote.
 

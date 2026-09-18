@@ -103,6 +103,11 @@ export interface TunnelOptions {
    * asking the same question repeatedly and pretending it might answer
    * differently. Optional, and an absent one sends no header — which is what a
    * daemon that has not generated one yet looks like on the wire.
+   *
+   * ⚠ **This is the key the *first* dial announces, not the key every dial
+   * announces.** `rotateMachineKey` below may replace it after a 409, which is
+   * the one thing that moves it and is not the daemon changing its mind — it is
+   * the Authority saying which of the keys already on this disk it pinned.
    */
   machineKey?: string;
   /**
@@ -115,6 +120,27 @@ export interface TunnelOptions {
    * this mode.
    */
   staticKey?: StaticKey;
+  /**
+   * After the relay answers 409: another key this machine holds, now live, or
+   * `null` when there is none left to try.
+   *
+   * ⚠ **A 409 is the only evidence anywhere about which key the Authority
+   * pinned, and without this it was thrown away.** A file that lost the
+   * two-daemon startup race holds two keys; `migrateMachineKeysToOneLive` has to
+   * leave one live and picks by `created_at`, which is right for a machine
+   * nobody repaired and backwards for one an operator already cleared the pin on.
+   * Rather than making that guess load-bearing, the guess is announced and the
+   * refusal is believed: the daemon promotes the other key and dials again.
+   * `machinekey.ts`'s `machineKeyRotation` is the one implementation and it is
+   * what makes the set finite — each `kth` is offered at most once per process,
+   * so this can never become a redial loop.
+   *
+   * Absent, or answering `null`, is the whole of the old behaviour: the 409
+   * sentence below, unchanged, and a backoff that outlasts nothing. That is what
+   * a machine with exactly one key gets, which is every legitimate 409 — a host
+   * restored from backup, a wiped `~/.reemoat`, a reused machine id.
+   */
+  rotateMachineKey?: () => { kth: string; machineKey: string; staticKey: StaticKey } | null;
   /** What decides whether a capability entitles its holder to anything. */
   verifier?: TokenVerifier;
   /** Seam for `relaycheck`: how long a request may sit unanswered. See `e2ee.ts`. */
@@ -200,7 +226,24 @@ export class RelayTunnel {
    * lifetime rather than two agreeing about it.
    */
 
-  private constructor(private readonly options: TunnelOptions) {}
+  /**
+   * The static this tunnel is announcing and terminating streams with *now*.
+   *
+   * Two fields rather than reads of `options`, because `rotateMachineKey` moves
+   * them together and they must never come apart: the public half is what the
+   * Authority compares, the private half is what `serveSecureSession` opens
+   * message 1 with, and a dial announcing one key while the responder holds the
+   * other is a machine that is up, visible, and fails every handshake with no
+   * key to send a refusal under. Seeded from `options` so a tunnel that never
+   * sees a 409 is byte-identical to the one before this existed.
+   */
+  private machineKey: string | undefined;
+  private staticKey: StaticKey | undefined;
+
+  private constructor(private readonly options: TunnelOptions) {
+    this.machineKey = options.machineKey;
+    this.staticKey = options.staticKey;
+  }
 
   /**
    * Start dialling. Returns immediately — the first connection happens in the
@@ -366,7 +409,7 @@ export class RelayTunnel {
           // dial rather than only the first, because the row it pins lives on the
           // control plane and a restored backup there must be able to catch up
           // without anybody touching this host. See `MACHINE_KEY_HEADER`.
-          ...(this.options.machineKey === undefined ? {} : { [MACHINE_KEY_HEADER]: this.options.machineKey }),
+          ...(this.machineKey === undefined ? {} : { [MACHINE_KEY_HEADER]: this.machineKey }),
         },
         perMessageDeflate: false,
         // h2 frames are already framed and mostly incompressible.
@@ -420,6 +463,13 @@ export class RelayTunnel {
        * symptom is identical to a relay that is merely down, and the remedy is
        * nothing like waiting.
        *
+       * ⚠ **That sentence is now something this handler has to hold rather than
+       * something it gets for free.** It was written when nothing between the
+       * status read and the `emit` could fail. The 409 arm below calls out of
+       * this file into an injected rotator that reads and writes SQLite, and the
+       * guard around that call is the only reason "every refusal here ends in
+       * `terminate()`" is still a true sentence — the measurement is beside it.
+       *
        * 426: this daemon speaks a protocol version older than anything the relay
        * still accepts. The one refusal here that re-enrolling cannot fix and
        * updating can.
@@ -428,13 +478,99 @@ export class RelayTunnel {
        * pinned for this machine. It means the machine's local database and the
        * Authority's row disagree about which static an app should expect — a host
        * restored from a backup, a wiped `~/.reemoat`, a machine id reused for a
-       * rebuilt box — and it is permanent, because the daemon regenerates nothing
-       * and the Authority adopts nothing. Both remedies are named because which
-       * one is available depends on the build: re-enrolling sends this key with
-       * the code and replaces the pin, and an operator who cannot do that clears
-       * the pin so the next dial is a first use again.
+       * rebuilt box. Both remedies are named because which one is available
+       * depends on the build: re-enrolling sends this key with the code and
+       * replaces the pin, and an operator who cannot do that clears the pin so
+       * the next dial is a first use again.
+       *
+       * ⚠ **"It is permanent, because the daemon regenerates nothing and the
+       * Authority adopts nothing" was the rest of that paragraph, and it is now
+       * true only of a machine holding one key.** A machine holding more — the
+       * file that lost the two-daemon startup race, where
+       * `migrateMachineKeysToOneLive` had to *guess* which of two the Authority
+       * pinned — tries the other one instead of accepting the guess, because this
+       * 409 is the only evidence in the system about which guess was right. The
+       * daemon still regenerates nothing and the Authority still adopts nothing:
+       * what moves is only which key already on this disk is the live one, and
+       * the walk is finite because `rotateMachineKey` offers each `kth` at most
+       * once per process. The refusal below is what an exhausted walk reaches,
+       * and it is what the one-key machine reaches on its first 409.
        */
       const status = res.statusCode ?? 0;
+      if (status === 409) {
+        /*
+         * ⚠ **This is the statement the guard exists for, and it is not the only
+         * one in this handler that can throw.** That is a correction: this read
+         * "the one statement here that runs code from outside this file, and the
+         * only one that can throw", and a sweep of the handler on 2026-09-19 —
+         * comments stripped, every statement read — says otherwise. Three
+         * `this.emit` calls run the injected `this.options.onEvent`, and two
+         * `ws.terminate()` calls are the `ws` library's; `teardown()` already
+         * wraps `terminate()` in a `try` for precisely that reason. A throw out of
+         * any of those five is the same class of failure as a throw out of this
+         * one, and none of them is guarded here.
+         *
+         * What singles this statement out is not that it is alone: it is that its
+         * one implementation has a *known* way to fail on an ordinary day, below.
+         * The other five are unguarded on the judgement that a callback this
+         * daemon injects and a `terminate()` on a socket that has not opened do
+         * not have one — a judgement, not a measurement, and nothing in the
+         * drivers holds it. `machinekey.ts`'s rotator —
+         * the one implementation — reads every row of `machine_keys` and then
+         * writes them inside a `BEGIN`/`COMMIT`. `SQLITE_BUSY` is not exotic
+         * here: this daemon's own writers — the event log, the session table —
+         * are live on the same file while it dials, and a dial is not a quiet
+         * moment. A private half that is not 32 bytes throws too, out of
+         * `localStaticKey`.
+         *
+         * A throw would escape into `ws`'s emit, which is an uncaught exception:
+         * no `terminate()`, no `scheduleRetry`, a socket nobody closes and a
+         * daemon that has stopped dialling. `machinekey.ts` swallows a `false`
+         * from `promote` on the grounds that "this file's whole contract is that
+         * the relay cannot break the daemon" — true of that file, and it was
+         * never true of the two store calls around it, which is what this guard
+         * is for.
+         *
+         * So a rotation that throws is a rotation that answered `null`: the
+         * terminal 409 sentence below, `terminate()`, `scheduleRetry` — byte for
+         * byte the behaviour of the build before any of this existed. And it is
+         * a lost dial rather than a lost capability, in both shapes the throw
+         * comes in. A read that failed left the tried set alone, so the next 409
+         * walks the same candidates again, which is what a transient
+         * `SQLITE_BUSY` wants. A *promotion* that failed had already added its
+         * candidate to that set — `machineKeyRotation` adds before it promotes —
+         * so the next 409 resumes past it rather than retrying it for ever.
+         *
+         * The cause is said rather than swallowed, because the sentence below
+         * names two remedies and neither of them is the remedy for a locked
+         * database. `onEvent` is the channel — nothing in `src/` prints, and it
+         * is the only callback this path has.
+         */
+        let promoted: { kth: string; machineKey: string; staticKey: StaticKey } | null = null;
+        try {
+          promoted = this.options.rotateMachineKey?.() ?? null;
+        } catch (error) {
+          this.emit(
+            "rejected",
+            "relay refused the tunnel with 409, and looking for another key this machine holds failed: " +
+              `${error instanceof Error ? error.message : String(error)}. ` +
+              "The next dial looks again, past the key this one gave up on. " +
+              "What follows is what an exhausted search reaches.",
+          );
+        }
+        if (promoted !== null) {
+          this.machineKey = promoted.machineKey;
+          this.staticKey = promoted.staticKey;
+          this.emit(
+            "rejected",
+            "relay refused the tunnel: the control plane did not pin the key this machine announced. " +
+              `This database holds another — ${promoted.kth} is live now and the next dial announces it. ` +
+              "Two daemons raced on this file once, and only the control plane knows which of them won.",
+          );
+          ws.terminate();
+          return;
+        }
+      }
       this.emit(
         "rejected",
         status === 426
@@ -678,7 +814,10 @@ export class RelayTunnel {
       return;
     }
 
-    const staticKey = this.options.staticKey;
+    // The rotated half, not `options.staticKey`: after a 409 promoted another key
+    // this is the one whose public half the app was handed, so it is the only one
+    // that can open message 1.
+    const staticKey = this.staticKey;
     const verifier = this.options.verifier;
     if (staticKey === undefined || verifier === undefined) {
       /*

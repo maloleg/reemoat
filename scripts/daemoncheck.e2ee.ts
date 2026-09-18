@@ -1793,12 +1793,10 @@ const UPLOAD_FRAMES = 14;
     `${answered.body.slice(0, 40)}, against ${uploaded} sent`,
   );
   /*
-   * The control for the line under it, and it is the one that keeps that line from
-   * going quiet. `stream.pause()` and `stream.resume()` have exactly one caller
-   * each in `src/e2ee.ts` — this pair — so a `"pause"` on the pipe is one
-   * backpressure cycle. Bounded at eleven rather than at `UPLOAD_FRAMES` because
-   * eleven is where `defaultMaxListeners` is crossed: fewer cycles than that and
-   * the leak assertion beside it could not have failed, whatever the code did.
+   * `stream.pause()` and `stream.resume()` have exactly one caller each in
+   * `src/e2ee.ts` — this pair — so a `"pause"` on the pipe is one backpressure
+   * cycle. The upload direction's listener leak is asserted in the block above
+   * rather than here; this report only says the path was walked.
    */
   // Not a threshold: the number is reported so a future reader can see whether the
   // backpressure path was exercised at all, without anything depending on which

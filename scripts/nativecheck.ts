@@ -1559,6 +1559,169 @@ check("the fallback writer was found to read", keyFallback.length > 0, true);
 check("a device key is written through that one writer", /write_stored\(dir, &stored\)/.test(keyFallback), true);
 check("and never by a writer of its own", /fs::(write|OpenOptions|File)/.test(keyFallback), false);
 
+/* ── what a `server.json` nobody can use is allowed to cost ──────────────── */
+
+/**
+ * ⚠ **Read with the comments taken out, and every pattern below is why.**
+ * `config.rs` states each of these rules in prose directly above the code that
+ * holds it — "`replaceable` is `false` and `write_stored` refuses", "the first one
+ * wins" — so over the raw file a search for the *code* is satisfied by the
+ * paragraph explaining it, and the cheapest route back to green is deleting the
+ * explanation. `daemonSrc` below already strips for exactly this; `configRs`
+ * above deliberately does not, because the assertions there are about names a
+ * docblock cannot contain.
+ *
+ * **What this section is about.** `server.json` is the only copy of an X25519
+ * device private key on a keyring-less host, so what `read_stored` decides about
+ * a file it cannot use is a decision about that key. The census below is the six
+ * arms that decide it — five states a stored file can be in that are not the
+ * ordinary one, plus the ordinary one — and they do **not** answer one thing each:
+ * three of them answer `true`, two answer `quarantine(dir)`, and one answers
+ * `false`. So what a reader has to keep straight is the mapping rather than a
+ * count, which is why the list is written out below and not tallied.
+ *
+ * ⚠ **This sentence read "there are four states and each answers a different
+ * pair", 26 lines above a census that enumerates six arms sharing three answers.**
+ * It was false on both halves, and it is the kind of false that costs something
+ * here: the whole point of the census is that no number about these arms is
+ * trustworthy unless it is differenced against the source.
+ *
+ * Three defects lived in the gaps between these arms: invalid UTF-8 classified as
+ * a read failure, which is permanent and froze every configuration write on that
+ * installation; a quarantine that preserved nothing and authorized the overwrite
+ * anyway; and a superseded key retained in the quarantine for ever after a re-key.
+ *
+ * ⚠ **A census rather than a count, because a count cannot see a skipped arm.**
+ * The list below is derived from the source in source order and compared for
+ * equality against a hand-written one, so a new arm, a missing arm, a reordering
+ * and a changed answer are each a different red line. `cargo test` covers the
+ * *behaviour* — it is the `native` job and needs a toolchain; this is the `check`
+ * job, which compiles no Rust, and the two can disagree indefinitely.
+ */
+const configCode = flat(
+  read(`${TAURI_DIR}/src/config.rs`)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, ""),
+);
+const readStored = between(configCode, "fn read_stored(", "fn sync_dir(");
+check("the reader behind every writer was found to read", readStored.length > 0, true);
+const arms = [
+  ...readStored.matchAll(
+    /(ErrorKind::\w+|Err\(_\)|Ok\(parsed\)) => \((?:Stored::default\(\)|parsed), (true|false|quarantine\(dir\))\)/g,
+  ),
+].map(([, arm, answer]) => `${arm} => ${answer}`);
+check("every state a stored file can be in, and what each one authorizes", arms, [
+  // Nothing there: the whole truth, and a write proceeds.
+  "ErrorKind::NotFound => true",
+  // A directory at the path: nothing this app wrote is in it to lose, and POSIX
+  // refuses `rename(file, directory)` so the one destructive statement cannot run.
+  "ErrorKind::IsADirectory => true",
+  // ⚠ Bytes that are not UTF-8. `read_to_string` does the decoding, so this is the
+  // one read failure with **no errno** — evidence about the bytes rather than a
+  // syscall saying no, and never transient. In the catch-all below it made the
+  // file unreplaceable for ever: no quarantine, no replacement, and every
+  // configuration write on that installation refused until somebody moved it by
+  // hand — silently, on `host_device_set` and `host_device_clear`.
+  "ErrorKind::InvalidData => quarantine(dir)",
+  // Every read failure that *does* carry an errno: evidence of nothing about the
+  // bytes, so they are neither moved nor replaced.
+  "Err(_) => false",
+  "Ok(parsed) => true",
+  // Bytes that will not deserialize, and the answer is whatever the quarantine
+  // managed rather than an unconditional `true`.
+  "Err(_) => quarantine(dir)",
+]);
+/*
+ * ⚠ **And the quarantine has to be able to say it preserved nothing.** It
+ * answered `()`, so both of its failing paths — the slot already taken by an
+ * earlier corruption, and a `rename` that did not land — left the caller marking
+ * the file replaceable. After one recovery that is exactly backwards: the
+ * retained copy holds what the *first* failure reduced the file to, and the bytes
+ * being overwritten are the current key.
+ */
+check("the quarantine answers whether the bytes are actually aside", /fn quarantine\(dir: &Path\) -> bool/.test(configCode), true);
+check("and its rename is read rather than discarded", /let _ = fs::rename\(/.test(configCode), false);
+/*
+ * And nothing calls it for its effect alone: a bare statement is an answer thrown
+ * away, which is the shape that shipped. The lookbehind is what keeps
+ * `discard_quarantine(dir);` — a different function, whose answer is genuinely
+ * nothing — from satisfying this.
+ */
+check("and no caller drops that answer on the floor", /(?<!\w)quarantine\(dir\);/.test(configCode), false);
+/*
+ * ⚠ **The superseded key, and the two statements it takes to give one up.** A
+ * quarantined `server.json` can hold a recoverable private key — a truncation past
+ * the base64 leaves the key legible and the JSON unparseable — and nothing removed
+ * it, so the Devices screen's **Re-key** gave up the keyring copy and the
+ * `server.json` copy and left that one on disk for ever.
+ *
+ * ⚠ **The first fix put the removal on `erase_device_key_fallback`, and that is
+ * the statement `device::store_secret` reaches too** — on every keyring-verified
+ * first use, through `device::ensure_key`. A **promotion** to the keyring is not a
+ * key given up; the docblock claiming *"`ensure_key`'s first-use path never comes
+ * here"* was false the day it was written, and the path that survives its early
+ * return is a `device_keys` entry `device::decode_key` rejects, where a quarantine
+ * that may hold the legible copy was discarded over a key nobody gave up. So the
+ * two acts are two functions, and this pair of assertions is which is which: the
+ * promotion must reach no quarantine at all, and `give_up_device_key` — the one
+ * `device::reset_key` calls — must reach it only after a write that landed.
+ */
+const eraseKey = between(configCode, "pub fn erase_device_key_fallback(", "pub fn give_up_device_key(");
+check("the statement a promotion reaches was found to read", eraseKey.length > 0, true);
+check("promoting a key to the keyring rewrites server.json and nothing else", /discard_quarantine/.test(eraseKey), false);
+const giveUp = between(configCode, "pub fn give_up_device_key(", "pub fn normalize_origin(");
+check("the statement a re-key reaches was found to read", giveUp.length > 0, true);
+check(
+  "giving up a file-held key drops the copy it supersedes, after the write that landed",
+  /erase_device_key_fallback\(dir, origin\)\?; discard_quarantine\(dir, origin\); Ok\(\(\)\)/.test(giveUp),
+  true,
+);
+/*
+ * ⚠ **And never a file about some other server.** The removal was the **whole**
+ * `server.json.unreadable` for one release, which is a sweep behind a per-origin
+ * button: re-keying server A destroyed the last hand-recoverable copy of server
+ * B's key. The argument for it — "a second server can only lose something already
+ * superseded, because each origin is regenerated the first time it is used" —
+ * fails on *the first time it is used*, which for a server nobody has opened since
+ * the corruption has not happened. So the removal is guarded by a read of the
+ * bytes, and the guard is asserted **in the same statement as the removal**: a
+ * pattern matching `remove_file` alone would stay green with the guard deleted.
+ */
+check(
+  "and the removal is guarded by what those bytes name, in the same statement",
+  /fn discard_quarantine\(dir: &Path, origin: &str\) \{ if !quarantine_is_only_about\(dir, origin\) \{ return; \} let _ = fs::remove_file\(unreadable_file\(dir\)\); \}/.test(
+    configCode,
+  ),
+  true,
+);
+/*
+ * One definition and one caller, which is what keeps the split above from being
+ * undone by a third statement growing its own removal.
+ */
+check(
+  "and no other statement in the module reaches for it",
+  configCode.replace(giveUp, "").split("discard_quarantine(").length - 1,
+  1,
+);
+/*
+ * The caller side, in the one file that has it. `device::reset_key` is the Devices
+ * screen's Re-key and `device::store_secret` is the promotion; swapping which
+ * function each reaches is the single edit that puts the defect back with every
+ * assertion above still green.
+ */
+const deviceCode = flat(
+  read(`${TAURI_DIR}/src/device.rs`)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, ""),
+);
+const resetKey = between(deviceCode, "pub fn reset_key(", "pub fn diffie_hellman(");
+check("the re-key was found to read", resetKey.length > 0, true);
+check("a re-key gives up the quarantined copy too", /config::give_up_device_key\(dir, origin\)/.test(resetKey), true);
+const storeSecret = between(deviceCode, "fn store_secret(", "pub fn ensure_key(");
+check("the promotion was found to read", storeSecret.length > 0, true);
+check("and a promotion takes the other door", /config::erase_device_key_fallback\(dir, origin\)/.test(storeSecret), true);
+check("and only that one", /give_up_device_key/.test(storeSecret), false);
+
 
 /* ── what adopting a server gives up ─────────────────────────────────────── */
 

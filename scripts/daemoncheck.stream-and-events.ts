@@ -715,10 +715,26 @@ process.stdout.write("\na control frame too large to send whole\n");
    * The control, and the section is worth nothing without it: a frame that
    * already fits must come back **byte-identical**, so no session that worked
    * before can tell this function exists.
+   *
+   * ⚠ **It carries a second property now, and it is the half a reader would
+   * skip.** The frame this function returns declares `session.reduced` — the
+   * marker a client reads to keep `waitingCount` honest across the poll/frame
+   * alternation — and *absent means whole*. So byte-identity here is also the
+   * assertion that a fitting frame carries **no marker**: a `reduced` on a frame
+   * nothing was cut from would make every ordinary attach claim it was a lossy
+   * projection, and the client would go on refetching the fuller record for ever.
    */
   const small = frameWith({ backgroundTasks: [], pendingPermissions: [], pendingElicitations: [], id: "s_small" });
   const smallBuilt = JSON.stringify(small);
   check("a frame that already fits is returned unchanged", fitSnapshotFrame(small, smallBuilt), smallBuilt);
+  check(
+    "and therefore carries no reduction marker at all",
+    Object.hasOwn(
+      (JSON.parse(fitSnapshotFrame(small, smallBuilt)) as { session: Record<string, unknown> }).session,
+      "reduced",
+    ),
+    false,
+  );
 
   /*
    * Rung one: `rawInput` and `content` are emptied and `outputFilePath` nulled.
@@ -740,6 +756,23 @@ process.stdout.write("\na control frame too large to send whole\n");
   // permission the app cannot see is a turn nobody can answer.
   check("with the permission still there to be answered", blobsBack.session.pendingPermissions.map((p) => p.id), ["p_1"]);
   check("and the background task's path nulled rather than the task removed", blobsBack.session.backgroundTasks.map((t) => t.outputFilePath), [null]);
+  /*
+   * ⚠ **Rung one loses something too, and for one release nothing on the frame
+   * said so.** `rawInput` and `content` become `clampBlob(…, 0)` — the identical
+   * `{truncated, bytes}` shape a permission gets when the *agent's* own payload
+   * was over 8 KiB at ingest — so `PermissionCard`'s "Part of this request was
+   * too large to keep" banner reads the same either way, while only one of the
+   * two is recoverable by asking `GET /sessions/:id`. `blobs` is what tells them
+   * apart, and it is asserted here rather than only on the halving fixture
+   * because this is the rung that can fire *with no row cut at all*: the counts
+   * beside it still equal the arrays.
+   */
+  const blobsMark = (JSON.parse(fittedBlobs) as { session: { reduced?: Record<string, unknown> } }).session.reduced;
+  check("and the frame says it is a reduction rather than a whole record", blobsMark, {
+    pendingPermissions: 1,
+    pendingElicitations: 0,
+    blobs: true,
+  });
 
   /*
    * Rung two: halving the two lists. Reached only when emptying every blob was
@@ -778,6 +811,66 @@ process.stdout.write("\na control frame too large to send whole\n");
   // because a hello carrying no permission at all is a turn that looks answerable
   // and is not.
   report("with at least one permission left", manyBack.session.pendingPermissions.length >= 1, `${manyBack.session.pendingPermissions.length} kept`);
+  /*
+   * ⚠ **And the count the client draws is on the frame, which is the half of
+   * this that is a wire change.** `store.ts` writes the four-second poll's snapshot and this frame
+   * into the same `row.snapshot`, and a halved list is a well-formed list — so
+   * without a marker `waitingCount` fell and rose on every alternation over a
+   * session nobody had touched, `SessionView`'s `more` line flipped with it, and
+   * each flip re-armed an effect that fires `store.loadAll`. The number asserted
+   * is the **true** length rather than the surviving one, which is the only form
+   * that is worth anything: `reduced.pendingPermissions === kept` would be
+   * satisfied by reading the array back out.
+   */
+  const manyMark = (JSON.parse(fittedMany) as { session: { reduced?: { pendingPermissions?: number } } }).session.reduced;
+  check("and the frame says how many there really are", manyMark?.pendingPermissions, 400);
+  report(
+    "which is more than it is carrying, or the marker says nothing",
+    (manyMark?.pendingPermissions ?? 0) > manyBack.session.pendingPermissions.length,
+    `${manyMark?.pendingPermissions} against ${manyBack.session.pendingPermissions.length} on the frame`,
+  );
+
+  /*
+   * The same rung driven from the **questions** side, which nothing reached
+   * before: `keep` is `Math.max` of the two lengths and the slice is applied to
+   * both, so a fixture whose weight is all in `pendingPermissions` exercises the
+   * elicitation half only by accident of it being empty.
+   *
+   * Sized at the real ingest ceiling rather than at an arbitrary number:
+   * `MAX_ELICITATION_MESSAGE_CHARS` is 4096, so 4 KiB is the largest `message` a
+   * question can carry past `session.ts` and 200 of them is the worst case this
+   * ladder can actually be handed. ⚠ Before that clip was restored the same
+   * worst case was **one** question of any size, which no rung can cut at all —
+   * `while (keep > 1)` does not run at `keep === 1`.
+   */
+  const asking = frameWith({
+    id: "s_asking",
+    backgroundTasks: [],
+    pendingPermissions: [],
+    pendingElicitations: Array.from({ length: 200 }, (_, i) => ({
+      elicitationId: `e_${i}`,
+      toolCallId: null,
+      message: "m".repeat(4_096),
+      fieldCount: 2,
+      raisedAt: 1_700_000_000_000 + i,
+    })),
+  });
+  const askingBuilt = JSON.stringify(asking);
+  report("the question fixture really is over the ceiling", bytes(askingBuilt) > CONTROL_MAX_BYTES, `${bytes(askingBuilt)} bytes`);
+  const fittedAsking = fitSnapshotFrame(asking, askingBuilt);
+  const askingBack = JSON.parse(fittedAsking) as {
+    session: { pendingElicitations: { elicitationId: string }[]; reduced?: { pendingElicitations?: number } };
+  };
+  report("and the fitted frame is under it", bytes(fittedAsking) <= CONTROL_MAX_BYTES, `${bytes(fittedAsking)} bytes`);
+  report(
+    "the halving cut questions rather than only permissions",
+    askingBack.session.pendingElicitations.length < 200 && askingBack.session.pendingElicitations.length >= 1,
+    `${askingBack.session.pendingElicitations.length} of 200 kept`,
+  );
+  // The prefix is the *oldest*, which is what keeps `oldestWait` naming the real
+  // one and `humanRequests()[0]` drawing the right card out of a cut list.
+  check("keeping the oldest rather than an arbitrary slice", askingBack.session.pendingElicitations[0]?.elicitationId, "e_0");
+  check("and the frame says how many questions there really are", askingBack.session.reduced?.pendingElicitations, 200);
 
   /*
    * And the refusal to wedge. A frame that cannot be brought under the ceiling by

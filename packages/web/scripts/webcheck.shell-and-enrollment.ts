@@ -1289,13 +1289,49 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
 
 process.stdout.write("\nhow wide the rail is\n");
 {
-  const { RAIL_DEFAULT, RAIL_MAX, RAIL_MIN, clampRailWidth } = await import("../src/ui/rail.js");
+  const { MACHINE_COLUMN_PX, RAIL_DEFAULT, RAIL_MAX, RAIL_MIN, clampRailWidth } = await import("../src/ui/rail.js");
 
   check("the bounds leave a usable range and the default is inside it", [RAIL_MIN < RAIL_DEFAULT, RAIL_DEFAULT < RAIL_MAX], [
     true,
     true,
   ]);
-  check("the default is the width this shipped at", RAIL_DEFAULT, 312);
+  /*
+   * ⚠ **The three bounds asserted by subtraction, where one literal used to be.**
+   *
+   * `check("the default is the width this shipped at", RAIL_DEFAULT, 312)` was the
+   * whole of it, and it was right for a rail that was one column. The rail is two
+   * now — the machine folders and the session list — so every bound is the column
+   * plus the number it used to be, and a literal would have had to be re-typed
+   * three times with the reason living nowhere.
+   *
+   * Subtracting is what keeps the *old* claims assertable: `rail.ts` argues its
+   * floor from the content of a session row, and that argument is about the list,
+   * which is `RAIL_MIN - MACHINE_COLUMN_PX`. It also pins something the literals
+   * could not — that the column was added **exactly once** to each bound, so a
+   * fourth column, or a second addition to one of the three, fails here rather
+   * than shipping as a rail that is 72px too wide at one end of its range.
+   */
+  check(
+    "the bounds are the machine column plus the list's own three numbers",
+    [RAIL_MIN - MACHINE_COLUMN_PX, RAIL_DEFAULT - MACHINE_COLUMN_PX, RAIL_MAX - MACHINE_COLUMN_PX],
+    [240, 312, 480],
+  );
+  /*
+   * And the column is drawn at the width the arithmetic above assumes. Tailwind v4
+   * generates nothing from an interpolated utility, so this number is a literal in
+   * a class string by necessity; the pair is what stops the two drifting, and the
+   * `rem` ban beside it is `index.css`'s own `19.5rem`/`312` defect read one file
+   * over — a column in `rem` inside a rail in device pixels reopens it exactly.
+   */
+  const columnSrc = stripComments(readFileSync(new URL("../src/ui/MachineColumn.tsx", import.meta.url), "utf8"));
+  check(
+    "and the machine column is drawn at that width, in that unit",
+    [
+      new RegExp(`w-\\[${MACHINE_COLUMN_PX}px\\]`).test(columnSrc),
+      /w-\[[\d.]+r?em\]/.test(columnSrc),
+    ],
+    [true, false],
+  );
 
   check("a width inside the bounds is kept", clampRailWidth(360), 360);
   check("too narrow is refused rather than allowed", clampRailWidth(10), RAIL_MIN);
@@ -1433,6 +1469,575 @@ process.stdout.write("\nhow wide the rail is\n");
   check(
     "the handle is in the one focus rule rather than styling its own",
     /\[role="separator"\]\[tabindex\]/.test(css),
+    true,
+  );
+}
+
+/* ------------------------------------------------------------------
+ * **The menu drawer, the machine column, and the version in the footer.**
+ *
+ * Three surfaces that arrived together and are held apart here for one reason:
+ * each of them reproduces, on a new axis, a rule this app has already got wrong
+ * once. The drawer is a modal layer that is **not** a route, which is the first
+ * one in this app — so what holds it is the `LayerKind` it registers, and `"menu"`
+ * is the plausible wrong answer (`TaskPanel` picks it, correctly, for the opposite
+ * geometry). The column is a strip whose axis changed, and three pieces of the
+ * horizontal one are *wrong* rather than merely unnecessary on it. And the version
+ * is a build-time constant read through an identifier this driver's own runtime
+ * does not define, which is a `ReferenceError` at module evaluation if the guard
+ * is ever "simplified".
+ *
+ * Every sweep below carries a floor, because a regex matching nothing passes.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe menu, the machines and the build\n");
+{
+  const drawer = stripComments(readFileSync(new URL("../src/ui/MenuDrawer.tsx", import.meta.url), "utf8"));
+  const column = stripComments(readFileSync(new URL("../src/ui/MachineColumn.tsx", import.meta.url), "utf8"));
+  const browser = stripComments(readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8"));
+  const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+  const { shortcutsEnabled } = await import("../src/ui/overlay.js");
+  report("all three surfaces were found to read", [drawer.length, column.length, browser.length].every((n) => n > 500), "three files, none of them empty");
+
+  /* ---- the drawer covers the app, and is not a docked panel ---- */
+
+  /*
+   * ⚠ **`"sheet"`, and `TaskPanel` is the precedent that must not be copied.**
+   * That panel registers `"menu"` on purpose — at `xl` it docks *beside* the
+   * conversation with no scrim, and `inert` on `#root` would kill the transcript it
+   * was opened to read alongside. This one is scrim-backed at every width. With
+   * `"menu"`, `shortcutsEnabled` stays true, and `keyboard.ts` records exactly what
+   * that costs: `inert` stops taps and focus but **not** a `window` keydown, so `j`
+   * and `k` would walk the session list behind an opaque panel, navigating to
+   * sessions nobody can see. Both halves are pinned, because the true one alone
+   * passes on a file carrying both.
+   */
+  check(
+    "the drawer covers the app rather than docking beside it",
+    [/useDismissible\("sheet"/.test(drawer), /useDismissible\("menu"/.test(drawer)],
+    [true, false],
+  );
+  /*
+   * And the pure half, which is what actually holds the behaviour the kind buys.
+   * The source text says which string was typed; this says what that string does.
+   */
+  check("so a drawer on the stack silences the bare-letter shortcuts", shortcutsEnabled([{ id: 91, kind: "sheet" }]), false);
+  /*
+   * ⚠ **And the layer lasts as long as the panel does, which is the half the kind
+   * cannot say.**
+   *
+   * `useDismissible` pushes on its third argument and pops in the effect's
+   * cleanup; `pop` runs `syncInert`, so `#root` loses `inert` and
+   * `shortcutsEnabled` goes true again the instant the last `sheet` leaves the
+   * stack. Passed `open`, that happened `DRAWER_EXIT_MS` **before** the element
+   * stopped existing — the drawer covered the app for the whole slide-out while
+   * the app behind it was live again, so `j`/`k` walked the session list and Tab
+   * reached controls nobody could see. Every check above was green over it: the
+   * kind was `"sheet"`, the durations agreed, the scrim still caught taps. It is
+   * keyboard-only, which is why looking at it did not find it.
+   *
+   * Asserted as an **identity between two derivations** rather than as the literal
+   * `shown`: the argument the hook is handed and the binding the mount guard
+   * returns on are read separately and compared, so renaming the flag keeps this
+   * green and passing the wrong one cannot.
+   */
+  const layerActive = /useDismissible\("sheet",\s*onClose,\s*([A-Za-z_$][\w$]*)\)/.exec(drawer)?.[1] ?? "";
+  const mountGuard = /if \(!([A-Za-z_$][\w$]*)\) return null;/.exec(drawer)?.[1] ?? "";
+  report(
+    "the layer's lifetime and the panel's were both found",
+    layerActive.length > 0 && mountGuard.length > 0,
+    `layer on ${layerActive}, mounted on ${mountGuard}`,
+  );
+  check("the sheet layer lives exactly as long as the panel it covers the app with", layerActive, mountGuard);
+
+  /* ---- and there is a way out that is not the scrim ---- */
+
+  /*
+   * ⚠ **`inert` is what makes the scrim's own argument false here.** `Sheet` may
+   * say "the rows behind it are the accessible way out" because it draws a real
+   * ✕; this panel registers `"sheet"`, so the rows behind it are precisely what
+   * cannot be reached, and the scrim is an `aria-hidden` `<div>` by the same
+   * reasoning that keeps it from being a phantom tab stop. Escape works, so the
+   * population this was broken for is narrow and real: a screen-reader user on a
+   * touch device, with no dismiss control at all.
+   *
+   * Matched on the *label*, and the `onClose` half asserted inside the matched
+   * element rather than anywhere in the file — a ✕ wired to something else, or a
+   * label on one control and the handler on another, is the shape that would read
+   * as fixed and not be.
+   */
+  const CLOSER = /<IconButton[^>]*?label="Close[^"]*"[\s\S]{0,240}?\/>/;
+  report(
+    "the close-control sweep can see one",
+    CLOSER.test('<IconButton icon={X} label="Close menu" onClick={onClose} size="nav" />'),
+    "positive control",
+  );
+  const closer = CLOSER.exec(drawer)?.[0] ?? "";
+  report("the drawer draws a labelled close control", closer.length > 0, closer.replace(/\s+/g, " ").trim());
+  check("and it is the one that closes the drawer, at the sheet's own size", [/onClick=\{onClose\}/.test(closer), /size="nav"/.test(closer)], [true, true]);
+  /*
+   * `aria-modal` beside `role="dialog"`, which is `Sheet`'s idiom. It is a
+   * description rather than a claim here: the `"sheet"` layer really does inert
+   * the rest of the document, so without the attribute the announcement and the
+   * reality disagree.
+   */
+  check("it announces itself as modal, which the inert it installs makes true", [/role="dialog"/.test(drawer), /aria-modal="true"/.test(drawer)], [true, true]);
+  /*
+   * ⚠ **The exiting scrim stops taking taps the instant it starts leaving.**
+   * `--animate-scrim-out` ends at `opacity: 0` while the element lives the full
+   * `DRAWER_EXIT_MS`, so it was an invisible viewport-sized click-eater for the
+   * tail of every close — and under `prefers-reduced-motion`, where `index.css`
+   * forces `animation-duration: 0.01ms !important`, for essentially all of it.
+   *
+   * Read out of the scrim element alone, with **both** ends of the slice anchored:
+   * an `indexOf` that misses gives -1 and `slice` reads a negative end as counting
+   * from the end of the string, so an unguarded slice widens to most of the file
+   * instead of emptying — which is four of this repository's measured
+   * false-greens.
+   */
+  const scrimAt = drawer.indexOf("aria-hidden={true}");
+  const scrimEnd = scrimAt < 0 ? -1 : drawer.indexOf("/>", scrimAt);
+  const scrim = scrimAt >= 0 && scrimEnd > scrimAt ? drawer.slice(scrimAt, scrimEnd) : "";
+  report("the scrim element was found, both ends anchored", scrim.length > 0 && scrim.length < 600, `${scrim.length} chars`);
+  check(
+    "the scrim swallows no taps once it is only a fade",
+    [/pointer-events-none/.test(scrim), /onClick=\{leaving \?/.test(scrim)],
+    [true, true],
+  );
+
+  /* ---- and a heading over these rows shares their left edge ---- */
+
+  /*
+   * ⚠ **`MENU_HEADING` is the *popover* heading and carries its own `px-2.5`.**
+   * `bits.tsx` states the rule absolutely — "a heading that did not share that
+   * left edge is the one arrangement worth preventing" — and importing it over
+   * `DRAWER_ROW`, which is `px-3`, reached exactly that arrangement: the word
+   * `screens` sat 2px inboard of the rows it heads, inside the same `px-1.5`
+   * scroller. `.claude/rules/web-typography.md` is the rule; the fix is a spelled-
+   * out constant at this panel's inset, because appending `px-3` to the imported
+   * one is resolved by Tailwind's emission order rather than by the string.
+   *
+   * Both insets are **derived from the source strings** rather than pinned at
+   * `px-3`, so this holds through a change to the row's own padding and can only
+   * go green when the two agree.
+   */
+  const insetOf = (name: string): string =>
+    /(?:^|\s)(px-[\w.[\]/-]+)/.exec(new RegExp(`const ${name} = "([^"]*)"`).exec(drawer)?.[1] ?? "")?.[1] ?? "";
+  const rowInset = insetOf("DRAWER_ROW");
+  const headingInset = insetOf("DRAWER_HEADING");
+  report("both insets were read off the drawer's own constants", rowInset.length > 0 && headingInset.length > 0, `rows ${rowInset}, heading ${headingInset}`);
+  check("the heading over these rows shares their left edge", headingInset, rowInset);
+  check("and the popover's heading is not borrowed for them", /MENU_HEADING/.test(drawer), false);
+  /*
+   * It is still the one caps idiom, at `MENU_HEADING`'s own tone — the choice
+   * between the three constants is a colour decision, and only the padding is this
+   * panel's. Asserted so that "spelled out" cannot quietly become "a different
+   * treatment".
+   */
+  const headingClasses = /const DRAWER_HEADING = "([^"]*)"/.exec(drawer)?.[1] ?? "";
+  check(
+    "and it is the same caps idiom at the menu's tone",
+    ["text-2xs", "font-semibold", "tracking-wider", "uppercase", "text-faint"].every((part) => headingClasses.includes(part)),
+    true,
+  );
+  /*
+   * ⚠ **Portaled, and not for tidiness.** `inert` lands on `#root`; a drawer
+   * rendered inside it inerts *itself* — visible, scrimmed and completely
+   * untouchable, with nothing in the console. `Sheet` is portaled for this and for
+   * a second reason it states: `position: fixed` resolves against the nearest
+   * `backdrop-filter` ancestor, and this app's header, composer and rail footer are
+   * each one hop from one.
+   */
+  check(
+    "it is portaled beside #root, which is the element inert lands on",
+    /createPortal\(/.test(drawer) && /document\.body/.test(drawer),
+    true,
+  );
+  check("it paints from the z-order table rather than a literal", /\$\{LAYER\.overlay\}/.test(drawer), true);
+  check("and reads no breakpoint in JavaScript", /matchMedia|innerWidth|clientWidth/.test(drawer), false);
+  /*
+   * **No hand-rolled focus trap, which is `overlay.ts`'s standing rule** — `inert`
+   * is the mechanism. The second cost is the one that would be invisible: a
+   * `[role="dialog"][tabindex]` is a focusable element type outside `index.css`'s
+   * one `:focus-visible` selector list, so it would take focus and draw no ring.
+   */
+  check("there is no hand-rolled focus trap", /tabIndex/.test(drawer), false);
+
+  /* ---- and it moves like the sheet it is a sibling of ---- */
+
+  check(
+    "the drawer arrives from its edge, over the one scrim this app has",
+    [/animate-drawer/.test(drawer), /animate-scrim/.test(drawer), /bg-fg\/25/.test(drawer)],
+    [true, true, true],
+  );
+  /*
+   * ⚠ **The two durations asserted *equal* rather than `260` pinned twice.** A
+   * drawer arriving from the left and a sheet arriving from the bottom are one
+   * gesture in this app — "a layer covers the app" — and a second easing or a
+   * second clock would be a second decision about it, made by whoever typed the
+   * second rule rather than argued anywhere.
+   */
+  const sheetMs = /--animate-sheet:\s*sheet\s+(\d+)ms/.exec(css)?.[1] ?? "";
+  const drawerMs = /--animate-drawer:\s*drawer\s+(\d+)ms/.exec(css)?.[1] ?? "";
+  report("both movements were found in the stylesheet", sheetMs.length > 0 && drawerMs.length > 0, `sheet ${sheetMs}ms, drawer ${drawerMs}ms`);
+  check("and the drawer travels on the sheet's clock", drawerMs, sheetMs);
+  /*
+   * Its own keyframe, on the inline axis — and never the arrival's name with
+   * `reverse` composed onto it, which `sheet-out`'s docblock records as playing
+   * once and never playing back.
+   */
+  check("its keyframe moves on the inline axis", /@keyframes drawer \{\s*from \{\s*transform: translateX\(-100%\);/.test(css), true);
+  check("and it does not try to leave by reversing its arrival", /animate-drawer[^"`]*\breverse\b/.test(drawer), false);
+  /*
+   * ⚠ **It leaves under its own keyframe, and the wait is the same number.**
+   *
+   * Opening is a CSS animation on mount and needs no state; leaving cannot be,
+   * because an unmounted element does not animate — so the panel is kept on screen
+   * for the duration with the outgoing animation on it and then dropped. The two
+   * numbers live in two files that cannot see each other, which is exactly the
+   * shape `--rail-w`/`RAIL_DEFAULT` is pinned for, so this reads the stylesheet's
+   * and asserts the component's against it.
+   *
+   * `both` is the half that is invisible when it is missing: without a fill the
+   * panel snaps back to rest for the frames between the animation ending and React
+   * dropping it — a flash of the full drawer after it has already left.
+   */
+  const outMs = /--animate-drawer-out:\s*drawer-out\s+(\d+)ms[^;]*\bboth\b/.exec(css)?.[1] ?? "";
+  report("the departure was found, and it fills forwards", outMs.length > 0, `${outMs}ms both`);
+  const waitMs = /DRAWER_EXIT_MS = (\d+);/.exec(drawer)?.[1] ?? "";
+  check("the panel waits exactly as long as the movement it is playing", waitMs, outMs);
+  check(
+    "and the scrim leaves with it rather than blinking out",
+    /animate-scrim-out/.test(drawer) && /@keyframes drawer-out/.test(css),
+    true,
+  );
+  /*
+   * ⚠ **And the exit is decided during render, never in an effect.**
+   *
+   * This shipped as an effect keyed on `open` and the defect was visible on every
+   * close: an effect runs *after* the commit, so the render where `open` first
+   * turns false still saw `leaving === false`, took the early return and
+   * **unmounted the panel** — a painted frame with no drawer in it — and only then
+   * did the effect set the flag and remount it to play the exit. What that looks
+   * like is the menu vanishing and then calmly closing a moment later, which is
+   * how it was reported.
+   *
+   * Asserted as source text because it is invisible to everything else here: the
+   * class strings were right, the durations agreed, and every check was green over
+   * it. The negative half is the one that matters — an effect whose dependency
+   * list is `[open]` is the shape that regressed, and a reader restoring it would
+   * otherwise only be caught by eye.
+   */
+  check(
+    "the exit is derived during render rather than scheduled after the commit",
+    [/if \(open !== wasOpen\.current\)/.test(drawer), /\}, \[open\]\);/.test(drawer)],
+    [true, false],
+  );
+
+  /* ---- what is in it, and what may not be ---- */
+
+  /*
+   * ⚠ **Asserted as an ordered list rather than as three `includes`**, so a fourth
+   * destination fails here instead of passing as "still a menu". `MenuDrawer`'s
+   * docblock sets the test a row must pass and records that `Account` fails one
+   * clause of it deliberately; this is what stops the next row failing it by
+   * accident.
+   */
+  /*
+   * ⚠ **Two destinations, and `Account` is deliberately not one.** It is
+   * `DEFAULT_SECTION`, so `settingsPath()` already opens on it — a row here would
+   * be the same door drawn twice, which is the middle clause of the test
+   * `MenuDrawer`'s docblock carries over from `ProfileMenu`. Asserted as an
+   * ordered list rather than as `includes`, so a fourth destination fails here
+   * instead of passing as "still a menu".
+   *
+   * ⚠ **Any call, never an allowlist of the ones expected.** This matched
+   * `settingsPath(...)|marketPath()` alone and so was structurally incapable of the
+   * failure the paragraph above promises: `go(pluginPath(machine, plugin.id))` was
+   * already in the file and the sweep reported `["settingsPath()", "marketPath()"]`
+   * as "no others". A capture that names what it is looking for cannot see what it
+   * is not. The `navigate` count beside it closes the other door — a row written
+   * without `go` at all.
+   */
+  const destinations = [...drawer.matchAll(/go\(([A-Za-z_$][\w$]*\([^)]*\))\)/g)].map((m) => m[1]);
+  check("the drawer's destinations, in order and no others", destinations, [
+    "settingsPath()",
+    "marketPath()",
+    "pluginPath(machine, plugin.id)",
+  ]);
+  check("and nothing navigates except the helper itself", (drawer.match(/navigate\(/g) ?? []).length, 1);
+  /*
+   * ⚠ **And every one of them goes through the one helper that closes first.**
+   * `AppShell` is handed `route={background}`, and every destination above is an
+   * overlay path — so `background` does not change when a row navigates and a
+   * listener on it would fire never. `App`'s effect on `usePathname()` is the belt;
+   * this is the brace, and a row calling `navigate` directly would leave the drawer
+   * standing open over the sheet it had just opened.
+   */
+  check(
+    "and each goes through the helper that closes the drawer first",
+    /const go = [\s\S]{0,80}?onClose\(\);\s*navigate\(path\);/.test(drawer),
+    true,
+  );
+  /*
+   * The head is who you are and it is **not** a control — that is what the Account
+   * row below it is for, and a pressable identity plus a row naming the account is
+   * the same door drawn twice.
+   */
+  check(
+    "it opens with who you are, and that is not itself a control",
+    [/<Monogram /.test(drawer), /<button[^>]*>\s*<Monogram/.test(drawer)],
+    [true, false],
+  );
+  /*
+   * The head is an avatar rather than an initial, and the face is derived from the
+   * name. The pure half — that it is derived at all, rather than rolled — is
+   * asserted below; this is only that the drawer asks for one.
+   */
+  check("and it draws a face rather than a letter", /personEmoji\(name\)/.test(drawer) && /size="md"/.test(drawer), true);
+  /*
+   * ⚠ **Derived, never rolled.** A face that changed between renders would be the
+   * one thing on this screen that moves for no reason — and this rail re-renders
+   * on the four-second poll and on every stream event, so "no reason" would mean
+   * several times a minute. The property is stability first and spread second: it
+   * does not need to be a good hash, it needs to be the *same* hash next time.
+   *
+   * `Math.random` is asserted absent from the module rather than inferred from two
+   * equal calls, because two calls agreeing is exactly what a cached random value
+   * would also do.
+   */
+  const { personEmoji } = await import("../src/ui/bits.js");
+  const faces = ["admin", "rends", "someone else", "Ада", "🙂 leading emoji"].map((n) => personEmoji(n));
+  check("a face is the same one every time it is asked", faces, ["admin", "rends", "someone else", "Ада", "🙂 leading emoji"].map((n) => personEmoji(n)));
+  check("an empty name still gets one rather than a blank circle", personEmoji(null).length > 0 && personEmoji("").length > 0, true);
+  report("and the names tried here do not all land on one face", new Set(faces).size > 1, `${new Set(faces).size} of ${faces.length}`);
+  const bitsSrc = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+  check("and nothing rolls it", /Math\.random/.test(bitsSrc), false);
+  /*
+   * No zero-width joiners and no variation selectors in the list: those render as
+   * two glyphs, or as a black-and-white silhouette, on whichever platform has not
+   * shipped the pair — and a broken face is worse than the letter it replaced.
+   */
+  const faceList = /const FACES = \[([^\]]*)\]/.exec(bitsSrc)?.[1] ?? "";
+  report("the face list was found", faceList.length > 0, `${(faceList.match(/"/g) ?? []).length / 2} faces`);
+  check("every face is one code point", [/\u200d/.test(faceList), /\ufe0f/.test(faceList)], [false, false]);
+  /*
+   * ⚠ **No product mark at the foot.** A wordmark there is a thing to look at
+   * rather than to read, and the fact this line carries is which build you are
+   * running. Asserted as an absence because an absence is what a later reader
+   * would otherwise "fix".
+   */
+  check("and the foot carries the build and no wordmark", [/Version \{APP_VERSION\}/.test(drawer), /<Mark\b/.test(drawer)], [true, false]);
+  check("the one extra fact is still drawn only when it is true", /me\?\.via === "api_key"/.test(drawer), true);
+  /*
+   * The way out is last, separated, and the only row here that is not a
+   * navigation. It is drawn outside any `me !== null` guard on purpose:
+   * `bootstrap`'s catch keeps `phase: "ready"` with no `me` when the control plane
+   * is unreachable, and an outage is the worst moment for it to disappear.
+   */
+  /*
+   * ⚠ **Ordering, not adjacency.** This matched a `border-t` within 120 characters
+   * of `text-danger` and went red the moment the row grew a wrapper — a check that
+   * fails for a reason it does not name, which this file's own header calls crying
+   * wolf. What actually has to hold is the *arrangement*: the way out is separated
+   * from the destinations above it, and it sits above the build line rather than
+   * below it, because a version is the last thing on a panel and an action is not.
+   */
+  const signOutAt = drawer.indexOf("store.signOut()");
+  const versionAt = drawer.indexOf("Version {APP_VERSION}");
+  report("the way out and the build line were both found", signOutAt > 0 && versionAt > 0, `${signOutAt} then ${versionAt}`);
+  check(
+    "the way out is separated, drawn as a refusal, and sits above the build line",
+    [/border-t border-edge/.test(drawer), /text-danger/.test(drawer), signOutAt < versionAt],
+    [true, true, true],
+  );
+  check(
+    "the machine's plugin screens survived the move, still gated on there being some",
+    /screenPlugins\(/.test(drawer) && /launchable\.length > 0/.test(drawer),
+    true,
+  );
+  check("and the help popover left with the footer it sat in", /HelpButton/.test(drawer) || /HelpButton/.test(browser), false);
+
+  /* ---- one menu button at each width, chosen in CSS ---- */
+
+  /*
+   * ⚠ **Two mounts and a class string, which is `AppShell`'s rule.** The phone's
+   * copy sits in the header row and is withdrawn at `lg`; the desktop's is at the
+   * top of the machine column, which is itself only ever rendered inside an
+   * `<aside>` that is `hidden … lg:flex` — so it carries no breakpoint of its own,
+   * and a `lg:` on it would be a second, disagreeing answer to the same question.
+   */
+  /*
+   * ⚠ **Matched on the label rather than on the element.** The column's copy is a
+   * plain `<button>` running the full 72px — `ICON_BUTTON_SIZE.chip` is `h-8 w-8`
+   * and a `w-full` composed onto it is two width utilities of equal specificity
+   * resolved by emission order — while the phone's is still an `IconButton`. What
+   * has to hold is that there is one at each width and that the breakpoint is a
+   * class string, not which primitive draws it.
+   */
+  const TRIGGER = /(?:<IconButton[^>]*label="Menu"|aria-label="Menu")[\s\S]{0,320}?(?:\/>|<\/button>)/;
+  report(
+    "the trigger sweep can see both spellings",
+    TRIGGER.test('<IconButton icon={MenuIcon} label="Menu" size="chip" />') &&
+      TRIGGER.test('<button aria-label="Menu" className="x"><Icon /></button>'),
+    "positive control",
+  );
+  const phoneTrigger = TRIGGER.exec(browser)?.[0] ?? "";
+  const deskTrigger = TRIGGER.exec(column)?.[0] ?? "";
+  check("the list header opens the menu, and so does the machine column", [phoneTrigger.length > 0, deskTrigger.length > 0], [true, true]);
+  check("the list header's copy is withdrawn where the column draws one", /lg:hidden/.test(phoneTrigger), true);
+  check("and the column's needs no breakpoint, being inside the lg aside", /\blg:/.test(deskTrigger), false);
+
+  /* ---- one data source, two axes ---- */
+
+  /*
+   * ⚠ **The same four calls in both files.** There is one answer to "which machine
+   * am I looking at" — `groups.ts` module state — and two presentations of it, so
+   * picking a machine on a phone and picking one on a desktop write the same
+   * `localStorage` key and cannot disagree. `allTab` is asserted beside
+   * `machineTabs` because it is returned separately and is the one a second
+   * presentation is most likely to forget.
+   */
+  report("the call sweep can see one", /machineTabs\(/.test("machineTabs(groups, view)"), "positive control");
+  for (const [what, code] of [
+    ["the phone's tab strip", browser],
+    ["the desktop column", column],
+  ] as const) {
+    check(`${what} is drawn from the tab list and the All tab beside it`, [/machineTabs\(/.test(code), /allTab\(/.test(code)], [true, true]);
+    check(`${what} selects through the store`, /selectMachine\(/.test(code), true);
+    /*
+     * And reveals the selection when it *changes*, not on every render. This rail
+     * re-renders on the four-second poll and on every stream event; an effect
+     * without that dependency yanks a strip you had scrolled back to the selected
+     * entry, repeatedly, which is the "a list that moves under a travelling thumb"
+     * failure both components spend their comments avoiding.
+     */
+    check(`${what} reveals the selection on a change rather than every render`, /\}, \[selected/.test(code), true);
+  }
+  /*
+   * ⚠ **Three things the horizontal strip carries that the column must not, and
+   * each is *wrong* on a vertical axis rather than merely unnecessary.**
+   *
+   * `.no-scrollbar`'s licence in `index.css` is granted to "a strip dragged
+   * sideways whose contents announce there is more of them by being cut off at the
+   * edge", and that docblock says outright: never on a vertical list, where a bar
+   * is the only thing saying how much more there is.
+   *
+   * `.edge-fade`'s `is-cut` arithmetic is `scrollWidth - clientWidth`, which on a
+   * vertical box is zero for ever — so the gradient would never light, and nothing
+   * would fail. That is the silent half, and it is why this is a check rather than
+   * a comment.
+   *
+   * `overscroll-contain` on a box that may have nothing to scroll ends the scroll
+   * chain anyway — 400px of wheel travel against 0px on the same gesture, measured
+   * — and a fleet of one puts a single entry in here.
+   */
+  check(
+    "and the column carries none of the horizontal strip's three cues",
+    [/no-scrollbar/.test(column), /edge-fade/.test(column), /overscroll-contain/.test(column), /scrollWidth/.test(column)],
+    [false, false, false, false],
+  );
+  check("while the strip it was borrowed from still has them", /no-scrollbar/.test(browser) && /edge-fade/.test(browser), true);
+  /*
+   * ⚠ **The phone's strip is a tab bar, not a row of pills.** The selected tab is
+   * marked by a rule under the word — the one shape that survives translating an
+   * accent-coloured underline into a monochrome palette — rather than by a
+   * `bg-raised` fill, which is 1.22:1 on `ink` and is the tone this app keeps
+   * failing to divide anything with. Asserted in both directions, because a
+   * revert to pills leaves the underline component in the file unused and every
+   * other check green.
+   */
+  check(
+    "the machine tabs mark the selected one with a rule rather than a fill",
+    [/function TabUnderline\(\)/.test(browser), /\{tab\.selected && <TabUnderline \/>\}/.test(browser), /rounded-full px-2\.5 text-xs/.test(browser)],
+    [true, true, false],
+  );
+  /*
+   * The column is divided by a line and paints no ground of its own: `ink` against
+   * `surface` is 1.06:1, too small a step to divide two panes, and this element
+   * sits inside an `<aside>` that already paints `bg-ink`. A third plane in a
+   * palette that has three in total is not available.
+   */
+  const nav = /<nav[^>]*className="([^"]*)"/.exec(column)?.[1] ?? "";
+  report("the column's own element was found", nav.length > 0, nav);
+  check("it is divided by a line and paints no ground of its own", [/border-r border-edge/.test(nav), /\bbg-/.test(nav)], [true, false]);
+
+  /* ---- the list header, and what it no longer refuses ---- */
+
+  /*
+   * ⚠ **Nothing in this row answers a tap with nothing.** The fleet-wide magnifier
+   * was drawn `disabled` beside a live search box one row down; in a single row
+   * forty pixels apart that is the conflation Q3.211 drew them apart to prevent
+   * rather than the distinction. The live box is asserted present in the same
+   * breath, so "deleted the wrong one" fails here too.
+   */
+  report("the refusal sweep can see one", /label="Search everything/.test('label="Search everything — not built yet"'), "positive control");
+  check(
+    "the header's search is the one that works, and there is no second, dead one",
+    [/label="Search everything/.test(browser), /aria-label="Search sessions"/.test(browser)],
+    [false, true],
+  );
+  /*
+   * ⚠ **And the list screen still has a heading, exactly once.** Below `lg` there
+   * is no `Header` on this route at all, so this `<h1>` is the only heading on the
+   * app's primary screen — `Header.tsx`'s docblock rests on it. The wordmark moved
+   * to the drawer's footer; the element did not move anywhere.
+   */
+  check("the list column still names the app for a screen reader, exactly once", (browser.match(/<h1\b/g) ?? []).length, 1);
+  /*
+   * The footer is one button. Full width with a leading glyph, never a floating
+   * action button — the rail's every other row is full-bleed, and a circle over the
+   * end of the list covers the row it is sitting on.
+   */
+  const footAt = browser.indexOf("function SidebarFoot");
+  const footEnd = browser.indexOf("\n}\n", footAt);
+  // Both ends, never one. `indexOf` answers -1 for a terminator that moved, and
+  // `slice(from, -1)` reads a negative end as counting from the end of the string —
+  // so an unguarded end widens this slice to the rest of the file instead of
+  // emptying it, and every positive assertion below becomes satisfiable from some
+  // other component. The floor under it cannot detect that: a widened slice is
+  // longer, not shorter. Same guard as `between()` in `scripts/nativecheck.ts`.
+  const foot = footAt < 0 || footEnd <= footAt ? "" : browser.slice(footAt, footEnd);
+  report("the footer was found", foot.length > 0, `${foot.length} chars`);
+  check(
+    "New session is still a full-width button at the foot of the list, and never a FAB",
+    [/size="sm"[\s\S]{0,120}className="w-full"/.test(foot), /\bfixed\b|\babsolute\b|\brounded-full\b/.test(foot)],
+    [true, false],
+  );
+  check("the account row left, and the footer still draws no rule the composer's cannot meet", /ProfileMenu|border-t/.test(foot), false);
+
+  /* ---- the build, drawn once, read from one place ---- */
+
+  const version = stripComments(readFileSync(new URL("../src/version.ts", import.meta.url), "utf8"));
+  check("the drawer says what build this is", /APP_VERSION/.test(drawer), true);
+  /*
+   * ⚠ **`typeof`, and the two halves of this check are the whole rule.** This
+   * driver imports the app's modules under plain `tsx` with no Vite, so
+   * `__APP_VERSION__` is not defined here at all: a bare reference — or
+   * `__APP_VERSION__ === undefined`, which reads as the careful spelling — throws
+   * `ReferenceError` during *module evaluation*, taking down every check that
+   * transitively imports it with an error naming neither the file nor the
+   * identifier. `typeof` on an undeclared name is the one read JavaScript defines.
+   */
+  check(
+    "the constant guards the identifier a Vite-less import does not define",
+    [/typeof __APP_VERSION__ === "string"/.test(version), /__APP_VERSION__\s*===\s*undefined/.test(version)],
+    [true, false],
+  );
+  const { APP_VERSION } = await import("../src/version.js");
+  check("so this driver, which has no Vite, gets the fallback rather than a ReferenceError", APP_VERSION, "dev");
+  /*
+   * And the build reads the manifest rather than writing the number down a second
+   * time. `pincheck` already holds that manifest against the root, the other two
+   * workspace manifests, `DAEMON_VERSION`, the control plane's `VERSION` and the
+   * CHANGELOG — seven copies of which six are asserted against each other. A
+   * literal in `src/` would be the eighth, asserted by nothing.
+   */
+  const viteConfig = stripComments(readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8"));
+  check(
+    "and the build reads it from this package's manifest rather than a second literal",
+    /__APP_VERSION__: JSON\.stringify\(/.test(viteConfig) &&
+      /JSON\.parse\(readFileSync\(new URL\("\.\/package\.json"/.test(viteConfig),
     true,
   );
 }

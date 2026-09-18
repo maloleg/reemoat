@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
-import { stripComments } from "./webcheck.source.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 
 /* ------------------------------------------------------------------ *
  * The machine limit
@@ -543,7 +543,38 @@ process.stdout.write("\nthe machine limit\n");
     check("and the code does the slicing", /base\.slice\(0, 61\)/.test(creating), true);
   }
 
-  for (const file of ["ui/SessionBrowser.tsx", "ui/NewSession.tsx", "ui/settings/MachinesSection.tsx"]) {
+  /*
+   * ⚠ **A census against the tree, because the floor that used to guard this list
+   * was `quotaDoors.length === 4` — a hand-typed literal compared against a
+   * hand-typed copy of its own length, six lines apart.** It read nothing from
+   * `src/`, so it could not fail on any product change, and its own comment
+   * claimed the opposite: *"a new door not on it passes silently. The floor below
+   * is what says the list was walked at all."* It never said that. It also could
+   * only ever go red on somebody **adding** a door correctly, which is the
+   * driver-fails-on-an-improvement shape this repository names elsewhere.
+   *
+   * And the claim was already false when it was written: `ui/AppShell.tsx` draws
+   * `installCommand(controlPlaneOrigin())` plus `<MachineOffer/>` in one arm
+   * against `machineQuotaNotice(state.me)` in the other — the door-or-the-sentence
+   * pair these three per-file checks exist for — and was on no list.
+   *
+   * Differencing two derivations is what goes red on a skip: the set of UI files
+   * that mention the predicate, against the set somebody wrote down. A count
+   * cannot, because a skipped item does not lower one.
+   */
+  const quotaDoors = [
+    "ui/AppShell.tsx",
+    "ui/SessionBrowser.tsx",
+    "ui/MachineColumn.tsx",
+    "ui/NewSession.tsx",
+    "ui/settings/MachinesSection.tsx",
+  ];
+  const asksQuota = srcFiles()
+    .filter((file) => file.startsWith("ui/"))
+    .filter((file) => /mayAddMachine\(/.test(strip(srcFile(file))))
+    .sort();
+  check("every door the quota gates is on the list, and nothing else is", asksQuota, [...quotaDoors].sort());
+  for (const file of quotaDoors) {
     const src = strip(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
     check(`${file} asks the shared predicate`, /mayAddMachine\(/.test(src), true);
     check(`${file} never re-derives it from the fields`, /machineLimit|machineCount|canAddMachine/.test(src), false);

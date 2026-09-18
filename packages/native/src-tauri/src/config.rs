@@ -44,14 +44,46 @@
 //! and the **first** one wins: a later corruption is refused rather than allowed
 //! to replace it.
 //!
-//! ⚠ **A `server.json` that will not *read* is a third state and is answered
-//! differently.** A file this process cannot open has bytes, and nothing about
-//! them is known — so it is neither moved aside nor replaced. `read_stored` marks
-//! it unreplaceable, `write_stored` refuses in its first statement with a sentence
-//! naming the path, and the app still starts on the setup screen. That is a
-//! behaviour change with a real cost: on a host where the state is permanent,
-//! every configuration write fails until a person moves the file. What it replaces
-//! is this module renaming a fresh empty file over a device key it never read.
+//! ⚠ **A stored file can be in five states that are not the ordinary one, and the
+//! last of them is answered differently from the other four.** `read_stored` is
+//! where they are implemented, one match arm each, and its docblock names the same
+//! five members in the same order as this list:
+//!
+//!   1. **absent** (`NotFound`);
+//!   2. a **directory** sitting where the file goes (`IsADirectory`);
+//!   3. bytes that **will not decode as UTF-8** (`InvalidData`, which carries no
+//!      errno and is therefore evidence about the bytes rather than a syscall
+//!      saying no);
+//!   4. a file this process **could not read at all** — `PermissionDenied`,
+//!      `NotADirectory`, an I/O error, each *with* an errno;
+//!   5. bytes that decoded and **will not deserialize**, which is serde's answer
+//!      rather than the file system's.
+//!
+//! They do not map one-to-one onto answers, and writing the count down is what
+//! made this paragraph wrong twice: 1 and 2 are replaced, 3 and 5 are quarantined,
+//! and only 4 is refused. What holds the two lists to the six arms that implement
+//! them is `scripts/nativecheck.ts`, which differences the arms out of this source
+//! against a written-out list — so a member added here and nowhere else is prose,
+//! and a member added to the code is a red line.
+//!
+//! ⚠ **This paragraph has been wrong about that list twice, in two different
+//! ways.** It said "a third state" and enumerated three, which was true until the
+//! `InvalidData` arm was split out of the catch-all and sent to `quarantine`; the
+//! repair for that reconciled the *number* with `read_stored` and not the members,
+//! enumerating a **directory** the function's docblock did not have and folding
+//! "will not decode" into "will not parse", which the function keeps apart. A file
+//! header that counts the states differently from the function implementing them
+//! is how the next reader concludes there is no arm for the one they are looking
+//! at — and a header that agrees on the count while naming different members is
+//! the same defect with the evidence for it removed.
+//!
+//! Only the fourth has bytes nothing is known about, and it alone is neither moved
+//! aside nor replaced. `read_stored` marks it unreplaceable, `write_stored`
+//! refuses in its first statement with a sentence naming the path, and the app
+//! still starts on the setup screen. That is a behaviour change with a real cost:
+//! on a host where the state is permanent, every configuration write fails until a
+//! person moves the file. What it replaces is this module renaming a fresh empty
+//! file over a device key it never read.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -138,20 +170,28 @@ struct Guarded {
     file: Stored,
     /// Whether anything may be renamed over `server.json`.
     ///
-    /// ⚠ **`false` means bytes are on disk that this process could not read**, and
-    /// it is the difference between the two states `read_stored` used to collapse
-    /// into one `Err` arm. `Stored::default()` is answered either way — an app
-    /// that cannot start because of a file nobody can see is this file's worst
-    /// failure, not its best — but `Default` for a file that *exists* is a guess,
-    /// and every writer here is read-modify-write, so the next write would rename
-    /// a fresh empty file over bytes that on a keyring-less host are the only copy
-    /// of that installation's X25519 private key.
+    /// ⚠ **`false` means bytes are on disk that this process neither read nor put
+    /// safely aside**, and it is the difference between the states `read_stored`
+    /// used to collapse into one `Err` arm. `Stored::default()` is answered either
+    /// way — an app that cannot start because of a file nobody can see is this
+    /// file's worst failure, not its best — but `Default` for a file that *exists*
+    /// is a guess, and every writer here is read-modify-write, so the next write
+    /// would rename a fresh empty file over bytes that on a keyring-less host are
+    /// the only copy of that installation's X25519 private key.
     ///
     /// Measured on this machine (macOS 15.6 / arm64 / APFS, rustc 1.95.0, uid
     /// 501): a `server.json` at mode `000` answers `PermissionDenied` (errno 13),
     /// a `~/.reemoat` replaced by a regular file answers `NotADirectory` (errno
     /// 20), and an absent file answers `NotFound` (errno 2). Three distinguishable
     /// states, of which the old code could see one.
+    ///
+    /// ⚠ **The second half is the *quarantine's* answer, and without it this bool
+    /// authorized the destruction the quarantine exists to prevent.** Bytes that
+    /// will not parse are moved aside and then written over — but where they could
+    /// not be moved aside, because the slot is already taken by an earlier
+    /// corruption or because the `rename` did not land, writing over them destroys
+    /// the *current* key while the retained quarantine holds an obsolete one. So
+    /// `quarantine` reports what it preserved and that report is this field.
     ///
     /// **It rides inside `Guarded` rather than arriving as a third argument**, for
     /// the same reason the guard does: `scripts/nativecheck.ts` reads the literal
@@ -305,7 +345,8 @@ fn unreadable_file(dir: &Path) -> PathBuf {
     dir.join(UNREADABLE)
 }
 
-/// Move a `server.json` nothing can parse aside, before anything overwrites it.
+/// Move a `server.json` nothing can parse aside, before anything overwrites it —
+/// and **say whether those bytes actually landed there**.
 ///
 /// ⚠ **Those bytes may still hold a private key.** `read_stored` answered
 /// `Default` for an unparseable file and the next write renamed a fresh one over
@@ -320,26 +361,165 @@ fn unreadable_file(dir: &Path) -> PathBuf {
 /// taken from the file that was whole longest — a later one is a copy of whatever
 /// the first failure already reduced it to.
 ///
+/// ⚠ **And that refusal used to authorize the destruction it was written to
+/// prevent.** This answered nothing at all, so both of the paths that preserve
+/// nothing — the slot already taken, and a `rename` that did not land — left the
+/// caller marking the file *replaceable*, and the next write renamed a fresh one
+/// over it. After one recovery the arithmetic is exactly backwards: the retained
+/// quarantine holds whatever the **first** failure reduced the file to, while the
+/// bytes being overwritten are the current ones, which on a keyring-less host are
+/// the only copy of this installation's current X25519 private key. So `true` is
+/// answered only where the current bytes are now under `UNREADABLE`, and
+/// `read_stored` hands that straight to `replaceable`: **nothing preserved,
+/// nothing replaced**.
+///
+/// That the `rename` can fail at all is not hypothetical — it needs write
+/// permission on the *directory* rather than on the file — which is why its
+/// `Result` is read here instead of discarded.
+///
 /// Narrowed to `0600` on the way in: `rename` carries the inode and therefore
 /// whatever mode it had, and an installation written by a build from before
 /// `write_stored` set one carried `0644`.
-fn quarantine(dir: &Path) {
+fn quarantine(dir: &Path) -> bool {
     let aside = unreadable_file(dir);
     if aside.exists() {
-        return;
+        return false;
     }
-    // Ignored rather than propagated: the caller answers `Default` either way, so
-    // a rename that does not land costs the bytes it was trying to save and
-    // nothing else. Refusing to start the app over it would be the worse failure,
-    // which is this file's posture everywhere.
-    let _ = fs::rename(server_file(dir), &aside);
+    if fs::rename(server_file(dir), &aside).is_err() {
+        return false;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // On the path where that rename failed this names nothing, and is ignored
-        // for the same reason every other mode call in this file is.
+        // Ignored for the reason every other mode call in this file is: a
+        // filesystem with no POSIX modes is not a reason to report bytes as
+        // unpreserved when they are sitting exactly where this put them.
         let _ = fs::set_permissions(&aside, fs::Permissions::from_mode(0o600));
     }
+    true
+}
+
+/// Forget a quarantined `server.json`, once what it was kept for is superseded —
+/// and only where it can be about nothing else.
+///
+/// ⚠ **The quarantine exists for one field, and that field goes out of date.**
+/// `UNREADABLE` is kept because those bytes may be the only copy of this
+/// installation's X25519 device private key — nothing here ever reads it back, so
+/// the whole of its value is that a person can open it and put the key back by
+/// hand. The moment this installation has *deliberately given that key up* — the
+/// Devices screen's **Re-key**, which reaches `give_up_device_key` through
+/// `device::reset_key` — those bytes stop being a recovery and become a superseded
+/// secret in cleartext, on precisely the shared keyring-less host the mode bits
+/// are about. Nothing removed it: before this, every path that gave a key up
+/// rewrote `server.json` alone and `UNREADABLE` was named nowhere outside this
+/// module and its own tests.
+///
+/// ⚠ **It was the whole file for one release, and that departure is withdrawn.**
+/// The argument for sweeping it ran: a quarantined file cannot be *edited*,
+/// because it is by definition one serde could not deserialize, so there is no
+/// `device_keys` map in it to take one entry out of; and a second server can only
+/// lose a copy "already unreadable to this app and already superseded — after a
+/// corruption `read_device_key_fallback` answers `None` for every origin, so each
+/// one is regenerated the first time it is used". **The last clause is where it
+/// fails.** *The first time it is used* may be long after this call: a server this
+/// installation has not opened since the corruption has regenerated nothing, so
+/// the quarantine is still the only hand-recoverable copy of its key. A person
+/// pressing **Re-key** for server A is not consenting to lose server B's, and
+/// `device::reset_key` says *per origin, never a sweep*. This belongs inside that
+/// rule rather than beside it as an exception.
+///
+/// **So the bytes are read before they are removed, and a server named in them
+/// that is not this one is a refusal.** The first half of the old argument stands
+/// — they cannot be edited — but what can always be done to bytes nobody can parse
+/// is to *look* at them. `quarantine_is_only_about` walks every `scheme://host`
+/// token in the raw file and answers whether they are all this origin. The
+/// measured corruption shape is what makes that sound rather than clever: a
+/// truncation *past* the base64, which leaves the key legible to a person and the
+/// JSON unparseable to serde — and serde writes a map entry's origin immediately
+/// before the key it maps to, so bytes that survived for a key have survived for
+/// the origin naming it.
+///
+/// ⚠ **It fails closed in every direction.** A file that cannot be read, a token
+/// that is not UTF-8, a token naming another server, and a file naming no server
+/// at all are each answered by *keeping* the quarantine. The two sides are not the
+/// same size: keeping costs a superseded key at `0600` beside the live one at
+/// `0600` in a directory at `0700`, and removing costs bytes somebody needed.
+///
+/// **Only ever after a write that landed**, which is what keeps this on the right
+/// side of `quarantine`'s own rule: a refusal must never be the thing that
+/// removes the copy it refused on behalf of.
+fn discard_quarantine(dir: &Path, origin: &str) {
+    if !quarantine_is_only_about(dir, origin) {
+        return;
+    }
+    // Ignored rather than propagated: there is nothing a caller could do with it
+    // and nothing it could mean, and a removal that fails leaves exactly what was
+    // there before — the state this is improving on rather than one it can make
+    // worse.
+    //
+    // ⚠ **This carried a sentence saying the file is absent on almost every call
+    // and `remove_file` answers `NotFound` for it.** The guard above made that
+    // dead in the same change that wrote it: `quarantine_is_only_about` answers
+    // `false` when its own `fs::read` fails, and an absent file is one of the ways
+    // it fails, so an ordinary call returns before reaching this line. What is
+    // left to fail here is narrower — the file going away between that read and
+    // this removal, or a directory this process may read and not write.
+    let _ = fs::remove_file(unreadable_file(dir));
+}
+
+/// Whether every server a quarantined `server.json` names is this one.
+///
+/// ⚠ **`false` is the answer to every question this cannot settle**, and "there
+/// is no such file" is one of them — the caller's next statement is a removal, and
+/// there is nothing to remove either way. The scan is over raw bytes rather than a
+/// string because the quarantine's own fourth state is *not valid UTF-8*, which is
+/// exactly the file a `read_to_string` here would refuse to look at and then, on
+/// the wrong default, authorize the destruction of.
+///
+/// The token is delimited the way a URL is and nothing more: scheme characters
+/// leftwards from `://`, then host and port rightwards, stopping at the quote
+/// serde put there. A truncated token simply is not equal to `origin` and keeps
+/// the file, which is the direction that costs nobody anything.
+fn quarantine_is_only_about(dir: &Path, origin: &str) -> bool {
+    let Ok(bytes) = fs::read(unreadable_file(dir)) else {
+        return false;
+    };
+    const MARK: &[u8] = b"://";
+    let mut named = 0usize;
+    let mut i = 0usize;
+    while i + MARK.len() <= bytes.len() {
+        if &bytes[i..i + MARK.len()] != MARK {
+            i += 1;
+            continue;
+        }
+        let mut start = i;
+        while start > 0 && is_scheme_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = i + MARK.len();
+        while end < bytes.len() && is_authority_byte(bytes[end]) {
+            end += 1;
+        }
+        match std::str::from_utf8(&bytes[start..end]) {
+            Ok(token) if token == origin => named += 1,
+            // Another server, a truncated spelling of this one, or bytes that are
+            // not text at all: none of those is this call's to give up.
+            _ => return false,
+        }
+        i = end;
+    }
+    // A file naming nothing is not thereby about this origin. It is a file this
+    // scan learned nothing from, and the conservative direction is to keep it.
+    named > 0
+}
+
+fn is_scheme_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')
+}
+
+/// Host and port, including the brackets an IPv6 literal is written in.
+fn is_authority_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b':' | b'[' | b']')
 }
 
 /// The whole file, or its defaults — with `CONFIG_LOCK` held.
@@ -351,31 +531,71 @@ fn quarantine(dir: &Path) {
 /// choosing a server and registering a device — and a partial write would be the
 /// one that silently discards the other.
 ///
-/// ⚠ **Three states, and this function could see one of them.** "Absent", "will
-/// not parse" and "will not read" were a single `Err`/`.ok()` answer, which made
-/// this the first half of a data loss: every writer here is read-modify-write, so
-/// the very next write renamed a fresh `Stored::default()` over whatever was
-/// there. The fix arrived in two halves, a release apart, and only the first was
-/// ever described here.
+/// ⚠ **Five states that are not the ordinary one, and this function once could
+/// see one of them.** "Absent", "will not parse" and "will not read" were a
+/// single `Err`/`.ok()` answer, which made this the first half of a data loss:
+/// every writer here is read-modify-write, so the very next write renamed a fresh
+/// `Stored::default()` over whatever was there. The fix arrived in three halves,
+/// and the census it was built from had only the three errnos below in it.
+///
+/// The five are the match arms below in source order, with `Ok(parsed)` — the
+/// ordinary state — left out, and they answer **three** things between them
+/// rather than one each. The file header states the same five members; neither
+/// list is what keeps them honest. `scripts/nativecheck.ts` is: it strips the
+/// comments, differences the arms out of the source and compares them against a
+/// written-out list, so an arm added, removed, reordered or given a different
+/// answer is a red line rather than a paragraph nobody re-read.
 ///
 /// - **Absent** (`NotFound`) is the whole truth. `Default`, and a write proceeds.
-/// - **Will not parse** is *evidence* the bytes are unusable, so `quarantine`
-///   moves them aside — from *here*, because this is the only moment anything in
-///   this process knows they were ever on disk — and a write proceeds afterwards.
+/// - **A directory where the file goes** (`IsADirectory`) is answered the same
+///   way, and the arm carries the argument: POSIX refuses `rename(file,
+///   directory)`, so nothing this app wrote can be in there to lose and the one
+///   statement that could destroy anything cannot run.
+/// - **Will not decode** (`InvalidData`) is *evidence* the bytes are unusable,
+///   arriving one layer below serde — and it is the state that had no arm at all.
+///   `quarantine` moves them aside and a write proceeds **only where that
+///   landed**. See below.
 /// - **Will not read** — `PermissionDenied`, `NotADirectory`, an I/O error on a
 ///   dying volume — is evidence of nothing at all about the bytes. So they are
 ///   neither moved nor replaced: `replaceable` is `false` and `write_stored`
 ///   refuses with a sentence naming the path.
+/// - **Will not parse** — bytes that decoded and that serde refused — is the same
+///   evidence as the third, and takes the same answer: `quarantine` moves them
+///   aside — from *here*, because this is the only moment anything in this process
+///   knows they were ever on disk — and a write proceeds only where that landed,
+///   which is what `quarantine` now answers. It is last because it is the last
+///   arm: it sits inside `Ok(text)`, after the read succeeded.
+///
+/// ⚠ **`InvalidData` carries no errno, and that is the whole of why it belongs
+/// with "will not parse" rather than with "will not read".** `read_to_string`
+/// runs the UTF-8 check itself and reports a failure of it as `InvalidData` with
+/// `raw_os_error()` of `None` — measured on this machine (macOS 15.6 / arm64 /
+/// APFS, rustc 1.95.0): `kind=InvalidData raw_os=None`, against errno 13, 20 and
+/// 2 for the three states the bullets above were built from. **The read failures
+/// the refusal protects are the ones *with* an errno**: a syscall said no, and a
+/// syscall saying no can be transient. Bytes that are not UTF-8 are not a syscall
+/// saying anything — they are evidence about the bytes, exactly as a serde error
+/// is, and they never become valid on their own.
+///
+/// Classified as a read failure it was permanent in the worst direction:
+/// `replaceable` stayed `false` for ever, so `write_stored` refused **every**
+/// configuration write on that installation, `quarantine` was never reached, and
+/// the file was therefore neither moved aside *nor* replaced. On the population
+/// this file exists for — a keyring-less host — that is `write_device_key_fallback`
+/// and `write_server` failing on every launch, with `host_device_set` and
+/// `host_device_clear` failing *silently* because `setNativeDevice` is
+/// `void invoke(...).catch(() => undefined)`. Nothing the app can do recovers it.
 ///
 /// ⚠ **Refusing rather than quarantining the unread file is a decision on the
 /// merits and not a limitation.** Measured here: `fs::rename` on a mode-`000`
 /// file *succeeds*, so a quarantine would land. It is declined because a read
-/// failure can be transient — an `EIO` on a network volume, a mode somebody is
-/// about to correct — and moving a perfectly good file into a slot named
-/// `unreadable` that nothing here ever reads back turns a recoverable error into
-/// exactly the permanent first run this section exists to prevent. Refusing is
-/// also the only answer that stays safe where the quarantine's own rename fails,
-/// which it can: that rename needs write permission on the directory.
+/// failure *with an errno* can be transient — an `EIO` on a network volume, a
+/// mode somebody is about to correct — and moving a perfectly good file into a
+/// slot named `unreadable` that nothing here ever reads back turns a recoverable
+/// error into exactly the permanent first run this section exists to prevent.
+/// Where the quarantine's own rename fails — it needs write permission on the
+/// directory rather than on the file — the answer is the same refusal by the
+/// other route, `quarantine` reporting `false`.
 ///
 /// ⚠ **The returned value carries the lock.** The caller's `write_stored` is part
 /// of the same critical section as this read; see `Guarded`.
@@ -406,6 +626,17 @@ fn read_stored(dir: &Path) -> Guarded {
          */
         Err(e) if e.kind() == ErrorKind::IsADirectory => (Stored::default(), true),
         /*
+         * ⚠ **Bytes that are not UTF-8: the unparseable case, never the unread
+         * one.** `read_to_string` does the decoding, so this is the *only* read
+         * failure that is evidence about the bytes rather than about a syscall —
+         * it has no errno at all, and it never becomes valid on its own. It sat
+         * in the `Err(_)` arm below, where `replaceable` is `false` for ever: no
+         * quarantine, no replacement, and every configuration write on that
+         * installation refused until somebody moved the file by hand. The
+         * docblock above carries the measurement and what it cost.
+         */
+        Err(e) if e.kind() == ErrorKind::InvalidData => (Stored::default(), quarantine(dir)),
+        /*
          * ⚠ **Bytes are there and this process could not read them**, which is
          * the case the single `Err` arm here used to answer `Default` for while
          * a comment claimed there was nothing to save. `Default` is still what is
@@ -417,11 +648,9 @@ fn read_stored(dir: &Path) -> Guarded {
             Ok(parsed) => (parsed, true),
             // Bytes that will not deserialize are evidence that they are unusable,
             // which is what makes moving them aside worth doing and makes a write
-            // over the gap they leave the right next act.
-            Err(_) => {
-                quarantine(dir);
-                (Stored::default(), true)
-            }
+            // over the gap they leave the right next act — but only where they are
+            // genuinely aside, which is the one thing `quarantine` answers.
+            Err(_) => (Stored::default(), quarantine(dir)),
         },
     };
     Guarded {
@@ -579,20 +808,21 @@ pub fn temp_name(name: &str) -> String {
 /// failure `read_device_key_fallback` exists to prevent.
 ///
 /// ⚠ **And the first statement is a refusal, which is a behaviour change and the
-/// right one.** Where `read_stored` could not read the file that is already
-/// there, `replaceable` is `false` and this writes **nothing at all** — no
-/// directory, no temporary, no rename — and answers a sentence naming the path.
-/// What shipped instead was `Default` for an unreadable file and a rename over
-/// bytes nobody had looked at, which is *the truncate* above arriving through the
-/// one door that shape does not cover.
+/// right one.** Where `read_stored` could neither read the file that is already
+/// there *nor put it safely aside*, `replaceable` is `false` and this writes
+/// **nothing at all** — no directory, no temporary, no rename — and answers a
+/// sentence naming the path. What shipped instead was `Default` for an unreadable
+/// file and a rename over bytes nobody had looked at, which is *the truncate*
+/// above arriving through the one door that shape does not cover.
 ///
 /// What the refusal costs is real and is stated rather than hidden: on a host
 /// where that state is permanent — a mode nobody corrects, a `~/.reemoat` that is
-/// a regular file, a dying volume — the app still *starts*, `read_server`
-/// answering `None` onto the setup screen, and then every configuration write
-/// fails until a person moves the file aside. What the other answer costs is an
-/// X25519 private key and one of the account's twenty device slots, on precisely
-/// the keyring-less machines this file exists for.
+/// a regular file, a dying volume, a second corruption over a quarantine slot
+/// that is already taken — the app still *starts*, `read_server` answering `None`
+/// onto the setup screen, and then every configuration write fails until a person
+/// moves the files aside. What the other answer costs is an X25519 private key
+/// and one of the account's twenty device slots, on precisely the keyring-less
+/// machines this file exists for.
 fn write_stored(dir: &Path, stored: &Guarded) -> Result<(), String> {
     use std::io::Write;
 
@@ -618,8 +848,12 @@ fn write_stored(dir: &Path, stored: &Guarded) -> Result<(), String> {
      * makes it seen.
      */
     if !stored.replaceable {
+        // "read or safely kept" rather than "read": the two states that reach here
+        // are a file this process could not open at all, and one it could open and
+        // could not put under `UNREADABLE` — and the remedy a person has is the
+        // same sentence for both.
         return Err(format!(
-            "{} could not be read, so nothing was written over it. \
+            "{} could not be read or safely kept, so nothing was written over it. \
              Move it aside by hand and try again.",
             server_file(dir).display()
         ));
@@ -767,6 +1001,33 @@ pub fn write_device_key_fallback(dir: &Path, origin: &str, key: &str) -> Result<
     write_stored(dir, &stored)
 }
 
+/// Take the file-held device key for one server out of `server.json`.
+///
+/// Reached from exactly two places: `device::store_secret`, once a keyring write
+/// has been read back and verified, and `device::reset_key`, arriving through
+/// `give_up_device_key` below, which is the Devices screen's **Re-key**. **The two
+/// mean different things**, and collapsing them is what put a quarantine removal
+/// on this statement.
+///
+/// ⚠ **The sentence that used to be here was false, and it was the load-bearing
+/// one.** It read *"`device::ensure_key`'s first-use path never comes here, which
+/// is what makes the last statement safe"*. `ensure_key` reaches this on **every**
+/// keyring-verified first use: `ensure_key` → `store_secret` → here, immediately
+/// after the keyring write is read back. It was wrong the day it was written, and
+/// what it was defending was a `discard_quarantine` that is no longer on this
+/// statement at all.
+///
+/// ⚠ **The promotion path could reach that removal, which is the hole the split
+/// closes.** `store_secret` runs only where `read_secret` answered `None`, which
+/// normally means there is no entry here and the early return below fires — the
+/// shape the old sentence was reaching for. But `read_secret` also answers `None`
+/// for an entry `device::decode_key` **rejects**: a value that is not 32 base64url
+/// bytes, from a hand-edit or a half-written file. There `remove` answers `Some`,
+/// the early return does not fire, and the old shape discarded the quarantine over
+/// a key nobody gave up — while those very bytes may have held the legible copy.
+///
+/// So this writes `server.json` and nothing else, and `give_up_device_key` is the
+/// statement a deliberate give-up goes through.
 pub fn erase_device_key_fallback(dir: &Path, origin: &str) -> Result<(), String> {
     let mut stored = read_stored(dir);
     // `replaceable` for `erase_device`'s reason, and it matters more here: an
@@ -776,6 +1037,31 @@ pub fn erase_device_key_fallback(dir: &Path, origin: &str) -> Result<(), String>
         return Ok(());
     }
     write_stored(dir, &stored)
+}
+
+/// The Devices screen's **Re-key**: this installation is giving up its key for one
+/// server, on purpose and because somebody asked.
+///
+/// ⚠ **This is the one moment a quarantined copy of that key stops being a
+/// recovery.** `server.json.unreadable` is retained because it may hold the only
+/// copy of this installation's X25519 static, and a re-key supersedes it; nothing
+/// removed it, so Re-key gave up both live copies and left the superseded private
+/// key in cleartext on disk indefinitely, on exactly the keyring-less host it was
+/// written down for. `discard_quarantine` is that half, and its docblock carries
+/// the weighing — including why it is now *this origin's* quarantine rather than
+/// the whole file, which is a departure taken back out.
+///
+/// **After the write, never before.** On the path where `write_stored` refuses,
+/// the old key is still in place and the quarantine is still the thing standing
+/// behind it. The early return inside `erase_device_key_fallback` is different: it
+/// writes nothing *and changes nothing*, so a re-key of a server whose key was
+/// only ever in the keyring still supersedes the quarantined copy. **The act is
+/// what supersedes those bytes, not the removal of a map entry** — which is also
+/// why this is a second function rather than a flag on the first.
+pub fn give_up_device_key(dir: &Path, origin: &str) -> Result<(), String> {
+    erase_device_key_fallback(dir, origin)?;
+    discard_quarantine(dir, origin);
+    Ok(())
 }
 
 /// What somebody typed, turned into the one canonical spelling — or a sentence
@@ -838,10 +1124,12 @@ pub fn normalize_origin(raw: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_server, erase_device, normalize_origin, read_device, read_device_key_fallback,
-        read_server, server_file, temp_name, unreadable_file, write_device,
-        write_device_key_fallback, write_server, DEFAULT_SERVER,
+        default_server, erase_device, erase_device_key_fallback, give_up_device_key,
+        normalize_origin, read_device, read_device_key_fallback, read_server, server_file,
+        temp_name, unreadable_file, write_device, write_device_key_fallback, write_server,
+        DEFAULT_SERVER,
     };
+    use std::path::Path;
 
     /// The mode of a path, as the nine permission bits alone.
     #[cfg(unix)]
@@ -1148,10 +1436,12 @@ mod tests {
     /// failure branches were executed by nothing at all. What one of them leaves
     /// behind is a second copy of an X25519 private key sitting beside the
     /// first — `0600` like the first, so this is not a disclosure, it is a copy
-    /// nothing can ever reach: `read_stored` never opens that name again and
-    /// `erase_device_key_fallback` rewrites `server.json` alone, so a key
-    /// somebody reset from the Devices screen would go on existing next to the
-    /// one that replaced it.
+    /// nothing can ever reach: `read_stored` never opens that name again, and
+    /// neither statement that gives a key up names a temporary at all —
+    /// `erase_device_key_fallback` rewrites `server.json`, `give_up_device_key`
+    /// adds a removal of `server.json.unreadable` to it — so a key somebody reset
+    /// from the Devices screen would go on existing next to the one that replaced
+    /// it.
     ///
     /// The failure is injected by putting a **directory** where the file goes.
     /// POSIX refuses `rename(file, directory)` with `EISDIR` whether or not it
@@ -1292,15 +1582,286 @@ mod tests {
          * whatever the first failure already reduced the file to, so replacing
          * the quarantine with it would throw away the copy most likely to hold a
          * key.
+         *
+         * ⚠ **And keeping the first is not on its own a licence to destroy the
+         * second, which is what this used to assert.** The write was `.unwrap()`ed
+         * here: the quarantine slot was taken, nothing at all was preserved, and
+         * the next write renamed a fresh file over the *current* bytes — which on
+         * a keyring-less host are the only copy of the key in use **now**, while
+         * the retained quarantine holds the obsolete one. `quarantine` reports
+         * what it preserved and `replaceable` is that report, so a second
+         * corruption is the same refusal an unreadable file gets.
          */
         std::fs::write(server_file(&dir), "also not json").unwrap();
-        write_device(&dir, "https://a.example", "dv_later").unwrap();
+        let refused = write_device(&dir, "https://a.example", "dv_later");
+        assert!(
+            refused.is_err(),
+            "nothing was preserved, so nothing may be written over"
+        );
         assert_eq!(
             std::fs::read_to_string(unreadable_file(&dir)).unwrap(),
             "{not json",
             "the first quarantine is the one that survives"
         );
+        assert_eq!(
+            std::fs::read_to_string(server_file(&dir)).unwrap(),
+            "also not json",
+            "and the current bytes are still where they were"
+        );
+        assert_eq!(
+            strays(&dir),
+            Vec::<String>::new(),
+            "and nothing at all was created"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **The fourth state, which had no arm and no errno.** `read_to_string`
+    /// runs the UTF-8 check itself, so a `server.json` carrying a byte no UTF-8
+    /// sequence has answers `InvalidData` — measured by the precondition below,
+    /// `raw_os_error()` of `None` against errno 13, 20 and 2 for the three states
+    /// this function's census was built from. It fell past `NotFound` and
+    /// `IsADirectory` into the catch-all, which marks the file **unreplaceable for
+    /// ever**: the quarantine was never reached, so the bytes were neither moved
+    /// aside nor replaced, and every configuration write on that installation was
+    /// refused until a person moved the file by hand — `write_server` and
+    /// `write_device_key_fallback` on every launch, and `host_device_set` and
+    /// `host_device_clear` silently, their caller discarding the rejection.
+    ///
+    /// HOW IT GOES RED: delete the `ErrorKind::InvalidData` arm and the `unwrap`
+    /// below panics with the refusal's own sentence, which is the production
+    /// failure exactly.
+    #[test]
+    fn a_file_that_is_not_utf8_is_moved_aside_rather_than_freezing_every_write() {
+        let dir = scratch("notutf8");
+        write_device_key_fallback(&dir, "https://a.example", "AAAA").unwrap();
+
+        // A lone `0xFF` begins no UTF-8 sequence, which is the ordinary way this
+        // arrives: a half-written file, a byte flipped on a dying volume.
+        let corrupt: [u8; 3] = [b'{', 0xFF, b'}'];
+        std::fs::write(server_file(&dir), corrupt).unwrap();
+        let err = std::fs::read_to_string(server_file(&dir)).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "the precondition: this is the fourth state"
+        );
+        assert!(
+            err.raw_os_error().is_none(),
+            "and it is the one with no errno, which is why it is not a read failure"
+        );
+
+        write_device(&dir, "https://a.example", "dv_new").unwrap();
+
+        assert_eq!(
+            read_device(&dir, "https://a.example").as_deref(),
+            Some("dv_new"),
+            "the write landed rather than being refused for ever"
+        );
+        assert_eq!(
+            std::fs::read(unreadable_file(&dir)).unwrap(),
+            corrupt,
+            "and the bytes it replaced are aside, byte for byte"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **The quarantine's `rename` can fail, and a failed one used to authorize
+    /// the overwrite anyway.** The slot-already-taken half is asserted above; this
+    /// is the other one, and it is a different statement — `let _ = fs::rename`,
+    /// whose answer was thrown away. That rename needs write permission on the
+    /// **directory**, not on the file, so a `0500` `~/.reemoat` with a corrupt
+    /// `server.json` in it is a real state: the bytes cannot be moved and, before
+    /// this, were replaced regardless.
+    ///
+    /// HOW IT GOES RED: put the `let _ =` back and the first assertion fails —
+    /// `write_device` answers `Ok` — and the last one fails with it, the key
+    /// having been renamed away.
+    ///
+    /// ⚠ **The precondition is checked rather than assumed, because a `0500`
+    /// directory stops nobody as root** — the valve `a_file_this_process_cannot_read_is_never_overwritten`
+    /// already carries, for the same reason.
+    #[cfg(unix)]
+    #[test]
+    fn a_quarantine_that_cannot_land_does_not_authorize_the_overwrite() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("noquarantine");
+        write_device_key_fallback(&dir, "https://a.example", "AAAA").unwrap();
+        std::fs::write(server_file(&dir), "{not json").unwrap();
+
+        // No write bit on the directory: the file can still be opened and read,
+        // and no entry in it can be created or renamed.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::rename(server_file(&dir), dir.join("probe")).is_ok() {
+            // Root, or a filesystem with no modes: there is no failing rename
+            // here to assert anything about.
+            let _ = std::fs::rename(dir.join("probe"), server_file(&dir));
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let refused = write_device(&dir, "https://a.example", "dv_new");
+        assert!(
+            refused.is_err(),
+            "the bytes could not be put aside, so they may not be written over"
+        );
+        assert!(!unreadable_file(&dir).exists(), "and nothing was put aside");
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(server_file(&dir)).unwrap(),
+            "{not json",
+            "and the bytes a person can still open the key out of are there"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **A superseded device private key used to be retained for ever.** On a
+    /// keyring-less host `device_keys` is the only copy of the installation's
+    /// X25519 static, so a quarantined `server.json` can hold a *recoverable* one:
+    /// a truncation past the base64 leaves the key legible and the JSON
+    /// unparseable, which is the shape reproduced here. Nothing removed it —
+    /// `erase_device_key_fallback` and `device::reset_key` rewrite `server.json`
+    /// alone — so the Devices screen's **Re-key**, which exists precisely for a
+    /// credential store that was reset out from under the app, gave up the keyring
+    /// copy and the `server.json` copy and left the quarantined private key on
+    /// disk indefinitely.
+    ///
+    /// This drives `give_up_device_key`, which is the statement `device::reset_key`
+    /// reaches — rather than `reset_key` itself, which would write this machine's
+    /// real keychain from a test.
+    ///
+    /// HOW IT GOES RED: drop `discard_quarantine(dir, origin)` and the last
+    /// assertion fails; move it above the `?` and the refusal path stops being
+    /// covered by `a_file_this_process_cannot_read_is_never_overwritten`.
+    #[test]
+    fn a_re_key_takes_the_superseded_quarantined_copy_with_it() {
+        let dir = scratch("superseded");
+        let quarantined = quarantine_holding_a_key(&dir, &[("https://a.example", "AAAA")]);
+        assert!(
+            quarantined.contains("AAAA"),
+            "the precondition: a recoverable private key is sitting in the quarantine"
+        );
+
+        give_up_device_key(&dir, "https://a.example").unwrap();
+        assert_eq!(read_device_key_fallback(&dir, "https://a.example"), None);
+        assert!(
+            !unreadable_file(&dir).exists(),
+            "the superseded copy went with the key it is a copy of"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **A promotion to the keyring is not a key given up, and it reached the
+    /// removal anyway.** `erase_device_key_fallback` carried
+    /// `discard_quarantine` for one release under a docblock claiming
+    /// *"`device::ensure_key`'s first-use path never comes here"* — which is false:
+    /// `ensure_key` → `store_secret` → here runs on **every** keyring-verified
+    /// first use. What made it *usually* harmless was the early return, because
+    /// `store_secret` is reached only where `read_secret` answered `None` and that
+    /// normally means there is no entry to remove.
+    ///
+    /// **Normally.** `read_secret` also answers `None` for an entry
+    /// `device::decode_key` rejects — a value that is not 32 base64url bytes,
+    /// reproduced here as the hand-edit it would be. There `remove` answers `Some`,
+    /// the early return does not fire, and the quarantine was discarded over a key
+    /// nobody gave up, while those very bytes may be the legible copy of it.
+    ///
+    /// HOW IT GOES RED: put `discard_quarantine(dir, origin)` back on
+    /// `erase_device_key_fallback` after its write and the last assertion fails.
+    #[test]
+    fn a_promotion_to_the_keyring_keeps_the_quarantine() {
+        let dir = scratch("promotion");
+        let quarantined = quarantine_holding_a_key(&dir, &[("https://a.example", "AAAA")]);
+        assert!(quarantined.contains("AAAA"), "the precondition");
+
+        // What `store_secret` finds after `read_secret` answered `None` over an
+        // entry the decoder refused: a live entry, and nothing usable in it.
+        write_device_key_fallback(&dir, "https://a.example", "not-a-key").unwrap();
+
+        erase_device_key_fallback(&dir, "https://a.example").unwrap();
+        assert_eq!(
+            read_device_key_fallback(&dir, "https://a.example"),
+            None,
+            "the unusable entry is gone, which is the whole of what this statement does"
+        );
+        assert!(
+            unreadable_file(&dir).exists(),
+            "and the bytes a person could still read a key out of are not this call's to take"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠ **Re-key is per origin and the quarantine removal was per *file*.** A
+    /// person pressing Re-key for server A is not consenting to lose the last
+    /// hand-recoverable copy of their key for server B — and on a keyring-less host
+    /// that is exactly what a quarantined `server.json` holding both is. The old
+    /// argument for sweeping it said a second server could only lose something
+    /// "already superseded, because each origin is regenerated the first time it is
+    /// used"; the failure is in *the first time it is used*, which for a server
+    /// nobody has opened since the corruption has not happened yet.
+    ///
+    /// The bytes cannot be edited — serde could not read them, which is why they
+    /// are here — but they can be *looked at*, and a server named in them that is
+    /// not this one is a refusal.
+    ///
+    /// HOW IT GOES RED: make `quarantine_is_only_about` answer `true`
+    /// unconditionally, or drop the `origin` argument and remove the file the way
+    /// the shipped release did, and the last two assertions fail.
+    #[test]
+    fn a_re_key_for_one_server_keeps_a_quarantine_naming_another() {
+        let dir = scratch("othertenant");
+        let quarantined = quarantine_holding_a_key(
+            &dir,
+            &[("https://a.example", "AAAA"), ("https://b.example", "BBBB")],
+        );
+        assert!(
+            quarantined.contains("https://b.example") && quarantined.contains("BBBB"),
+            "the precondition: a second server's key is in those bytes too"
+        );
+
+        give_up_device_key(&dir, "https://a.example").unwrap();
+        assert!(
+            unreadable_file(&dir).exists(),
+            "the file names a server this call is not about, so it is not this call's to remove"
+        );
+        assert!(
+            std::fs::read_to_string(unreadable_file(&dir))
+                .unwrap()
+                .contains("BBBB"),
+            "and the other server's key is still hand-recoverable out of it"
+        );
+
+        /*
+         * And the scan is a scan rather than a "more than one origin" count: the
+         * *same* single foreign origin is still a refusal, which is the shape a
+         * cheaper guard would let through.
+         */
+        give_up_device_key(&dir, "https://b.example").unwrap();
+        assert!(
+            unreadable_file(&dir).exists(),
+            "a.example is named in there too, and b.example's re-key does not supersede it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The state every test above starts from: a `server.json` truncated *past* the
+    /// base64, so serde refuses it and a person can still read the key, moved aside
+    /// by the next write. Answers the quarantined bytes.
+    fn quarantine_holding_a_key(dir: &Path, keys: &[(&str, &str)]) -> String {
+        for (origin, key) in keys {
+            write_device_key_fallback(dir, origin, key).unwrap();
+        }
+        let whole = std::fs::read_to_string(server_file(dir)).unwrap();
+        let last = keys.last().expect("at least one key").1;
+        let cut = whole.rfind(last).expect("the key is in the file") + last.len();
+        std::fs::write(server_file(dir), &whole[..cut]).unwrap();
+
+        // The launch after that corruption: a fresh key is written, and the bytes
+        // holding the old one are kept. This is the state the findings are about.
+        write_device_key_fallback(dir, keys[0].0, "ZZZZ").unwrap();
+        std::fs::read_to_string(unreadable_file(dir)).expect("the bytes were put aside")
     }
 
     /// ⚠ **A downgrade must not delete data, and without `rest` it silently

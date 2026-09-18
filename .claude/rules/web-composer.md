@@ -312,24 +312,47 @@ and `chipInner`, the same two calls the live chip makes**. Q3.404. The menu hold
 choose and why (`unavailableHint`, keyed on category — the effort case gets its own
 sentence, "why is this empty" having a measured answer there and a vague one
 elsewhere). It is deliberately **not** disabled: a dimmed inert chip answers "why
-is this greyed out" with silence on a phone. `unavailable` is empty whenever there
-is no agent at all — that sentence is `stale` instead.
+is this greyed out" with silence on a phone.
 
 **And the same fact arrives in a second shape, which drew nothing.** claude and
 kimi *withdraw* the effort control; opencode never publishes one for a model with
 no levels, so there was no slot to keep and the right cluster had three chips on one
-session and two on the next. `drawnControls` synthesizes `NO_LEVELS` — an empty
-`thought_level` select, id-namespaced `reemoat:` so it cannot collide with something
-an agent said — into `unavailable`, so the paragraph above draws it with no second
-code path. **`thought_level` only**: a synthesized `mode` would be found by
-`splitOptions` as the `NESTED_HOST`, and `Absent` draws no nested sections, so
-`collaboration_mode` would nest into a placeholder and cease to exist. **The memory gets the slot too** — `held` holds only what a
+session and two on the next. `placeholderFor` builds an empty select,
+id-namespaced `reemoat:` so it cannot collide with something an agent said, and
+`withUnusable` appends one for **every standard slot nothing already occupies** —
+`ALWAYS_DRAWN`, derived from `CATEGORY_SLOT` rather than listed, so it is exactly
+the two visible slots and cannot drift. So the paragraph above draws them with no
+second code path. **The memory gets the slot too** — `held` holds only what a
 daemon published, so a slot invented on the live branch alone vanished for every
-restart. Not synthesized only where nothing is drawn at all: a live agent
-publishing no controls. `unavailable` also carries **a select published with
+restart. **And there is no state that draws none**: the two branches that returned
+an empty set — a live agent publishing nothing, and an absent one with nothing
+remembered — go through the synthesis as well, which is what makes the row the
+same shape on every session rather than only on every agent. `heldConfig` is
+per-tab and the daemon restores none, so that second branch was **every reload of
+a session whose agent is away**, permanently for an ended one. Reversed on the
+owner's report of a composer with a paperclip, a Send button and nothing else;
+`webcheck` sweeps all nine statuses against every config shape and asserts none of
+the 81 empties it. ⚠ **A synthesized `mode` is only safe because `splitOptions`
+takes `unavailable` now**: it looked for `NESTED_HOST` by category alone, `Absent`
+draws no nested sections, and nothing else reads `slots.nested` — so codex's
+`collaboration_mode` ceased to exist whenever `mode` was unavailable, which was
+already true of a *withdrawn* one and asserted nowhere. An unavailable host demotes
+`nested` to `overflow`, the answer a missing host already had. `unavailable` also carries **a select published with
 nothing in it**, the same absence with a chip in front. Q3.518.
 
-**The strip never empties while the agent is away.** The daemon drops
+**The strip never empties while the agent is away, and now not across a reload
+either.** `holdConfig`'s memory lives in `rows`, in this tab; `configMemory.ts`
+writes it through to `localStorage` and `rememberHeld` in `store.ts` is the one
+place both directions happen — read only where `holdConfig` answers `undefined`,
+which is exactly what a reload leaves. ⚠ **Only the *selected* choice is kept**:
+`chipValue` names a value through its choice, so dropping it draws
+`openai/gpt-5` instead of `GPT-5`, and keeping the rest is 362 models a session.
+Nothing read back is ever sent — a memory is `stale`, so `Select` is `disabled`
+over it — which is what makes storing a possibly-stale value safe here and unsafe
+on the daemon. It is cleared on sign-out, and it restores the *reading* only: a
+daemon restart still brings the agent back on its own defaults.
+
+The daemon drops
 `agentConfig` with the agent, so `holdConfig` in `store.ts` keeps the last set a
 **running** agent published, `drawnControls` chooses between the live answer and
 that memory, and `stale` makes the memory readable but not tappable. The live agent

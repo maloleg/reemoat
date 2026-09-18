@@ -244,7 +244,9 @@ export type OfflineReason =
    *
    * ⚠ **Not a browser**, which an earlier spelling of this sentence claimed.
    * `POST /v1/tokens` guards `device_key_required` on `caller.deviceId !== null`
-   * (`packages/control-plane/src/app.ts:4644`) and a browser sign-in sends no
+   * (in `packages/control-plane/src/app.ts`; cited by symbol rather than by line,
+   * because that file is six thousand lines and an insertion above would move a
+   * number silently) and a browser sign-in sends no
    * device, so it is minted an *unbound* capability rather than refused; and
    * `e2ee.ts`'s `dial()` throws a plain `Error` for a missing static, which
    * `probe` swallows into `no_route`. A browser's permanent state is `no_route`,

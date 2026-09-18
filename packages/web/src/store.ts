@@ -1,5 +1,6 @@
 import { authFailure, signedOutText, type AuthFailure } from "./account";
 import { forgetAttachments } from "./attach";
+import { forgetAllConfig, rememberConfig, rememberedConfig } from "./configMemory";
 import { clearEcho, landEcho, settleEcho } from "./echo";
 import { forgetAsks } from "./ask";
 import { forgetChoices } from "./choices";
@@ -19,6 +20,7 @@ import {
   startLocalDaemon,
   type NativeBoot,
 } from "./native";
+import { isTruncationMarker } from "./permission";
 import { hostPlatform, localNetworkDetail } from "./platform";
 import { mayAddMachine } from "./quota";
 import { mergeOptimistic } from "./sessionOrder";
@@ -35,6 +37,8 @@ import {
   type CreatedMachine,
   type LaggedFrame,
   type Me,
+  type PendingElicitationSnapshot,
+  type PendingPermissionSnapshot,
   type PluginSummary,
   type SessionSnapshot,
   type StoredEvent,
@@ -779,6 +783,32 @@ export type CommandsPlan = "fetch" | "drop" | "defer" | "current";
  *   back to 0 while a client still holds 5, and 5 is the stale one.
  */
 /**
+ * `holdConfig`, plus the half of the memory that outlives this tab.
+ *
+ * One function rather than two call sites doing it by hand, because the two are
+ * the same decision read in two directions and they must not drift: what a
+ * *running* agent published is written down, and what a reload has no other copy
+ * of is read back. Both write sites for `heldConfig` go through here.
+ *
+ * ⚠ **The read is a fallback and never an override.** `holdConfig` already answers
+ * correctly whenever this tab has seen the agent — live set, or its own memory of
+ * one — and that answer is newer than anything on disk by construction. Storage is
+ * consulted only where it answers `undefined`, which is exactly the state a reload
+ * leaves and the one the strip drew three dashes in.
+ *
+ * The write is deliberately *after* the fallback rather than instead of it, so a
+ * memory restored from storage is not immediately written back as though this tab
+ * had seen it: `rememberConfig` ignores an empty set, and a restored one is not
+ * empty, so without that ordering the timestamp would refresh on every poll of a
+ * session nobody is looking at and the LRU would stop meaning "recently seen".
+ */
+function rememberHeld(key: SessionKey, held: AgentConfig | undefined): AgentConfig | undefined {
+  if (held === undefined || held.options.length === 0) return rememberedConfig(key);
+  rememberConfig(key, held);
+  return held;
+}
+
+/**
  * The controls to keep across a window in which there is no agent to publish any.
  *
  * The daemon empties `agentConfig` the moment the agent goes — "the controls
@@ -826,6 +856,206 @@ export function holdConfig(
   }
   if (hasLiveAgent(session.status)) return live;
   return held;
+}
+
+/**
+ * The parked permissions this client holds a **whole-record** copy of.
+ *
+ * Pulled out of {@link unreduceSnapshot} and named, because it is the whole of
+ * how that function tells the daemon's ingest clamp from the socket frame's
+ * ladder, and because being able to say *which* rows is what made the property
+ * checkable at all.
+ *
+ * `reduced` absent means the snapshot *is* the whole record — the 4s poll,
+ * `GET /sessions/:id`, or a socket frame that fitted and was therefore
+ * byte-identical to what the daemon built — so every row on one qualifies, and a
+ * `{truncated}` stand-in on such a row can only be the ingest clamp.
+ *
+ * `reduced` present means the snapshot came out of {@link unreduceSnapshot},
+ * which wrote the set it had.
+ *
+ * ⚠ **`?? []` is the floor and it is deliberately the pessimistic one.** It is
+ * reached by a `reduced` this client did not write — a daemon frame stored by
+ * some path that does not merge, or a build older than the field — and it costs
+ * the *recoverable* sentence, never a false claim of permanence.
+ */
+function onRecordPermissions(held: SessionSnapshot): Set<string> {
+  if (held.reduced === undefined) return new Set(held.pendingPermissions.map((row) => row.permissionId));
+  return new Set(held.reduced.onRecord ?? []);
+}
+
+/**
+ * A snapshot frame the daemon's ladder had to cut, put back together from the row
+ * this client already holds.
+ *
+ * ⚠ **The poll's snapshot and the socket's snapshot are written into the same
+ * `row.snapshot`, and only one of the two is the whole record.** `GET /sessions`
+ * serves every parked request with its payloads; a `hello`/`snapshot` frame past
+ * the daemon's `CONTROL_MAX_BYTES` is a *lossy projection* of it —
+ * `fitSnapshotFrame`'s first rung replaces every surviving permission's
+ * `rawInput` and `content` with the `{truncated, bytes}` stand-in, and its second
+ * halves the two parked lists until the frame fits. Writing that over a fuller
+ * row is how the approval count, `SessionView`'s *more waiting* line and
+ * `PermissionCard`'s *"Part of this request was too large to keep"* banner came
+ * to alternate twice a poll interval, each flip re-arming the effect that fires
+ * `store.loadAll`. `wire.ts`'s `waitingCount` learned to read `reduced` and that
+ * fixed the count; this is the other half, and without it the rows and the
+ * payloads still alternate.
+ *
+ * **Absent means whole**, so an ordinary frame and an older daemon's frame take
+ * the first line out of here and nothing below runs for them. The contract when
+ * it is present:
+ *
+ *  - **A frame carrying `reduced` may not shrink either parked list.** Rows are
+ *    topped up from the held record, capped at `reduced.pendingPermissions` /
+ *    `reduced.pendingElicitations`, which are the daemon's own **true** lengths
+ *    at the moment the frame was built.
+ *  - **A stand-in never overwrites a payload this client already has.** Where the
+ *    held row carries the real `rawInput` or `content`, it survives the frame.
+ *
+ * ⚠ **The top-up is bounded by `raisedAt` and that bound is the whole of its
+ * safety.** The ladder cuts a *prefix* — both lists are `[...map.values()]` in
+ * insertion order and `raisedAt` is stamped at insertion — so the frame is
+ * authoritative for everything up to its last row and silent only past it. A held
+ * row inside that range and absent from the frame was **answered**, and putting
+ * it back would park a card over a request that is already settled, which is a
+ * far worse failure than under-counting. So only held rows strictly newer than
+ * the last row the frame carried are candidates. A frame carrying no rows at all
+ * cannot happen — the halving rung floors at one each (`while (keep > 1)`) — and
+ * is written as "every held row is a candidate" rather than left to `-Infinity`
+ * by accident.
+ *
+ * **`reduced.blobs` is rewritten rather than carried through, and that is what
+ * keeps the card's sentence honest.** A `{truncated}` blob has two possible
+ * origins and they want opposite sentences: the daemon's own 8 KiB ingest clamp
+ * (`MAX_PERMISSION_BLOB_BYTES`), which is on the HTTP record too and is therefore
+ * the honest *"too large to keep"*, and this frame's ladder, which is not — the
+ * record has it whole.
+ *
+ * ⚠ **Nothing on the wire separates the two, the `bytes` count included.** Both
+ * are `clampBlob`'s stand-in. The ladder runs `clampBlob(pending.rawInput, 0)`
+ * over a value the ingest clamp has *already* replaced, so an ingest-clamped row
+ * reaches this client as a stand-in whose `bytes` is the size of the previous
+ * stand-in — around thirty — which is exactly what the ladder makes of a
+ * genuinely small payload. So the origin is not read off the row; it is
+ * reconstructed from where this client has seen the row before, which is what
+ * {@link onRecordPermissions} answers.
+ *
+ * **The discriminator is a per-row fact, and it is carried forward on
+ * `reduced.onRecord`.** A snapshot with **no** `reduced` is the whole record —
+ * that field's own contract — so every permission on one has been seen off the
+ * record, and a stand-in on such a row can only be the ingest clamp. A reduced
+ * frame teaches this client nothing new about any row, so the merge carries the
+ * previous set forward, narrowed to the rows still parked. `blobs` leaves here
+ * meaning: **at least one permission on this snapshot carries a stand-in on a row
+ * this client has no record copy of.**
+ *
+ * ⚠ **The set has to be carried rather than re-derived from `held`, and that is
+ * the defect this replaced.** It asked whether the row was in
+ * `held.pendingPermissions` at all — but `held` is the row a *previous* merge
+ * wrote, so a row first seen on a reduced frame counted as held by the very next
+ * reduced frame. Measured by driving this function twice over two identical
+ * reduced frames: `blobs` true, then false, with the same input and the payload
+ * still only on the machine — so the card swapped its alternation for the
+ * *permanent* sentence about something `GET /sessions/:id` still held whole. Two
+ * frames land between two polls routinely, snapshot frames being watch-driven,
+ * and `setSessionMeta` re-folds a row's own snapshot through `onSnapshot`, so
+ * pinning or dragging a session was enough to trigger it on the spot.
+ *
+ * ⚠ **This is a reconstruction of a fact the daemon holds and does not send.**
+ * `fitSnapshotFrame` knows which stand-ins it created and there is no field on the
+ * frame saying so; until there is, what this cannot decide is a row this client
+ * has never had a record copy of. Such a row is reported as still fetchable,
+ * which is the conservative direction — the poll is about to settle it — and is
+ * wrong for exactly one case, an *ingest-clamped* request raised since the last
+ * poll, for as long as it takes that poll to land.
+ *
+ * ⚠ It is a property of the *snapshot* and not of one request, and
+ * `PermissionCard` reads it for the single request it is drawing. With a mixture
+ * — one row with no record copy beside an ingest-clamped one — every card on that
+ * session takes the "not fetched yet" sentence until the poll lands. That is the
+ * conservative direction on purpose: the sentence it replaces claims permanence
+ * about something a poll is about to fix.
+ */
+export function unreduceSnapshot(next: SessionSnapshot, held: SessionSnapshot | undefined): SessionSnapshot {
+  const reduced = next.reduced;
+  // The ordinary path, and it is the overwhelming majority of frames: nothing was
+  // cut, so there is nothing to put back and the frame is the answer.
+  if (reduced === undefined) return next;
+  // Nothing held, or held for some other session — a row keyed by machine and id
+  // cannot normally disagree, and a merge across two sessions would be the worst
+  // possible way to find out that it had.
+  if (held === undefined || held.id !== next.id) return next;
+
+  const heldPermissions = new Map(held.pendingPermissions.map((row) => [row.permissionId, row]));
+  const onFrame = new Set(next.pendingPermissions.map((row) => row.permissionId));
+  const onRecord = onRecordPermissions(held);
+
+  /*
+   * `null`/`undefined` is not a payload and neither is a stand-in, so neither may
+   * be promoted over the frame's copy. `clampBlob` returns a nullish value
+   * unchanged — "jsonSize of any non-nullish value is at least 1, so the bound
+   * always bites" — which is why a held `null` beside a frame stand-in would be a
+   * contradiction rather than a recovery, and is refused here instead of being
+   * reasoned about at the call site.
+   */
+  const whole = (value: unknown): boolean => value !== null && value !== undefined && !isTruncationMarker(value);
+
+  const repaired: PendingPermissionSnapshot[] = next.pendingPermissions.map((pending) => {
+    const before = heldPermissions.get(pending.permissionId);
+    if (before === undefined) return pending;
+    return {
+      ...pending,
+      rawInput: isTruncationMarker(pending.rawInput) && whole(before.rawInput) ? before.rawInput : pending.rawInput,
+      content: isTruncationMarker(pending.content) && whole(before.content) ? before.content : pending.content,
+    };
+  });
+
+  const permissionCutoff = next.pendingPermissions.at(-1)?.raisedAt;
+  const permissions = [
+    ...repaired,
+    ...held.pendingPermissions.filter(
+      (row) => !onFrame.has(row.permissionId) && (permissionCutoff === undefined || row.raisedAt > permissionCutoff),
+    ),
+  ].slice(0, Math.max(reduced.pendingPermissions, repaired.length));
+
+  const frameQuestions = next.pendingElicitations ?? [];
+  const questionsOnFrame = new Set(frameQuestions.map((row) => row.elicitationId));
+  const questionCutoff = frameQuestions.at(-1)?.raisedAt;
+  const questions: PendingElicitationSnapshot[] = [
+    ...frameQuestions,
+    ...(held.pendingElicitations ?? []).filter(
+      (row) => !questionsOnFrame.has(row.elicitationId) && (questionCutoff === undefined || row.raisedAt > questionCutoff),
+    ),
+  ].slice(0, Math.max(reduced.pendingElicitations, frameQuestions.length));
+
+  return {
+    ...next,
+    pendingPermissions: permissions,
+    pendingElicitations: questions,
+    /*
+     * The counts stay the daemon's, because they are its claim about a list it
+     * holds and this client's top-up can only ever reach what it happened to have
+     * seen. `waitingCount`'s `Math.max` is then a no-op wherever the top-up was
+     * complete and still the honest floor wherever it was not.
+     */
+    reduced: {
+      ...reduced,
+      /*
+       * Narrowed to the rows still parked, which is what bounds it: a permission
+       * id is minted once and an answered row never comes back, so the set
+       * shrinks with the list instead of growing for the life of the session.
+       */
+      onRecord: permissions.map((row) => row.permissionId).filter((id) => onRecord.has(id)),
+      blobs:
+        reduced.blobs &&
+        permissions.some(
+          (row) =>
+            !onRecord.has(row.permissionId) &&
+            (isTruncationMarker(row.rawInput) || isTruncationMarker(row.content)),
+        ),
+    },
+  };
 }
 
 export function commandsPlan(
@@ -2177,6 +2407,15 @@ class AppStore implements StreamSink {
      * an eleventh browser.
      */
     if (failure === "device_revoked") cp.forgetDevice();
+    /*
+     * ⚠ **Both ways out, not only the deliberate one.** `signOut()` below swept
+     * the remembered controls and this path did not, so an expired or revoked
+     * session left them for whoever signed in next — which is the disclosure the
+     * sweep exists to prevent, and that argument is about the *browser* rather
+     * than about which verb ended the session. `configMemory`'s own docblock
+     * states it as "Everything, on sign-out"; this is the other sign-out.
+     */
+    forgetAllConfig();
     this.patch({ phase: "signed_out", me: null, cpError: null, authError: signedOutText(failure) });
   }
 
@@ -2207,6 +2446,18 @@ class AppStore implements StreamSink {
    */
   async signOut(): Promise<void> {
     await cp.logout();
+    /*
+     * The remembered controls go with the credential that was reading them.
+     *
+     * They are not secret — a model name and an effort level — but they are a
+     * record of what somebody was doing, keyed by session, and leaving them for
+     * whoever signs in next on this browser is the one way a per-tab convenience
+     * becomes a disclosure. Before the reload, so the next paint has no copy.
+     *
+     * Not in `cp.logout`'s `finally`: that clears the *credential*, which is its
+     * subject, and this is the app's own cache of what it drew.
+     */
+    forgetAllConfig();
     window.location.href = "/";
   }
 
@@ -2604,7 +2855,7 @@ class AppStore implements StreamSink {
         snapshot: mergeOptimistic(snapshot, this.metaWrites.get(key)?.patch),
         daemonNow: listed.now,
         fetchedAt,
-        heldConfig: holdConfig(this.rows.get(key)?.heldConfig, snapshot),
+        heldConfig: rememberHeld(key, holdConfig(this.rows.get(key)?.heldConfig, snapshot)),
         });
     }
 
@@ -3024,8 +3275,16 @@ class AppStore implements StreamSink {
       key,
       ref,
       machineName: existing?.machineName ?? this.connections.get(ref.machineId)?.state().name ?? "",
-      snapshot: mergeOptimistic(session, this.metaWrites.get(key)?.patch),
-      heldConfig: holdConfig(existing?.heldConfig, session),
+      /*
+       * ⚠ **Through `unreduceSnapshot` first**, because a socket frame is not
+       * always the whole record and the row it is about to replace may be. Its
+       * docblock is the contract; what it prevents here is the frame's reduced
+       * copy of the parked lists — and the emptied payloads on them — clobbering
+       * the poll's fuller one twice a poll interval. A no-op on every frame the
+       * daemon did not have to cut, which is almost all of them.
+       */
+      snapshot: mergeOptimistic(unreduceSnapshot(session, existing?.snapshot), this.metaWrites.get(key)?.patch),
+      heldConfig: rememberHeld(key, holdConfig(existing?.heldConfig, session)),
       daemonNow: existing?.daemonNow ?? unanchored,
       fetchedAt: existing?.fetchedAt ?? unanchored,
       // Kept from the row the poll built. A snapshot frame does not carry the

@@ -215,11 +215,118 @@ export const MAX_HEADER_JSON_BYTES = MAX_FRAME_PAYLOAD;
  * bound is *for* is still only the first paragraph — a peer that sends `MESSAGE`
  * and never `MESSAGE_END` — and it does that.
  *
- * ⚠ **Nothing compares this to `src/server.ts`'s copy.** `packages/web` may not
- * import `src/`, which is the same reason `RELAY_CHANNEL_PATH` exists as two
- * literals — except that a drift here shows up as one large message refused rather
- * than as a fleet that cannot connect, which is why it is a comment and not a
- * driver.
+ * ⚠ **That ~768 KiB is the worst case only for the events `truncateEvent`
+ * actually cuts, and it took a second defect to notice.** `truncateEvent` returns
+ * six of its nineteen labels unchanged on purpose — a truncated question is an
+ * unanswerable question — so for those arms the ceiling is whatever the field
+ * carries, not `DEFAULT_MAX_EVENT_BYTES`. Measured on this branch,
+ * `elicitation_request.message` was bounded by **nothing**: the elicitation
+ * form's 32 KiB backstop weighs the form, of which `message` is not a field, and
+ * the clip that used to bound it had been retired. One agent-minted question over
+ * ~1 MiB is one event, taken unconditionally as the first of a batch, refused
+ * here, and reconnected onto for ever — this number's own stall on a different
+ * trigger. The repair is an ingest bound rather than a number here, again:
+ * `MAX_ELICITATION_MESSAGE_CHARS` (4096 code units, at most 16 KiB of UTF-8) in
+ * `src/session.ts`.
+ *
+ * ⚠ **So the headroom sentence above holds for the arms that converge on
+ * `maxBytes`, and for those only — an earlier draft of this paragraph claimed it
+ * held for all of them, and that claim was false on the day it was written.**
+ * The draft said the headroom held "because every arm that refuses to shrink is
+ * bounded at ingest", in the same change that added `src/server.ts`'s inventory
+ * saying `context_cleared` and `session_started` rely on nothing at all — one
+ * commit carrying both halves of a contradiction. It is the worse kind of stale
+ * comment, because it tells the next reader the property is guaranteed, which is
+ * exactly what stops them re-checking.
+ *
+ * **Measured 2026-09-18, and re-run 2026-09-19 after the first census turned out
+ * to be short**, by replaying `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES` and
+ * weighing `JSON.stringify` in UTF-8, the way `flush` now weighs a batch.
+ *
+ * ⚠ **The 2026-09-18 version of this paragraph said "three doors" and named the
+ * one that reaches this ceiling. It was a closed enumeration produced by reading
+ * the switch by hand, and it was wrong** — `agent_config` was a fourth and a
+ * *nearer* one, at **7 766 choices** against `plan.entries`' ~9 500, in the same
+ * switch the whole time. The correction is not a fourth bullet: it is that this
+ * comment stopped counting. What replaces the count is a driver —
+ * `daemoncheck.after-the-turn-and-config`'s census replays every arm of
+ * `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES`, weighs each against this constant,
+ * and differences the labels it swept against `SessionEvent`'s own union in both
+ * directions, so a label with no fixture fails rather than being skipped. **Run it
+ * to enumerate the doors; do not read a number out of this paragraph.** The
+ * `agent_config` half is closed: `toConfigOptions` in `src/session.ts` bounds a
+ * configuration at ingest, and the census asserts the event that produces no
+ * longer reaches this ceiling.
+ *
+ * What the census reported on 2026-09-19, with each fixture built at the largest
+ * shape this daemon's own ingest bounds permit, is that these arms can still
+ * exceed it — **at least these, on that construction**, which is the strongest
+ * thing a fixture census can say:
+ *
+ * - `plan.entries` — **1 100 027 bytes at 10 000 entries**, *after* truncation,
+ *   which is past this constant and stalls. The arm does run, but it budgets
+ *   **per item** against a 64-byte floor, so what it bounds is the size of an
+ *   entry and never the count: 1 000 entries of 500 characters come out at
+ *   145 027 and 3 entries of a megabyte each come out at 131 148 — the cut works
+ *   perfectly on content and not at all on cardinality, and `session.ts` pushes
+ *   the agent's array through uncapped. **~9 500 entries is the cliff** once the
+ *   per-item budget has floored, at ~110 bytes an entry on the wire.
+ * - `context_cleared` — a `return event` arm carrying two agent-minted session
+ *   ids bounded nowhere in `src/`: two of 400 000 characters are charged 800 064
+ *   and weigh 800 074, past `src/server.ts`'s `BATCH_MAX_BYTES` and inside this.
+ * - `session_started` — the same ids, and sharper: `estimateBytes` charges it a
+ *   **flat 192** against 800 109 on the wire, so `truncateEvent` is never entered
+ *   on it at all and the under-report is ~4 000×. That number is not only this
+ *   bound's: the per-session byte budget and `MAX_QUEUE_BYTES` read it too.
+ * - `agent_config` **was a fourth and is not one any more**, recorded because a
+ *   reader who finds it absent from this list should know it was here rather than
+ *   assume nobody looked. Unbounded it weighed **5 418 664 bytes** after
+ *   truncation on the census's own hostile fixture; bounded at ingest the same
+ *   fixture comes through at ~35 KiB.
+ *
+ *   ⚠ **It took three bounds, not one, and the third was missed for a whole
+ *   revision after the other two read as done.** `toConfigOptions` and `toModes`
+ *   stand on `session/new` and `session/resume`; a `current_mode_update`
+ *   notification reaches `updateConfig` directly and wrote its `currentModeId`
+ *   through with no bound at all. Measured through a real registry and a stub
+ *   agent over real streams: a 2 MB id logged an `agent_config` of **2 098 061
+ *   bytes**, and 916 with the bound. Nothing in the type system connects the
+ *   three, so the guard against a fourth path is the label census in
+ *   `scripts/daemoncheck.after-the-turn-and-config.ts` rather than this list.
+ *
+ * ⚠ **Bounding those two session ids at ingest was considered and refused**, and
+ * the reason is this repository's own rule about which agent-minted ids may be
+ * clipped. `messageId` and `toolCallId` are clipped precisely because they never
+ * leave this fleet; an async task id and a permission's `optionId` are *refused*
+ * rather than clipped because they round-trip to the agent, where a clipped one
+ * names nothing. An agent session id is the extreme case of the second kind — it
+ * is `AcpClient`'s routing key and rides every `session/prompt`,
+ * `session/cancel` and `session/close` — so clipping it addresses a conversation
+ * that does not exist, and refusing an over-long one at `session/new` turns a
+ * large event into a session that cannot start. Clipping only the *copy on the
+ * event* was refused too: `ContextClearedEvent` exists to answer why a
+ * transcript and an agent disagree about what was said, and a halved id answers
+ * that wrongly rather than briefly — `truncateEvent`'s own arm says a clipped id
+ * names nothing. The door with no round-trip argument against it is
+ * `plan.entries`, so that is the one to bound first if this is ever closed.
+ *
+ * What is left open is therefore narrower than what was fixed, and that is the
+ * whole argument for recording it rather than closing it: reaching this ceiling
+ * now needs a session id or a plan hundreds of kilobytes wide, which is a
+ * different shape of agent from the ~1 MiB *question* measured above, where the
+ * oversized field was prose an agent writes on purpose.
+ *
+ * ⚠ **Nothing holds this constant and `src/server.ts`'s `BATCH_MAX_BYTES` to each
+ * other.** `packages/web` may not import `src/`, which is the same reason
+ * `RELAY_CHANNEL_PATH` exists as two literals — except that a drift here shows up
+ * as one large message refused rather than as a fleet that cannot connect, which
+ * is why the pair is a comment and not a driver.
+ *
+ * What *is* a driver, and is a different claim: `daemoncheck.after-the-turn-and-config`
+ * imports this constant and weighs every `truncateEvent` arm against it. That
+ * holds the **events** to this number. It still holds nothing to the 512 KiB one
+ * file over, so the halving in that pair is as unchecked as this paragraph has
+ * always said.
  */
 export const MAX_SOCKET_MESSAGE_BYTES = 1024 * 1024;
 

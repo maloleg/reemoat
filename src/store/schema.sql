@@ -551,20 +551,42 @@ CREATE TABLE IF NOT EXISTS agent_strip (
 -- the daemon would never start. The repair that has to precede it *retires a row*,
 -- which is destructive and must not run before the lock is claimed.
 --
--- Nothing *rotates* a key today, and `retired_at` was added ahead of that
--- deliberately rather than speculatively: the column costs nothing, and a
--- rotation that had to add it later would have to add it to a table a live daemon
--- is reading. It is not dead weight even so — `active()` filters on it,
--- `retire()` writes it, and `migrateMachineKeysToOneLive` uses it to take a
--- racer's row out of the answer without destroying the key in it. What a
--- rotation *would* mean is an overlap — announce the new key, keep answering on
--- the old until no app offers it — and nothing in this build can answer on two
--- statics at once: `scripts/daemon.ts` reads one key and hands the tunnel one
--- static. So the overlap is something a rotation **adds**, and it adds the
--- removal of that index along with it. Until then a second live row buys no
--- overlap and only poisons `active()`, whose `created_at DESC` would make every
--- later start announce a key the control plane never pinned — a 409 on every dial,
--- for ever.
+-- ⚠ **"Nothing *rotates* a key today" was true when this table was written and
+-- is not true now**, and everything this paragraph used to conclude rested on
+-- it. `retired_at` was added ahead of a rotation deliberately rather than
+-- speculatively — the column costs nothing, and a rotation that had to add it
+-- later would have to add it to a table a live daemon is reading — and the
+-- rotation that arrived is the case that argument was made for.
+--
+-- **Four things touch `retired_at`, not three.** `active()` filters on it,
+-- `retire()` and `migrateMachineKeysToOneLive` write a timestamp into it, and
+-- `promote()` in `sqlite.ts` — the dial's answer to a 409 — writes both halves:
+-- it retires every other live row and then writes `retired_at = NULL` back onto
+-- the candidate, which makes it the only writer in this tree that *un*-retires
+-- anything. That is what makes a retirement reversible by code rather than only
+-- by hand, and it is why a retirement keeps the row: `promote` needs the private
+-- half of a key that was taken out of the answer.
+--
+-- **What the rotation moved is which key is announced, not how many are live,
+-- and that distinction is why this index stays.** A rotation in the full sense
+-- would mean an *overlap* — announce the new key, keep answering on the old
+-- until no app offers it — and nothing in this build can answer on two statics
+-- at once: `scripts/daemon.ts` hands the tunnel one static, and the 409 arm
+-- swaps the public and private halves together rather than holding two pairs. So
+-- the overlap is still something a rotation would have to **add**, and it would
+-- still have to remove this index to get it.
+--
+-- ⚠ **"A 409 on every dial, for ever" is no longer what a second live row costs,
+-- and that sentence was the whole justification written here.** The rotation
+-- recovers from exactly that state — it is what it exists for — so the index can
+-- no longer be argued for as the only thing standing between a file and a
+-- permanently dark machine. What a second live row still costs is smaller and is
+-- real: `active()` orders `created_at DESC`, so it answers the *later* key, which
+-- is the one trust-on-first-use never pinned; every start then announces a key
+-- the control plane will refuse, and the machine is reachable only after a 409
+-- and a redial that promotes the row which should have been live all along. A
+-- recoverable wrong answer is still a wrong answer, and this index is what stops
+-- the state being created instead of cleaned up after.
 --
 -- A new table, so `SCHEMA_VERSION` does not move: this file is
 -- `CREATE … IF NOT EXISTS` and is re-applied on every open. The index does not

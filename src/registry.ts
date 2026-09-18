@@ -1159,7 +1159,20 @@ export interface PendingPermissionSnapshot {
 export interface PendingElicitationSnapshot {
   elicitationId: string;
   toolCallId: string | null;
-  /** The agent's prompt. Always present — ACP requires it. Clipped at ingest. */
+  /**
+   * The agent's prompt. Always present — ACP requires it.
+   *
+   * ⚠ **Clipped at ingest, and for five releases it was not.** The old sentence
+   * here said "Clipped at ingest" after `MAX_ELICITATION_MESSAGE_CHARS` had been
+   * retired, leaving `MAX_ELICITATION_FORM_BYTES` — which weighs the *form*, of
+   * which this is not a field — holding nothing. A snapshot carrying one
+   * elicitation therefore had no bounded worst case at all, which is the residue
+   * `fitSnapshotFrame`'s ladder concedes it cannot cut past: its halving rung
+   * floors at one row, so one enormous question defeats every rung and the
+   * oversized control frame goes out anyway. The clip is back at 4096 code units,
+   * applied by `clipElicitationMessage` in `session.ts` — the one place that
+   * bounds this field and the event's copy of it together. See `src/server.ts`.
+   */
   message: string;
   fieldCount: number;
   raisedAt: number;
@@ -1434,6 +1447,55 @@ export interface SessionSnapshot {
    * back. See {@link SessionResumeState} for why absent means "waiting".
    */
   resume?: SessionResumeState;
+  /**
+   * What a socket frame had to leave out to fit under the wire ceiling.
+   *
+   * ⚠ **Absent everywhere but a reduced frame, and that is the whole contract.**
+   * `snapshot()` never sets it, so `GET /sessions` and `GET /sessions/:id` always
+   * carry a whole record and never this field; only `fitSnapshotFrame` in
+   * `src/server.ts` writes it, on the `hello`/`snapshot` frames its ladder had to
+   * cut. So **absent means whole**, which is also what an older daemon says by
+   * sending nothing — `compatibility.md` rule 2, degrading to exactly today's
+   * behaviour.
+   *
+   * Why it exists: past ~512 KiB of parked requests the frame became a *lossy
+   * projection* of the same declared type the HTTP route still served whole, with
+   * nothing on it saying so. `packages/web/src/store.ts` writes both into one
+   * `row.snapshot` — the four-second poll and `onSnapshot` — so the approval
+   * list, the `more` count and `PermissionCard`'s "Part of this request was too
+   * large to keep" banner flipped on every poll/frame alternation, and each flip
+   * re-armed an effect that fires `store.loadAll`. A client cannot tell the two
+   * apart from the arrays alone: a halved list is a well-formed list.
+   *
+   * Marking rather than degrading the route to match, because a route cut to the
+   * frame's shape loses data nothing can get back — the fuller record is one
+   * `GET /sessions/:id` away, and this field is what tells a client to go.
+   */
+  reduced?: SnapshotReduction;
+}
+
+/**
+ * How much of a snapshot a frame is actually carrying.
+ *
+ * The two counts are the **true** lengths of the record's own arrays — what the
+ * client would have received over HTTP — and never the lengths of the arrays on
+ * the frame beside them, which is what makes `reduced.pendingPermissions >
+ * pendingPermissions.length` the readable form of "rows were cut". Counts rather
+ * than a boolean because `waitingCount` is a number on screen: *3 more waiting*
+ * has to stay true across a poll and a frame, and a flag would only say that it
+ * is not.
+ *
+ * `blobs` is the other rung, and it is a boolean because there is nothing to
+ * count: every surviving permission's `rawInput` and `content` are replaced with
+ * `clampBlob(…, 0)` together. It is the difference between *the agent's own
+ * payload was over 8 KiB at ingest* and *this frame dropped it* — identical
+ * `{truncated, bytes}` shapes, opposite remedies, and only the second is
+ * recoverable by asking the route.
+ */
+export interface SnapshotReduction {
+  pendingPermissions: number;
+  pendingElicitations: number;
+  blobs: boolean;
 }
 
 export type DecisionWord = "allow" | "allow_always" | "reject" | "reject_always";
@@ -3090,8 +3152,10 @@ export class ManagedSession {
        * names `/private/tmp/claude-<uid>/…/tasks/<id>.output`, outside the
        * workspace, which `files-paths-git.md` containment refuses to read, so
        * there is no detail view to build and the panel's own footer says so
-       * instead. It is kept in this daemon's state, sent whole on the socket and
-       * on `GET /sessions/:id`, and dropped only where sixty copies of it ride one
+       * instead. It is kept in this daemon's state, sent whole on `GET
+       * /sessions/:id` and on any socket frame that fits — `fitSnapshotFrame`'s
+       * first rung nulls it too on one it has to reduce — and dropped wherever
+       * sixty copies of it ride one
        * poll. `null` rather than absent, because the field is declared on both
        * sides of the wire and an absence would be a third state to read.
        */

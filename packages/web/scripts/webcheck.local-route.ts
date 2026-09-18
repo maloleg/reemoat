@@ -508,7 +508,8 @@ async function connect(id: string, channels: never = fetchChannel) {
    * ⚠ **What it is not is the browser's real state.** An earlier spelling of this
    * paragraph said a browser reaches `no_device_key` permanently, and that is
    * false in two independent places. `POST /v1/tokens` guards the refusal on
-   * `caller.deviceId !== null` (`packages/control-plane/src/app.ts:4644`), and a
+   * `caller.deviceId !== null` (in `packages/control-plane/src/app.ts`, cited by
+   * symbol rather than by line for the reason `machine.ts` gives), and a
    * browser sign-in sends no device at all (`cp.ts`'s `describeDevice()` answers
    * null off `inNativeShell()`), so the Authority mints an **unbound** capability
    * rather than refusing. And even if it did refuse, a browser never gets that

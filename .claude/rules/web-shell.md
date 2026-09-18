@@ -7,7 +7,8 @@ paths:
   - packages/web/src/ui/Header.tsx
   - packages/web/src/ui/Sheet.tsx
   - packages/web/src/ui/ErrorBoundary.tsx
-  - packages/web/src/ui/ProfileMenu.tsx
+  - packages/web/src/ui/MenuDrawer.tsx
+  - packages/web/src/ui/MachineColumn.tsx
   - packages/web/src/ui/Toast.tsx
   - packages/web/src/ui/NewSession.tsx
   - packages/web/src/ui/groups.ts
@@ -67,9 +68,12 @@ bundle, two shells**: `packages/native` is a Tauri window around this same
 copy and no branch at a call site. `native-shell.md` is that area, and Q3.605 is
 why "no Electron" is narrowed rather than reversed.
 It is **adaptive**: below `lg` one screen at a time, list → detail; at `lg` and
-above the list becomes a permanent left rail. `AppShell` is the only place that
-knows, and it knows **in CSS** — no breakpoint state in JavaScript, so a resized
-window cannot render a rail that is not there.
+above the rail becomes permanent and is **two columns** — `MachineColumn`, 72px of
+machines, then the session list. `AppShell` is the only place that knows, and it
+knows **in CSS** — no breakpoint state in JavaScript, so a resized window cannot
+render a rail that is not there. Both columns are inside one `<aside>` on one
+`--rail-w`, which is what keeps `RailHandle` anchored on that property rather than
+on a `calc` of two lengths in two units.
 
 It is shaped around one question asked from a phone: **does anything anywhere need
 me** — and the answer travels *with the rows* rather than living in a mode you
@@ -122,8 +126,17 @@ have to enter. These are the rules a change here must not break:
   and the reversible approval on the ask card; anything else wearing it becomes the
   loudest object on screen. `raised` means **state**: a tab you are on, a toggle
   that is on, a chosen menu row. Q3.209.
-- **The magnifier in the rail header is the fleet-wide search, not built, drawn
-  `disabled`.** The box below it filters *this machine's* chats by title. Q3.211.
+- **One search control, and it is the live one.** The header is a single row —
+  menu, field, filter, bell — so the *disabled* fleet-wide magnifier is gone:
+  forty pixels from a box you can type in it was the conflation Q3.211 drew it
+  apart to prevent, not the distinction. Fleet-wide search, when built, is a
+  **scope** of this box under the `All` entry rather than a second control.
+  Reverses Q3.211.
+- **The menu is a left drawer and the only thing in this app that is not a
+  route.** `MenuDrawer`, portaled, `useDismissible("sheet")` — never `"menu"`,
+  which would leave `j`/`k` walking the list behind it. Two triggers, one panel,
+  state in `App`; the `usePathname()` effect is what makes Android's Back close
+  it, at the cost of Back doing two things.
 - **`border-r` on the rail: the rule is the ratio**, measured in Q3.210.
 - **`visibleRows` in `groups.ts` is the single source of render order**, shared
   with `keyboard.ts` so `j` cannot land on a row nobody can see. The order is
@@ -180,12 +193,9 @@ have to enter. These are the rules a change here must not break:
   anywhere in this app, and the icon beside the search box is a live `Dropdown` on
   `setFilter`. Revert it to a placeholder and `groups.ts`'s initialiser and
   `webcheck`'s assertion go back to `"all"` in the same commit. Q3.212.
-- **`upFrom` answers where up goes, and `null` at the root.** It is one rule
-  rather than a `switch` per screen because a host webview drew a *second* leading
-  control over ours and two that disagree is worse than one. That host was the
-  Telegram mini app and it is **gone** (Q1.649), rule file and all; the shape is
-  what outlived it — one pure function, read in `App` for `LegalScreen` and for a
-  sheet's ◀, so the two cannot drift. Q3.443.
+- **`upFrom` answers where up goes, and `null` at the root.** One pure function
+  rather than a `switch` per screen — read in `App` for `LegalScreen` and for a
+  sheet's ◀, so the two cannot drift. Q3.443, Q1.649.
 - **There is no back button.** Every leading control goes to a fixed destination
   from the URL, never a history — `useUnder` for a ✕, `upFrom` for a ◀ — which is
   why one may be *drawn* as `ChevronLeft` without being one. None may become
@@ -382,11 +392,12 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the **seven** sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
 | `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs`, `waitingFloor`, and `visibleRows`, still the **single** source of render order, deduplicated by key |
 | `packages/web/src/ui/overlay.ts` | Who owns Escape, and what paints above what. A LIFO stack of dismissible layers, one capture-phase listener installed lazily inside `push()`, the `inert` refcount on `#root`, and `LAYER` — the z-order as full class strings, in one table a driver can assert. Also the **two** bare-key predicates |
-| `packages/web/src/ui/rail.ts` | How wide the rail is: the bounds, `clampRailWidth` — the one place a width is bounded, four ways in — and module state seeded from `localStorage`. Holds **no DOM**, so `webcheck` can import it. `AppShell`, the impure shell, writes `--rail-w`; the width travels as that property and must not become a React prop, which would snap back to the start of the drag on every poll |
+| `packages/web/src/ui/rail.ts` | How wide the rail is: `MACHINE_COLUMN_PX` plus the list's own three numbers, and `clampRailWidth` — the one place a width is bounded, four ways in, and the whole of the migration for a width stored before the column existed. Holds **no DOM**, so `webcheck` can import it. `AppShell`, the impure shell, writes `--rail-w`; the width travels as that property and must not become a React prop, which would snap back to the start of the drag on every poll |
 | `packages/web/src/ui/Sheet.tsx` | Route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone, a centred card above `sm`. **One element serves every route-backed pop-up**, owned by `OverlaySheet`, so two cross-dissolve rather than one unmounting and the next replaying `animate-sheet` (Q3.484); `sheetTitle`/`sheetUpLabel` decide its head; only a railless pop-up gets a ◀ there (Q3.432, Q3.473). `footer` suits one screen; with several each draws its bar inside `SHEET_BODY` via `SHEET_SCREEN`, or `sheet-body` morphs mid-slide (Q3.472). Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` a **definite** height, never a `max-h` it can shrink under; `SHEET_BODY` a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |
-| `packages/web/src/ui/ProfileMenu.tsx` | Who you are signed in as, and the two things you can do about it. The sidebar's footer, and the only copy of the name in the chrome |
-| `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: the scroll is inside `SessionBrowser` so the account row can sit at the bottom and its popover can open upward without being clipped |
-| `packages/web/src/ui/SessionBrowser.tsx` | The whole left column: logo, machine tabs, the waiting floor, the chat search, Pinned above the selected machine's folders, orphans, the footer. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
+| `packages/web/src/ui/MenuDrawer.tsx` | Who you are, where you can go, and what build this is. Its foot draws the **build** and not the wordmark — the visible mark left the chrome entirely, and `webcheck` pins `<Mark` absent here — plus the rule for what a row here must be |
+| `packages/web/src/ui/MachineColumn.tsx` | The machines as folders at `lg`. Same `machineTabs`/`allTab`, other axis — and what a horizontal strip carries that a column may not |
+| `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: its two columns each own their scroller, so the New session button sits at the bottom of one of them |
+| `packages/web/src/ui/SessionBrowser.tsx` | The list column: one header row (menu · search · filter · bell, the `<h1>` `sr-only`), the waiting floor, the machine tabs **below `lg` only**, Pinned above the selected machine's folders, orphans, and a footer that is one button. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
 | `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, what a ◀ goes to). Its own module because `router.ts` reads `window.location` in its module body |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — used from the header and every list row, plus `RenameField` |
 | `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the supervisor's ring for the daemon *this app started on this computer*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |

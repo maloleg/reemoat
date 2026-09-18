@@ -35,7 +35,7 @@ import {
 import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
 import { createApp } from "../src/server.js";
 import { localStaticKey } from "@reemoat/protocol";
-import { ensureMachineKey } from "../src/machinekey.js";
+import { ensureMachineKey, machineKeyRotation } from "../src/machinekey.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
 import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
@@ -1092,14 +1092,42 @@ function startRelayTunnel(local: { host: string; port: number }): void {
     // the report names the build a launch would get; the daily update above
     // clears that cache but does not redial — see `AGENT_CLIS_HEADER`.
     agentClis: () => announcedAgentClis(runtime),
-    // The static an app authenticates this machine by. Read once here rather than
-    // per dial: unlike the CLI inventory beside it, this does not move under a
-    // running daemon. See `ensureMachineKey`.
+    // The static an app authenticates this machine by, as this daemon booted
+    // holding it.
+    //
+    // ⚠ **"Read once here rather than per dial: unlike the CLI inventory beside
+    // it, this does not move under a running daemon" is what this said, and the
+    // `rotateMachineKey` block below falsified the second half of it.** A 409
+    // makes the tunnel announce a *different* key on its next dial, so the
+    // announced key does move under a running daemon — this value is only the
+    // first one, and the tunnel stops reading it after that.
+    //
+    // What survives is the reason it is a value rather than a function like
+    // `agentClis`: nothing ever asks this daemon to re-read a key, because there
+    // is no second answer to read. The replacement is *handed* to the tunnel by
+    // the rotation instead, which is a different mechanism from re-reading and is
+    // why the two options beside each other are shaped differently. See
+    // `ensureMachineKey`, and the `rotateMachineKey` block below, which has said
+    // this from the other side since the rotation landed.
     machineKey: machineKey.publicKey,
     // The private half, for terminating an encrypted stream. It never leaves this
     // process — the relay carries ciphertext it cannot read, and this is the only
     // thing that can open it.
     staticKey: localStaticKey(new Uint8Array(Buffer.from(machineKey.privateKey, "base64url"))),
+    // What to announce if the control plane says the pair above is not what it
+    // pinned. On a machine holding one key this answers `null` on its first call
+    // and changes nothing; on one that lost the two-daemon startup race it is how
+    // the guess `migrateMachineKeysToOneLive` had to make stops being final. See
+    // `machineKeyRotation`.
+    //
+    // ⚠ This is the one thing that makes `machineKey` above stale, so the
+    // ordering `buildVerifier` already has is load-bearing now: enrollment runs
+    // and finishes before the listener exists, and this runs from inside the
+    // listening callback. Move an `enroll()` after the dial and it would post the
+    // key this daemon booted on rather than the one it is announcing, pinning the
+    // wrong half of the pair with `setMachineKey`, which compares nothing.
+
+    rotateMachineKey: machineKeyRotation(stores.machineKeys, machineKey),
     // Every relayed request is checked here, against the key the handshake
     // authenticated, exactly as it is checked at the HTTP gate.
     verifier,

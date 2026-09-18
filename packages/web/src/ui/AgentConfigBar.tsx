@@ -457,7 +457,10 @@ export function AgentConfigBar({
   );
   // Above the early return because the registration below reads it, and a hook
   // cannot sit under one. Pure, and the same call it was two lines lower.
-  const slots = splitOptions(options);
+  // The unavailable set travels with the options, so a `mode` chip routed to
+  // `Absent` stops counting as a host and its nested control is demoted to `…`
+  // rather than drawn nowhere. See `splitOptions`.
+  const slots = splitOptions(options, unavailable);
 
   /*
    * The `…` panel is a layer like every other menu, and registering it fixes two

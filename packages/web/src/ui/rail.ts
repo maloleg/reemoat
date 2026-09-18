@@ -40,8 +40,25 @@ const STORAGE_KEY = "reemoat.railWidth";
  * read; past ~480px the list is mostly whitespace and the conversation is paying
  * for it.
  *
- * `RAIL_DEFAULT` is 312px — the width this shipped at, so an install that never
- * touches the handle is pixel-identical to the one before it. Written in px and
+ * ⚠ **All three are written as arithmetic now, because the rail is two columns.**
+ * `MACHINE_COLUMN_PX` is the machine folders on the left; every bound above is that
+ * plus the number it used to be, so the three sentences either side of this one are
+ * unchanged claims **about the list** rather than about the rail. `webcheck` asserts
+ * the subtraction — `RAIL_MIN - MACHINE_COLUMN_PX === 240` and its two siblings —
+ * which pins the same three numbers the old literals did and additionally pins that
+ * the column was added exactly once to each.
+ *
+ * It is also the whole migration. A `reemoat.railWidth` written before the column
+ * existed meant *the list*, and nothing can tell such a value from one written after
+ * — but every path reads it through `clampRailWidth`, so anything under the new
+ * floor comes up to it and anything above keeps the total width it had, with the
+ * list 72px narrower than the reader left it. A rail that is a little tight is a
+ * drag away from right; a storage key bumped to avoid that would have thrown the
+ * preference away instead, for everybody, to fix it for nobody.
+ *
+ * `RAIL_DEFAULT` is the column plus 312px — the width the *list* shipped at, so an
+ * install that never touches the handle draws the same list it always did with the
+ * folders added beside it. Written in px and
  * **not** as the `19.5rem` it replaced: `index.css` declares the same number and
  * `AppShell` writes px, and the two spellings agreeing only at a 16px root font is
  * a defect that file now records at length.
@@ -54,9 +71,10 @@ const STORAGE_KEY = "reemoat.railWidth";
  * always drag away from — but it is the first thing to revisit if the rail is ever
  * reported as too tight, rather than moving the number for everybody.
  */
-export const RAIL_MIN = 240;
-export const RAIL_MAX = 480;
-export const RAIL_DEFAULT = 312;
+export const MACHINE_COLUMN_PX = 72;
+export const RAIL_MIN = MACHINE_COLUMN_PX + 240;
+export const RAIL_MAX = MACHINE_COLUMN_PX + 480;
+export const RAIL_DEFAULT = MACHINE_COLUMN_PX + 312;
 
 /**
  * The one place a width is bounded, and every path goes through it.

@@ -26,7 +26,7 @@ export type { NavMove, StoredEvent, SystemInfo };
 
 // Dynamic, so the stub above is in place before any module body runs.
 export const { SessionStream } = await import("../src/stream.js");
-export const { askedQuestion, permissionLayout, essentialContext, formatLocation, hasInput, optionLabel, permissionButtons, permissionContext, permissionHeadline, planControls, detailContext, readInput, withheldDetail } = await import(
+export const { askedQuestion, permissionLayout, essentialContext, formatLocation, hasInput, optionLabel, permissionButtons, permissionContext, permissionHeadline, planControls, detailContext, readInput, truncationNotice, withheldDetail } = await import(
   "../src/permission.js"
 );
 export const { changeCounts, diffLines } = await import("../src/diff.js");
@@ -49,6 +49,7 @@ export const {
   reattachSince,
   sessionGroups,
   sessionLists,
+  unreduceSnapshot,
 } = await import("../src/store.js");
 export const {
   currentView,
@@ -69,6 +70,7 @@ export const {
   visibleRows,
   waitingFloor,
 } = await import("../src/ui/groups.js");
+export const { expandConfig, prune, reduceConfig } = await import("../src/configMemory.js");
 export const { RANK_STEP, canReorder, compareRows, effectiveRank, orderSessions, rankBetween, resolveDrop } = await import(
   "../src/sessionOrder.js"
 );

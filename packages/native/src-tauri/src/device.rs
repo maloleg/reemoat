@@ -103,7 +103,10 @@ fn store_secret(
         && credential::read_device_key(origin).as_deref() == Some(encoded.as_str())
     {
         // Give up any earlier fallback: two copies of one secret is two places to
-        // get wrong, and the keyring is the one that will now be read.
+        // get wrong, and the keyring is the one that will now be read. ⚠ This is a
+        // **promotion** and not a key given up, which is why it is the statement
+        // that rewrites `server.json` alone — `reset_key` takes the second route,
+        // `config::give_up_device_key`, and only that one reaches the quarantine.
         let _ = config::erase_device_key_fallback(dir, origin);
         return Ok(AT_REST_KEYRING);
     }
@@ -138,9 +141,20 @@ pub fn ensure_key(dir: &Path, origin: &str) -> Result<DeviceKey, String> {
 /// origin, never a sweep** — `credential.rs`'s refusal to grow a `list` is what
 /// stops this becoming an enumeration, and one server at a time is also the only
 /// shape that matches what a person is looking at when they ask for it.
+///
+/// ⚠ **That rule reaches a third place now, and for one release it did not hold
+/// there.** This gives up three copies, not two: the keyring's, `server.json`'s,
+/// and — through `config::give_up_device_key` — a quarantined
+/// `server.json.unreadable`, which on a keyring-less host may be the last
+/// *hand-recoverable* copy of a device private key. That third removal was the
+/// whole file, so Re-keying server A could destroy the only remaining copy of
+/// server B's key: per origin at this end, a sweep at the other. It now reads the
+/// quarantined bytes and refuses to remove a file naming any server but this one;
+/// `config.rs`'s `discard_quarantine` carries the measurement and the argument for
+/// both halves.
 pub fn reset_key(dir: &Path, origin: &str) -> Result<DeviceKey, String> {
     let _ = credential::erase_device_key(origin);
-    let _ = config::erase_device_key_fallback(dir, origin);
+    let _ = config::give_up_device_key(dir, origin);
     ensure_key(dir, origin)
 }
 

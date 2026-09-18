@@ -13,6 +13,7 @@ import {
   permissionLayout,
   planControls,
   detailContext,
+  truncationNotice,
   withheldDetail,
 } from "../permission";
 import { elapsedSince, store } from "../store";
@@ -95,9 +96,38 @@ export function PermissionCard({
    * the store from a component the shell does not hand it to.
    */
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  /*
+   * This session's row, read here rather than beside the one number it used to
+   * serve: the effect and the banner below want it too. `waited`'s own argument
+   * for subscribing is unchanged and is written at its call site.
+   */
+  const row = state.rowsByKey.get(sessionKey);
   // Memoised: this walks the held transcript to find the tool call behind the
   // request, and it was re-running on every streamed event.
   const context = useMemo(() => permissionContext(pending, events), [pending, events]);
+
+  /*
+   * **Whether a clipped payload here is permanent or merely not fetched yet**, and
+   * it is the difference between two sentences rather than a detail.
+   *
+   * A `{truncated, bytes}` stand-in reaches this card for one of two reasons. The
+   * daemon clamps every permission payload at 8 KiB on ingest
+   * (`MAX_PERMISSION_BLOB_BYTES`), and that copy is what `GET /sessions/:id`
+   * serves too — nothing will ever have more of it, which is what *"too large to
+   * keep"* says. Or `fitSnapshotFrame`'s ladder emptied it to fit a socket frame
+   * under 512 KiB, in which case the record still has it whole and the next poll
+   * brings it back. The two stand-ins are byte-identical, so the card cannot tell
+   * them apart from `pending` alone.
+   *
+   * `store.unreduceSnapshot` is what can: it puts a held payload back over a
+   * frame's stand-in and leaves `reduced.blobs` true only where this client has
+   * never held the row off the record. So `true` here means *the machine has more
+   * of this than we do*, and it is false again within one `POLL_INTERVAL_MS`.
+   *
+   * ⚠ **It is a property of the snapshot rather than of this request** — the
+   * argument for reading it per card anyway is at `unreduceSnapshot`.
+   */
+  const awaitingRecord = row?.snapshot.reduced?.blobs === true;
 
   /**
    * Answer, or — with no option — cancel.
@@ -212,6 +242,25 @@ export function PermissionCard({
    * and `permissionContext` now prefers that copy over the stand-in, so this
    * self-terminates: the moment the join lands, `truncated` goes false.
    */
+  /*
+   * ⚠ **This fired twice a poll interval on a session past the frame ceiling, and
+   * the repair is not here.** `store.onSnapshot` wrote a socket frame's reduced
+   * snapshot straight over the poll's fuller one, so `context.truncated` — a
+   * dependency of this effect — alternated on every swap and re-armed a full
+   * transcript load each time, on the one session already large enough to have
+   * overflowed the frame. `store.unreduceSnapshot` is what stops the alternation:
+   * a frame carrying `reduced` may no longer take a payload away. Nothing here
+   * had to change for that, which is why it is written down — an effect whose
+   * deps are booleans is only as stable as what computes them.
+   *
+   * It stays armed for **both** origins of a stand-in. Even one the frame's
+   * ladder emptied is worth a look in the log: the per-event cap is 128 KiB
+   * against the snapshot's 8 KiB, so the conversation is where the payload most
+   * often is, and `permissionContext` prefers that copy the moment it lands.
+   * `awaitingRecord` is deliberately **not** a dependency — it decides a sentence,
+   * not whether there is anything to fetch, and adding it would put this effect
+   * back on a flipping boolean for no load at all.
+   */
   useEffect(() => {
     if (!context.unavailable && !context.truncated) return;
     void store.loadAll(sessionRef);
@@ -302,7 +351,6 @@ export function PermissionCard({
    * `null` when the row has not landed, which a cold open onto a session URL
    * genuinely is: no number is better than one measured against nothing.
    */
-  const row = state.rowsByKey.get(sessionKey);
   const waited = row === undefined ? null : shortDuration(elapsedSince(row, pending.raisedAt));
 
   return (
@@ -363,10 +411,10 @@ export function PermissionCard({
        */
       context={
         asked !== null ? (
-          <Context context={{ ...essentialContext(context), rawInput: null }} />
+          <Context context={{ ...essentialContext(context), rawInput: null }} awaitingRecord={awaitingRecord} />
         ) : (
           <>
-            <Context context={essentialContext(context)} />
+            <Context context={essentialContext(context)} awaitingRecord={awaitingRecord} />
 
             {/*
              * **Drawn only when something is withheld, above what it reveals, and
@@ -398,7 +446,7 @@ export function PermissionCard({
 
             {expanded && withheldDetail(context) && (
               <div className="mt-2">
-                <Context context={detailContext(context)} />
+                <Context context={detailContext(context)} awaitingRecord={awaitingRecord} />
               </div>
             )}
           </>
@@ -453,7 +501,18 @@ export function PermissionCard({
   );
 }
 
-function Context({ context }: { context: ReturnType<typeof permissionContext> }): ReactNode {
+function Context({
+  context,
+  awaitingRecord,
+}: {
+  context: ReturnType<typeof permissionContext>;
+  /**
+   * Whether the payload this card is missing is still on the machine — see
+   * {@link truncationNotice}, which is where the two sentences live and the only
+   * thing this prop decides.
+   */
+  awaitingRecord: boolean;
+}): ReactNode {
   if (context.unavailable) {
     return (
       <p className="rounded-md bg-raised px-2.5 py-2 text-xs text-muted">
@@ -503,9 +562,16 @@ function Context({ context }: { context: ReturnType<typeof permissionContext> })
         Losing the arguments box is the cost of being over the cap; losing the
         command as well was a bug.
       */}
-      {context.truncated && (
+      {/*
+        ⚠ **And the sentence is chosen rather than fixed.** It said "too large to
+        keep" for both of the two things a stand-in can mean, and one of them is a
+        payload the record still holds whole — the daemon's frame ladder emptied
+        it to fit 512 KiB, and the poll puts it back. `truncationNotice` is the
+        partition and carries the argument.
+      */}
+      {truncationNotice(context, awaitingRecord) !== null && (
         <p className="rounded-md bg-raised px-2.5 py-2 text-xs text-muted">
-          Part of this request was too large to keep and is not shown below.
+          {truncationNotice(context, awaitingRecord)}
         </p>
       )}
 

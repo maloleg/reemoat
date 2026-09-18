@@ -25,6 +25,8 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-18
+
 ### Changed
 
 - **Traffic to a remote daemon is end-to-end encrypted, and there is no other
@@ -44,6 +46,26 @@ it — so a citation here would be the one kind nothing checks.
   naming what to do. Its machine draws as offline until `deploy/deploy.sh` runs on
   that host. No range can span "plaintext HTTP" and "ciphertext", which is what the
   version range normally exists to avoid.
+- **The shell is the shape of a chat client now, on both axes.** Below `lg` the
+  machines are a horizontal strip of underline tabs above the session list; at `lg`
+  and wider they are a 72px column of folders down the left, drawn from the same
+  `machineTabs`/`allTab` source and carrying none of the strip's three cues. The
+  rail is the two of them on one `--rail-w`, draggable, bounded in one place.
+- **`ProfileMenu` is gone and a menu drawer replaces it.** Who you are, where you
+  can go and what build you are running, in a panel that **covers** the app rather
+  than docking beside it — registered as a sheet, so `j`/`k` cannot walk the list
+  behind it. The visible wordmark left the chrome with it: the drawer's foot draws
+  the build, and the `<h1>` on the list column stays `sr-only` for the heading
+  order `Header.tsx` rests on. The build string is read from `packages/web`'s own
+  manifest at build time rather than written down an eighth time.
+- **The agent's controls survive a reload.** The daemon deliberately restores no
+  `agentConfig` from disk and empties it while an agent is away, so `F5` used to
+  cost you a strip of three dashes on a session whose model and effort were on
+  screen a second earlier. This tab now remembers the last set a *running* agent
+  published — the selected choice only, 120 sessions, bounded on write — and draws
+  it dimmed and untappable. ⚠ **It does not put the settings back on the agent**: a
+  restart still comes back on the agent's own defaults, and nothing read back from
+  the memory is ever sent. It is cleared on sign-out, both ways out.
 
 ### Removed
 
@@ -1714,7 +1736,9 @@ holds them in full, with what would settle each.
 - Three agent-login questions on macOS are written but unmeasured, all settled by
   one real device-code login.
 
-[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/rends-east/reemoat/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/rends-east/reemoat/releases/tag/v0.9.1
+[0.9.0]: https://github.com/rends-east/reemoat/releases/tag/v0.9.0
 [0.8.0]: https://github.com/rends-east/reemoat/releases/tag/v0.8.0
 [0.2.0]: https://github.com/rends-east/reemoat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rends-east/reemoat/releases/tag/v0.1.0

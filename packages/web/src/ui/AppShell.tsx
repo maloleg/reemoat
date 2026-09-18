@@ -7,6 +7,7 @@ import type { Route } from "../router";
 import type { AppState } from "../store";
 import { CommandLine } from "./CommandLine";
 import { MachineOffer } from "./MachineOffer";
+import { MachineColumn } from "./MachineColumn";
 import { SessionBrowser } from "./SessionBrowser";
 import { useKeyboard } from "./keyboard";
 import { LAYER } from "./overlay";
@@ -34,10 +35,13 @@ import { RAIL_DEFAULT, RAIL_MAX, RAIL_MIN, clampRailWidth, railWidth, setRailWid
 export function AppShell({
   state,
   route,
+  onMenu,
   children,
 }: {
   state: AppState;
   route: Route;
+  /** Opens the menu drawer. Held in `App`, because two triggers share one panel. */
+  onMenu: () => void;
   children: ReactNode;
 }): ReactNode {
   const activeKey = route.name === "session" ? keyOf(route.ref) : null;
@@ -124,14 +128,23 @@ export function AppShell({
       {/*
        * **`overflow-hidden`, with the scroll moved inside `SessionBrowser`.**
        *
-       * Three things needed that. The account row has to sit at the bottom of the
-       * column rather than at the bottom of a scrolling list. The profile popover
-       * opens *upward* out of that row, and an `absolute` panel inside an
-       * `overflow-y-auto` ancestor is a panel with its top half clipped away — the
-       * alternative being to portal it and measure the viewport, which this app
-       * does not do. And the footer stops being a `sticky` strip with a
-       * `backdrop-blur`, which was blurring content that no longer passes under it
-       * while costing a stacking context.
+       * Three things needed that, and the middle one has since been replaced by a
+       * fourth. The New session button has to sit at the bottom of the column
+       * rather than at the bottom of a scrolling list. The footer stops being a
+       * `sticky` strip with a `backdrop-blur`, which was blurring content that no
+       * longer passes under it while costing a stacking context. ⚠ And the two
+       * children of this element scroll *independently* — the machine folders and
+       * the session list are each their own scrollport — which only works while
+       * nothing above them scrolls.
+       *
+       * ⚠ **The reason that is no longer here is the one to know about**, because
+       * it is why this rule reads as over-specified: the account row used to live
+       * in that footer and open a popover *upward* out of it, and an `absolute`
+       * panel inside an `overflow-y-auto` ancestor is a panel with its top half
+       * clipped away. That row is the menu drawer now, portaled to
+       * `document.body`, and could not be clipped by anything here. The clause is
+       * recorded rather than deleted because it is the one that would otherwise be
+       * re-discovered by somebody putting a popover back in the footer.
        *
        * **`border-r` is back, and it has now been argued in both directions with
        * the same sentence, which is why the number is written down.** It was
@@ -160,8 +173,27 @@ export function AppShell({
        * here knows what `lg` is; the width is a number, and CSS decides whether
        * there is anything to apply it to.
        */}
-      <aside className="hidden shrink-0 flex-col overflow-hidden border-r border-edge bg-ink lg:flex lg:w-[var(--rail-w)]">
-        <SessionBrowser state={state} activeKey={activeKey} />
+      {/*
+       * ⚠ **A row, not a column, and `--rail-w` measures both children.**
+       *
+       * The machines are the leading column — this app's folders — and the session
+       * list is beside them. Putting the folders *inside* this element rather than
+       * before it is what keeps `RailHandle` anchored on `left: var(--rail-w)`: the
+       * handle divides the rail from the conversation, and that join is this
+       * element's trailing edge whichever way its own children are arranged. The
+       * alternative, a sibling column before this one, forces the handle onto a
+       * `calc` of two lengths — and the second of them would be written once in
+       * `rail.ts` in device pixels and once in a class string, which is exactly the
+       * `19.5rem`/`312` defect `index.css` records at the top of the file.
+       *
+       * `MachineColumn` is fixed at 72px and `SessionBrowser` takes the rest, so a
+       * drag moves the list alone. `rail.ts`'s bounds are stated as
+       * `MACHINE_COLUMN_PX` plus the old numbers for that reason: the floor is still
+       * "240px of session row", now measured where the rows actually are.
+       */}
+      <aside className="hidden shrink-0 overflow-hidden border-r border-edge bg-ink lg:flex lg:w-[var(--rail-w)]">
+        <MachineColumn state={state} onMenu={onMenu} />
+        <SessionBrowser state={state} activeKey={activeKey} onMenu={onMenu} />
       </aside>
 
       {/*
@@ -291,9 +323,10 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
  * inserted 8px of nothing between the rail and the conversation and pushed that
  * line off the join.
  *
- * It sits *outside* the `<aside>` because that element is `overflow-hidden` — so
- * the account row's popover can open upward without a scrolling ancestor clipping
- * it — and anything hanging past its right edge would be clipped by the same rule.
+ * It sits *outside* the `<aside>` because that element is `overflow-hidden` — which
+ * is what lets the machine folders and the session list inside it scroll
+ * independently — and anything hanging past its right edge would be clipped by the
+ * same rule.
  *
  * **After `<main>` in the DOM, and at `LAYER.header`, which together are one fix
  * rather than two choices.** The first draft was a zero-width flex child sitting

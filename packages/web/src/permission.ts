@@ -1275,6 +1275,52 @@ export function detailContext(context: PermissionContext): PermissionContext {
 }
 
 
+/**
+ * The one sentence a card draws about a payload it does not have — or `null`,
+ * which is every request that is intact and is most of them.
+ *
+ * ⚠ **Two sentences where there was one, and the pair is the point.** A
+ * `{truncated, bytes}` stand-in reaches a card for one of two reasons and they
+ * are byte-identical, so nothing on the request itself separates them:
+ *
+ *  - The daemon's **ingest clamp**. Every permission payload is bounded at 8 KiB
+ *    (`MAX_PERMISSION_BLOB_BYTES`) on its way onto the record, so
+ *    `GET /sessions/:id` has exactly this much of it and nothing anywhere has
+ *    more. That is what *"too large to keep"* claims, and for this case it is
+ *    true.
+ *  - The **socket frame's** size ladder. `fitSnapshotFrame` empties every
+ *    surviving permission's `rawInput` and `content` to bring a `hello` under
+ *    512 KiB; the record is untouched and the next poll carries it whole. Here
+ *    *"too large to keep"* is a claim of permanence about something that is four
+ *    seconds away, which is precisely the wrong thing to tell somebody deciding
+ *    whether to approve.
+ *
+ * `awaitingRecord` is `store.unreduceSnapshot`'s answer to which it is, and it is
+ * a **reconstruction rather than a fact off the wire**: nothing on a reduced
+ * frame distinguishes the two stand-ins, so the merge answers from whether this
+ * client holds a whole-record copy of the row, and `blobs` survives true where it
+ * does not. ⚠ **So the permanent sentence waits for a record copy.** An
+ * *ingest-clamped* request raised since the last poll takes the recoverable
+ * sentence until that poll lands — chosen deliberately, because claiming
+ * permanence about a payload four seconds away is the failure this pair exists to
+ * end, and the reverse mistake is unrecoverable on screen. Reading it is the
+ * caller's job because only a component holds the session row; choosing the words
+ * is this function's, so the two sentences sit beside each other where they can be
+ * compared and `webcheck` can assert that they differ.
+ *
+ * ⚠ **Not gated on the caller having already fetched the log.** By the time
+ * `context.truncated` is true the join in {@link permissionContext} has already
+ * looked and failed — the log's own copy is under the 128 KiB per-event cap and
+ * would have won — so both sentences describe a payload that is genuinely not in
+ * this client's hands.
+ */
+export function truncationNotice(context: PermissionContext, awaitingRecord: boolean): string | null {
+  if (!context.truncated) return null;
+  return awaitingRecord
+    ? "Part of this request is too large for the live connection and has not been fetched yet."
+    : "Part of this request was too large to keep and is not shown below.";
+}
+
 export function isTruncationMarker(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;

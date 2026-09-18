@@ -1,4 +1,15 @@
-import { Bell, Check, ChevronRight, Folder as FolderIcon, Layers, ListFilter, Pin, Plus, Search } from "lucide-react";
+import {
+  Bell,
+  Check,
+  ChevronRight,
+  Folder as FolderIcon,
+  Layers,
+  ListFilter,
+  Menu as MenuIcon,
+  Pin,
+  Plus,
+  Search,
+} from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
 import { AGENT_HOST_OS, installCommand } from "../enrollment";
@@ -51,8 +62,6 @@ import {
 import { useRowDrag, type RowDrag } from "./rowDrag";
 import { CommandLine } from "./CommandLine";
 import { MachineOffer } from "./MachineOffer";
-import { Mark } from "./Mark";
-import { HelpButton, ProfileMenu } from "./ProfileMenu";
 import { RenameField, SessionMenu } from "./SessionMenu";
 
 /**
@@ -77,9 +86,12 @@ import { RenameField, SessionMenu } from "./SessionMenu";
 export function SessionBrowser({
   state,
   activeKey = null,
+  onMenu,
 }: {
   state: AppState;
   activeKey?: SessionKey | null;
+  /** Opens the menu drawer. Drawn only below `lg`; see `SidebarHeader`. */
+  onMenu: () => void;
 }): ReactNode {
   const groups = sessionGroups(state);
   // Dragging a row. It owns the scroller's ref, every row's pointer handlers and
@@ -149,8 +161,17 @@ export function SessionBrowser({
   const selectedOverLimit = !selectedOwnerDisabled && selected?.overLimit === true;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <SidebarHeader state={state} />
+    /*
+     * `min-w-0 flex-1` for the desktop mount, inert on the phone's.
+     *
+     * At `lg` this is the second child of a flex row — the machine folders are the
+     * first — so it has to be allowed both to take the remaining width and to be
+     * narrower than its own content, which is `<main>`'s `min-w-0` rule read one
+     * element over. Below `lg` the wrapper in `App.tsx` is an ordinary block and
+     * neither token does anything.
+     */
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <SidebarHeader state={state} machines={state.machines.length} needle={needle} onMenu={onMenu} />
 
       {/*
        * **First of everything, and that is the same rule as its own existence.**
@@ -166,15 +187,25 @@ export function SessionBrowser({
         <WaitingElsewhere rows={floor} state={state} activeKey={activeKey} />
       )}
 
+      {/*
+       * **Below `lg` only, because above it the machines are a column.**
+       *
+       * `MachineColumn` draws the same `machineTabs` and the same `allTab` on the
+       * vertical axis, inside `AppShell`'s aside; this strip keeps every word of
+       * its own comments because it is still a strip you drag sideways at the
+       * width it is drawn at. The breakpoint is this class string and the aside's,
+       * and nothing in JavaScript — which is `AppShell`'s standing rule.
+       */}
       {state.machines.length > 0 && (
-        <MachineTabs tabs={tabs} all={allTab(groups, view)} canAdd={mayAddMachine(state.me)} />
+        <div className="lg:hidden">
+          <MachineTabs tabs={tabs} all={allTab(groups, view)} canAdd={mayAddMachine(state.me)} />
+        </div>
       )}
 
       {state.cpError !== null && <ControlPlaneNotice />}
 
       {state.setup !== null && <SetupNotice setup={state.setup} />}
 
-      {state.machines.length > 0 && <ChatSearch value={needle} />}
 
 
       {/*
@@ -519,69 +550,74 @@ export function SessionBrowser({
         )}
       </div>
 
-      <SidebarFoot state={state} machine={view.machine} />
+      <SidebarFoot machine={view.machine} />
     </div>
   );
 }
 
 /**
- * The logo, the name, and the one fact that must never be hidden: that something,
- * somewhere, is waiting on you.
+ * One row: the menu, the search box, the filter and the bell.
  *
- * ⚠ **It said "the one number" and the bell up here draws no number** — the count
- * reaches `aria-label` and `title` and stops there. The numeral is on the machine
- * tabs, on `All` and on every folder header that has one, all of them within a
- * few hundred pixels of this row; what this header carries is that there *is*
- * one. The bell's own comment records why that is still open rather than settled.
+ * **This was two rows and an application title, and the merge is the change.** It
+ * drew the product mark, `Reemoat` as an `<h1>`, a *disabled* magnifier and the
+ * bell; the box you actually type into was a second band underneath. Every chat
+ * client puts one search field at the top with a menu to its left, and that is what
+ * this is now.
+ *
+ * ⚠ **The disabled magnifier is gone, and that reverses a recorded decision.** It
+ * was drawn `disabled` on the argument that it is the *fleet-wide* search — across
+ * machines, eventually across what was said inside a conversation — and therefore a
+ * different question from the box below it, which filters this machine's chats by
+ * title. That argument was about two controls on two rows. With both in one row,
+ * forty pixels apart, a dead magnifier beside a live field is not a distinction, it
+ * is the conflation the original decision was trying to prevent. When fleet-wide
+ * search is built it is a **scope** of this one box — searching under the `All`
+ * entry — rather than a second control, and the `All` entry is now permanently on
+ * screen to the left, which is what makes that spelling available.
+ *
+ * ⚠ **The `<h1>` stays, `sr-only`.** It is not decoration: below `lg` there is no
+ * `Header` on this route at all, so this element is the only heading on the app's
+ * primary screen, and `Header.tsx`'s docblock rests on it — *"the rail has
+ * `<h1>Reemoat</h1>` and its folders are `<h2>`"*. What left is the *visible*
+ * wordmark, and it did not move: the drawer's foot draws the build alone, and
+ * `MenuDrawer`'s own docblock argues why — a wordmark at the foot of a menu is a
+ * thing to look at rather than a thing to read. So this `<h1>` is the only copy of
+ * the name in the chrome, and it is never painted.
+ *
+ * **The menu button is drawn here only below `lg`.** Above it the machines are a
+ * column and the button is at the top of that column, which is where a desktop chat
+ * client puts it. Two mounts, one `lg:hidden`, the breakpoint answered in CSS —
+ * `AppShell`'s rule.
+ *
+ * **The field and the filter are withheld together on an empty fleet**, and the
+ * menu is not: with no machines there is nothing to search, and the one thing
+ * somebody needs is the door to Settings → Machines, which is behind that button.
  */
-function SidebarHeader({ state }: { state: AppState }): ReactNode {
+function SidebarHeader({
+  state,
+  machines,
+  needle,
+  onMenu,
+}: {
+  state: AppState;
+  machines: number;
+  needle: string;
+  onMenu: () => void;
+}): ReactNode {
   const waiting = sessionLists(state).blocked;
   return (
-    <div className="pt-safe flex shrink-0 items-center gap-2 px-3 pb-2">
+    <div className="pt-safe flex shrink-0 items-center gap-1.5 px-3 pb-2">
+      <h1 className="sr-only">Reemoat</h1>
       {/*
-       * The mark, where the placeholder square was — that square's own comment
-       * said "a logo goes here", and this is the logo.
-       *
-       * **Taller than the cap height beside it**, 20px against 16px text, which is
-       * the landing page's own sizing rule and the reason it is not `h-7`: matched
-       * to the cap height a glyph-shaped mark reads as undersized next to its own
-       * name. It takes `currentColor`, so it is the same ink as the name and needs
-       * no token of its own.
+       * `chip` rather than `sm`, for the same neighbour argument the two controls
+       * on the right of this row already make: these sit `gap-1.5` apart, and
+       * `sm`'s symmetric `after:-inset-2.5` is 10px a side into a 6px gap, which
+       * puts this control's tap target over the field beside it. `chip` grows
+       * vertically only, into this row's `pt-safe` above and `pb-2` below, so 44px
+       * is reached without reaching anything.
        */}
-      <Mark size={20} className="shrink-0" />
-      {/* Capitalised, because it is a name. The `<title>` and the landing page
-          both say Reemoat; the lowercase spelling here was the last place that
-          still read as a command you type. */}
-      <h1 className="min-w-0 flex-1 truncate text-base font-semibold">Reemoat</h1>
-      {/*
-       * **This is not the chat search, and it must not act like it.**
-       *
-       * It was wired to focus the search box below, which was wrong twice over:
-       * that box is already on screen and needs no shortcut, and the two are
-       * different questions. The one below filters *this machine's* chats by
-       * title; this one is the fleet-wide search — across machines, and
-       * eventually across what was said inside a conversation — which does not
-       * exist yet.
-       *
-       * So it is drawn and inert, deliberately, and `disabled` rather than
-       * silently doing nothing: a control that answers a tap with no change is
-       * one somebody taps again. The bell beside it is the honest comparison —
-       * that one has a real answer and a real destination, which is why it is
-       * enabled. (It also has a *number*, and does not draw it; that is the
-       * subject of its own comment and not of this one.)
-       *
-       * ⚠ **`IconButton` and not a fifth hand-rolled `h-9 w-9`**, which is what
-       * this was: 36px of box with no growth mechanism at all, no focus styling
-       * and colour-only hover — the exact string the primitive's docblock names
-       * four copies of. `chip` rather than `sm` because of the neighbour: these
-       * sit `gap-2` apart, and `sm`'s symmetric `after:-inset-2.5` is 10px a side
-       * into an 8px gap, which puts this control's tap target over the bell's
-       * *face*. `chip` grows vertically only, into this row's own `pb-2` and the
-       * safe-area padding above, so 44px is reached without either control
-       * reaching the other. It costs 4px of ink and 2px of glyph against the old
-       * square, which is the trade `md` was deleted to force.
-       */}
-      <IconButton icon={Search} label="Search everything — not built yet" size="chip" disabled />
+      <IconButton icon={MenuIcon} label="Menu" size="chip" onClick={onMenu} className="lg:hidden" />
+      {machines > 0 && <ChatSearch value={needle} />}
       {/*
        * The bell is the blocked count, not a stub.
        *
@@ -592,33 +628,36 @@ function SidebarHeader({ state }: { state: AppState }): ReactNode {
        * nothing waiting it is `disabled`, which is the honest drawing of "nowhere
        * to go" rather than a control that shrugs.
        *
-       * ⚠ **It does not say the number, and this comment claimed it did.** What
-       * is drawn is the glyph plus an 8px dot; the count reaches `aria-label` and
-       * `title` and goes no further, and on a phone there is no tooltip — so a
-       * sighted reader here gets "something" and never "three". That is a
-       * docblock describing an intention rather than the render under it, which
-       * is the one thing a comment in this repo may not do.
+       * ⚠ **It does not say the number.** What is drawn is the glyph plus an 8px
+       * dot; the count reaches `aria-label` and `title` and goes no further, and on
+       * a phone there is no tooltip — so a sighted reader here gets "something" and
+       * never "three". Left as a dot on purpose and as an open question rather than
+       * a settled trade: a numeral here would be the fourth copy of a count the
+       * screen already draws — on each machine, on `All`, and on every folder
+       * header that has one.
        *
-       * **Left as a dot on purpose, and as an open question rather than a settled
-       * trade.** A numeral in this square would be the fourth copy of a count the
-       * screen already draws — on each machine tab, on `All`, and on every folder
-       * header that has one — and the nearest of those is the tab bar
-       * immediately below this row, so nothing is missing from the *screen*. What
-       * is unresolved is whether the count belongs in the one control that is
-       * about nothing else, which is a design call and not a thing a refactor
-       * gets to decide.
-       */}
-      {/*
+       * ⚠ **Its old comment said the nearest of those is "the tab bar immediately
+       * below this row", and at `lg` that is false**: the machines are a column to
+       * the left now. The claim survives the correction — the counts are still on
+       * screen, just in a different direction — which is the only reason the
+       * sentence is rewritten rather than the control reconsidered.
+       *
        * The dot is a sibling of the button rather than a child of it, because
        * `IconButton` takes no children — so the wrapper is what `absolute` is
-       * measured against, and it is `inline-flex` so that box is exactly the
-       * button's and the dot keeps its 4px inset from the corner, on a square
-       * that is now 32px rather than 36. `pointer-events-none` is
-       * load-bearing in that move: inside the button a press on the dot was a
-       * press on the button, and as a sibling it would otherwise be an 8px hole
-       * in the middle of the one control this header exists for.
+       * measured against. `pointer-events-none` is load-bearing: as a sibling it
+       * would otherwise be an 8px hole in the middle of the one control this row
+       * exists for.
        */}
-      <span className="relative inline-flex shrink-0">
+      {/*
+       * ⚠ **`ml-auto`, and it is only load-bearing in one state.** With the field
+       * present it is inert — that `flex-1` already pushes this to the end of the
+       * row. With an empty fleet the field and the filter are both withheld, and
+       * without this the bell slid to the *left* edge and sat alone beside the
+       * hamburger, which reads as a second leading control rather than as the
+       * trailing one it is. Seen on the empty-fleet screen, which is the first
+       * screen a new account gets.
+       */}
+      <span className="relative ml-auto inline-flex shrink-0">
         <IconButton
           icon={Bell}
           label={waiting.length === 0 ? "Nothing is waiting on you" : `${waiting.length} waiting on you`}
@@ -635,6 +674,30 @@ function SidebarHeader({ state }: { state: AppState }): ReactNode {
       </span>
     </div>
   );
+}
+
+/**
+ * The mark under the tab you are on.
+ *
+ * **A rule rather than a fill, and that is the whole of why it is allowed to be
+ * `bg-fg`.** `web-shell.md` reserves that token for the affirmative action inside
+ * a decision — Send, and the approval on the ask card — on the grounds that
+ * anything else wearing it becomes the loudest object on screen. Two pixels of it
+ * under a word is not a fill and cannot be loud; what it replaces is a `raised`
+ * pill, and `raised` on `ink` is 1.22:1, which is the tone this palette keeps
+ * failing to divide anything with. The reference this is drawn from marks the
+ * selected tab with an accent underline, and with the palette monochrome the
+ * underline is the half that survives translation.
+ *
+ * `-bottom-px` so it sits **on** the bar's own hairline rather than above it: a
+ * 2px mark with a 1px rule showing beneath it reads as two lines that failed to
+ * meet, which is the defect `SidebarFoot` records about the composer's border.
+ *
+ * `inset-x-3` matches the tab's own `px-3`, so the mark is as wide as the word and
+ * not as wide as its target.
+ */
+function TabUnderline(): ReactNode {
+  return <span aria-hidden="true" className="absolute inset-x-3 -bottom-px h-0.5 rounded-full bg-fg" />;
 }
 
 /**
@@ -760,7 +823,7 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
   return (
     <div
       ref={stripRef}
-      className="flex shrink-0 items-center gap-1.5 px-3 pb-2"
+      className="flex shrink-0 items-center border-b border-edge px-1.5"
     >
       {/*
        * **`All` is pinned to the left, outside the scroller.**
@@ -770,32 +833,26 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
        * drag, and All going off the end costs you the only view that can show a
        * session whose machine you have not thought of.
        *
-       * **Flat on the left, round on the right, and bled to the rail's own edge.**
-       * Every fill in this app it borrows unchanged — it is a machine pill in
-       * colour, weight and hover, because it is one more tab and not a mode
-       * switch. The one thing it does differently is the shape, and the shape is
-       * the argument: a pill floating with air on both sides is a thing in a row
-       * of things, while a half-pill running off the left edge is a thing *fixed
-       * to* that edge, which is exactly the promise being made — the strip beside
-       * it scrolls and this does not. `-ml-3` cancels the row's own padding so the
-       * flat side has an edge to be flat against; `pl-3` puts the label back where
-       * it would have been.
-       *
-       * That also retires the divider that used to follow it. A rule between two
-       * pills says "these are different kinds of thing"; so does one of them being
-       * a different shape, and saying it twice is what makes a bar look busy.
+       * ⚠ **It is drawn exactly like a machine tab, and the shape argument that
+       * used to live here is gone with the pills.** This paragraph read *"flat on
+       * the left, round on the right, and bled to the rail's own edge"*, and named
+       * `-ml-3`/`pl-3` as the mechanism; the strip is underline tabs now and the
+       * class string carries none of it. What still marks `All` as fixed is
+       * position alone: it is `shrink-0` and sits *outside* the scroller, so it is
+       * the only tab that cannot travel. That is a weaker cue than a half-pill was
+       * and it is the one being relied on — worth knowing before anything moves
+       * `All` inside the scroller to tidy the markup.
        */}
       <button
         type="button"
         onClick={() => selectMachine(all.id)}
         aria-pressed={all.selected}
-        className={`tap -ml-3 flex min-h-8 shrink-0 items-center gap-1.5 rounded-l-none rounded-r-full py-1 pr-4 pl-3.5 text-xs whitespace-nowrap ${
-          all.selected
-            ? "bg-raised font-medium text-fg"
-            : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
+        className={`tap relative flex min-h-11 shrink-0 items-center gap-1.5 px-3 text-sm whitespace-nowrap ${
+          all.selected ? "font-semibold text-fg" : "text-muted hover:text-fg"
         }`}
       >
         {all.name}
+        {all.selected && <TabUnderline />}
         {all.blockedCount > 0 && (
           <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink">
             {all.blockedCount}
@@ -822,9 +879,11 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
           ref={scroller}
           /*
            * `no-scrollbar` only in the many-machine case, and the classic bar it
-           * hides really is worth hiding: this strip is 32px of pill above a list
-           * of chats, and an eight-pixel rule under it reads as a rendering fault
-           * rather than as an affordance.
+           * hides really is worth hiding: this strip is one 44px row of tabs above
+           * a list of chats, and an eight-pixel rule under it reads as a rendering
+           * fault rather than as an affordance. (It said "32px of pill" — the
+           * measurement predates the underline tabs, and the argument is the one
+           * thing about it that survived them.)
            *
            * ⚠ **What that class used to be justified by was a cue that is only
            * sometimes there.** The argument was "this strip's contents already
@@ -839,7 +898,7 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
            */
           className={lone ? "" : "no-scrollbar overflow-x-auto overscroll-x-contain"}
         >
-          <div className={`flex gap-1.5 ${lone ? "w-full" : "w-max"}`}>
+          <div className={`flex ${lone ? "w-full" : "w-max"}`}>
             {tabs.map((tab) => (
               <button
                 key={tab.id}
@@ -850,34 +909,32 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
                 // a ref per tab that would change identity on every render.
                 data-machine={tab.id}
                 /*
-                 * **The selected tab is `raised`, not `bg-fg`, and an unselected one
-                 * is `raised/50` rather than nothing.**
+                 * **Selection is weight plus `TabUnderline`, and no fill at all.**
                  *
+                 * The half of this that has never changed: it may not be `bg-fg`.
                  * A near-black pill was the loudest object on a page whose whole
-                 * palette is three greys within 1.22:1 of each other, and it is a
+                 * palette is three greys within 1.22:1 of each other, and this is a
                  * *selection* — the least eventful state a control can be in.
                  * `bg-fg` in this app means the affirmative action (Send, an
                  * approval), and spending it on "you are looking at this machine"
-                 * is what made the rail read as though something were alarming.
+                 * made the rail read as though something were alarming.
                  *
-                 * The resting fill is the other half and arrived later: with only
-                 * the selected tab filled, every other tab was bare text on the
-                 * rail's own ground, so a bar of four machines read as one tab and
-                 * three labels — and the shape of the tabs, which is the only thing
-                 * saying the strip is draggable, existed only where you already
-                 * were. `raised/50` against `raised` is 1.10 against 1.22 on the
-                 * rail; the selection is still obvious because it also carries the
-                 * weight and the text value.
+                 * ⚠ **What went with the pills is the resting fill, and the defect
+                 * it was added for is now accepted rather than solved.** This said
+                 * an unselected tab is `raised/50` "rather than nothing", because
+                 * with only the selected tab filled "a bar of four machines read as
+                 * one tab and three labels" and the shape — the only thing saying
+                 * the strip is draggable — existed only where you already were.
+                 * Every unselected tab is bare text on the rail's own ground again.
+                 * The edge fade below is what now says there is more of the strip;
+                 * nothing says it is draggable when it is not cut.
                  */
-                className={`tap flex min-h-8 items-center gap-1.5 rounded-full px-2.5 text-xs whitespace-nowrap ${
+                className={`tap relative flex min-h-11 items-center gap-1.5 px-3 text-sm whitespace-nowrap ${
                   lone ? "flex-1 justify-center" : "shrink-0"
-                } ${
-                  tab.selected
-                    ? "bg-raised font-medium text-fg"
-                    : "bg-raised/50 text-muted hover:bg-raised hover:text-fg"
-                }`}
+                } ${tab.selected ? "font-semibold text-fg" : "text-muted hover:text-fg"}`}
               >
                 {tab.name}
+                {tab.selected && <TabUnderline />}
                 {tab.blockedCount > 0 && (
                   <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink">
                     {tab.blockedCount}
@@ -894,10 +951,12 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
          * mounted over it would be one more node the effect has to reason about
          * on a screen where the answer is already known.
          *
-         * `pointer-events-none` because it lies over the last pill: a gradient
+         * `pointer-events-none` because it lies over the last tab: a gradient
          * that swallowed the tap would make the machine you can half-see the one
-         * machine you cannot select. `w-8` is one pill-height of gradient, short
-         * enough that what it dims is the cut edge rather than a whole tab.
+         * machine you cannot select. `w-8` was "one pill-height of gradient" and is
+         * now 8px against a 44px tab — still short enough that what it dims is the
+         * cut edge rather than a whole label, but it is no longer a fraction of
+         * anything and would have to be re-measured rather than re-derived.
          */}
         {!lone && (
           <div
@@ -934,17 +993,20 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
         aria-label="Add a machine"
         title="Add a machine"
         /*
-         * **Wider than a square, so it is a tab and not a column.**
+         * **Wider than a square, so it is a tab and not an icon button.**
          *
-         * At `w-8` it sat directly above the filter glyph below it — both 32–36px
-         * icon boxes flush to the same right edge — and two icon squares stacked
-         * on one axis read as a *toolbar column*, which is a thing this rail does
-         * not have and which put "add a machine" and "filter these chats" in the
-         * same visual group despite being about different scopes. `px-6` moves its
-         * centre inboard of the glyph below and gives it the proportions of the
-         * pills beside it, which is what it is one of.
+         * `px-3` is the machine tabs' own inset, so this sits in their rhythm and
+         * reads as one more thing in the row rather than as a control bolted to the
+         * end of it.
+         *
+         * ⚠ **The argument that put it here has expired and the shape is kept on
+         * its own merits.** It was that at `w-8` this sat directly above the filter
+         * glyph, two icon squares stacked on one axis reading as a *toolbar column*
+         * that grouped "add a machine" with "filter these chats". The filter moved
+         * into `SidebarHeader` in the same change that made these tabs — it is
+         * above this strip now, not below it — so there is no stack left to break.
          */
-        className="tap flex min-h-8 shrink-0 items-center justify-center rounded-full px-6 text-muted hover:bg-raised hover:text-fg"
+        className="tap flex min-h-11 shrink-0 items-center justify-center px-3 text-muted hover:text-fg"
       >
         <Icon as={Plus} size={14} />
       </button>
@@ -1002,7 +1064,18 @@ const FILTERS: readonly { value: Filter; label: string }[] = [
 function ChatSearch({ value }: { value: string }): ReactNode {
   const filter = currentFilter();
   return (
-    <div className="flex shrink-0 items-center gap-1.5 px-3 pb-2">
+    /*
+     * A fragment, because the row around this is `SidebarHeader`'s now.
+     *
+     * The box and the filter beside it used to be their own band under the
+     * header. They are the header: one row of `[menu] [search] [filter] [bell]`,
+     * which is the arrangement every chat client uses and which this app had
+     * spread over two rows with an application title in the first. Nothing about
+     * the field changed in the move — including the four autofill defences, which
+     * are here because a password manager filled this box with the account's
+     * email address.
+     */
+    <>
       <span className="relative min-w-0 flex-1">
         <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-faint">
           <Icon as={Search} size={13} />
@@ -1163,7 +1236,7 @@ function ChatSearch({ value }: { value: string }): ReactNode {
           </>
         )}
       </Menu>
-    </div>
+    </>
   );
 }
 
@@ -1845,22 +1918,26 @@ function SessionLine({
 }
 
 /**
- * New session, then who you are.
+ * New session, and nothing else.
  *
  * A real flex footer rather than a `sticky` strip with a `backdrop-blur`: the
- * scroll lives in the box above it now, so there is nothing to blur — and the blur
- * was creating a stacking context that would have clipped the profile popover
- * opening upward out of it.
+ * scroll lives in the box above it now, so there is nothing to blur.
+ *
+ * ⚠ **Recorded history, not a description.** The blur also created a stacking
+ * context that would have clipped a profile popover opening upward out of this
+ * footer. `ProfileMenu` is gone and who-you-are is `MenuDrawer`'s now, so that is
+ * a reason not to put a popover back here rather than a thing being avoided.
  */
-function SidebarFoot({ state, machine }: { state: AppState; machine: MachineId | null }): ReactNode {
+function SidebarFoot({ machine }: { machine: MachineId | null }): ReactNode {
   /*
    * **No `border-t`, because there was no way to make it meet the composer's.**
    *
    * This rule and the composer's top rule are the two horizontal lines at the
    * bottom of a wide screen, and they sit either side of the rail divider at
-   * heights decided by two different stacks of content — a button plus an account
-   * row here, a textarea plus a control strip there. They landed a couple of
-   * pixels apart, so what read across the divider was one line with a step in it.
+   * heights decided by two different stacks of content — one button here now that
+   * the account row has gone to `MenuDrawer`, a textarea plus a control strip
+   * there. They landed a couple of pixels apart, so what read across the divider
+   * was one line with a step in it.
    * Nothing can align them: both heights are content-derived and either can
    * change on its own.
    *
@@ -1914,23 +1991,26 @@ function SidebarFoot({ state, machine }: { state: AppState; machine: MachineId |
         New session
       </Button>
       {/*
-       * ⚠ **The launcher is inside the account menu now, and it is still not in
-       * the list.** It used to be one bordered button per plugin, stacked directly
-       * under New session — which put an unbounded, machine-dependent column
-       * between the one control somebody presses all day and the account row, and
-       * grew the footer by a row for every plugin installed.
+       * ⚠ **The account row, the help popover and the plugin launcher have all
+       * left this footer for the menu drawer, and only one of them is a loss.**
        *
-       * The rule it was written for is untouched: the rail is the sessions, and a
-       * plugin able to add rows to the list would open a hole in `waitingFloor`,
-       * which is computed by subtraction precisely so that a new section cannot.
-       * A menu row takes part in no ordering, no filter and no count either — it
-       * is one door further in than it was, in a menu that is already where the
-       * other doors out of the rail live.
+       * The launcher's own rule is untouched by the move and worth restating,
+       * because it is the one somebody will try to undo: the rail is the sessions,
+       * and a plugin able to add rows to the list would open a hole in
+       * `waitingFloor`, which is computed by subtraction precisely so that a new
+       * section cannot. A menu row takes part in no ordering, no filter and no
+       * count — it is one door further in, in the panel where the other doors out
+       * of the rail now live.
+       *
+       * ⚠ **What was lost is `HelpButton`'s legend**, the only place this app
+       * documented `j`, `k` and `/` — and, more importantly, the only place it
+       * said that none of them fire while you are typing, which is most of the
+       * time. It is not re-homed here: the drawer takes rows that are *places to
+       * go*, and a legend is not one. That legend had already been deleted once,
+       * from under this very button, for being advertised as a feature while being
+       * wrong more often than right; it is gone again, and `docs/DECISIONS.md`
+       * names `CommandMenu` as where it belongs if it comes back.
        */}
-      <div className="mt-2 flex items-center gap-1">
-        <ProfileMenu state={state} machine={machine} className="min-w-0 flex-1" />
-        <HelpButton />
-      </div>
     </div>
   );
 }

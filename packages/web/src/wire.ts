@@ -1107,6 +1107,53 @@ export interface BackgroundTask {
   endedAt: number | null;
 }
 
+/**
+ * How much of a snapshot a frame is actually carrying. See
+ * {@link SessionSnapshot.reduced}.
+ *
+ * The two counts are the **true** lengths of the daemon's own arrays — what
+ * `GET /sessions/:id` would return — and not the lengths of the arrays beside
+ * them on the frame, so `reduced.pendingPermissions > pendingPermissions.length`
+ * is the readable form of "rows were cut". `blobs` says the frame emptied every
+ * surviving permission's `rawInput` and `content`, which is the one thing that
+ * looks identical to the agent's own payload having been over 8 KiB at ingest and
+ * is the only one of the two that asking the route can fix.
+ *
+ * ⚠ **`blobs` is narrowed once this record reaches a row**, and the two readings
+ * are set out at {@link SessionSnapshot.reduced}: what the daemon sends is what
+ * the ladder emptied, what `store.ts` keeps is what this client could not put
+ * back. Anything reading it off a `store` row is reading the second.
+ *
+ * Mirrored from `SnapshotReduction` in `src/registry.ts`; named as the daemon
+ * names it, or the hand-mirror sweep never compares it. ⚠ **One field below is
+ * not mirrored and never arrives from the daemon** — it is said so at the field
+ * rather than left to be discovered.
+ */
+export interface SnapshotReduction {
+  pendingPermissions: number;
+  pendingElicitations: number;
+  blobs: boolean;
+  /**
+   * ⚠ **Written by `store.unreduceSnapshot`, never sent by any daemon.** The one
+   * field here with no counterpart in `src/registry.ts`. It lives on `reduced`
+   * rather than on the row because `reduced` is already the record that means two
+   * different things either side of that merge ({@link SessionSnapshot.reduced}),
+   * and because it is only ever read together with {@link blobs}.
+   *
+   * The parked permission ids this client holds a **whole-record** copy of, in
+   * the order they sit in `pendingPermissions`. A `{truncated, bytes}` stand-in
+   * on one of those was cut by the daemon's 8 KiB ingest clamp and nothing
+   * anywhere has more of it; a stand-in on a row absent from here may instead be
+   * the socket frame's ladder, and the record may still hold it whole. That is
+   * the distinction `blobs` and `PermissionCard`'s two sentences turn on, and it
+   * cannot be read off the row: the two stand-ins are byte-identical.
+   *
+   * Absent reads as empty, which draws the *recoverable* sentence — the
+   * conservative half, and the one a poll corrects within seconds.
+   */
+  onRecord?: string[];
+}
+
 export interface SessionSnapshot {
   id: string;
   agent: AgentId;
@@ -1214,6 +1261,46 @@ export interface SessionSnapshot {
    * `undefined` behave as `[]` in one place instead of nine.
    */
   pendingElicitations?: PendingElicitationSnapshot[];
+  /**
+   * What a socket frame had to leave out to fit under the wire ceiling.
+   *
+   * ⚠ **Absent means whole, and it is absent almost always.** The daemon sets it
+   * only on a `hello`/`snapshot` frame its `fitSnapshotFrame` ladder had to cut —
+   * past roughly 512 KiB of parked requests — and never on `GET /sessions` or
+   * `GET /sessions/:id`, which still serve the record whole. An older daemon
+   * sends nothing here and reads the same way, which is this file's usual
+   * degrade: every count below falls back to the array lengths, i.e. to exactly
+   * what this client did before the field existed.
+   *
+   * ⚠ **Why it has to be read at all.** `store.ts` writes the poll's snapshot and
+   * the frame's snapshot into the same `row.snapshot`. Without this field the two
+   * are indistinguishable — a halved list is a well-formed list — so the approval
+   * count, the `more` line and `PermissionCard`'s "Part of this request was too
+   * large to keep" banner alternated on every poll/frame swap, and each swap
+   * re-armed an effect that fires `store.loadAll`.
+   *
+   * ⚠ **This said "what it does not do is put the missing rows back: they are
+   * not on the frame", and that is now only half true.** They are not on the
+   * frame, and {@link waitingCount} is still the honest count of how many there
+   * are — but `store.unreduceSnapshot` puts back the rows and the payloads this
+   * client is *already holding* from the poll, which is what stopped a frame
+   * clobbering a fuller row. What no client can recover is a row it has never
+   * seen; that one is still one `GET /sessions/:id` away, and the 4s poll is what
+   * makes the request.
+   *
+   * `reduced` therefore means two slightly different things either side of that
+   * merge, and the difference is deliberate. **As the daemon sends it**, the
+   * counts are the record's true lengths, `blobs` says the ladder emptied every
+   * surviving payload, and {@link SnapshotReduction.onRecord} is absent. **As
+   * `store.ts` keeps it on a row**, the counts are unchanged, `onRecord` names the
+   * parked permissions this client holds a whole-record copy of, and `blobs` has
+   * been narrowed to *"a stand-in sits on a row this client has no record copy
+   * of"*. ⚠ **That is a reconstruction and not a fact off the wire** — the two
+   * stand-ins are byte-identical and the daemon sends nothing that separates
+   * them, so this is as close as `PermissionCard` can get to *"the record still
+   * has this payload"*, and it errs towards saying so.
+   */
+  reduced?: SnapshotReduction;
   exit: SessionExit | null;
   /**
    * The agent's controls, on the snapshot rather than only in the log.
@@ -1644,6 +1731,15 @@ export type HumanRequest =
  *
  * `pendingElicitations` is optional on the wire, so this is also the single place
  * an older daemon's `undefined` becomes `[]`.
+ *
+ * ⚠ **This one deliberately does **not** read {@link SessionSnapshot.reduced},
+ * unlike {@link waitingCount}.** It returns rows, and the rows a reduced frame
+ * left out are not on it to return — inventing a placeholder would put a card on
+ * screen with no id to answer. What the daemon's ladder guarantees is that what
+ * survives is a *prefix in `raisedAt` order*, so the first element here is still
+ * the real oldest and `SessionView` still draws the right card; the count beside
+ * it is `waitingCount`'s job, which is why that one is the function that had to
+ * learn about the field.
  */
 export function humanRequests(session: SessionSnapshot): HumanRequest[] {
   const requests: HumanRequest[] = [];
@@ -1668,12 +1764,40 @@ export function humanRequests(session: SessionSnapshot): HumanRequest[] {
 
 /** Whether anything is waiting on a person. Replaces `pendingPermissions.length > 0`. */
 export function needsHuman(session: SessionSnapshot): boolean {
-  return session.pendingPermissions.length + (session.pendingElicitations?.length ?? 0) > 0;
+  return waitingCount(session) > 0;
 }
 
-/** How many. Replaces `pendingPermissions.length`. */
+/**
+ * How many. Replaces `pendingPermissions.length`.
+ *
+ * ⚠ **Counted off {@link SessionSnapshot.reduced} where the daemon set it, and
+ * off the arrays otherwise** — the two are the same number on every snapshot but
+ * a socket frame the daemon's ladder had to cut, and on one of those the arrays
+ * are a *prefix*. Reading the arrays there made the count fall and rise on every
+ * poll/frame alternation over an unchanged session: `SessionView` draws
+ * `waitingCount(session) - 1` as its `more` line, so *4 more waiting* became *1
+ * more waiting* and back, twice a poll interval.
+ *
+ * `Math.max` rather than the field outright, because the field is the daemon's
+ * claim about a list this client also holds, and the two disagreeing in the other
+ * direction — a count below what is actually on the record — would under-report
+ * something visible. Whichever is larger is the honest floor.
+ *
+ * ⚠ **`waitingCount(session) === humanRequests(session).length` stopped being an
+ * invariant the moment this function learned to read `reduced`, and the check
+ * that asserted it went on passing because no fixture set the field.** That is
+ * this repository's own commonest defect — a partition losing a case through a
+ * new field rather than through a bad predicate — so it is recorded here as well
+ * as repaired. `webcheck.elicitation-and-links.ts`'s "the predicates are a
+ * partition" asserts `waitingCount(session) < humanRequests(session).length` now,
+ * and its matrix carries a row whose `reduced` is larger than its arrays:
+ * equality fails on that row, which is what makes the clause an assertion rather
+ * than a formality.
+ */
 export function waitingCount(session: SessionSnapshot): number {
-  return session.pendingPermissions.length + (session.pendingElicitations?.length ?? 0);
+  const permissions = Math.max(session.pendingPermissions.length, session.reduced?.pendingPermissions ?? 0);
+  const questions = Math.max(session.pendingElicitations?.length ?? 0, session.reduced?.pendingElicitations ?? 0);
+  return permissions + questions;
 }
 
 /**

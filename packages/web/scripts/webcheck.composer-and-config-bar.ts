@@ -1961,9 +1961,15 @@ process.stdout.write("\narrow keys inside a menu that claims to be one\n");
    * the widget going dead: a focused row can unmount under the 4s poll
    * (`NewSession`'s machine list, a conditional row in `UsersSection`), the browser
    * drops focus to `<body>`, and from there no arrow key can reach the handler to
-   * get back in. It is also the only way a panel whose rows are a caller's prose —
-   * `ProfileMenu`'s `HelpButton` — takes focus at all, rather than announcing
-   * `role="menu"` and answering nothing.
+   * get back in.
+   *
+   * ⚠ **This named a second reason and that reason is gone**: it was also the only
+   * way a panel whose rows are a caller's *prose* took focus at all, rather than
+   * announcing `role="menu"` and answering nothing — and the panel it named was
+   * `ProfileMenu`'s `HelpButton`, which went out of the tree with the rail footer
+   * when the menu became a drawer. No panel in this app has prose rows today. The
+   * clause is recorded rather than deleted because it is the case `tabIndex={-1}`
+   * would otherwise look over-specified for, and the next such panel inherits it.
    *
    * Pinned as source text because it is a JSX attribute and this driver has no DOM.
    */

@@ -33,9 +33,15 @@
  * device pixels and `RAIL_MIN` is a floor somebody can always drag away from, not
  * a fixed width — but it does mean `RAIL_MIN`'s "enough of a name to tell two
  * sessions apart" is a claim about a 16px root and gets tighter above it.
+ *
+ * ⚠ **This measures the whole rail, which is now two columns** — the machine
+ * folders plus the session list — and `rail.ts` states every bound as
+ * `MACHINE_COLUMN_PX` plus the number it used to be. The `312` quoted above is
+ * history: it is what the snap was measured at, on the build that had one column,
+ * and it is left as written for the reason every measurement in this repository is.
  */
 :root {
-  --rail-w: 312px;
+  --rail-w: 384px;
 }
 
 /*
@@ -480,6 +486,58 @@
     }
   }
 
+  /**
+   * The menu drawer, which is the sheet's movement on the other axis.
+   *
+   * **The same duration and the same curve, deliberately, and `webcheck` asserts
+   * the two numbers equal rather than pinning 260 twice.** A drawer arriving from
+   * the left and a sheet arriving from the bottom are one gesture in this app —
+   * "a layer covers the app" — and a second easing would be a second decision
+   * about it, made by whoever typed the second rule rather than argued anywhere.
+   *
+   * ⚠ **A distinct keyframe rather than `sheet` with a different transform**,
+   * because a keyframe here is a *name* a utility is generated from: Tailwind v4
+   * emits `animate-drawer` from `--animate-drawer` and nothing composes a
+   * direction onto it. `sheet-out`'s own docblock, ten lines down, records what
+   * happens to the nearest shortcut — `reverse` on an arrival plays once and
+   * never plays back.
+   *
+   */
+  --animate-drawer: drawer 260ms cubic-bezier(0.32, 0.72, 0, 1);
+
+  @keyframes drawer {
+    from {
+      transform: translateX(-100%);
+    }
+  }
+
+  /**
+   * And the way back out, which is a **separate keyframe** rather than the arrival
+   * reversed.
+   *
+   * ⚠ `animate-drawer` with a `reverse` composed onto it is the shortcut, and
+   * `sheet-out` twelve lines down records what it does: it slides out and does not
+   * slide back. An arrival plays once; naming the direction does not give you the
+   * departure.
+   *
+   * **`both`, and that is the half that is invisible when it is missing.** Without
+   * a fill the panel snaps back to its resting position for the frames between the
+   * animation ending and React dropping the element — a flash of the full drawer
+   * after it has already left. `MenuDrawer` waits exactly this long before it
+   * unmounts, and `webcheck` reads this duration out of the stylesheet and asserts
+   * it against that constant, because neither file can see the other's number.
+   *
+   * The easing is `sheet-out`'s rather than the arrival's, for the reason that one
+   * gives: leaving is quick at the start and settles, arriving is the opposite.
+   */
+  --animate-drawer-out: drawer-out 260ms cubic-bezier(1, 0, 0.68, 0.28) both;
+
+  @keyframes drawer-out {
+    to {
+      transform: translateX(-100%);
+    }
+  }
+
   /*
    * And the ground behind it darkens rather than switching.
    *
@@ -642,6 +700,35 @@ body {
 }
 .pt-safe {
   padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+
+/*
+ * The inline-start inset, and it exists for exactly one surface.
+ *
+ * Both rules above are block-axis, because until now every edge this app pins to
+ * is the top or the bottom of the screen. The menu drawer is the first thing
+ * anchored to `inset-y-0 left-0`, and on a landscape iPhone with the notch on the
+ * left `env(safe-area-inset-left)` is around 44px — so its rows sit under the
+ * sensor housing with `viewport-fit=cover` set, which it is, in `index.html`.
+ *
+ * ⚠ **Here, beside the other two, and never inside the fade-scrollbar block
+ * further down.** `webcheck.strip-chosen-tile.ts` slices this file between two of
+ * that block's selectors with `indexOf` and asserts the slice declares no
+ * `width`/`height`/`scrollbar-width`; a rule inserted there is swallowed into that
+ * slice and re-anchors the assertion onto something else. The edge-fade rule
+ * already carries the same ⚠ for the same reason — this is the second instance,
+ * which is what makes it a rule about this file rather than a note about one class.
+ *
+ * ⚠ **And this paragraph may not spell those selectors**, which is a second,
+ * sharper instance of the same thing: the driver's anchors are plain `indexOf`
+ * calls over the raw file, so a comment quoting the string being searched for is
+ * found *before* the rule it describes. Written out once, it moved all three of
+ * that block's assertions onto this docblock and failed them — the exact shape
+ * `webcheck.composer-and-config-bar.ts` records about its own counts, arriving
+ * from the other side.
+ */
+.pl-safe {
+  padding-left: max(0rem, env(safe-area-inset-left));
 }
 
 /*

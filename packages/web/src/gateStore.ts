@@ -245,7 +245,7 @@ class GateStore implements SignInAuth {
    *
    * ⚠ **`password_change_required` is not a failure here and must not become
    * one**, which is the half of `store.ts`'s reasoning that a bare catch loses.
-   * `POST /v1/devices` is registered *above* the control plane's second gate so an
+   * `POST /v1/me/devices` is registered *above* the control plane's second gate so an
    * admin-created account can reach it — but a control plane that has not been
    * updated answers 403, and this client has to keep working against one. So the
    * catch is total on purpose rather than by omission, and narrowing it to "real"

@@ -2,11 +2,12 @@ import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNo
 import { clearRevokedKeyNotice, peekRevokedKeyNotice } from "./account";
 import { legalPublishable } from "./legal";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
-import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
+import { navigate, parsePath, useOrigin, usePathname, useRoute, useUnder, type Route } from "./router";
 import { sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
 import { ChooseServer } from "./ui/ChooseServer";
 import { ForcedPasswordChange } from "./ui/ForcedPasswordChange";
+import { MenuDrawer } from "./ui/MenuDrawer";
 import { StartSheet } from "./ui/NewSession";
 import { Sheet } from "./ui/Sheet";
 import { SessionBrowser } from "./ui/SessionBrowser";
@@ -130,6 +131,37 @@ export function App(): ReactNode {
    * the branching, and `upFrom` is read by `LegalScreen` below.
    */
   const up = upFrom(route, under, origin);
+
+  /*
+   * The menu drawer's open state, held here and threaded down as `onMenu`.
+   *
+   * ⚠ **React state and not a `groups.ts`-shaped module store**, which is the
+   * first thing to reach for in this package and is wrong here. Those stores
+   * exist on an argument `rail.ts` states plainly — *"this is a preference about
+   * the app rather than about a screen, and a component that unmounts must not
+   * take it with it"* — and that argument is **inverted** for this panel: the
+   * drawer should die when the screen changes, and surviving the phone's
+   * list → detail → back unmount is a liability rather than the point. It is
+   * also above every early return, for the reason `up` is.
+   *
+   * Two triggers open it — the phone's header row and the top of the desktop
+   * machine column — and they live in two different subtrees, which is what the
+   * prop is for.
+   *
+   * ⚠ **The effect is keyed on `usePathname()` and may not be keyed on `route`
+   * or on `background`.** Every destination in the drawer is an overlay path, so
+   * `background` does not change when a row navigates and a listener on it would
+   * fire never. What this buys, beyond a belt on the rows' own `onClose`, is the
+   * one thing a panel that is not a route cannot get for free: **Android's Back
+   * closes the drawer.** It closes it *and* navigates, which is one press doing
+   * two things — a known limitation recorded in `docs/DECISIONS.md` rather than
+   * a bug, and the price of not minting a `/menu` URL that is a dead end.
+   */
+  const [menu, setMenu] = useState(false);
+  const path = usePathname();
+  useEffect(() => setMenu(false), [path]);
+  const openMenu = (): void => setMenu(true);
+  const closeMenu = (): void => setMenu(false);
 
   /*
    * **The tab says how many sessions are waiting, and it is the only thing this
@@ -326,10 +358,11 @@ export function App(): ReactNode {
 
   return (
     <>
-      <AppShell state={state} route={background}>
-        <Suspense fallback={<Waiting />}>{content(state, background)}</Suspense>
+      <AppShell state={state} route={background} onMenu={openMenu}>
+        <Suspense fallback={<Waiting />}>{content(state, background, openMenu)}</Suspense>
       </AppShell>
       {overlay && <OverlaySheet state={state} route={route} />}
+      <MenuDrawer state={state} open={menu} onClose={closeMenu} />
       <ToastHost />
     </>
   );
@@ -553,7 +586,11 @@ function Waiting(): ReactNode {
   );
 }
 
-function content(state: ReturnType<typeof store.getSnapshot>, route: Route): ReactNode {
+function content(
+  state: ReturnType<typeof store.getSnapshot>,
+  route: Route,
+  onMenu: () => void,
+): ReactNode {
   switch (route.name) {
     case "session":
       return <SessionView state={state} sessionRef={route.ref} />;
@@ -579,7 +616,7 @@ function content(state: ReturnType<typeof store.getSnapshot>, route: Route): Rea
            * boundary follows a different rule.
            */}
           <div className="h-full bg-ink lg:hidden">
-            <SessionBrowser state={state} />
+            <SessionBrowser state={state} onMenu={onMenu} />
           </div>
           <div className="hidden flex-1 lg:block">
             <NothingSelected state={state} />

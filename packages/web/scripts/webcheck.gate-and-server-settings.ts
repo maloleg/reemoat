@@ -786,6 +786,27 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
     ],
     [true, false, true, false],
   );
+  /*
+   * ⚠ **And the gate never reaches the app's version constant, where the `define`
+   * that fills it does not exist.**
+   *
+   * `vite.config.ts` defines `__APP_VERSION__` and `vite.gate.config.ts`
+   * deliberately does not — that file's own rule is that it sets no build config
+   * asserting something the code does not say, and nothing across those nine
+   * addresses draws a version. `version.ts` guards the identifier with `typeof`, so
+   * an accidental edge would not *throw*; it would answer `"dev"`, and a shipped
+   * bundle quietly claiming to be a development build is worse than one that fails
+   * to build. This is the check that makes the guard a safety net rather than the
+   * mechanism.
+   *
+   * The control beside it is the app, which must reach it — otherwise this is one
+   * name that resolves to nothing and the check is free.
+   */
+  check(
+    "the gate never reaches the version constant its build does not define",
+    [gateValues.has("version.ts"), appValues.has("version.ts")],
+    [false, true],
+  );
 
   /* ---- the server screen, as an editing screen ---- */
 

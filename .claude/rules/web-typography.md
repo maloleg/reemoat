@@ -177,16 +177,32 @@ constants, two of them byte-identical local `const label` declarations in two fi
 that never imported from each other. Nothing had ever swept for the idiom, so the
 second wave was invisible until somebody counted. Q5.115.
 
-Four sites spend the idiom outside the constants **on purpose**, and every one of
-them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
+**Five** sites spend the idiom outside the constants **on purpose**, and every one
+of them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
 louder than its rows), `MachineSection`'s `RETIRE_HEADING` (`text-danger`),
 `MachineOffer`'s `or` (no `font-semibold` — the word between two doors is not a
-heading), and `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
-rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why).
-`webcheck.typography.ts` already names the last two in the same breath. The sweep
-that finds them is `grep -rn 'tracking-wider' packages/web/src` less `ui/bits.tsx`;
+heading), `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
+rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why), and
+`MenuDrawer`'s `DRAWER_HEADING` (`text-faint` at that panel's own `px-3`, because
+`MENU_HEADING` carries `px-2.5` and put the word 2px inboard of the rows it heads).
+`webcheck.typography.ts` names `RETIRE_HEADING` and `HIDDEN_PROVIDER_HEADING` in
+the same breath, as the two spelled out to avoid appending a colour. The sweep that
+finds them all is `grep -rn 'tracking-wider' packages/web/src` less `ui/bits.tsx`;
 `SettingField`'s hit is `FIELD_LABEL`, i.e. one of the three constants rather than
-an exception to them.
+an exception to them — the third constant, and the one that does not live in
+`bits.tsx`.
+
+⚠ **This said *four* for a release, and nothing could see that it had stopped being
+true.** `DRAWER_HEADING` arrived with its own docblock arguing for itself, and the
+only sweep that existed was for a *colour appended to a constant*, which this is
+not — so the number was the whole record of the set and the record was wrong. It is
+not prose any more: `webcheck.typography.ts` carries the **census**, a table of
+every file that spends the idiom with its hit count, differenced against the sweep
+above over comment-stripped source. A sixth site fails it as *found, not listed*; a
+deleted one fails it as *listed, not found*. A count could do neither, which is the
+general shape — a census, never a `length === N`. It also requires a comment to
+close immediately above each of the five, which is what makes the "says so at the
+code" clause above enforced rather than asserted.
 
 **The background panel carries three heading treatments at once, and exactly one
 of them is a constant.** `PanelHeading` — `Agents (2)`, `Dynamic workflows (1)`,

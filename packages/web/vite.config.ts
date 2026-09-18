@@ -1,6 +1,23 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
+
+/**
+ * The version the app draws in its menu, read from this package's own manifest.
+ *
+ * `readFileSync` + `JSON.parse` rather than an `import ... with { type: "json" }`,
+ * matching `scripts/pincheck.ts`'s own way of reading the manifests it compares —
+ * and it keeps the value out of the module graph, so nothing in `src/` can import
+ * `package.json` and start shipping the whole manifest.
+ *
+ * ⚠ **The build is where this belongs and `src/version.ts` explains why**: the
+ * alternative is a literal in a source file, which would be an eighth copy of a
+ * number `pincheck` already holds in seven places, asserted by nothing.
+ */
+const { version } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as {
+  version: string;
+};
 
 /**
  * In dev the control plane is a different process on a different port, so `/v1`
@@ -13,6 +30,9 @@ import { defineConfig } from "vite";
  */
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Consumed by `src/version.ts`, behind a `typeof` guard — see its docblock for
+  // why the guard is load-bearing rather than defensive.
+  define: { __APP_VERSION__: JSON.stringify(version) },
   server: {
     host: true,
     proxy: {

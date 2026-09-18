@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { check } from "./webcheck.env.js";
+import { stripComments } from "./webcheck.source.js";
 import {
   askedQuestion,
   detailContext,
@@ -9,6 +11,8 @@ import {
   permissionHeadline,
   permissionLayout,
   planControls,
+  truncationNotice,
+  unreduceSnapshot,
   withheldDetail,
 } from "./webcheck.modules.js";
 
@@ -1380,4 +1384,242 @@ process.stdout.write("\nthe permission card's context\n");
   const edit = permissionContext({ ...base, rawInput: { file_path: "/home/proj/notes.txt" }, content: null } as never, []);
   check("a file-shaped argument is surfaced as the target", edit.target, "/home/proj/notes.txt");
   check("and the card is not empty", edit.unavailable, false);
+}
+
+/* ------------------------------------------------------------------ *
+ * A frame the daemon had to cut, and the row it must not clobber
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\na reduced snapshot frame\n");
+{
+  const perm = (permissionId: string, raisedAt: number, rawInput: unknown): unknown => ({
+    permissionId,
+    toolCallId: null,
+    title: "Running",
+    options: [],
+    raisedAt,
+    rawInput,
+    content: null,
+  });
+  const ask = (elicitationId: string, raisedAt: number): unknown => ({
+    elicitationId,
+    toolCallId: null,
+    message: "Which?",
+    fieldCount: 1,
+    raisedAt,
+  });
+  const clamped = { truncated: true, bytes: 9000 };
+
+  // What the 4s poll left on the row: three approvals and two questions, every
+  // payload whole, because `GET /sessions` serves the record and never the
+  // ladder's projection of it.
+  const held = {
+    id: "s1",
+    pendingPermissions: [perm("p1", 1, { command: "ls" }), perm("p2", 2, { command: "rm -rf /" }), perm("p3", 3, { command: "mv" })],
+    pendingElicitations: [ask("e1", 1), ask("e2", 2)],
+  };
+
+  /*
+   * What a `hello` past `CONTROL_MAX_BYTES` carries instead: the oldest row of
+   * each list, its payload replaced by `clampBlob(…, 0)`'s stand-in, and
+   * `reduced` naming the lengths the daemon actually holds.
+   */
+  const frame = {
+    id: "s1",
+    pendingPermissions: [perm("p1", 1, clamped)],
+    pendingElicitations: [ask("e1", 1)],
+    reduced: { pendingPermissions: 3, pendingElicitations: 2, blobs: true },
+  };
+
+  const merged = unreduceSnapshot(frame as never, held as never);
+  check(
+    "a frame carrying `reduced` may not shrink the parked list",
+    merged.pendingPermissions.map((row) => row.permissionId),
+    ["p1", "p2", "p3"],
+  );
+  check(
+    "and the questions go back with the approvals",
+    (merged.pendingElicitations ?? []).map((row) => row.elicitationId),
+    ["e1", "e2"],
+  );
+  /*
+   * The harm the marker was put on the wire for. Without this the frame's
+   * `{truncated}` stand-in alternates with the poll's real arguments in one
+   * `row.snapshot`, so `PermissionCard`'s banner flips twice a poll interval and
+   * each flip re-arms the effect that fires `store.loadAll`.
+   */
+  check("and a stand-in never overwrites a payload this client already holds", merged.pendingPermissions[0]?.rawInput, {
+    command: "ls",
+  });
+  check("so nothing is left marked as still missing", merged.reduced?.blobs, false);
+  /*
+   * The count is still the daemon's claim rather than the merged length, because
+   * a client that could only top up half the list must not report half.
+   */
+  check("and the daemon's own counts survive the merge", merged.reduced?.pendingPermissions, 3);
+
+  /*
+   * ⚠ **The bound that makes the top-up safe.** The ladder cuts a *prefix* in
+   * `raisedAt` order, so the frame is authoritative for everything up to its last
+   * row: a held row inside that range and absent from the frame was **answered**.
+   * Putting it back would park a card over a settled request, which is far worse
+   * than under-counting — here `p1` has been answered and only `p3`, which is
+   * newer than the last row the frame carried, may come back.
+   */
+  const afterAnswer = unreduceSnapshot(
+    {
+      ...frame,
+      pendingPermissions: [perm("p2", 2, clamped)],
+      reduced: { pendingPermissions: 2, pendingElicitations: 2, blobs: true },
+    } as never,
+    held as never,
+  );
+  check(
+    "a row the frame's prefix left out was answered, not cut",
+    afterAnswer.pendingPermissions.map((row) => row.permissionId),
+    ["p2", "p3"],
+  );
+
+  /*
+   * The one thing the merge cannot repair, and the reason `blobs` is rewritten
+   * rather than carried through: a request raised since the last poll has no held
+   * copy, so its stand-in may be the frame's ladder *or* the daemon's 8 KiB ingest
+   * clamp. The two are byte-identical; `blobs` staying true is what makes
+   * `truncationNotice` take the conservative sentence.
+   */
+  const fresh = unreduceSnapshot(
+    {
+      id: "s1",
+      pendingPermissions: [perm("p9", 9, clamped)],
+      pendingElicitations: [],
+      reduced: { pendingPermissions: 1, pendingElicitations: 0, blobs: true },
+    } as never,
+    held as never,
+  );
+  check("a payload this client has never held stays marked as still on the machine", fresh.reduced?.blobs, true);
+
+  // Absent means whole. Every ordinary frame and every older daemon's frame takes
+  // the first line out of the function, and a list that really did empty must be
+  // allowed to empty.
+  const whole = unreduceSnapshot({ id: "s1", pendingPermissions: [], pendingElicitations: [] } as never, held as never);
+  check("absent means whole, so an unmarked frame still takes the list away", whole.pendingPermissions.length, 0);
+  check("and it is returned untouched rather than rebuilt", whole.reduced, undefined);
+
+  // A row keyed by machine and session id cannot normally disagree, and merging
+  // one session's requests into another's would be the worst possible way to find
+  // out that it had.
+  const crossed = unreduceSnapshot({ ...frame, id: "s2" } as never, held as never);
+  check("and a row for another session is never merged into this one", crossed.pendingPermissions.length, 1);
+
+  /*
+   * ⚠ **Two reduced frames in a row, which is the case every check above misses.**
+   * `held` for the second frame is the row the *first* merge wrote, so a
+   * derivation that asks only "was this row in `held`" answers yes for a row it
+   * has never seen anywhere but on a frame — `blobs` went false with the payload
+   * still on the machine, and the card swapped its alternation for the
+   * **permanent** sentence about something `GET /sessions/:id` still held whole.
+   * Measured by driving this exported function twice over two identical frames:
+   * true, then false, same input. It is reachable rather than theoretical —
+   * snapshot frames are watch-driven, so several land between two 4s polls — and
+   * `setSessionMeta` re-folds a row's own snapshot through `onSnapshot`, which is
+   * the same merge with `next` and `held` the same object.
+   */
+  const raised = {
+    id: "s1",
+    pendingPermissions: [perm("p1", 1, clamped), perm("p9", 9, clamped)],
+    pendingElicitations: [],
+    reduced: { pendingPermissions: 2, pendingElicitations: 0, blobs: true },
+  };
+  const frameOnce = unreduceSnapshot(raised as never, held as never);
+  check("a row this client has no record copy of is marked as still on the machine", frameOnce.reduced?.blobs, true);
+  const frameTwice = unreduceSnapshot(raised as never, frameOnce as never);
+  check("and a second identical frame does not talk this client out of it", frameTwice.reduced?.blobs, true);
+  /*
+   * The carry itself, asserted as a list rather than a length: a count cannot
+   * tell a dropped id from a substituted one, and the whole failure above was an
+   * id silently changing sides.
+   */
+  check(
+    "because the record copies ride the row rather than being re-derived from it",
+    frameTwice.reduced?.onRecord,
+    ["p1"],
+  );
+  check("and the row the record did cover keeps its payload across both", frameTwice.pendingPermissions[0]?.rawInput, {
+    command: "ls",
+  });
+
+  /*
+   * `setSessionMeta` re-folds a row through `onSnapshot` the moment somebody pins
+   * or drags a session, with no daemon involved at all. That must be a no-op
+   * here, which is a stronger statement than "the second frame agrees with the
+   * first" — both arguments are the merged row, not the daemon's frame.
+   */
+  const refolded = unreduceSnapshot(frameOnce as never, frameOnce as never);
+  check("pinning a session re-folds its own snapshot and changes no sentence", refolded.reduced?.blobs, true);
+  check(
+    "and takes no row off the parked list",
+    refolded.pendingPermissions.map((row) => row.permissionId),
+    ["p1", "p9"],
+  );
+
+  /*
+   * The other origin, which must **not** drift the other way. Here the poll
+   * itself served the stand-in, so `MAX_PERMISSION_BLOB_BYTES` is the only place
+   * it could have been cut and nothing anywhere has more of it — the permanent
+   * sentence is the true one, and no number of frames may turn it into a promise
+   * that a fetch will produce the payload.
+   */
+  const clampedRecord = { id: "s1", pendingPermissions: [perm("pc", 1, clamped)], pendingElicitations: [] };
+  const overClamped = {
+    ...clampedRecord,
+    reduced: { pendingPermissions: 1, pendingElicitations: 0, blobs: true },
+  };
+  const ingestOnce = unreduceSnapshot(overClamped as never, clampedRecord as never);
+  check("a stand-in the record itself carries is permanent, and is not marked as pending", ingestOnce.reduced?.blobs, false);
+  const ingestTwice = unreduceSnapshot(overClamped as never, ingestOnce as never);
+  check("and that answer holds across a second frame as well", ingestTwice.reduced?.blobs, false);
+}
+
+/* ------------------------------------------------------------------ *
+ * Which sentence a clipped payload gets
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe two truncation sentences\n");
+{
+  const base = { permissionId: "p1", toolCallId: null, title: "Running", options: [], raisedAt: 0 };
+  const clipped = permissionContext({ ...base, rawInput: { truncated: true, bytes: 9000 }, content: null } as never, []);
+  const intact = permissionContext({ ...base, rawInput: { command: "ls" }, content: null } as never, []);
+
+  check(
+    "the daemon's ingest clamp is permanent, and the sentence claims it",
+    truncationNotice(clipped, false),
+    "Part of this request was too large to keep and is not shown below.",
+  );
+  check(
+    "a frame's ladder is not, and the record still has it",
+    truncationNotice(clipped, true),
+    "Part of this request is too large for the live connection and has not been fetched yet.",
+  );
+  /*
+   * ⚠ **Asserted as a difference and not only as two strings.** The repair this
+   * came out of is `webcheck`'s own: a pairing failure had two causes and one
+   * sentence, and the check asserting they must read alike is what kept the false
+   * one shipping. Two origins, two sentences, and a check that says so.
+   */
+  check("and the two do not read alike", truncationNotice(clipped, true) === truncationNotice(clipped, false), false);
+  check("an intact request says nothing at all", truncationNotice(intact, true), null);
+
+  const cardSrc = stripComments(readFileSync(new URL("../src/ui/PermissionCard.tsx", import.meta.url), "utf8"));
+  check("and the card draws that rather than a sentence of its own", /truncationNotice\(context, awaitingRecord\)/.test(cardSrc), true);
+  check(
+    "with the flag read off the session row the merge wrote",
+    /awaitingRecord = row\?\.snapshot\.reduced\?\.blobs === true/.test(cardSrc),
+    true,
+  );
+  /*
+   * The old fixed sentence, asserted as an **absence** over a comment-stripped
+   * copy — the docblocks above quote it several times over, so a regex on raw
+   * source would match this repository's own explanation of why it went.
+   */
+  check("and the fixed one it replaced is gone from the card's markup", cardSrc.includes("too large to keep"), false);
 }

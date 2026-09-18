@@ -1,16 +1,22 @@
 import { readFileSync } from "node:fs";
-import { check } from "./webcheck.env.js";
+import { check, report } from "./webcheck.env.js";
 import { snapshot } from "./webcheck.ws.js";
 import { stripComments } from "./webcheck.source.js";
 import {
   chipParts,
+  chipValue,
   choiceRefusal,
   drawnControls,
+  expandConfig,
   gapPlan,
   hasLiveAgent,
   holdConfig,
   isTerminal,
+  labelFor,
+  prune,
+  reduceConfig,
   restartsAgent,
+  showsCaption,
   splitOptions,
   unavailableHint,
 } from "./webcheck.modules.js";
@@ -936,13 +942,24 @@ process.stdout.write("\nthe routes that spawn a process\n");
    * a bar that is not marked stale is never drawing a memory.
    */
   /*
-   * The id of the slot `drawnControls` synthesizes for an effort control that was
-   * never published — see `NO_LEVELS`. Not exported from the module, and pinned
-   * here against the function's own answer rather than restated from memory: the
-   * string itself is a contract with nobody, but *that it is namespaced* is one,
+   * The ids `drawnControls` synthesizes for a standard slot nobody published — see
+   * `placeholderFor`. Not exported from the module, and pinned here against the
+   * function's own answers rather than restated from memory: the strings
+   * themselves are a contract with nobody, but *that they are namespaced* is one,
    * since `unavailable` is keyed on ids and a collision would draw a live control
    * as an absent one.
+   *
+   * ⚠ **There used to be one of these and now there are three, because the strip
+   * is no longer allowed to be shorter on one session than on the next.** The
+   * effort slot was synthesized alone, for a measured reason — every agent derives
+   * its effort list from the selected model — while `mode` and `model` were left
+   * to the agent. That was fine right up until an agent published *nothing*, which
+   * is every session whose agent has not started, failed to start, or went away
+   * before the tab was reloaded; then the whole row vanished and took the model,
+   * the effort and the mode with it.
    */
+  const ABSENT_MODE = "reemoat:mode";
+  const ABSENT_MODEL = "reemoat:model";
   const ABSENT_EFFORT = "reemoat:thought_level";
 
   const drawnFrom = (status: string, options: string[] | null, held: string[] | null) =>
@@ -957,12 +974,12 @@ process.stdout.write("\nthe routes that spawn a process\n");
    * session, `unavailable` is about one control.
    */
   check(
-    "a live agent's controls come from the daemon",
+    "a live agent's controls come from the daemon, and the slots it skipped are added after",
     [
       drawnFrom("idle", ["mode"], ["mode"]).options.map((o: { id: string }) => o.id),
       drawnFrom("idle", ["mode"], ["mode"]).stale,
     ],
-    [["mode", ABSENT_EFFORT], false],
+    [["mode", ABSENT_MODEL, ABSENT_EFFORT], false],
   );
   check(
     "and one it has dropped is added after them, marked",
@@ -970,12 +987,36 @@ process.stdout.write("\nthe routes that spawn a process\n");
       drawnFrom("idle", ["mode"], ["old"]).options.map((o: { id: string }) => o.id),
       [...drawnFrom("idle", ["mode"], ["old"]).unavailable],
     ],
-    [["mode", "old", ABSENT_EFFORT], ["old", ABSENT_EFFORT]],
+    [
+      ["mode", "old", ABSENT_MODEL, ABSENT_EFFORT],
+      ["old", ABSENT_MODEL, ABSENT_EFFORT],
+    ],
   );
+  /*
+   * ⚠ **The strip is never empty, and these two cases are why the rule changed.**
+   *
+   * Both used to assert `options.length === 0` — they were the *permission* for an
+   * empty strip, written on the argument that an agent publishing nothing already
+   * is the sentence "this agent has no controls", and that a row which is not
+   * drawn cannot have a slot missing from it. The argument answers the wrong
+   * question: the reader is not comparing an agent against itself, they are
+   * comparing this session against the last one they opened, and a composer that
+   * grows and shrinks a whole row between sessions is the shape change every other
+   * rule in this area forbids.
+   *
+   * What made it urgent is that the second case is not rare. `heldConfig` lives in
+   * the tab and the daemon deliberately restores none from disk, so *every reload*
+   * of a session whose agent is away landed here — permanently, for an ended one,
+   * since nothing will ever publish again. Reported from a screenshot of exactly
+   * that: a composer with a paperclip, a Send button and nothing else.
+   */
   check(
-    "a live agent with nothing to offer draws nothing, and is not stale",
-    [drawnFrom("idle", [], ["old"]).options.length, drawnFrom("idle", [], ["old"]).stale],
-    [0, false],
+    "a live agent with nothing to offer still draws the slots, and is not stale",
+    [
+      drawnFrom("idle", [], ["old"]).options.map((o: { id: string }) => o.id),
+      drawnFrom("idle", [], ["old"]).stale,
+    ],
+    [[ABSENT_MODE, ABSENT_MODEL, ABSENT_EFFORT], false],
   );
   check(
     "an absent agent draws the memory, and says so",
@@ -986,10 +1027,82 @@ process.stdout.write("\nthe routes that spawn a process\n");
     [["mode", "model", ABSENT_EFFORT], true],
   );
   check(
-    "an absent agent with nothing remembered draws nothing rather than claiming staleness",
-    [drawnFrom("exited", [], null).options.length, drawnFrom("exited", [], null).stale],
-    [0, false],
+    "an absent agent with nothing remembered draws the slots rather than vanishing",
+    [
+      drawnFrom("exited", [], null).options.map((o: { id: string }) => o.id),
+      drawnFrom("exited", [], null).stale,
+      [...drawnFrom("exited", [], null).unavailable],
+    ],
+    [
+      [ABSENT_MODE, ABSENT_MODEL, ABSENT_EFFORT],
+      false,
+      [ABSENT_MODE, ABSENT_MODEL, ABSENT_EFFORT],
+    ],
   );
+  /*
+   * The property behind all of the above, swept rather than sampled: **there is no
+   * session state that empties the strip.** Every status the union has, crossed
+   * with every shape of published and remembered config. A new status, or a fourth
+   * branch in `drawnControls`, is caught here rather than by eye.
+   *
+   * ⚠ **The statuses are read off the daemon, and a hand-typed copy of them here
+   * is what made that sentence false.** This block declared its own nine-string
+   * shadow and guarded the sweep with `STATUSES.length * 9 === 81` — a constant
+   * over two literals in the same block, which is `81 === 81`. Add a tenth
+   * `SessionStatus` and the census at the top of this file goes red, you fix it by
+   * editing *that* list, this shadow stays at nine, the sweep silently covers nine
+   * of ten, and the report still prints ok. A count cannot see a skipped item,
+   * because skipping does not lower one.
+   *
+   * So the union is re-read here the way the census reads it, and what guards the
+   * sweep is a census of its own rather than an arity — see the ⚠ below, where the
+   * arity guard turned out to be the same defect in a second dress.
+   */
+  const daemonStatuses = (() => {
+    const code = readFileSync(new URL("../../../src/events.ts", import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    const union = code.slice(code.indexOf("export type SessionStatus ="));
+    return [...union.slice(0, union.indexOf(";")).matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
+  })();
+  report("the sweep's statuses came off the daemon, not a copy", daemonStatuses.length > 0, `${daemonStatuses.length} read`);
+  const LIVE_SHAPES = [null, [], ["mode"]];
+  const HELD_SHAPES = [null, [], ["mode", "model"]];
+  const combinations = daemonStatuses.flatMap((status) =>
+    LIVE_SHAPES.flatMap((live) => HELD_SHAPES.map((held) => ({ status, live, held }))),
+  );
+  const empties = combinations.filter(
+    ({ status, live, held }) => drawnFrom(status, live, held).options.length === 0,
+  );
+  /*
+   * ⚠ **And the guard that replaced the `81 === 81` one was the same shape.** It
+   * checked `combinations.length` against `daemonStatuses.length * LIVE_SHAPES.length
+   * * HELD_SHAPES.length` — but `combinations` is a `flatMap` over exactly those
+   * three arrays, so its length *is* that product by construction and no edit can
+   * make the two disagree. The arity is a fact about the expression above, not
+   * about the sweep, so it is stated here and asserted nowhere.
+   *
+   * What is asserted instead is the thing a count cannot see: the set of statuses
+   * actually swept, differenced against a **second, independent derivation** of the
+   * same union — the client's own classification arrays, which come from
+   * `wire.ts` rather than from the `events.ts` read above. A status added on the
+   * daemon and classified nowhere makes the left side longer than the right; one
+   * classified on the client that the daemon never declares makes the right side
+   * longer. Either way the sweep is no longer covering what this block says it is.
+   *
+   * `starting` and `stopping` are written out because they are deliberately in
+   * neither array — they are the two transitional statuses, which the section at
+   * the top of this file pins as *exactly* the ones that are neither terminal nor
+   * live. Two literals here rather than a ninth list, and they are the two a
+   * mistake in cannot hide: dropping one shortens this side.
+   */
+  const { AGENT_LIVE_STATUSES, TERMINAL_STATUSES } = await import("../src/wire.js");
+  check(
+    "the sweep tried every status the daemon derives, and the client classifies no others",
+    [...new Set(combinations.map(({ status }) => status))].sort(),
+    [...new Set([...AGENT_LIVE_STATUSES, ...TERMINAL_STATUSES, "starting", "stopping"])].sort(),
+  );
+  check("and not one of them leaves the composer with no controls at all", empties, []);
   /*
    * The sequence that is the bug, walked end to end: a restart is a live frame,
    * then an emptied `interrupted` one, then an emptied `starting` one. The strip
@@ -1102,7 +1215,11 @@ process.stdout.write("\nthe routes that spawn a process\n");
     );
     check(
       "the synthesized slot is namespaced, so no agent could have published it",
-      [ABSENT_EFFORT.startsWith("reemoat:"), opencode.options.at(-1)?.category],
+      // Read off the *drawn* slot rather than this block's own `ABSENT_EFFORT`,
+      // which would be a literal testing itself. The constant is differenced
+      // against the synthesized id by the check above, which compares the whole
+      // drawn id list against it.
+      [opencode.options.at(-1)?.id.startsWith("reemoat:"), opencode.options.at(-1)?.category],
       [true, "thought_level"],
     );
     check(
@@ -1128,31 +1245,273 @@ process.stdout.write("\nthe routes that spawn a process\n");
       ["model", ABSENT_EFFORT],
     );
     /*
-     * The width invariant `ChipParts` exists for, applied to the row this client
-     * invents: a chip that reserves a different width from a real effort control
-     * would move every button beside it on exactly the sessions this fix is for.
+     * What the row this client invents stands in for — and, because this is the
+     * check whose predecessor was a tautology, how much of that is *asserted*
+     * rather than entailed by the element beside it.
+     *
+     * ⚠ **This compared `chipParts(…, false)` against `chipParts(…, false)` and
+     * was `"—" === "—"`.** With `available: false` the `value` field is the literal
+     * `UNAVAILABLE_VALUE` and the option is never consulted; `thought_level` is in
+     * `CAPTION_SILENT`, so `caption` is `null` on both sides as well. Neither half
+     * of the comparison ever read the thing it was comparing, and it stayed green
+     * through a slot synthesized in the wrong place, for the wrong category,
+     * standing for the wrong control — which is the whole of what it claimed.
+     *
+     * ⚠ **The repair's own first prose then re-described that comparison as
+     * meaningful, and is corrected here in the open rather than quietly.** It read
+     * "every field a chip is assembled from matches a published control of that
+     * category — the caption in **both** availability states, which is
+     * `ChipParts`' own property". It is not asserting that, and for a slot this
+     * strip synthesizes it never can: `ALWAYS_DRAWN` is `CATEGORY_SLOT` filtered to
+     * the two visible slots, which yields `mode`, `model` and `thought_level`, and
+     * all three are in `CAPTION_SILENT`. So `caption` is `null` in both states *by
+     * construction*, and a caption comparison here is entailed by the category
+     * equality next to it rather than evidence for anything. The second check
+     * below states that as a property instead of leaning on it in silence: a
+     * fourth always-drawn slot, for a category that does draw a caption, makes
+     * this paragraph false and is what goes red.
+     *
+     * What the pair below honestly discriminates is **which control the last slot
+     * stands in for**: its category is a published effort control's, and its
+     * position is load-bearing — swap the synthesized slots and `at(-1)` is the
+     * model, whose category fails. `chipParts(…, false)` is kept as the statement
+     * that the two are one shape, not as the evidence for it.
+     *
+     * Where the caption *is* a real comparison is the other kind of absence: a
+     * control the agent published and then withdrew, whose category can be
+     * anything, including one with no glyph and therefore a caption. That is the
+     * sweep at "a … chip keeps its caption when the agent stops offering it",
+     * below, and it is the only place `ChipParts`' availability-independence is
+     * actually put to a category that can fail it.
+     *
+     * **The width is not in here at all**, and the sentence that used to open this
+     * docblock — "a chip that reserves a different width from a real effort
+     * control" — outlived the thing it described: the fixed reserve that made
+     * width a `chipParts` property was withdrawn on the owner's word (Q3.564).
+     * What is left is `Absent`'s class string, asserted against the live chip's
+     * own further down, off disk, since that is the only place the fact lives.
      */
+    const stood = opencode.options.at(-1) as never;
+    const published = config(["effort"]).options[0] as never;
     check(
-      "and reserves the same width as an effort control the agent did publish",
-      chipParts(opencode.options.at(-1) as never, false),
-      chipParts(config(["effort"]).options[0] as never, false),
+      "and the slot stands in for an effort control, drawing what one draws",
+      [(stood as { category: string }).category, chipParts(stood, false)],
+      [(published as { category: string }).category, chipParts(published, false)],
     );
     /*
-     * The one refusal that stands: an agent that published nothing at all is
-     * already the sentence "this agent has no controls", and a strip that is not
-     * drawn cannot have a slot missing from it. A *memory*, by contrast, keeps the
-     * slot — asserted in the restart sequence above, where leaving it out is what
-     * moved the buttons.
+     * The premise the paragraph above rests on, as a check rather than a claim:
+     * every slot this strip invents is caption-silent, so no comparison of two
+     * captions over one of them can ever discriminate anything.
+     *
+     * A census over the slots as *drawn*, compared against a written-out list
+     * rather than counted: a count cannot see a skipped member, and what this one
+     * is here to notice is a **fourth** invented slot, or one of these three
+     * arriving under a category that is not caption-silent. The state it is taken
+     * in — no agent, nothing remembered — is the one where nothing is filled, so
+     * every placeholder `withUnusable` can add is in the answer; that it can add
+     * none outside `ALWAYS_DRAWN` is read off `agentConfig.ts` and is not pinned
+     * here.
+     *
+     * ⚠ **It overlaps the census further down, and the difference is one column.**
+     * This said the two had different subjects; they share one. Both pin the
+     * category of all three slots in drawn order — that one adds the id, the label
+     * and the chip, this one adds `showsCaption`. And `showsCaption` itself is not
+     * this file's to hold: `webcheck.composer-and-config-bar.ts` runs the predicate
+     * over its four categories and two misses. What is left here, and is the reason
+     * to keep it, is the narrower statement that the categories *this strip
+     * invents* fall inside that set.
      */
     check(
-      "a live agent offering nothing still offers nothing",
-      drawnFrom("idle", [], ["mode"]).options.length,
-      0,
+      "and no slot this strip invents draws a caption, which is why comparing two proves nothing",
+      drawnFrom("exited", [], null).options.map((option) => [option.category, showsCaption(option)]),
+      [
+        ["mode", false],
+        ["model", false],
+        ["thought_level", false],
+      ],
+    );
+    /*
+     * ⚠ **The refusal that used to stand here is withdrawn, and this is its
+     * replacement.** It read "an agent that published nothing at all is already the
+     * sentence *this agent has no controls*, and a strip that is not drawn cannot
+     * have a slot missing from it" — and it was the permission for an empty
+     * composer. What the argument misses is that the comparison a reader makes is
+     * against the *previous session they opened*, not against this agent, so a row
+     * that appears and disappears moves every control beside it. The three slots
+     * are drawn in every state now, unavailable and each saying so.
+     *
+     * Kept as a check rather than deleted, pointed the other way: the case is
+     * still worth naming, it just has the opposite answer.
+     */
+    check(
+      "a live agent offering nothing still gets the three slots",
+      [
+        drawnFrom("idle", [], ["mode"]).options.map((option: { id: string }) => option.id),
+        [...drawnFrom("idle", [], ["mode"]).unavailable],
+      ],
+      [
+        [ABSENT_MODE, ABSENT_MODEL, ABSENT_EFFORT],
+        [ABSENT_MODE, ABSENT_MODEL, ABSENT_EFFORT],
+      ],
     );
     check(
-      "and neither does a session with no agent and nothing remembered",
-      [drawnFrom("exited", [], null).options.length, drawnFrom("exited", [], null).stale],
-      [0, false],
+      "and so does a session with no agent and nothing remembered",
+      [
+        drawnFrom("exited", [], null).options.map((option: { id: string }) => option.id),
+        drawnFrom("exited", [], null).stale,
+      ],
+      [[ABSENT_MODE, ABSENT_MODEL, ABSENT_EFFORT], false],
+    );
+    /*
+     * ⚠ **A claim about *width* stood here with no check under it, and it was a
+     * withdrawn claim besides.** It read "each placeholder reserves the width a
+     * real control of that category would, which is the `chipParts` invariant
+     * applied to the two slots that gained one" — and the fixed reserve that made
+     * width a `chipParts` invariant is gone on the owner's word (Q3.564), so an
+     * unavailable slot is *narrower* than the control it stands for and the
+     * cluster does move. Recorded rather than deleted, because this repository
+     * keeps its reversals where the reader will hit them.
+     *
+     * ⚠ **What replaced it claimed more than the checks under it.** It read that
+     * what survives about these two slots is "their id, category, name and chip
+     * contents" plus "the box around them", and each of those three is wider than
+     * what is actually pinned. Narrowed against the two checks it names:
+     *
+     * "Every synthesized slot stands in for its own control, in its own place",
+     * further down, sweeps **all three** slots rather than these two, in drawn
+     * order, and pins four fields per slot: the id, the category, `labelFor`'s
+     * answer, and `chipParts`. The *name* is in that only through `labelFor`, which
+     * answers `CATEGORY_LABEL` for `mode` and `thought_level` and reaches the
+     * `name` field for `model` alone. And `chipParts` is the weak column: at
+     * `available: false` its value is `UNAVAILABLE_VALUE` whatever the option is,
+     * and its caption follows from the category the same row already pins — which
+     * is the `"—" === "—"` shape this file has had to repair twice, kept here
+     * because it is free beside three fields that can genuinely go red rather than
+     * because it discriminates.
+     *
+     * The box is pinned as a **prefix and an absence**, not as a comparison of two
+     * strings: `Absent`'s `${CHIP}` class string and `Select`'s must both start
+     * `" border-transparent px-2 "` and must add no sizing utility after it. Read
+     * off disk, because neither fact is reachable from a module with no DOM. What
+     * follows the prefix is otherwise unread, so two chips whose colours diverge
+     * pass, deliberately.
+     */
+    /* ---- what survives a reload, and what may not ---- */
+
+    /*
+     * ⚠ **The reduction keeps the selected choice and drops the rest, and both
+     * halves are the assertion.**
+     *
+     * `chipValue` names a value through the *choice* that carries it, never
+     * through the raw value — without one the model chip reads `openai/gpt-5`
+     * instead of `GPT-5`, and for a model it mines the choice's description to
+     * split `Opus 5 · Best for…` into a name. So dropping the selected choice
+     * would restore the chip and draw it wrong, which is worse than a dash.
+     *
+     * And keeping the others is not available: opencode publishes **362** models
+     * on one control, and a few hundred sessions of that is megabytes into a
+     * budget shared with the credential. So the count is pinned at one, not
+     * merely "contains the right one".
+     */
+    {
+      const wide = {
+        modes: { current: "plan", available: [{ id: "plan", name: "Plan" }, { id: "build", name: "Build" }] },
+        options: [
+          {
+            id: "model",
+            name: "Model",
+            description: "ignored",
+            category: "model",
+            kind: "select" as const,
+            value: "b",
+            choices: [
+              { value: "a", name: "A", description: null, group: null },
+              { value: "b", name: "B", description: "B · best", group: null },
+              { value: "c", name: "C", description: null, group: null },
+            ],
+          },
+        ],
+      };
+      const small = reduceConfig(wide as never);
+      check(
+        "a remembered control keeps the chosen choice and only that one",
+        [small.options.length, small.options[0]?.choices.length, small.options[0]?.choices[0]?.value],
+        [1, 1, "b"],
+      );
+      check(
+        "and the chip still names it rather than printing the raw value",
+        chipValue(expandConfig(small).options[0] as never),
+        chipValue(wide.options[0] as never),
+      );
+      check(
+        "modes keep the current one and drop the rest",
+        [small.modes?.current, small.modes?.available.length],
+        ["plan", 1],
+      );
+      /*
+       * The bound is applied on write, so what it keeps is the most recently
+       * seen rather than whatever the object happened to enumerate first. A
+       * read-time bound would answer differently as storage filled, which is how
+       * a chip appears on one load and not the next.
+       */
+      const many = Object.fromEntries(
+        Array.from({ length: 5 }, (_, at) => [`s${at}`, { at, modes: null, options: [] }]),
+      );
+      check("the bound keeps the most recently seen", Object.keys(prune(many as never, 2)).sort(), ["s3", "s4"]);
+      check("and leaves a file already under it alone", Object.keys(prune(many as never, 9)).length, 5);
+    }
+
+    const blank = drawnFrom("exited", [], null).options as readonly never[];
+    /*
+     * ⚠ **The name is read even where it is not drawn.** `showsCaption` keeps
+     * every one of these categories off the chip face, so a wrong one looks right;
+     * it reaches the reader through `Absent`'s `title` and `aria-label`. `labelFor`
+     * falls through to `name` for `model`, and `name` on a synthesized slot is the
+     * wire's own category — lower-case and underscored. A screen reader announced
+     * the control as "model".
+     */
+    check(
+      "a synthesized slot is named the way a published one would be",
+      blank.map((option) => labelFor(option as never)),
+      ["Mode", "Model", "Effort"],
+    );
+    /*
+     * ⚠ **The check that stood here was `"—" === "—"`, twice.** It compared
+     * `chipParts(slot, false)` against `chipParts(realControl, false)`, and with
+     * `available: false` that field is the literal `UNAVAILABLE_VALUE` on both
+     * sides without the option being read at all — while `mode` and `model` are
+     * both in `CAPTION_SILENT`, so the other field is `null` on both sides too.
+     * The slots could have been synthesized in any order, under any ids, for any
+     * categories, and it passed. It was written by analogy to the effort one
+     * above, which had the same defect and is now the same repair.
+     *
+     * A census over the three slots **in their drawn order** replaces it, carrying
+     * the facts a chip is actually assembled from: the id it occupies —
+     * `unavailable` is keyed on ids, so a collision draws a live control as an
+     * absent one — the category the glyph, the slot and the label all come from,
+     * the name a reader is given, and what the chip says where a value would go.
+     *
+     * Written out per slot rather than derived from `config`, deliberately:
+     * `config` names each option after its id, so `labelFor` answers `model`
+     * there and `Model` here, which is the title-casing the check above exists
+     * for. Deriving the expectation from the fixture would assert the bug.
+     *
+     * The **width** is not in here and never was — it is `Absent`'s own class
+     * string, asserted against the live chip's below.
+     */
+    check(
+      "and every synthesized slot stands in for its own control, in its own place",
+      blank.map((option: { id: string; category: string; name: string }) => [
+        option.id,
+        option.category,
+        labelFor(option),
+        chipParts(option as never, false),
+      ]),
+      [
+        [ABSENT_MODE, "mode", "Mode", { caption: null, value: "—" }],
+        [ABSENT_MODEL, "model", "Model", { caption: null, value: "—" }],
+        [ABSENT_EFFORT, "thought_level", "Effort", { caption: null, value: "—" }],
+      ],
     );
     /*
      * A select the agent published with nothing in it is the same absence with a
@@ -1172,10 +1531,19 @@ process.stdout.write("\nthe routes that spawn a process\n");
         ],
       };
       const empty = drawnControls({ status: "idle", agentConfig: hollow } as never, undefined);
+      /*
+       * The published-but-empty select is marked; the `model` slot this fixture
+       * never mentions is synthesized beside it. Two different routes into
+       * `unavailable` — one an agent's own answer, one this client's stand-in —
+       * asserted together so neither can quietly take over the other's case.
+       */
       check(
         "a select published with nothing in it is drawn as having nothing to choose",
         [empty.options.map((option) => option.id), [...empty.unavailable]],
-        [["mode", "effort"], ["effort"]],
+        [
+          ["mode", "effort", ABSENT_MODEL],
+          ["effort", ABSENT_MODEL],
+        ],
       );
     }
     /*
@@ -1336,12 +1704,74 @@ process.stdout.write("\nthe routes that spawn a process\n");
      * string — the kind of thing a tidy-up changes without noticing, and every
      * pure assertion above stays green when it does.
      */
-    const bar = readFileSync(new URL("../src/ui/AgentConfigBar.tsx", import.meta.url), "utf8");
-    const inner = bar.slice(bar.indexOf("function chipInner"), bar.indexOf("function Absent"));
+    /*
+     * ⚠ **Comment-stripped, and that is not a precaution here.** This module
+     * argues about `CHIP_MAX`, `px-2` and `sm:absolute` in prose a few lines above
+     * the code that sets them — the withdrawn reserve is described in full in
+     * `chipInner`'s own docblock — so a regex over raw source matches the
+     * argument and reports the rule as held while the code has dropped it.
+     */
+    const bar = stripComments(readFileSync(new URL("../src/ui/AgentConfigBar.tsx", import.meta.url), "utf8"));
+    /*
+     * ⚠ **Both ends, and never a bare `slice`.** `indexOf` answers -1 for an
+     * anchor somebody renamed, and JS `slice` reads a negative end as counting
+     * *from the end of the file* — so a missing end anchor does not empty the
+     * region, it widens it to nearly the whole module and every regex below goes
+     * on matching something. A throw is the only honest answer: a source check
+     * that cannot find its subject has not passed.
+     */
+    const region = (from: string, to: string): string => {
+      const start = bar.indexOf(from);
+      const end = bar.indexOf(to);
+      if (start < 0 || end <= start) throw new Error(`webcheck: no ${from} … ${to} in AgentConfigBar.tsx`);
+      return bar.slice(start, end);
+    };
+    const inner = region("function chipInner", "function Absent");
     check("the value is capped and clips rather than overflowing", /\$\{CHIP_MAX\} truncate/.test(inner), true);
     check("the caption takes the same cap", (inner.match(/\$\{CHIP_MAX\}/g) ?? []).length, 2);
     check("and the fixed sizers are gone rather than hidden", inner.includes("col-start-1 row-start-1"), false);
     check("with nothing left holding a width open", /max-w-40|sm:absolute sm:inset-0/.test(inner), false);
+
+    /*
+     * **And the two chips are the same box**, which is the assertion the pair of
+     * `chipParts` comparisons in the sections above were pretending to be.
+     *
+     * `Absent` and `Select` are one button in two states and the rule they exist
+     * to keep is that the strip does not move. They already share their
+     * *contents*, through `chipInner` — written twice, those drifted inside one
+     * release. Nothing shared the box around them, and the box is what has the
+     * width on it: `CHIP` carries `inline-flex`, `gap-1.5` and `text-2xs`, the
+     * call site adds the horizontal padding, and the tail of each class string is
+     * colour. A `min-w`, a `px-3` or a step on the type scale landing on one of
+     * the two is the edit that moves that chip and not its twin, and it is exactly
+     * the edit every pure assertion in this file stays green through.
+     *
+     * The first `${CHIP}` template in each function is its own button; the menu
+     * panel below it carries none.
+     */
+    const chipClass = (source: string): string =>
+      /className=\{`\$\{CHIP\}([^`]*)`\}/.exec(source)?.[1] ?? "\u26a0 no ${CHIP} button found";
+    const GEOMETRY = " border-transparent px-2 ";
+    const absentChip = chipClass(region("function Absent", "function Select"));
+    const liveChip = chipClass(region("function Select", "function ChoiceSection"));
+    check(
+      "the unavailable chip and the live one are sized by the same string",
+      [absentChip.startsWith(GEOMETRY), liveChip.startsWith(GEOMETRY)],
+      [true, true],
+    );
+    /*
+     * And what follows the shared prefix is colour and nothing else. Asserted as
+     * an absence over both, because the failure this catches arrives as an
+     * *addition*: one chip given a width, a padding or a font size the other does
+     * not have. `text-faint` and `hover:bg-raised` live here legitimately, so the
+     * type-scale half names the six steps rather than everything starting `text-`.
+     */
+    const SIZING = /\b(?:w|h|min-w|max-w|min-h|max-h|p|px|py|pt|pb|pl|pr|gap|basis|flex)-|\btext-(?:2xs|xs|sm|base|lg|xl)\b/;
+    check(
+      "and neither of them adds a size of its own after it",
+      [SIZING.test(absentChip.slice(GEOMETRY.length)), SIZING.test(liveChip.slice(GEOMETRY.length))],
+      [false, false],
+    );
   }
 
   /*

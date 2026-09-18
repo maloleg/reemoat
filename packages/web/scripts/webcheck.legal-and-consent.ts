@@ -456,16 +456,18 @@ process.stdout.write("\nthe three documents, and the box that points at them\n")
 
   /*
    * **Nothing else in the app links a document, and each refusal has its own
-   * reason.** `ProfileMenu`'s own docblock sets the test a fourth row must pass —
-   * *"it is about **you** rather than about what is on screen"* — and a policy is
-   * about the service. `SignIn`'s two doors are argued at length and its
+   * reason.** `MenuDrawer`'s own docblock sets the test a row must pass — *"it is
+   * about **you** rather than about what is on screen"* — and a policy is about the
+   * service. (It was `ProfileMenu`'s docblock, and the clause quoted here is one of
+   * the two that survived that file being replaced by the drawer intact; the one
+   * that did not is named there.) `SignIn`'s two doors are argued at length and its
    * `${LINK}` count is pinned at two one module over. `registrationConfirm` is
    * forbidden a second link by `templates.ts` itself.
    */
   const DOC_LINK = /legalPath\(|href="\/(?:terms|acceptable-use|privacy)"/;
   check("the link sweep can see a document link", DOC_LINK.test('href={legalPath("terms")}'), true);
   for (const [what, where] of [
-    ["the profile menu", "../src/ui/ProfileMenu.tsx"],
+    ["the menu drawer", "../src/ui/MenuDrawer.tsx"],
     ["the sign-in screen", "../src/ui/SignIn.tsx"],
   ] as const) {
     const text = stripComments(readFileSync(new URL(where, import.meta.url), "utf8"));

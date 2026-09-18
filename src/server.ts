@@ -212,32 +212,94 @@ const BATCH_MAX_EVENTS = 200;
  * ingest); the permission pair's `options` (`MAX_PERMISSION_OPTIONS`, 24, under
  * an 8 KiB `MAX_PERMISSION_SNAPSHOT_BYTES` refusal over `{title, options}`
  * together); `elicitation_resolved`'s answers (`MAX_ELICITATION_ANSWER_CHARS`,
- * 2048, clipped in `registry.ts` and refused on the route). `status` and
- * `turn_end` need none — union literals and numbers.
+ * 2048, clipped in `registry.ts` and refused on the route); and `agent_config`'s
+ * ids, names, values and *counts* (`toConfigOptions`, `session.ts` — the
+ * `MAX_CONFIG_*` family, under a `MAX_CONFIG_BYTES` backstop that cuts and marks
+ * `truncated` rather than refusing). `status` and `turn_end` need none — union
+ * literals and numbers.
  *
- * ⚠ **Four rely on nothing at all, and that is the correction.**
+ * ⚠ **That `agent_config` clause is the newest and it was missing from this list
+ * while this list was being written**, which is the failure this whole inventory
+ * exists to prevent: the paragraph below said `plan.entries` was "the one door
+ * that reaches 1 MiB" on the same day {@link fitSnapshotFrame}'s residue note in
+ * this file said `agentConfig`'s choice ids were bounded nowhere. ⚠ **This list is
+ * still hand-derived and may still be short.** What is not hand-derived is the
+ * outcome: `daemoncheck.after-the-turn-and-config` replays every `truncateEvent`
+ * arm against `MAX_SOCKET_MESSAGE_BYTES` and differences the labels against
+ * `SessionEvent`'s union, so a field this paragraph forgets shows up there as a row
+ * over the ceiling.
+ *
+ * ⚠ **Two rely on nothing at all, and that is the correction.**
  * `context_cleared` carries two agent-minted session ids whose real length
  * `estimateBytes` charges, so this function is entered and has nothing to do —
  * there is no `MAX_AGENT_SESSION_ID` anywhere in `src/`. `session_started` is
  * sharper still: an agent-minted `sessionId`, the adapter's `agentInfo` and its
  * `modes`, charged a **flat 192**, so the function is never entered on it at
- * all. And `elicitation_request`'s own comment says its `message` is "clipped at
- * ingest in `session.ts`" — `MAX_ELICITATION_MESSAGE_CHARS` was retired,
- * `MAX_ELICITATION_FORM_BYTES` weighs the *form* and `message` is not a field of
- * it, so that arm now names a bound that no longer exists. **And
- * `elicitation_resolved` is the fourth**, easy to miss because it shares
+ * all. **It was four**, and the two that came back are the elicitation pair.
+ * `elicitation_request`'s own comment said its `message` was "clipped at ingest
+ * in `session.ts`" while `MAX_ELICITATION_MESSAGE_CHARS` was retired and
+ * `MAX_ELICITATION_FORM_BYTES` weighed the *form*, of which `message` is not a
+ * field — an arm naming a bound that did not exist, and the one field on this
+ * whole path that could be a frame by itself. The clip is restored at 4096 code
+ * units (`clipElicitationMessage`, `session.ts`), which is what makes the
+ * paragraph below hold for this arm as well. **And
+ * `elicitation_resolved` was the fourth**, easy to miss because it shares
  * `truncateEvent`'s arm with `elicitation_request` (`events.ts:2085`, `return
  * event`) while having its *own* `estimateBytes` case that charges
  * `256 + message.length` plus every answer's key, label and value at their real
  * lengths — so it carries strictly more than the request it answers and is
- * shrunk by exactly as little. `plan.entries` is a fifth of a different kind:
- * `session.ts` pushes the agent's array through uncapped, so the count that arm
- * divides by is itself unbounded.
+ * shrunk by exactly as little. It is fixed by the same clip and not by a second
+ * one: both its call sites in `registry.ts` copy the `message` off the *parked*
+ * record, which is the string `onElicitation` already cut, so there is one
+ * bound for the pair rather than two numbers that can disagree. `plan.entries` is a
+ * fifth of a different kind: `session.ts` pushes the agent's array through
+ * uncapped, so the count that arm divides by is itself unbounded. **`agent_config`
+ * was a sixth, of that same cardinality kind and worse** — its arm nulls
+ * descriptions and leaves the ids, names and values it divides nothing by, so at
+ * 20 000 choices it weighed 1 318 159 bytes *after* truncation and its cliff sat
+ * at **7 766 choices**, below `plan`'s ~9 500. Closed at ingest on 2026-09-19;
+ * `plan.entries` is what is left of the two.
  *
  * The conclusion the old sentence reached is unchanged and only its premise was
  * wrong: one event over the wire ceiling is still **sent** rather than dropped,
  * because dropping it wedges the client's own cursor (see {@link encodeStored})
  * and the transcript is what the daemon is for.
+ *
+ * ⚠ **What this inventory is worth to the reader on the other side, and the one
+ * sentence that may not be written from it.** `MAX_SOCKET_MESSAGE_BYTES` in
+ * `packages/protocol` describes the other half of this bound — 1 MiB against the
+ * 512 KiB here — as headroom, on the strength of a ~768 KiB worst case that is
+ * `DEFAULT_MAX_EVENT_BYTES` escaped six bytes to the unit. That figure is honest
+ * for the nine labels above that converge on `maxBytes` and for no others, so the
+ * headroom sentence is true of *those* and must be qualified rather than
+ * generalised. It was generalised once, on 2026-09-17, to "every arm that refuses
+ * to shrink is bounded at ingest" — written in the same change as the two
+ * paragraphs above saying `context_cleared` and `session_started` rely on nothing
+ * at all, so one commit carried both halves of a contradiction. It is corrected
+ * there rather than here, against numbers measured 2026-09-18 by replaying
+ * `truncateEvent` and weighing UTF-8: `plan.entries` at 10 000 entries is
+ * **1 100 027 bytes after truncation**, because the per-item budget floors at 64
+ * bytes and bounds an entry rather than the count — 3 entries of a megabyte each
+ * come out at 131 148. The two ids are the smaller hazard and cost more to close:
+ * bounding them at ingest was refused, since an agent session id is `AcpClient`'s
+ * routing key and rides every `session/prompt`, `session/cancel` and
+ * `session/close`, so a clip addresses a conversation that does not exist and a
+ * refusal at `session/new` turns a large event into a session that cannot start.
+ *
+ * ⚠ **On 2026-09-18 that sentence read "and is the one door that reaches 1 MiB",
+ * and it was wrong the day it was written.** `agent_config` was a nearer one —
+ * **7 766 choices** at a realistic value and name against `plan`'s ~9 500 — and it
+ * is named as unbounded three thousand lines further down this same file, in
+ * {@link fitSnapshotFrame}'s residue note, which was true and untouched while this
+ * paragraph said otherwise. One file carrying both halves of a contradiction, for
+ * the second time in two days. The `agent_config` half is closed now
+ * (`toConfigOptions`, `src/session.ts`), and what replaces the *count* is a driver
+ * rather than a better sentence: `daemoncheck.after-the-turn-and-config` replays
+ * every arm of `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES`, weighs each against
+ * `MAX_SOCKET_MESSAGE_BYTES`, and differences the labels it swept against
+ * `SessionEvent`'s own union in both directions. **Run it to enumerate the doors.
+ * Do not count them here, and do not write "the one" about a set nothing sweeps** —
+ * three comments in this tree did, and all three missed the same arm.
  *
  * ⚠ **Nothing compares this to `MAX_SOCKET_MESSAGE_BYTES`**, which lives in
  * `packages/protocol`: `packages/web` may not import `src/`, so the app's copy is
@@ -292,10 +354,14 @@ const BATCH_MAX_BYTES = 512 * 1024;
  *   issuing them in parallel inside one turn. At 24 KiB an entry, 22 of them
  *   pass this bound and 43 pass the ceiling it protects.
  * - `pendingElicitations` — **unbounded in count** by the identical gate, which
- *   `resolveElicitation` reuses verbatim, and unbounded *per entry* besides:
- *   `MAX_ELICITATION_FORM_BYTES` weighs the **form**, `message` is not a field of
- *   it, and the `MAX_ELICITATION_MESSAGE_CHARS` clip that used to bound it was
- *   retired. One question can be arbitrarily large on its own.
+ *   `resolveElicitation` reuses verbatim, but bounded per entry: the form is not
+ *   on this record at all, and `message` is clipped at ingest to
+ *   `MAX_ELICITATION_MESSAGE_CHARS` (4096 code units, at most 16 KiB of UTF-8).
+ *   ⚠ It was **unbounded per entry as well** — `MAX_ELICITATION_FORM_BYTES`
+ *   weighs the **form**, `message` is not a field of it, and the clip had been
+ *   retired — so one question could be arbitrarily large on its own and defeat
+ *   every rung of the ladder below, whose halving floors at one row. That is the
+ *   worst case this bound was restored to remove.
  * - `agentSessionId` and `agentHandle` — agent-minted, bounded nowhere.
  *
  * So {@link controlItem} **fits** the frame instead of guessing at it, and
@@ -2959,8 +3025,10 @@ export function createApp(options: ServerOptions): AppBundle {
   app.get("/sessions", read, (c) => {
     // `listing`, which is what takes `outputFilePath` off every background-task
     // row: this is the four-second poll the paragraph above is about, and that
-    // field is the largest thing in a record no client draws. The socket and
-    // `GET /sessions/:id` still carry it — see `ManagedSession.snapshot`.
+    // field is the largest thing in a record no client draws. `GET /sessions/:id`
+    // still carries it whole — see `ManagedSession.snapshot`. The socket carries
+    // it too, except on a frame `fitSnapshotFrame` had to reduce: its first rung
+    // nulls the same field, so that is a second site and it is conditional.
     const all = registry.list().map((session) => session.snapshot({ listing: true }));
     const limitParam = c.req.query("limit");
     const limit = limitParam === undefined ? null : Math.max(0, boundedInt(limitParam, 0));
@@ -5252,10 +5320,19 @@ function heldFrame(payload: string): QueueItem {
  * Two rungs, each one re-encoded and re-measured on `Buffer.byteLength` rather
  * than estimated — charging an estimate against a wire ceiling is the defect
  * {@link BATCH_MAX_BYTES} records, and repeating it here would repeat it on the
- * one frame that cannot afford it. The rung before both of them is not in this
- * function at all: the frame exactly as built, already checked by the caller, so
- * **every frame that fits is byte-identical to what this daemon sent before** and
- * no session that worked can tell this function exists.
+ * one frame that cannot afford it. The rung before both of them is the frame
+ * exactly as built, so **every frame that fits is byte-identical to what this
+ * daemon sent before** and no session that worked can tell this function exists.
+ *
+ * ⚠ **That rung is stated twice on purpose, and it stopped being redundant when
+ * the reduction became visible.** {@link controlItem} tests it first as a *gate*
+ * — an ordinary frame must pay one `Buffer.byteLength` over a string already in
+ * hand and nothing else, on the emit path `touchSafe()` fans out — and this
+ * function tests it again as its *contract*, because it is exported and because
+ * what it returns now carries {@link SessionSnapshot.reduced}. A caller reaching
+ * past the gate with a frame that fits would otherwise get a snapshot marked as
+ * cut with nothing cut out of it, and "marked means reduced" is the whole of what
+ * the client reads.
  *
  * **The first rung here reduces, and every shape it produces is one the client
  * already handles.** `backgroundTasks[].outputFilePath` goes to `null` —
@@ -5293,24 +5370,70 @@ function heldFrame(payload: string): QueueItem {
  * proportional and not down to a single row: it spends the whole 512 KiB.
  *
  * ⚠ **The ladder terminates in practice and not in principle, and the residue is
- * named rather than papered over.** `agentSessionId`, `agentHandle`, each
- * surviving elicitation's `message` and `agentConfig`'s choice ids and names are
- * agent-minted and bounded nowhere (see {@link CONTROL_MAX_BYTES}), so a hostile
- * or broken ACP binary defeats every rung with one enormous string. The fix for
- * those is an ingest bound in `session.ts`, not another number here; what this
- * guarantees is that the **reachable** case — an agent parking permissions in
- * parallel inside one turn — no longer wedges the attach. Whatever the last rung
- * produced is sent rather than dropped, for {@link BATCH_MAX_BYTES}'s reason one
- * arm over: a `hello` that never arrives is a transcript that never starts, which
+ * named rather than papered over.** `agentSessionId` and `agentHandle` are
+ * agent-minted and bounded nowhere (see {@link CONTROL_MAX_BYTES}), so a hostile or
+ * broken ACP binary defeats every rung with one enormous string. The fix for those
+ * is an ingest bound in `session.ts`, not another number here — which is exactly what **a surviving
+ * elicitation's `message` got**: it was on that list, and it was the sharpest
+ * member of it, because the halving rung floors at one row (`while (keep > 1)`
+ * never runs at `keep === 1`) so a single oversized question could not be cut by
+ * any rung at all. `clipElicitationMessage` bounds it at ingest now; the list
+ * above is what is left.
+ *
+ * ⚠ **`agentConfig`'s choice ids and names were on that list until 2026-09-19, and
+ * the way they came off is worth the sentence.** This note was right about them
+ * and stayed right while `BATCH_MAX_BYTES`'s own paragraph, three thousand lines
+ * up in this same file, said `plan.entries` was "the one door that reaches 1 MiB" —
+ * so a reader checking one half of this file against the other would have caught
+ * it, and nobody did. They are bounded at ingest now by `toConfigOptions` in
+ * `src/session.ts`, the same repair `clipElicitationMessage` is and for the same
+ * reason. What stays true of them here is only that this ladder could never have
+ * cut them: the bound is upstream of the frame, not a rung on it.
+ *
+ * What this ladder guarantees is that the **reachable** case — an agent parking
+ * permissions in parallel inside one turn — no longer wedges the attach. Whatever
+ * the last rung produced is sent rather than dropped, for {@link BATCH_MAX_BYTES}'s
+ * reason one arm over: a `hello` that never arrives is a transcript that never starts, which
  * is the stall, not the cure for it.
+ *
+ * ⚠ **And what the ladder reduced is now *said on the frame*, which is a wire
+ * change rather than a tidy-up.** Every rung here
+ * produces a `session` that is a **lossy projection** of the one
+ * `GET /sessions/:id` serves whole, and nothing on the frame used to mark it.
+ * `store.ts` writes both into one `row.snapshot` — the 4s poll and `onSnapshot` —
+ * so past this ceiling `waitingCount`, the `more` count and `PermissionCard`'s
+ * *"Part of this request was too large to keep"* banner flipped on every
+ * poll/frame alternation, each flip re-arming an effect that fires
+ * `store.loadAll`. {@link SessionSnapshot.reduced} is set by the rungs that lose
+ * something and absent otherwise, so a client can add the cut rows back to a
+ * count and decline to clobber a fuller list it already holds. Marked rather than
+ * degrading the HTTP route to match, which is the conservative direction: a route
+ * cut to the frame's shape loses data no client can get back.
  */
 export function fitSnapshotFrame(frame: unknown, built: string): string {
   const session = snapshotOnFrame(frame);
   if (session === null) return built;
+  // See the docblock: the gate in `controlItem` is a fast path and this is the
+  // contract. Nothing may come back marked as reduced without having been.
+  if (Buffer.byteLength(built, "utf8") <= CONTROL_MAX_BYTES) return built;
   const rest = frame as Record<string, unknown>;
 
   const trimmed: SessionSnapshot = {
     ...session,
+    /*
+     * Written on the first rung rather than on the one that cuts rows, because
+     * the first rung already loses something — every permission's `rawInput` and
+     * `content` — and a frame that says nothing about that is the lossy
+     * projection this field exists to end. The counts are the record's **true**
+     * lengths, taken before either rung runs, so the halving below can slice the
+     * arrays without touching them; `...trimmed` carries this through every
+     * iteration of that loop.
+     */
+    reduced: {
+      pendingPermissions: session.pendingPermissions.length,
+      pendingElicitations: session.pendingElicitations.length,
+      blobs: true,
+    },
     backgroundTasks: session.backgroundTasks.map((task) => ({ ...task, outputFilePath: null })),
     pendingPermissions: session.pendingPermissions.map((pending) => ({
       ...pending,
