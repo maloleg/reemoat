@@ -1,0 +1,26 @@
+{
+  "name": "@reemoat/protocol",
+  "version": "0.9.0",
+  "description": "The authenticated encryption between a Reemoat app and a remote daemon: the Noise handshake, the framing inside it, and the capability both ends read.",
+  "license": "AGPL-3.0-only",
+  "author": "rends-east",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rends-east/reemoat.git",
+    "directory": "packages/protocol"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0"
+  }
+}

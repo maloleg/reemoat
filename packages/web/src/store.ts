@@ -22,6 +22,7 @@ import {
 import { hostPlatform, localNetworkDetail } from "./platform";
 import { mayAddMachine } from "./quota";
 import { mergeOptimistic } from "./sessionOrder";
+import { provideSignInAuth } from "./signInAuth";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
 import {
   countsAsLive,
@@ -36,7 +37,6 @@ import {
   type Me,
   type PluginSummary,
   type SessionSnapshot,
-  type SessionToken,
   type StoredEvent,
 } from "./wire";
 
@@ -2015,28 +2015,25 @@ class AppStore implements StreamSink {
     await this.bootstrap();
   }
 
-  /**
-   * Adopt a session the server minted on a gate screen — a confirmation, a
-   * reset, or an invitation.
+  /*
+   * `adoptSession` lived here and moved to `gateStore.ts` with its two callers —
+   * `Register`'s no-mail arm and `ResetPassword`, both in `Gate.tsx`.
    *
-   * **It drops every connection first**, and that is `handleSignedOut`'s reason
-   * rather than tidiness: this is reachable from `phase: "ready"`, so the tab may
-   * already be showing somebody else's fleet, and each of those connections holds
-   * a token minted from a credential that is about to stop being the one in use.
-   * Without the drop the previous person's machines paint for a frame and their
-   * sockets keep talking.
+   * A session minted by a confirmation, a password reset or a registration on an
+   * instance with no mail arrives on a **gate** address, which `dist` does not
+   * serve and cannot reach: those nine addresses are the control plane's own, out
+   * of `dist-gate`. Nothing else in the tree called it, so keeping it here would
+   * leave a callerless export describing a capability this bundle does not have —
+   * which is the exact situation the `useApiKey` tombstone below was written
+   * about.
    *
-   * `login` has the same latent hole and is safe only because `SignIn` is
-   * reachable only from `phase: "signed_out"`, which `handleSignedOut` reaches
-   * only after dropping them. Nothing but that ordering enforces it.
+   * ⚠ **What must not be lost with it**, because it is about `login` rather than
+   * about the method that moved: `login` has the same latent hole the moved
+   * docblock named — it does not drop connections before adopting a new
+   * credential — and it is safe only because `SignIn` is reachable only from
+   * `phase: "signed_out"`, which `handleSignedOut` reaches only after dropping
+   * every one of them. Nothing but that ordering enforces it.
    */
-  async adoptSession(token: SessionToken): Promise<void> {
-    this.stopPolling();
-    for (const id of [...this.connections.keys()]) this.dropMachine(id);
-    cp.setSession(token.token);
-    this.patch({ me: token.user, authError: null });
-    await this.bootstrap();
-  }
 
   /*
    * `useApiKey` lived here and is deleted with the field that fed it.
@@ -3600,6 +3597,19 @@ export const store = new AppStore();
  * a request came back saying this credential is finished.
  */
 cp.onSignedOut((failure) => store.handleSignedOut(failure));
+
+/*
+ * And the one way `ui/SignIn.tsx` reaches this store without naming it.
+ *
+ * That screen is drawn by both bundles — it is the sign-in form the app shows
+ * when there is no credential, and the one `Gate` shows on a mailed link that
+ * needs a session — so it names `SignInAuth` and the bundle decides which
+ * store answers. Registered from this tail rather than from `main.tsx` because
+ * `dist` has exactly one store and nothing in it has ever had an opinion about
+ * which; the gate wires its own from its entry point, where the answer is not
+ * unambiguous. See `signInAuth.ts`.
+ */
+provideSignInAuth(store);
 
 /** Sessions needing a human, oldest wait first, across every machine. */
 /**

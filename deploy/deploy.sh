@@ -410,7 +410,16 @@ UNITS="^deploy/$INIT_SYSTEM/"
 # ran no build, and the image-id comparison below cannot catch what was never
 # built — so the log said "nothing that goes into it moved" about a file that
 # had.
-CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/web/|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
+#
+# ⚠ **`packages/protocol` is on this list even though no *runtime* file in the
+# image imports it**, and leaving it off is exactly the failure this comment
+# describes one paragraph up. The gate's import closure reaches it —
+# `gate-main.tsx` → `store.ts` → `machine.ts` → `e2ee.ts` → `@reemoat/protocol`,
+# consumed as source because nothing here has a build step — so a change to the
+# handshake changes the bytes of `dist-gate`. Off the list, that commit runs no
+# build, `cp_image_fingerprint` inspects an image that was never rebuilt, and the
+# deploy prints "unchanged" about a file that moved.
+CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/protocol/|^packages/web/|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
 
 # What goes into the **relay**, which is a subset of the image and the reason the
 # split is worth anything.
@@ -442,7 +451,14 @@ CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/web/|^package\.json$|^
 # keep carrying traffic for machines the API considers switched off — which is
 # precisely the silent skew this list exists to prevent, and `deploycheck` caught
 # the omission the moment the import landed.
-RELAY_INPUTS='^src/relay/|^src/(token|auth|http|cors)\.ts$|^packages/control-plane/src/relay/|^packages/control-plane/src/(store|keys|quota|settings|machines)\.ts$|^packages/control-plane/src/mail/address\.ts$|^packages/control-plane/src/schema\.sql$|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
+#
+# `machinekeys.ts` is here for the same reason and it caught the same way. The
+# relay pins a machine's announced X25519 static on the dial and refuses a later
+# disagreement; a relay left running the old rule would pin nothing, so every app
+# would be handed a null key for a machine that had in fact announced one — and
+# the failure would read as "this machine has not been updated" about a machine
+# that had.
+RELAY_INPUTS='^src/relay/|^src/(token|auth|http|cors)\.ts$|^packages/control-plane/src/relay/|^packages/control-plane/src/(store|keys|quota|settings|machines|machinekeys)\.ts$|^packages/control-plane/src/mail/address\.ts$|^packages/control-plane/src/schema\.sql$|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
 
 # Both tsx binaries, not just the root one — `packages/control-plane` is a
 # separate workspace package with its own node_modules, so a tree wiped by a

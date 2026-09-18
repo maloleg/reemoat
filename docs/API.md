@@ -5,12 +5,28 @@ plane** issues identity and holds accounts; the **daemon** owns sessions and run
 on your machine.
 
 A client talks to both, and how it reaches the second depends on where it is. The
-control plane is always addressed directly. A daemon is reached **through the
-relay** — the only way in from anywhere else — except for one case: the desktop app
-reaching a daemon on the **same computer**, which goes over loopback. That is one
-base URL instead of another and nothing else; every route below, every header and
-every refusal is identical on both paths, which is why this document does not
-mention it again.
+control plane is always addressed directly.
+
+**A daemon is reached over an encrypted channel, and there is no other way in.**
+The app opens a WebSocket to the relay at **`/__relay/channel`**, the relay
+authorizes it — verify the capability, take the machine from `aud`, read the live
+user, machine and grant rows — and then splices it to that machine's tunnel as raw
+bytes. Inside it the app and the daemon run
+`Noise_IK_25519_ChaChaPoly_BLAKE2s` between themselves, and every route below
+travels as frames in that session. The relay carries bytes it holds no key for.
+
+⚠ **The plaintext proxy is deleted.** The relay used to serialize each request onto
+the tunnel and copy the answer back, so a daemon had an ordinary HTTPS base URL and
+this document could say *"one base URL instead of another and nothing else"*. Both
+handlers now answer **`426 upgrade_required`** — every request, and every upgrade
+that is not a channel. There is nothing to point an HTTP client at.
+
+The one path that is still plain is the desktop app reaching a daemon on the **same
+computer**, over loopback: no relay, no channel, and there the capability is a
+bearer token for its remaining life, which `.claude/rules/relay.md` bounds and
+`SECURITY.md` states. Every route below, every header and every refusal is identical
+on both paths — the channel is a transport under them, not a different API — which
+is why this document does not mention it again.
 
 This file is a map, not a specification. Every route's actual rules — what a
 refusal means, what may be replayed, what a 409 carries — are in
@@ -41,8 +57,14 @@ nothing about whether the daemon acted.
 **Auth.** The daemon takes a bearer token whose `aud` is its own machine id, and
 stops asking who the subject is — see `.claude/rules/auth-and-tokens.md`. The
 control plane takes a session token (`rs_`) or an API key (`rk_`), resolved by
-prefix. The web UI never sends its control-plane credential to a daemon or to the
+prefix. The app never sends its control-plane credential to a daemon or to the
 relay.
+
+A machine capability also names the **device** it was minted for, in RFC 7800's
+`cnf.jkt`. The daemon compares that against the static key the Noise handshake
+authenticated and does it **offline**, which is what keeps *"the daemon makes
+exactly one control-plane request, ever"* literally true — so a capability copied
+off the wire or out of a log is worth nothing from any other installation.
 
 **Bodies** are capped: 1 MiB on the daemon, except the three routes that stream
 their own — `POST /sessions/:id/uploads` (100 MiB), `POST /fs/import` (50 MiB) and
@@ -54,7 +76,16 @@ auth gate.
 
 ## The daemon — 58 routes
 
-Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
+Runs on your machine, reachable through the relay's encrypted channel.
+
+⚠ **`pnpm client` no longer drives all of it, and this line used to say it did.**
+Its relay arm is deleted: opening a channel needs an X25519 device key and a
+capability the Authority bound to it in `cnf.jkt`, and `REEMOAT_TOKEN` is a
+long-lived bearer capability with neither — which is exactly what the binding exists
+to make worthless. The client refuses with a sentence naming the remedy rather than
+downgrading. What it still drives, unchanged, is every route below against a daemon
+on **this** computer, through `REEMOAT_URL`; for a machine anywhere else the client
+is the app.
 
 ### Liveness
 
@@ -224,7 +255,7 @@ these, so a new route is private by doing nothing. "Public" is not
 | `POST /v1/machines/:id/revoke` | Retire one, which gives its slot back to the limit |
 | `GET` · `PUT` · `DELETE /v1/machines/:id/grants` | Share a machine **you own**, and take it back. A grant is **full access** to the machine, so this is the owner's verb: the admin routes that wrote one are deleted. Addressed by user id — there is no directory an ordinary account may read, so the other person reads theirs off `GET /v1/me`. `404 machine_not_found` for one you do not own, which is the anti-mapping rule rather than a lie; `409 grant_is_owner` for your own grant on both writes (narrowing it would take `machine:admin` off your own hardware, removing it would hide the machine from its owner — retiring it is the verb for that); `404 user_not_found`; `409 user_disabled` for a suspended account, which would otherwise become live the moment somebody re-enabled them; `400 bad_request` for a `userId` that is missing on either verb; `404 grant_not_found` on an unshare that removed nothing |
 | `DELETE /v1/machines/:id/grants/me` | **Give up a share somebody made to you.** The three routes above all resolve through ownership, so a grantee could reach none of them — and a share is written for any `userId` with no consent asked, so what somebody can do to you unasked now has something you can do about it. Your own grant only, and there is no `userId` parameter: the caller is the subject, and a route that took an id would be `DELETE /v1/admin/grants` under another name. `409 grant_is_owner` on a machine you own, because `GET /v1/machines` joins `grants` and an owner without one owns a machine in no list — retiring it is the verb for that; `404 grant_not_found` for both "no such grant" and "no such machine", which is the same anti-mapping rule |
-| `POST /v1/tokens` | The short-lived token a browser uses. Quota is checked **after** the grant is proved |
+| `POST /v1/tokens` | The short-lived capability the app spends on one machine. Quota is checked **after** the grant is proved. The answer is also **how a client learns where that machine is and what it will answer as**: `machine.relayUrl`, `machine.relayOnline`, and `machine.key` — the machine's X25519 static, which is IK's precondition and therefore the thing without which no channel can be opened at all. `null` there means a machine that has not dialled since it learned to announce one, and the client turns that into a sentence about updating it rather than into a session without it: there is no mode to fall back to. A route and a key are the same kind of fact — *how to reach this thing* — so they are minted together rather than fetched twice and left to disagree. **`409 device_key_required`** refuses a signed-in installation that has registered no device key: a capability minted for it could not open a channel, so the answer is a refusal with a remedy rather than a credential that fails later about the wrong thing. An **API key** is the deliberate exception and is minted **without** a binding, because a key is no sign-in and has no device to bind to — such a capability works over loopback and is refused by any daemon it reaches on a channel, which is the honest shape rather than a let-off |
 
 ### Admin
 
@@ -238,6 +269,7 @@ password change is refused all of it by a second positional gate.
 | `PUT` · `DELETE /v1/admin/users/:id/machine-limit` | The commercial limit, per person |
 | `GET` · `POST · PATCH /v1/admin/machines[/:id]` | Every machine in the fleet, whoever owns it |
 | `POST /v1/admin/machines/:id/enrollments` · `/revoke` · `PUT /v1/admin/machines/:id/owner` | Mint a code, revoke a machine, adopt an ownerless one. **The enrollment mint refuses a machine that is enrolled and has an owner *or grantees*** (`409 machine_enrolled`) — redeeming a code retires the running daemon's tunnel key, so it would replace somebody's machine rather than read it; its owner mints their own. **The owner route refuses a transfer away from a live owner** (`403 machine_owned`), and refuses adopting an ownerless machine somebody holds a grant on unless they are the one being handed it (`403 machine_granted`) — so what it adopts is a row nobody depends on, and what it re-labels is a machine for the owner it already has. Adopting burns that machine's outstanding codes and says how many |
+| `DELETE /v1/admin/machines/:id/machine-key` | **Unpin a machine's static key.** A machine's X25519 key is pinned on first sight and a *different* one on a later dial is refused, which is the right answer for a substituted machine and the wrong one for a daemon whose database was legitimately rebuilt — so this is the operator's undo, and the only one. Idempotent, with `cleared` saying whether a row actually changed rather than turning the second attempt into an error. It returns `previousKey`, deliberately: it is a public key, this route is admin-only, and this is the only moment anybody can write down what *was* pinned, so refusing it would mean repairing a mismatch also destroys the evidence of what the mismatch was. `403 machine_revoked` for a revoked machine, which dials nothing and therefore has no pin to repair |
 | `GET /v1/admin/grants` | Who holds what, paged. **The `PUT` and `DELETE` are deleted** — a grant is full access to a machine that runs agents as its owner, and an admin writing one for a machine they do not own was one request from that. Sharing is `PUT /v1/machines/:id/grants`; the read is kept, because an operator who cannot see this table cannot answer "why can this person reach that machine" |
 | `GET` · `PUT /v1/admin/settings` · `POST /v1/admin/settings/test` | Env-seeded, database-owned; the answer says which side won |
 | `GET /v1/admin/mail` · `POST /v1/admin/mail/:id/retry` | The outbox, and pushing a stuck message again |
@@ -265,23 +297,21 @@ is the only remedy this service has for a forgotten password. `/app` is where ev
 one of them ends — the page that says the product is an app and, where
 `REEMOAT_CP_APP_DOWNLOAD_URL` names one, offers the build.
 
-`GET *` additionally serves the whole app with an SPA fallback **only when
-`REEMOAT_CP_WEB` names a built copy**, which by default it does not and inside the
-official image it cannot: that image carries no app bundle.
+⚠ **Nothing serves the app, and there is no variable that would.** A browser holds
+no device key, so it cannot open the encrypted channel a daemon is reached through —
+it could load the app and reach no machine at all. The gate's list above is closed:
+an address outside it answers the error envelope, whatever the method. Q1.649.
 
 ## What is served to a browser
 
 | | Serves | Reached by |
 |---|---|---|
-| **The deployment** | the API, the relay, and the **gate** at nine addresses | the Reemoat app; a browser for sign-up and recovery |
-| **A checkout with `REEMOAT_CP_WEB=<path>`** | the same, plus the whole app at `/` | anything |
+| **Every deployment** | the API, the relay, and the **gate** at nine addresses | the Reemoat app; a browser for sign-up and recovery |
 
-The desktop app carries its own copy of the interface, compiled into the binary,
-and **never downloads one** — which is what keeps the first row's app column
-empty. `docs/NATIVE.md` records how that invariant is held and what asserts it.
-
-`/health`, every `/v1` route, `/install.sh`, the relay listener and the tunnel
-endpoint behave identically in both rows.
+**One row, and that is the change.** There was a second — a checkout naming a built
+app bundle — and it is deleted with `REEMOAT_CP_WEB`. The desktop app carries its own
+copy of the interface, compiled into the binary, and **never downloads one**;
+`docs/NATIVE.md` records how that invariant is held and what asserts it.
 
 ⚠ **`mail.public_url` must point at whatever serves the gate.** The confirmation,
 reset, verify and invitation links are built from it, and they are opened in a
@@ -291,8 +321,8 @@ it points at a control plane serving none, and the gate itself takes a **pasted
 link or code** for the case a mail client rewrites the URL and drops the fragment
 the token rides on.
 
-`REEMOAT_CP_INSTALL=0` is a **separate** switch for `/install.sh`. Turning off the
-app bundle does not turn off the route the next machine joins through — and the two
-no longer spell their values the same way: `REEMOAT_CP_INSTALL=1` still means the
-built-in default, because `deploy/bootstrap.sh` really is in the image, while
-`REEMOAT_CP_WEB=1` names nothing and is answered with a sentence at startup.
+`REEMOAT_CP_INSTALL=0` switches off `/install.sh`, the route the next machine joins
+through. It is the only variable of its shape left — *either* a boolean *or* a path —
+and `=1` means the built-in default, because `deploy/bootstrap.sh` really is in the
+image. (A second one shared that shape without a default to mean, so `=1` resolved to
+a directory called `1` and 404ed for ever. It is deleted.)

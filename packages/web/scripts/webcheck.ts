@@ -75,7 +75,7 @@ await import("./webcheck.shell-and-enrollment.js");
 await import("./webcheck.gate-and-server-settings.js");
 await import("./webcheck.legal-and-consent.js");
 await import("./webcheck.machine-limit-and-probe.js");
-await import("./webcheck.navigation-and-telegram.js");
+await import("./webcheck.navigation.js");
 closeWss();
 await import("./webcheck.plugin-protocol.js");
 await import("./webcheck.plugin-consent.js");
@@ -88,6 +88,7 @@ await import("./webcheck.refusing-controls.js");
 await import("./webcheck.harness-and-systems.js");
 await import("./webcheck.model-list.js");
 await import("./webcheck.local-route.js");
+await import("./webcheck.e2ee.js");
 await import("./webcheck.typography.js");
 
 finish();

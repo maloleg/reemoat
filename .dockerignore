@@ -73,6 +73,12 @@
 # `pnpm-workspace.yaml` before installing the filtered subset, so without it this
 # is not the workspace the lockfile describes and the install fails outright, in
 # the `manifests` stage, before anything else runs.
+# The crypto package, in the build context for the gate's sake. Its manifest is
+# needed by `--frozen-lockfile` (every workspace importer is verified) and its
+# source by the gate build, because `machine.ts` imports it and there is no build
+# step — the package is consumed as source. Nothing in the runtime image reads it.
+!packages/protocol/package.json
+!packages/protocol/src
 !packages/web/package.json
 !packages/web/tsconfig.json
 !packages/web/vite.gate.config.ts

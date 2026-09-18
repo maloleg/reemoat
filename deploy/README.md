@@ -301,20 +301,16 @@ names a control plane with no gate. The gate also takes a **pasted link or code*
 for the case a mail client rewrites the URL and drops the fragment the token rides
 on.
 
-**Serving the whole app as well** is a host directory rather than a rebuild: build
-`packages/web` on the host and mount it. `deploy/docker/compose.yml` carries the
-`${REEMOAT_CP_WEB}:/srv/web:ro` line commented, with the instructions — commented
-because compose resolves a bind source before it starts anything and there is no
-value meaning "no mount", so a live line with the variable unset would fail
-`compose config` on every deployment that does not want it, which is the default
-one. On a checkout, `REEMOAT_CP_WEB=$(pwd)/packages/web/dist pnpm cp` needs none
-of that.
+⚠ **Serving the whole app is not an option any more, and the variable that offered
+it is deleted.** A browser holds no device key, so it cannot open the encrypted
+channel a daemon is reached through — it could load the client and reach no machine
+at all. `pnpm web` in dev is what replaced the checkout case; nothing serves a built
+copy over HTTP. Q1.649.
 
-⚠ **`REEMOAT_CP_INSTALL=0` is a different switch**, and the two no longer spell
-their values the same way. It turns off `GET /install.sh`, which is how the next
-machine joins, and it still has a built-in default to mean because
-`deploy/bootstrap.sh` really is in the image — while `REEMOAT_CP_WEB=1` names
-nothing and is answered with a sentence at startup.
+`REEMOAT_CP_INSTALL=0` turns off `GET /install.sh`, which is how the next machine
+joins. It is the only variable of its shape left — *either* a boolean *or* a path —
+and `=1` means the built-in default, because `deploy/bootstrap.sh` really is in the
+image.
 
 Two more overrides exist and are install-time rather than runtime.
 `REEMOAT_CPCTL_ENV` moves the admin-key file. `REEMOAT_UNIT_PATH` replaces the
@@ -391,11 +387,8 @@ drops a tunnel.
 What is left of the old escape-hatch paragraph is its one true half: a host
 directory still cannot reach the container through the environment alone, because
 `compose.yml` declares the volumes and `compose.sh` execs one fixed `-f`. The
-`${REEMOAT_CP_WEB}:/srv/web:ro` mount it said nobody had added is **in that file
-now, commented, with the instructions** — commented rather than live because
-compose resolves a bind source before it starts anything and there is no value
-meaning "no mount", so an unset variable would fail `compose config` on every
-deployment that wants no UI, which is now the default one.
+commented web-bundle mount it argued about is gone with the variable that would have
+named it — there is no browser UI to mount.
 
 **The recreate is decided by what the image is, not by the paths.** A rebuild
 whose layers all came from cache produces byte-identical layers and config and

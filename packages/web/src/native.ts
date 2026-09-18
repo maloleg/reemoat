@@ -3,11 +3,12 @@ import { openableHref } from "./ui/links";
 /**
  * The native shell, from inside the page.
  *
- * **Hand-written, feature-detected, and with no dependency of its own** — the same
- * three properties as `telegram.ts`, for the same three reasons. This app runs in
- * an ordinary browser, in a Telegram mini app, and in a Tauri window, and the way
- * it stays one app is that each of those is a module answering "not here" when it
- * is not there. Every export below has a browser arm, and no call site branches.
+ * **Hand-written, feature-detected, and with no dependency of its own** — the ⚠
+ * below is why the third and `core()` is why the second. This bundle runs in a
+ * Tauri window and, as the gate, in an ordinary browser: `cp.ts` imports this
+ * module and the gate imports `cp.ts`, so the browser arm ships and is reached.
+ * The way it stays one app is that the host is a module answering "not here" when
+ * it is not there. Every export below has a browser arm, and no call site branches.
  *
  * ⚠ **No `@tauri-apps/*` package is imported, and that is a property rather than a
  * simplification.** `packages/web` is the bundle the control plane's image serves,
@@ -52,10 +53,10 @@ interface TauriGlobal {
 /**
  * Keyed on the transport existing, never on a user-agent string or a build flag.
  *
- * `telegram.ts`'s `proxy()` one file over, and the idiom is the point: the only
- * honest question is "is the thing that carries a call actually here", and a
- * `import.meta.env`-style flag would answer it wrongly in exactly the case that
- * matters — a native build whose bridge failed to inject.
+ * **Read out of `window` on every call, cached nowhere**, and the idiom is the
+ * point: the only honest question is "is the thing that carries a call actually
+ * here", and a `import.meta.env`-style flag would answer it wrongly in exactly the
+ * case that matters — a native build whose bridge failed to inject.
  */
 function core(): TauriCore | null {
   const held = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
@@ -69,10 +70,11 @@ export function inNativeShell(): boolean {
 /**
  * Call a command, or throw.
  *
- * Unlike `telegram.ts`'s `post`, this does **not** swallow. There every caller is
- * decoration and a throw must cost the chrome rather than the app; here a caller
- * is a control-plane request or a sign-in being saved, and a failure that reads as
- * a success is the worse outcome. Each caller below decides what to do with it.
+ * This does **not** swallow. A bridge whose callers are all decoration can afford
+ * to eat a throw, because the cost of one is the chrome rather than the app; here
+ * a caller is a control-plane request or a sign-in being saved, and a failure that
+ * reads as a success is the worse outcome. Each caller below decides what to do
+ * with it.
  */
 async function invoke<T>(command: string, args?: unknown, options?: { headers?: Record<string, string> }): Promise<T> {
   const held = core();
@@ -131,6 +133,34 @@ export interface NativeBoot {
    */
   deviceId: string | null;
   /**
+   * This installation's X25519 public key on that server, base64url, or `null`.
+   *
+   * ⚠ **The private half is not here and there is no field that would carry it.**
+   * The shell keeps it and answers `hostDeviceDh` with the *output* of a
+   * Diffie-Hellman instead, so the one place somebody else's JavaScript could ever
+   * run never holds the key. That is what a capability's device binding is worth:
+   * a copy of one taken out of a log or a proxy cannot be used from anywhere else,
+   * because the copier cannot produce this key.
+   *
+   * `null` before the first launch that generates one, or where no store would
+   * answer at all. A remote machine is then unreachable and says so — there is no
+   * unencrypted mode to fall back to.
+   */
+  devicePublicKey: string | null;
+  /**
+   * Where that key is actually kept: `"keyring"` or `"file"`.
+   *
+   * A **disclosure rather than a setting**, and it exists for the machines
+   * {@link NativeBoot.durable} already names. On a box whose credential store
+   * silently discards writes, a keyring-only device key would be regenerated every
+   * launch and this app would register a new device each time until the account hit
+   * its limit — the same failure `deviceId` above avoids by not being in the
+   * keyring. So the key falls back to a 0600 file, and the Devices screen says
+   * which of the two this installation used, per server. The alternative to the
+   * file is that machine having no remote access at all.
+   */
+  deviceKeyAtRest: string | null;
+  /**
    * The address this build suggests, for the setup screen's field to open on.
    *
    * ⚠ **A suggestion, and never {@link NativeBoot.server}.** They answer
@@ -163,10 +193,14 @@ let hydrating = inNativeShell();
  *
  * The two alternatives were both worse and both are recorded rather than
  * rediscovered. An `await` gate in `main.tsx` moves `installWakeDetection()` and
- * the Telegram launch sequence into an async body, and that ordering is asserted
- * off disk. Injecting the value with Tauri's `initialization_script` is fixed at
- * window creation, so the reload in `store.signOut()` would re-inject the
- * credential `clearSession()` had just deleted — which is exactly the defect
+ * `store.bootstrap()` into an async body. ⚠ **That ordering is no longer asserted
+ * off disk**: it was checked beside the Telegram launch sequence, which is deleted,
+ * and no driver under `packages/web/scripts/` names `main.tsx` now except as a
+ * bundle entry point — so `main.tsx`'s own comment, that StrictMode mounts twice
+ * and a resume path running twice would mint two tokens per machine, is the whole
+ * of what holds it. Injecting the value with Tauri's `initialization_script` is
+ * fixed at window creation, so the reload in `store.signOut()` would re-inject
+ * the credential `clearSession()` had just deleted — which is exactly the defect
  * `setSession`'s own docblock records having shipped once.
  */
 export const hostReady: Promise<NativeBoot | null> = inNativeShell()
@@ -356,6 +390,53 @@ export function setNativeDevice(value: string | null): void {
   void invoke(value === null ? "host_device_clear" : "host_device_set", value === null ? {} : { value }).catch(
     () => undefined,
   );
+}
+
+/**
+ * One Diffie-Hellman with this installation's device key, done in the shell.
+ *
+ * The Noise handshake runs **here, in the page**, and `native-shell.md` gives four
+ * reasons the daemon leg may not leave the webview — one of which is that an
+ * encrypted stream with two decryptors is not a design. So the two operations in
+ * the IK pattern that need the *static* key (`ss` and `se`) come back across the
+ * bridge and nothing else does; every other operation uses an ephemeral this page
+ * generated and holds.
+ *
+ * Rejects rather than returning `null`, because a caller mid-handshake has no
+ * useful smaller answer: there is no session to have without this.
+ */
+export async function hostDeviceDh(peer: string): Promise<string> {
+  if (!inNativeShell()) throw new Error("no native shell");
+  return await invoke<string>("host_device_dh", { peer });
+}
+
+/**
+ * Start this installation over with a fresh device key on the chosen server.
+ *
+ * For a credential store that was reset out from under the app, and for somebody
+ * deliberately re-keying from Settings → Devices. The server registers the new
+ * public half against the **same** device row, so this does not spend a slot.
+ *
+ * ⚠ **The caller is `DevicesSection`'s device row, and until now there was
+ * none.** This function shipped with the sentence above already in it while a
+ * grep for it over `packages/web/src` returned one hit — its own declaration — so
+ * the one state a client cannot otherwise leave had no exit: the Authority keeps
+ * a registration whose `publicKey` it refused, reports `hasKey: false` for ever,
+ * and every sign-in re-sends the same refused bytes. The row wearing that badge
+ * is where the act belongs, offered in the shell alone because a browser holds
+ * no keyring, and on your own row alone because this resets *this* installation.
+ *
+ * ⚠ **It makes the key and registers nothing.** What it does beyond the keyring
+ * is refresh the cached `NativeBoot`, so `describeDevice()` reads the new public
+ * half on the next call; sending it is the caller's separate `cp.registerDevice()`,
+ * which `adoptDevice` writes onto the same row. Two steps rather than one because
+ * the registration is a control-plane call and this module holds no credential.
+ */
+export async function hostDeviceKeyReset(): Promise<{ publicKey: string; atRest: string }> {
+  if (!inNativeShell()) throw new Error("no native shell");
+  const fresh = await invoke<{ publicKey: string; atRest: string }>("host_device_key_reset", {});
+  if (boot !== null) boot = { ...boot, devicePublicKey: fresh.publicKey, deviceKeyAtRest: fresh.atRest };
+  return fresh;
 }
 
 /**
@@ -619,9 +700,9 @@ export async function saveNative(blob: Blob, filename: string): Promise<boolean>
  * Send a link to the browser instead of to this window.
  *
  * ⚠ **Installed from the module body, gated on the shell, and that is the whole
- * reason `main.tsx` needs no line for any of this.** `telegram.ts` is called from
- * there because it has chrome to configure and a readiness to announce; this has
- * neither. In a browser nothing is installed at all, so the driver's `window` stub
+ * reason `main.tsx` needs no line for any of this.** A host with chrome to
+ * configure or a readiness to announce would need one there; this has neither.
+ * In a browser nothing is installed at all, so the driver's `window` stub
  * — which has a `location` and a `localStorage` and no more — is never touched.
  *
  * **Capture phase, and `openableHref` is the decision.** Reusing that function

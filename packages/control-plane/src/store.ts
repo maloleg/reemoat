@@ -356,6 +356,30 @@ function migrate(db: DatabaseSync): void {
    */
   addColumn(db, has("enrolled_by"), "ALTER TABLE machines ADD COLUMN enrolled_by TEXT");
   /*
+   * The X25519 static a machine announced on its dial, and when it was first
+   * recorded. `schema.sql` carries what NULL means and why a later disagreement
+   * is refused; an older build selects neither column, so the version stays
+   * where it is.
+   *
+   * Nothing indexes them, deliberately. A key is only ever read by machine id,
+   * which is already the primary key, and an index nothing queries is the mirror
+   * of the column-nothing-writes that Q1.642 refused.
+   */
+  /*
+   * The installation's own X25519 public key, and when it was last set.
+   *
+   * ⚠ **Its own `table_info` reader**, because `has()` asks `machines` — which is
+   * the wrong-table mistake this function has already made once, and the guard
+   * would then be false for ever while the statement was attempted on every open
+   * by both processes.
+   */
+  const deviceColumns = db.prepare("PRAGMA table_info(devices)").all();
+  const hasDevice = (name: string): boolean => deviceColumns.some((column) => column["name"] === name);
+  addColumn(db, hasDevice("public_key"), "ALTER TABLE devices ADD COLUMN public_key TEXT");
+  addColumn(db, hasDevice("key_set_at"), "ALTER TABLE devices ADD COLUMN key_set_at INTEGER");
+  addColumn(db, has("machine_key"), "ALTER TABLE machines ADD COLUMN machine_key TEXT");
+  addColumn(db, has("machine_key_set_at"), "ALTER TABLE machines ADD COLUMN machine_key_set_at INTEGER");
+  /*
    * When somebody last chose their own password, and when a key last signed a
    * request — two facts the settings screen draws beside the row they belong to
    * ("Changed 3 mo ago", "last used 2 d ago"). Both nullable with no DEFAULT,

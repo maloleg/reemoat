@@ -224,6 +224,10 @@ token for any machine with any `sub` — the daemon checks the signature, the is
 and the audience, and never compares the subject to anything — so the operator's
 reach is unchanged and no route deletion can change it. They also serve the web
 client from their own image, terminate TLS at the relay, and hold the database.
+(⚠ Terminating TLS there no longer means *reading* what passes through it — see
+the end-to-end encryption note below — but the other two clauses are untouched,
+and serving the client is the one that matters most: whoever ships the code that
+holds the keys does not need to read the wire.)
 What the deletions buy is that an admin account, on its own, is no longer one
 request from somebody else's computer; **an operator is still trusted completely,
 and self-hosting is the only version of "not trusted" this system has.**
@@ -285,17 +289,44 @@ work in flight, and it is the same property that makes revocation slow: nothing 
 re-checked, no revocation list is fetched, and a grant revoked at the control
 plane stops new requests at the *relay* rather than at the daemon.
 
-**Tokens are not replay-tracked.** They live 300 s with 60 s of clock leeway
-either side, verification is local and stateless, and nothing remembers a `jti`.
-A token that leaks — out of a log, a proxy, or a `?token=` query string on a
-WebSocket, which is the one place a browser cannot set a header — is usable by
-whoever holds it until it expires.
+**Tokens are not replay-tracked, and they are bound to a device.** They live
+300 s with 60 s of clock leeway either side, verification is local and stateless,
+and nothing remembers a `jti`. What changed is that a leaked one is no longer
+*bearer*: every capability names the requesting device's X25519 public key in an
+RFC 7800 `cnf.jkt` claim, and the daemon refuses one whose key is not the key the
+encrypted handshake just authenticated. So a capability out of a log or a proxy
+cannot be spent from another machine — the holder would have to produce a private
+key that never left the operating system's keyring on the device it was minted
+for.
 
-**Traffic through the relay is not end-to-end encrypted.** The relay terminates
-TLS and sees plaintext: prompts, diffs, file contents, everything a session
-carries. It is written to route and never to parse, but that is a discipline in
-the code rather than a property of the protocol. The seam for changing this is
-`reemoat-enc: none` on the CONNECT handshake, and no crypto has been written.
+Two honest limits on that. A capability carrying **no** `cnf` at all is refused
+rather than treated as unbound, so the binding cannot be opted out of — but it is
+enforced by the *daemon*, on the encrypted path, so a stolen capability spent
+against a daemon on the same computer over loopback is still a bearer token for
+its remaining life. And `?token=` still exists on exactly one hop: the app's
+WebSocket handshake to the relay, because a browser cannot set a header on one.
+It no longer appears on the daemon's own loopback dial, which is made by Node and
+carries a header.
+
+**Traffic through the relay is end-to-end encrypted, and that is the only mode.**
+The app and the daemon run `Noise_IK_25519_ChaChaPoly_BLAKE2s` between themselves:
+the app's static is its device key, the daemon's is a machine key it generates on
+first start and announces on its tunnel dial, and the Authority reports that key
+on the same call that says where the machine is. The relay authorizes the
+connection and then moves bytes it holds no key for — prompts, diffs, file
+contents and terminal output are ciphertext to it. There is no plaintext mode to
+negotiate: the constant naming one was deleted, `RELAY_PROTOCOL_MIN_VERSION` was
+raised past every build that spoke it, and a daemon that cannot speak the
+encrypted mode is reported unreachable rather than reached another way.
+
+⚠ **What this does and does not buy.** It removes the **relay** from the trusted
+payload path — a compromised carrier, a hostile TLS terminator or anyone reading
+that host's memory gets ciphertext. It does **not** defend against a malicious
+Authority: that service mints every capability and holds
+`signing_keys.private_pem`, so it can issue one naming a device key of its
+choosing and talk to your daemon as you. It does not make the operator untrusted;
+they still serve the client from their own image. E2EE narrows one party's reach,
+and the paragraph above about operators is unchanged.
 
 **A relayed stream's authorization is checked at open and not re-checked.** A
 grant revoked mid-stream does not tear down a live WebSocket; the daemon's own
@@ -316,9 +347,20 @@ above:
 |---|---|
 | Any control-plane request | next request |
 | Minting a machine token | next request |
-| A machine token already minted | ≤ 300 s + 60 s leeway, from the last mint |
+| A machine token already minted, **over the relay** | ≤ 300 s + 60 s leeway, from the last mint — and only from *that* device, because the capability names its key |
 | A WebSocket already open | that, plus one 20 s ping tick |
-| Loopback to a local daemon | the same ≤ 360 s, with no control-plane hop at all |
+| Loopback to a local daemon | the same ≤ 360 s, with no control-plane hop at all — and here the capability **is** a bearer token, because a loopback request has no channel to be bound to |
+
+⚠ **Two rows changed with end-to-end encryption and the rest did not.** Device
+retirement still bites at the *next mint* and nowhere deeper — nothing in the
+token-verifying half reads a device row, and it must not learn to. What the key
+adds is that the window on an already-minted capability is now a window **for one
+device**: it cannot be spent from anywhere else over the relay, because the daemon
+compares the key inside it against the key the handshake authenticated. The
+loopback row is the exception and is stated rather than glossed: there is no
+channel there, so there is no key to compare, so a capability on that path is what
+it always was for its remaining life. That is the same trade `.claude/rules/relay.md`
+already bounds, taken by a process running as the uid that owns `~/.reemoat`.
 
 ⚠ **And a device id is not a credential.** It is an identifier this service hands
 back, stored unhashed and returned in full: holding one authorizes nothing,

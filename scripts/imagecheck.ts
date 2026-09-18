@@ -537,11 +537,15 @@ ok(
 const deep = await get("/m/m_x/s/s_y");
 ok("as does a deep link the app would own", deep.status === 404 && deep.body === index.body, `status ${deep.status}`);
 /*
- * And the app bundle is genuinely absent rather than merely unserved — a `dist`
- * left in the image would be one `REEMOAT_CP_WEB=/app/packages/web/dist` away
- * from the old behaviour, which is a different deployment from the one claimed.
- * The gate's own directory is asserted present in the same breath, so "no bundle"
- * cannot be satisfied by an image that carries neither.
+ * And the app bundle is genuinely absent rather than merely unserved.
+ *
+ * ⚠ **There is no longer a variable that would serve one**, which is a stronger
+ * guarantee than this used to assert: a `dist` left in the image was once one
+ * environment value away from the old behaviour. What is checked now is that the
+ * bytes are not there either, because "unreachable by configuration" and "not
+ * shipped" are different claims and the second is the one made. The gate's own
+ * directory is asserted present in the same breath, so "no bundle" cannot be
+ * satisfied by an image that carries neither.
  */
 const bundles = docker([
   "exec",

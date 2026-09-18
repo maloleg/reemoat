@@ -80,8 +80,8 @@ export const DEVICE_REVOKED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
  * name into the file that also holds the fleet's signing key and is fsynced on
  * every write — and then drag it through every listing afterwards.
  */
-const MAX_DEVICE_NAME_CHARS = 128;
-const MAX_DEVICE_PLATFORM_CHARS = 32;
+export const MAX_DEVICE_NAME_CHARS = 128;
+export const MAX_DEVICE_PLATFORM_CHARS = 32;
 /**
  * And the id a caller may offer back, bounded for the same reason and on the same
  * route. Longer than the ids this service mints — `newId("dv")` — because the
@@ -108,6 +108,19 @@ export interface DeviceRow {
    * minutes.
    */
   lastSeenAt: number | null;
+  /**
+   * Whether this installation has registered an X25519 public key, and when.
+   *
+   * ⚠ **A boolean rather than the key.** The screen's question is *can this
+   * installation reach a machine* — one word — and answering it with 43 bytes of
+   * base64url would put a value on a row for somebody to copy, compare or paste
+   * into a support conversation, none of which is a thing anybody should do with
+   * it. `false` for a row registered before keys existed and for one whose
+   * credential store lost the key; both draw the same sentence, because both have
+   * the same remedy.
+   */
+  hasKey: boolean;
+  keySetAt: number | null;
 }
 
 /** Clamp a caller-supplied string, mapping empty to `null` so absence has one shape. */
@@ -117,15 +130,46 @@ function clamp(value: unknown, max: number): string | null {
   return trimmed.length === 0 ? null : trimmed.slice(0, max);
 }
 
-/** What a caller may say about an installation. Both halves are clamped here. */
-export function readDeviceInput(value: unknown): { name: string; platform: string } | null {
+/**
+ * What a caller may say about an installation. Every part is clamped here.
+ *
+ * The key is **optional and refused to `null` rather than refusing the
+ * registration**, for the reason a device id that will not bind is ignored rather
+ * than refused: a client older than this sends none, and one that sent something
+ * malformed has a bug that must not cost somebody the ability to sign in. An
+ * installation with no key registers, appears in the list, and is told it cannot
+ * reach a machine yet — which is a sentence with a remedy, where a refused
+ * sign-in is a loop.
+ */
+export function readDeviceInput(
+  value: unknown,
+): { name: string; platform: string; publicKey: string | null } | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const name = clamp(record["name"], MAX_DEVICE_NAME_CHARS);
   const platform = clamp(record["platform"], MAX_DEVICE_PLATFORM_CHARS);
   if (name === null || platform === null) return null;
-  return { name, platform };
+  return { name, platform, publicKey: readDevicePublicKey(record["publicKey"]) };
 }
+
+/**
+ * An X25519 public key as a caller offers it: base64url, exactly 32 raw bytes.
+ *
+ * Strict about the alphabet as well as the length, for `b64uDecode`'s reason:
+ * `Buffer.from(s, "base64url")` silently skips what it does not recognise, so two
+ * different strings can decode alike — and here that would mean a capability
+ * naming a key by a spelling the daemon computes differently, which reads as
+ * "wrong device" for a device that is right.
+ */
+export function readDevicePublicKey(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const key = value.trim();
+  if (key.length !== DEVICE_PUBLIC_KEY_CHARS) return null;
+  return /^[A-Za-z0-9_-]+$/.test(key) ? key : null;
+}
+
+/** 32 raw bytes in base64url is 43 characters, with no padding. */
+export const DEVICE_PUBLIC_KEY_CHARS = 43;
 
 /** The `id` a caller offered, bounded — see {@link MAX_DEVICE_ID_CHARS}. */
 export function readDeviceId(value: unknown): string | null {
@@ -183,7 +227,7 @@ export function adoptDevice(
   db: DatabaseSync,
   userId: string,
   offeredId: string | null,
-  input: { name: string; platform: string },
+  input: { name: string; platform: string; publicKey?: string | null },
   now = Date.now(),
 ): string {
   if (offeredId !== null) {
@@ -192,6 +236,18 @@ export function adoptDevice(
       // The name and the platform are refreshed rather than kept: a computer can
       // be renamed, and the row exists so a person can recognise it.
       db.prepare("UPDATE devices SET name = ?, platform = ? WHERE id = ?").run(input.name, input.platform, adopted);
+      /*
+       * ⚠ **A key is written in place on the row rather than making a new one, and
+       * that is what keeps a re-key from spending a slot.**
+       *
+       * A credential store that was reset takes the key with it, so this
+       * installation comes back with a new one and the same id. Registering a
+       * fresh *device* for it would walk straight into `MAX_DEVICES_PER_USER` —
+       * the failure this file already avoids for the id by ignoring a retired one
+       * rather than refusing it. Re-keying an installation somebody could retire
+       * outright buys an attacker nothing they did not already have.
+       */
+      if (input.publicKey != null) setDeviceKey(db, userId, adopted, input.publicKey, now);
       return adopted;
     }
   }
@@ -205,14 +261,52 @@ export function adoptDevice(
   if (Number(live?.["n"] ?? 0) >= MAX_DEVICES_PER_USER) throw new DeviceLimitError();
 
   const id = newId("dv");
-  db.prepare("INSERT INTO devices (id, user_id, name, platform, created_at) VALUES (?, ?, ?, ?, ?)").run(
-    id,
-    userId,
-    input.name,
-    input.platform,
-    now,
-  );
+  db.prepare(
+    "INSERT INTO devices (id, user_id, name, platform, created_at, public_key, key_set_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(id, userId, input.name, input.platform, now, input.publicKey ?? null, input.publicKey == null ? null : now);
   return id;
+}
+
+/**
+ * Record an installation's X25519 public key.
+ *
+ * **Every statement carries `user_id`**, which is this file's oldest rule and is
+ * not weakened by the key arriving: without the owner clause this would be a
+ * cross-account primitive for overwriting somebody else's key, which is a way to
+ * take their installation off the network.
+ *
+ * ⚠ **Proof of possession is not demanded here, and that is a decision rather
+ * than an omission.** The obvious shape — a challenge the device answers with its
+ * key — would stop nothing that matters: anybody holding the session could
+ * register a key of their own on a device of their own, and a session is what
+ * this route already requires. What actually enforces the binding is one layer
+ * further on and cannot be skipped: the daemon compares this key against the one
+ * the encrypted handshake authenticated, so an installation that registers a key
+ * it does not hold simply cannot connect to anything. The column is attested by
+ * use, which is the property the old refusal of this column asked for.
+ */
+export function setDeviceKey(db: DatabaseSync, userId: string, deviceId: string, publicKey: string, now = Date.now()): void {
+  db.prepare("UPDATE devices SET public_key = ?, key_set_at = ? WHERE id = ? AND user_id = ?").run(
+    publicKey,
+    now,
+    deviceId,
+    userId,
+  );
+}
+
+/**
+ * The key a capability minted for this installation must name, or `null`.
+ *
+ * Read by device id alone. Unlike every other statement here that is not a
+ * mistake: the caller is the mint, and the id it passes came out of a session
+ * this service has already resolved — the owner clause was applied when the
+ * session was, and asking again would suggest the id were caller-supplied.
+ */
+export function deviceKeyFor(db: DatabaseSync, deviceId: string): string | null {
+  const row = db.prepare("SELECT public_key FROM devices WHERE id = ? AND revoked_at IS NULL").get(deviceId);
+  if (!row) return null;
+  return row["public_key"] == null ? null : String(row["public_key"]);
 }
 
 /**
@@ -297,7 +391,7 @@ export function revokeDevice(
 export function listDevices(db: DatabaseSync, userId: string, now = Date.now()): DeviceRow[] {
   const rows = db
     .prepare(
-      "SELECT d.id, d.name, d.platform, d.created_at, d.revoked_at, " +
+      "SELECT d.id, d.name, d.platform, d.created_at, d.revoked_at, d.public_key, d.key_set_at, " +
         // Derived rather than stored — see `DeviceRow.lastSeenAt`. LEFT, because a
         // device that has never held a session is still a device, and NULL is the
         // honest answer for it.
@@ -313,6 +407,8 @@ export function listDevices(db: DatabaseSync, userId: string, now = Date.now()):
     createdAt: Number(row["created_at"]),
     revokedAt: row["revoked_at"] === null ? null : Number(row["revoked_at"]),
     lastSeenAt: row["last_seen_at"] === null || row["last_seen_at"] === undefined ? null : Number(row["last_seen_at"]),
+    hasKey: row["public_key"] != null,
+    keySetAt: row["key_set_at"] == null ? null : Number(row["key_set_at"]),
   }));
 }
 

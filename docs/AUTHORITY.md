@@ -114,8 +114,10 @@ The gate is here because its flows have nowhere else to begin: `/confirm`,
 That is also why it has no off switch — a variable that could disable it would be
 a variable that breaks account recovery.
 
-`REEMOAT_CP_WEB` names a built copy of the **app**, which a checkout or a mounted
-directory can have and the image cannot. `docs/API.md` has both shapes.
+⚠ **Nothing serves the app, and there is no variable that would.** A browser holds
+no device key, so it cannot open the encrypted channel a daemon is reached through —
+it could load the client and reach no machine at all, which is worse than not
+offering it. `docs/API.md` has the shape; Q1.649 is the decision.
 
 Authentication is a bearer token and **never a cookie**: `src/cors.ts` answers
 `Access-Control-Allow-Origin: *` and deliberately never sends

@@ -2432,6 +2432,22 @@ export interface IssuedToken {
     name: string;
     relayUrl: string | null;
     relayOnline: boolean;
+    /**
+     * The machine's X25519 static public key, base64url, or `null`.
+     *
+     * ⚠ **Beside the route rather than on `GET /v1/machines`, and for the route's
+     * own reason.** Minting is how a client learns where a machine is; a key and
+     * an address are the same kind of fact — *how to reach this thing* — and
+     * splitting them would create two answers that can disagree about one
+     * machine. They move together or not at all.
+     *
+     * `null` for a machine that has not dialled since it learned to announce one,
+     * which on a fleet mid-update is every machine. The client turns that into a
+     * sentence about updating that daemon and refuses the route: there is no mode
+     * without it. Optional so a control plane older than this reads as "not
+     * reported" rather than as `undefined` reaching a handshake.
+     */
+    key?: string | null;
   };
   /**
    * The control plane's own clock when it answered, in epoch milliseconds.
@@ -2604,6 +2620,50 @@ export interface DeviceRecord {
    * most once every fifteen minutes, like everything else that reads it.
    */
   lastSeenAt: number | null;
+  /**
+   * Whether this installation has registered an X25519 public key, and when.
+   *
+   * ⚠ **Not the key**, and the control plane's own docblock says why: the
+   * question this row exists to answer is *can this installation reach a machine*
+   * — one word — and 43 characters of base64url on a row is a value somebody
+   * copies, compares, or pastes into a support conversation, none of which is a
+   * thing to do with a key. `false` covers a row registered before device keys
+   * existed and one whose credential store lost the key, and both draw the same
+   * sentence because both have the same remedy.
+   *
+   * ⚠ **This is the fifth feature this hand mirror has silently dropped, and the
+   * guard is not what catches it.** `webcheck.plugin-protocol.ts` sweeps every
+   * interface here whose original it can find, and it looks each one up in a
+   * hard-coded list of `src/` files with no control-plane file in it — so this
+   * type hits the sweep's `continue` and is compared against nothing at all. The
+   * control plane has been answering `hasKey` on **every** device row since the
+   * column landed, and the screen whose whole purpose is that question could not
+   * read it.
+   *
+   * **Optional on the type as well as boolean, for `SessionRecord.ip`'s reason.**
+   * `public_key` and `key_set_at` are `migrate()` additions onto a `devices` table
+   * that shipped without them, so a control plane older than that release lists
+   * devices and sends neither key. `cp.ts`'s own `registerDevice` already reads
+   * `hasKey?: boolean` off the registration answer for exactly this reason.
+   * `undefined` means *nobody said*, which is not the same claim as `false` and
+   * must not be drawn as one — a client that declared them required would mark
+   * every device on such a server as unable to reach anything.
+   */
+  hasKey?: boolean;
+  /**
+   * When that key was last written, or `null` for a row that has never had one.
+   *
+   * Mirrored because the control plane sends it on every row and this file is the
+   * copy — the whole failure being fixed here is a field served and not declared,
+   * and declaring one of a pair repeats it at half size. **Nothing draws it yet**,
+   * and that is deliberate rather than an oversight: the screen's question is
+   * *can this installation reach a machine*, which `hasKey` answers on its own,
+   * and a second date beside `last used` on a row this narrow would compete with
+   * the one somebody actually came to read. It is here for the day a row has to
+   * say *re-keyed on Tuesday* — the state `wrong_device` recovery produces — and
+   * for `pnpm cpctl devices`, which prints rows rather than laying them out.
+   */
+  keySetAt?: number | null;
   /** Whether this row is the installation making the request. */
   current: boolean;
 }

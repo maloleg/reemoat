@@ -1,18 +1,74 @@
 //! Everything the webview may ask this process to do, and nothing else.
 //!
-//! Fifteen, and the list is short on purpose: an app-defined command is not
+//! Seventeen, and the list is short on purpose: an app-defined command is not
 //! ACL-gated, so this file *is* the capability surface. `pnpm nativecheck` holds
 //! it to the set `packages/web/src/native.ts` actually calls, in both directions —
 //! a command nobody calls is a door nobody is watching, and a call with no command
 //! behind it is a runtime failure no offline check would otherwise see.
 //!
-//! ⚠ **That number is prose and nothing asserts it, which is why it was wrong.**
-//! It read *twelve* while thirteen were registered — `host_daemon_log` arrived and
-//! the sentence did not move — and a count restated in a comment is exactly the
+//! ⚠ **That number is prose and nothing asserts it, which is why it has been
+//! wrong twice.** It read *twelve* while thirteen were registered —
+//! `host_daemon_log` arrived and the sentence did not move — and then *fifteen*
+//! while seventeen were, which is the same failure with the same cause: a count
+//! restated in a comment is exactly the
 //! kind of claim `docs/DECISIONS.md` records this repository learning not to keep.
 //! What the driver compares is the two *lists*, which is the property that
 //! matters; this sentence is a reader's orientation, and if it disagrees with
 //! `generate_handler!` in `lib.rs`, the handler is right.
+//!
+//! ## Which of these may hold the main thread
+//!
+//! **`#[tauri::command]` runs the body on the main thread — the one the webview
+//! paints on — and `#[tauri::command(async)]` runs it on the async runtime.** A
+//! bare attribute is the right shape for a `PathBuf` join, a keyring write or a
+//! clipboard call, and the wrong one for anything that *waits*, because a command
+//! that waits on the main thread is a command that stops the app drawing for
+//! exactly as long as it waits.
+//!
+//! **The rule: a command that waits on a socket, on a disk flush, on a platform
+//! panel or on a child process carries `(async)`; so does one on a path hot enough
+//! that even a keyring round trip is too much.** Ten do, each with the measurement
+//! at its own docblock:
+//!
+//! - `host_daemon_state` and `host_local_daemon` — a loopback `/health` probe
+//!   worth three `PROBE_TIMEOUT`s in the bad case.
+//! - `host_device_dh` — an OS keyring round trip **twice per Noise handshake**,
+//!   which is the hot-path clause rather than the waiting one.
+//! - `host_save_file` — a platform panel, and then up to `MAX_DOWNLOAD_BYTES`.
+//! - `host_set_server`, `host_device_set`, `host_device_clear`,
+//!   `host_device_key_reset` — a `server.json` write, which `config.rs` makes
+//!   durable by flushing the file **and** its directory entry: two `sync_all`s.
+//!   The first, on a regular file, is `fcntl(F_FULLFSYNC)` on macOS — a full
+//!   device cache flush. ⚠ The second is that same call on a **directory**
+//!   descriptor, which is measured only as far as being reached and answering
+//!   success; `config::sync_dir` carries the numbers, and the platform where it
+//!   does nothing at all. The first also erases a keyring entry and the last does
+//!   a keyring erase, a keyring write and a read-back to verify it.
+//! - `host_daemon_start` — an env file written the same durable way, and then a
+//!   child process spawned.
+//! - `host_daemon_stop` — a SIGTERM and then a **bounded wait** on the child, up
+//!   to `STOP_DEADLINE`. Waiting is the point rather than politeness (`daemon.rs`
+//!   has the argument), which is exactly why it may not be waited for here.
+//!
+//! `host_cp` is an `async fn` and the macro gives it the same treatment without
+//! being asked.
+//!
+//! ⚠ **And the remainder, so this is a closed statement rather than a list with an
+//! unspoken tail.** `host_credential_set` and `host_credential_clear` are one
+//! keyring call and touch no disk; `host_daemon_log` copies an in-memory ring;
+//! `host_copy_text`, `host_open_external` and `host_cp`'s own body are a clipboard
+//! call, a URL parse and a join. `host_boot` is the one judgement call: it reads
+//! the keyring and, on the single launch that generates a device key, pays that
+//! durable write too — and it stays bare because it is the call the page makes
+//! *before it draws anything*, so there is no frame for it to hold, and because
+//! its four answers are read in one breath about one origin, which the main thread
+//! gives it for free.
+//!
+//! ⚠ **The attribute is the whole fix, and it is easy to lose in a refactor** —
+//! `(async)` on a synchronous function is not decoration, it is the difference
+//! between `tauri::async_runtime::spawn` and running inline on the event loop.
+//! Nothing the compiler does will tell you it went missing; the symptom is a
+//! beachball on somebody else's machine.
 
 use std::sync::Mutex;
 
@@ -25,6 +81,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::config;
 use crate::credential;
 use crate::daemon;
+use crate::device::{self, DeviceKey};
 use crate::local::{self, LocalDaemon};
 use crate::proxy::{self, CpAnswer, CpRequest};
 
@@ -67,7 +124,19 @@ impl Host {
 /// - `exited` — it was started and is gone. `detail` carries the tail of what it
 ///   printed, which is the whole reason this command exists.
 /// - `absent` — nothing here, and nothing has been tried.
-#[tauri::command]
+///
+/// ⚠ **`(async)`, because this one is a *poll*.** Four `read_to_string`s is
+/// already more than the painting thread should be asked for once a second, but
+/// the cost that mattered is the `is_alive` probe below and it is paid only on
+/// the branch nobody developing this app ever takes. On a `deploy/install.sh`
+/// machine `ours` is false for ever, so every tick does a synchronous loopback
+/// connect, write and read — three `PROBE_TIMEOUT`s, three quarters of a second,
+/// whenever the announced port is stale and *filtered* rather than refused, which
+/// is the case the timeout exists for. `store.ts` asks at `SETUP_POLL_MS` while a
+/// computer is being set up and `LogsSection` every two seconds afterwards. An app
+/// running its own child answers from a process handle and pays none of it, which
+/// is why a whole release of this was invisible.
+#[tauri::command(async)]
 pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::DaemonState {
     let unknown = |status: &str| daemon::DaemonState {
         status: status.to_string(),
@@ -121,6 +190,10 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
      * daemon rather than the socket.
      * Not asked when this app owns the child: the handle is better evidence than a
      * probe, and it keeps a round trip off the one-second polling path.
+     * ⚠ **The `foreign` branch has always paid it, every tick.** That is not a
+     * thing this filter can fix — a daemon this app did not start is exactly the
+     * one that has to be proved — so the fix is the `(async)` on this command:
+     * the round trip is off the *main thread* now rather than off the poll.
      */
     let announced =
         announced.filter(|found| ours || daemon::is_alive(&found.base, &found.instance_id));
@@ -189,7 +262,16 @@ pub fn host_daemon_state(app: AppHandle, host: State<'_, Host>) -> daemon::Daemo
 ///   or this app's own after a restart.
 /// - **A file naming another server** — refused outright, both above. Overwriting
 ///   it would point somebody's working daemon at a fleet they did not choose.
-#[tauri::command]
+///
+/// ⚠ **`(async)`, because everything this does waits.** `write_private` below is
+/// durable now — the bytes and then the directory entry, two `sync_all`s, the
+/// first of them a full device cache flush on macOS and the second the same call
+/// on a directory descriptor, which `config::sync_dir` measures rather than
+/// assumes — and then this spawns a child process. On the main thread that is a
+/// window that
+/// stops drawing at exactly the moment somebody has pressed the button that sets
+/// their computer up, which is the one moment they are watching it.
+#[tauri::command(async)]
 pub fn host_daemon_start(
     enroll_code: String,
     machine_id: String,
@@ -307,7 +389,17 @@ pub fn host_daemon_start(
 }
 
 /// Stop the daemon this app started, and only that one.
-#[tauri::command]
+///
+/// ⚠ **`(async)`, and this is the longest wait in the file by an order of
+/// magnitude.** `Supervisor::stop` signals and then **waits** — bounded by
+/// `STOP_DEADLINE`, and waiting is the point rather than politeness: a stop that
+/// returned early would let a relaunch start a second daemon while the first still
+/// held `reemoat.db`, which the setup flow reads as a daemon that will not start.
+/// That argument is about the *quit* path, where holding the main loop is
+/// unavoidable because the loop is on its way out. Here it is avoidable, and bare
+/// it was a window frozen for up to that whole deadline because somebody pressed
+/// Stop.
+#[tauri::command(async)]
 pub fn host_daemon_stop(host: State<'_, Host>) -> Result<(), String> {
     host.supervisor
         .lock()
@@ -346,6 +438,24 @@ pub fn host_daemon_log(host: State<'_, Host>) -> Vec<String> {
 /// is the same discipline `src/announce.ts` applies to `daemon.json` and
 /// `deploy/install.sh` to this very file. A filesystem with no POSIX modes is not
 /// a reason to refuse — it is the same judgement `store/sqlite.ts` already makes.
+///
+/// ⚠ **The temporary name comes from `config::temp_name`, and that stopped being
+/// cosmetic when this function's caller became `(async)`.** It used to be the pid
+/// alone, which was modelled on `write_stored`'s name *minus* the counter that
+/// name carries — survivable only while `host_daemon_start` ran on the main
+/// thread and could not overlap itself. `temp_name`'s docblock has what two
+/// writers sharing one temporary path cost, which for this file is the truncated
+/// `daemon.env` the block below exists to prevent rather than an untidy
+/// directory.
+///
+/// ⚠ **Known gap, bounded and named rather than half-fixed: the lost update on
+/// `daemon.env` is still open.** `host_daemon_start` does `read_to_string` →
+/// `daemon::env_rewritten` → this function with nothing serialising it — there is
+/// no `CONFIG_LOCK` on this path, `config.rs` says so in as many words — so two
+/// concurrent starts can each write a file built from bytes the other has already
+/// replaced. A shared temporary name was the half that produced a *torn* file and
+/// it is closed; a lock here is a larger change that reaches the machine-claim
+/// ordering above, which is why it is written down instead of guessed at.
 fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
     use std::io::Write;
     /*
@@ -362,6 +472,12 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
      * A temporary file created at `0600`, filled, flushed and renamed over the
      * target closes both: the mode is never wrong because it is set at creation,
      * and every reader sees either the whole old file or the whole new one.
+     *
+     * ⚠ **And the rename is flushed too, which for a long time it was not.** That
+     * sentence above described a crash *during* a write and stopped at the last
+     * statement: `sync_all` promises the temporary's bytes, and the directory
+     * entry naming them is a separate write that nothing waited on. See the call
+     * at the foot of this function.
      */
     let dir = path
         .parent()
@@ -375,7 +491,11 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("daemon.env");
-    let tmp = dir.join(format!("{name}.tmp.{}", std::process::id()));
+    // The pid **and** a counter, through the one function that builds both. Two
+    // `host_daemon_start`s can be in flight in one process — it carries `(async)`
+    // — and both opens below carry `truncate(true)`, so a temporary path they
+    // share is the second one emptying bytes the first has already flushed.
+    let tmp = dir.join(config::temp_name(name));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -399,7 +519,28 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("could not write {}: {e}", path.display())
-    })
+    })?;
+    /*
+     * ⚠ **The flush above is the bytes; this is the name.** `sync_all` promises
+     * the temporary's *contents* are on the device and says nothing about the
+     * directory entry that gives them a path — a separate write, and an un-synced
+     * one can leave neither the new name nor the old after a crash or a power cut.
+     * For this file that state is an env file with no `REEMOAT_CONTROL_PLANE`,
+     * which `config_state` reads as `elsewhere`: exactly the failure the block
+     * above exists to prevent, where the app refuses to touch a file it corrupted
+     * itself while telling the person their computer belongs to another server.
+     *
+     * The same gap was in `config.rs`'s `write_stored`, which this shape was
+     * modelled on, so the fix is one function called from both — two copies that
+     * drift apart is how one of them stops being a fix, and the temporary name
+     * above now goes through that same door. Best effort for `sync_dir`'s own
+     * reason: a platform with no openable directory handle may not turn a write
+     * that landed into a refusal. It answers an `io::Result` rather than
+     * swallowing one, so the discard is stated here and its docblock can carry
+     * what each platform actually does with the call.
+     */
+    let _ = config::sync_dir(dir);
+    Ok(())
 }
 
 /// Where `bundle.resources` landed, in a bundle and in `tauri dev` alike.
@@ -465,6 +606,29 @@ pub struct Boot {
     /// it survive a machine whose credential store silently discards writes.
     #[serde(rename = "deviceId")]
     pub device_id: Option<String>,
+    /// This installation's X25519 public key on that server, base64url.
+    ///
+    /// ⚠ **Two flat fields rather than one nested `deviceKey` object, and that is
+    /// forced rather than chosen.** `nativecheck`'s census reads `^\s{4}pub (\w+): `
+    /// — the **top-level** fields of this struct and nothing deeper. A nested
+    /// struct's members are invisible to it, so a missing `rename` inside one
+    /// would be the failure the `device_id` block above describes, repeating one
+    /// level down where the census that was built to catch it cannot look.
+    ///
+    /// `None` before the first launch that generates one, and on a failure to
+    /// reach any store at all — the page then has no encrypted route to a remote
+    /// machine and says so, rather than opening an unencrypted one.
+    #[serde(rename = "devicePublicKey")]
+    pub device_public_key: Option<String>,
+    /// `"keyring"` or `"file"` — where that key is actually kept.
+    ///
+    /// Carried to the page because a person on a machine whose credential store
+    /// keeps nothing should be **told** their key is in a file, on the screen that
+    /// lists their devices. The alternative to the file is that installation
+    /// having no remote access at all, so this is a disclosure rather than a
+    /// setting.
+    #[serde(rename = "deviceKeyAtRest")]
+    pub device_key_at_rest: Option<String>,
     /// The address this build suggests, for the setup screen's field to open on.
     ///
     /// ⚠ **A suggestion, and never `server`.** They are different questions —
@@ -490,6 +654,12 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
     let device_id = server
         .as_deref()
         .and_then(|origin| config::read_device(&host.config_dir, origin));
+    // The same origin again, and in the same breath, for the reason the device id
+    // is read here: three answers about three different servers is the shape this
+    // function exists to make impossible.
+    let device_key = server
+        .as_deref()
+        .and_then(|origin| device::ensure_key(&host.config_dir, origin).ok());
     Boot {
         server,
         credential,
@@ -498,8 +668,70 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
         app_version: app.package_info().version.to_string(),
         durable: host.durable,
         device_id,
+        device_public_key: device_key.as_ref().map(|k| k.public_key.clone()),
+        device_key_at_rest: device_key.as_ref().map(|k| k.at_rest.clone()),
         default_server: config::default_server(),
     }
+}
+
+/// One Diffie-Hellman with this installation's device key.
+///
+/// The page runs the Noise handshake — `native-shell.md` gives four reasons the
+/// daemon leg may not leave the webview, and one of them is that an encrypted
+/// stream with two decryptors is not a design — so the two operations in the IK
+/// pattern that need the *static* key come back here. Every other operation uses
+/// an ephemeral the page generated and holds itself.
+///
+/// ⚠ **This is a Diffie-Hellman oracle scoped to the page, and naming it as one
+/// is the point.** Anything running in the webview can ask for `DH(device, X)` for
+/// an `X` it chooses. That is strictly less than holding the key — it cannot be
+/// exported, survives no copy, and is gone when the origin changes — and it is the
+/// same trust boundary `host_credential_set` already sits on, which hands over the
+/// fleet credential outright.
+///
+/// ⚠ **`(async)`, and on this command that is the hot path itself.** The work
+/// here is an OS keyring read — on macOS a `securityd` IPC round trip rather than
+/// a memory lookup — plus an X25519 scalar multiplication, and the IK handshake
+/// crosses this bridge **twice**: `ss` in message 1 and `se` in message 2.
+/// `e2ee.ts` holds a pool rather than a multiplexer with `MAX_IDLE_CONNECTIONS`
+/// of 2, so any burst — the four-second poll fanning out across a fleet, or a
+/// wake — dials fresh connections and pays two blocking keychain reads *each*.
+/// Every byte of remote traffic now sits behind this call, which makes it the
+/// last thing in this file that may hold the thread the webview paints on.
+///
+/// **The two reads are still two, and that is a file-ownership fact rather than a
+/// judgement.** Caching the decoded static in `Host` after the first successful
+/// read would make a handshake one keyring hit; the process holds the key in
+/// memory for the length of the DH anyway, so it costs no exposure that is not
+/// already taken. But `device::read_secret` is private and the at-rest policy it
+/// implements — keyring first on *every* read, file fallback second, a keyring
+/// answer retiring the file — is deliberately in one place. A cache here would be
+/// a second copy of that policy in a module that has no other reason to know it,
+/// so it belongs in `device.rs`, beside the only reader.
+#[tauri::command(async)]
+pub fn host_device_dh(peer: String, host: State<'_, Host>) -> Result<String, String> {
+    let origin = host.origin().ok_or("no server has been chosen")?;
+    device::diffie_hellman(&host.config_dir, &origin, &peer)
+}
+
+/// Start this installation over with a fresh device key on the chosen server.
+///
+/// Two cases, one act: a credential store that was reset out from under the app,
+/// and somebody deliberately re-keying from Settings → Devices. The old key is
+/// given up first, so a failure part-way leaves no installation holding a key the
+/// server has never heard of.
+///
+/// ⚠ **`(async)`, because re-keying is three stores in a row.** A keyring erase, a
+/// `server.json` write to drop any fallback copy, and then `ensure_key`: fresh
+/// randomness, a keyring write **verified by reading it back** (`device.rs` says
+/// why the `Ok` cannot be trusted), and on a machine where that read-back fails, a
+/// second durable `server.json` write. Each of those writes flushes the file and
+/// its directory entry, so on macOS this is several `F_FULLFSYNC`s and two or more
+/// `securityd` round trips in one command.
+#[tauri::command(async)]
+pub fn host_device_key_reset(host: State<'_, Host>) -> Result<DeviceKey, String> {
+    let origin = host.origin().ok_or("no server has been chosen")?;
+    device::reset_key(&host.config_dir, &origin)
 }
 
 /// Is there a daemon on *this computer*, and which machine is it?
@@ -526,9 +758,17 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
 ///
 /// It costs one `/health` round trip against `PROBE_TIMEOUT`, and `localRoute.ts`
 /// asks this once per route resolution — a wake or a fifteen-second retry, never
-/// the four-second poll. It is paid on *this* thread, which is the main one until
-/// this command is `#[tauri::command(async)]`.
-#[tauri::command]
+/// the four-second poll. ⚠ **It also does not memoise, on purpose**, so a fleet of
+/// N machines resolving after a wake is N of these one after another, each worth a
+/// connect, a write and a read against that timeout: three quarters of a second
+/// apiece against a port that is stale and filtered rather than refused.
+///
+/// This docblock used to end *"it is paid on **this** thread, which is the main
+/// one until this command is `#[tauri::command(async)]`"* — a standing TODO
+/// written as prose, which is the shape of comment this repository keeps finding
+/// on the wrong side of the code it describes. It is the attribute now, so the
+/// probe is paid on the async runtime and the webview goes on painting through it.
+#[tauri::command(async)]
 pub fn host_local_daemon(app: AppHandle) -> Option<LocalDaemon> {
     let home = app.path().home_dir().ok()?;
     local::read(&home).filter(|found| daemon::is_alive(&found.base, &found.instance_id))
@@ -540,7 +780,17 @@ pub fn host_local_daemon(app: AppHandle) -> Option<LocalDaemon> {
 /// is one it has no reason to keep, and doing it here — rather than on some later
 /// sign-out that may never happen — is what makes "no credential is retained for a
 /// server you are not using" true of the act rather than of an intention.
-#[tauri::command]
+///
+/// ⚠ **`(async)`, because both halves of that act wait on a store.** The write is
+/// a durable `server.json` — the bytes and the directory entry, the first of
+/// which is a full device cache flush on macOS and the second of which
+/// `config::sync_dir` states the measured limits of — and the erase is a
+/// `securityd` IPC round trip. Neither was ever free; the durability fix is what
+/// made the first of them expensive enough to stop pretending otherwise.
+///
+/// Nothing here reaches the event loop — `State` and a `Mutex`, no `AppHandle` —
+/// so there is no reentrancy the attribute could turn into a deadlock.
+#[tauri::command(async)]
 pub fn host_set_server(url: String, host: State<'_, Host>) -> Result<String, String> {
     let origin = config::normalize_origin(&url)?;
     let previous = host.origin();
@@ -583,7 +833,12 @@ pub fn host_credential_clear(host: State<'_, Host>) -> Result<(), String> {
 /// `config.rs`: the row on the old server still exists, so forgetting the id
 /// leaves an installation nobody can recognise in their own list and spends a
 /// second slot the next time they point back.
-#[tauri::command]
+///
+/// ⚠ **`(async)`, for the durable write.** `config.rs` flushes the file *and* the
+/// directory entry that names it, because an `fsync` on the bytes alone leaves the
+/// rename unguaranteed — and this is the one call on the sign-in path, so a device
+/// registration is not a thing to stop the window drawing for.
+#[tauri::command(async)]
 pub fn host_device_set(value: String, host: State<'_, Host>) -> Result<(), String> {
     let origin = host.origin().ok_or("no server has been chosen")?;
     config::write_device(&host.config_dir, &origin, &value)
@@ -596,7 +851,11 @@ pub fn host_device_set(value: String, host: State<'_, Host>) -> Result<(), Strin
 /// the next sign-in would offer the retired id again; the server declines to bind
 /// it and registers a fresh device, so the loop terminates either way, but the app
 /// would go on presenting something it has been told is dead.
-#[tauri::command]
+///
+/// ⚠ **`(async)` for the same durable write as `host_device_set`**, and left bare
+/// it would have been the odder of the two: this one fires on a `device_revoked`
+/// answer, which arrives mid-session while somebody is looking at the app.
+#[tauri::command(async)]
 pub fn host_device_clear(host: State<'_, Host>) -> Result<(), String> {
     let Some(origin) = host.origin() else {
         return Ok(());
@@ -654,7 +913,20 @@ pub fn host_open_external(app: AppHandle, url: String) -> Result<(), String> {
 ///
 /// Answers `false` where the panel was dismissed, which is not a failure and must
 /// not be drawn as one.
-#[tauri::command]
+///
+/// ⚠ **`(async)`, and `tauri-plugin-dialog` documents this as the only correct
+/// way to call it.** `blocking_save_file` carries *"this is a blocking operation,
+/// and should **NOT** be used when running on the main thread"*, for a mechanical
+/// reason rather than a stylistic one: the panel's result is delivered *by* the
+/// main event loop, so a main-thread command that blocks waiting for it is waiting
+/// on the loop it is itself holding — a frozen window while the panel is open at
+/// best, and a deadlock at worst. The plugin's own `save` command is an `async fn`
+/// wrapped around exactly this call, which is the shape being copied here.
+///
+/// The `std::fs::write` underneath is the second reason and stands on its own:
+/// `MAX_DOWNLOAD_BYTES` is 100 MiB, and 100 MiB to a spinning disk or a network
+/// volume is not something to do between two paints even if the panel were free.
+#[tauri::command(async)]
 pub fn host_save_file(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<bool, String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("expected the file as bytes".into());

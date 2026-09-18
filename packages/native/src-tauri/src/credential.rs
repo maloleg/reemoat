@@ -19,14 +19,23 @@ use keyring::Entry;
 /// service+account, and two spellings would be two stores on two platforms.
 const SERVICE: &str = "com.reemoat.app";
 
-/// Every secret this app keeps, and there is one.
+/// Every secret this app keeps, and there are two.
 ///
-/// A named set with a single member rather than a string at each call site, so
-/// adding a second is a visible edit in one place. There is deliberately **no
-/// device id** here: a value generated at first run and persisted *is* device
-/// identity, arriving by accident, and it would be a new fact about a person that
-/// nothing in this fleet has agreed to record.
+/// A named set rather than a string at each call site, so adding a member is a
+/// visible edit in one place — which is what this set was built for, and this is
+/// that edit. There is still deliberately **no device id** here: an id is an
+/// identifier rather than a secret, it is read only after a session token has
+/// already resolved, and a store that silently discards writes would have this
+/// app register a new device on every launch. `config.rs` keeps it, and says so.
 pub const CREDENTIAL: &str = "credential";
+
+/// The device's X25519 private key, base64url, 32 raw bytes.
+///
+/// Scoped per origin like the credential beside it, because the row it names
+/// lives on one fleet: a key registered with one server means nothing to another,
+/// and reusing it across both would link the two installations to each other for
+/// no benefit.
+pub const DEVICE_KEY: &str = "device_key";
 
 /// What a secret store has to do, and pointedly not more.
 ///
@@ -37,13 +46,30 @@ pub const CREDENTIAL: &str = "credential";
 /// `Entry::new(…)` through the commands is precisely what would make a mobile arm
 /// expensive later.
 ///
-/// ⚠ **`read` and `write` carry a `String`, which is what says a private key may
-/// not use them.** A key this process can read is a key this process can leak, so
-/// the future shape for one is a `sign(key, bytes)` that never returns it, backed
-/// by the Secure Enclave or a TPM. That is named here and built nowhere.
+/// ⚠ **This block said a private key may not use `read`/`write`, and one now
+/// does. The amendment is here rather than in a plan nobody reads later.**
 ///
-/// And there is no `list`. Enumerating is what a device-key rotation would want,
-/// and shipping the verb now is shipping the feature.
+/// What it said: *a key this process can read is a key this process can leak, so
+/// the future shape for one is a `sign(key, bytes)` that never returns it, backed
+/// by the Secure Enclave or a TPM.* Two of those three clauses still stand and
+/// one is not available.
+///
+/// **Not available:** the Secure Enclave does P-256 and nothing else. The key the
+/// Noise handshake needs is X25519, so a non-extractable static simply does not
+/// exist on this platform for this algorithm. That is a fact about the hardware
+/// rather than a corner cut, and pretending otherwise in a security document is
+/// the failure this repository names elsewhere as *a property the code appears to
+/// have and nothing enforces*.
+///
+/// **Still true, and it is what the refusal actually bought:** the key never
+/// crosses the bridge. `device.rs` performs the two Diffie-Hellman operations the
+/// handshake needs and returns a shared secret; no command returns the key
+/// itself, so the webview — the one place somebody else's JavaScript could ever
+/// run — cannot read it. And there is still no `list`: enumerating is what a
+/// rotation would want, and shipping the verb now is shipping the feature.
+///
+/// So the honest claim is *the page cannot read it*, not *this process cannot*.
+/// `SECURITY.md` says it in those words.
 pub trait SecretStore {
     fn read(&self, key: &str, scope: &str) -> Option<String>;
     fn write(&self, key: &str, scope: &str, value: &str) -> Result<(), String>;
@@ -107,6 +133,21 @@ pub fn write(origin: &str, value: &str) -> Result<(), String> {
 
 pub fn erase(origin: &str) -> Result<(), String> {
     PlatformStore.erase(CREDENTIAL, origin)
+}
+
+/* The device key. Same store, same scoping, and deliberately the same three
+ * verbs — `device.rs` owns every decision about what the value means. */
+
+pub fn read_device_key(origin: &str) -> Option<String> {
+    PlatformStore.read(DEVICE_KEY, origin)
+}
+
+pub fn write_device_key(origin: &str, value: &str) -> Result<(), String> {
+    PlatformStore.write(DEVICE_KEY, origin, value)
+}
+
+pub fn erase_device_key(origin: &str) -> Result<(), String> {
+    PlatformStore.erase(DEVICE_KEY, origin)
 }
 
 /// Whether this machine's store actually keeps what it is given.

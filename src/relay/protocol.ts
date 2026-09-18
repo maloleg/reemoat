@@ -21,7 +21,7 @@
  * than guessing, because the alternative is a daemon that appears connected and
  * silently mis-parses every request.
  */
-export const RELAY_PROTOCOL_VERSION = 1;
+export const RELAY_PROTOCOL_VERSION = 2;
 
 /**
  * The oldest tunnel protocol version this build still speaks.
@@ -38,11 +38,27 @@ export const RELAY_PROTOCOL_VERSION = 1;
  * daemons move to 2 whenever their owners get to it, and raise the floor only
  * once nothing is left below it — which `cpctl admin fleet` is what answers.
  *
- * Equal to the maximum today, which is the honest state of a project at 0.1.0
- * with one protocol version. The mechanism is still live, and `relaycheck`
- * asserts it by offering a version from the future.
+ * ⚠ **It is 2 rather than 1, and this is the one flag day that was taken
+ * deliberately.** v2 is the version on which a stream is *always* encrypted: the
+ * relay opens nothing but `reemoat-enc: noise-ik-…`, and this daemon serves
+ * nothing else. There is no arrangement in which a v1 daemon and a v2 relay can
+ * both be right about what the bytes on a stream mean — v1's answer is "plaintext
+ * HTTP" — so the range that exists to avoid a flag day cannot span the change.
+ * Keeping the floor at 1 would mean a relay that still speaks plaintext, which is
+ * the thing being removed.
+ *
+ * So: a daemon that has not been updated stops dialling in, is refused with a 426
+ * naming what to do, and its machine draws as offline until somebody runs
+ * `deploy/deploy.sh` on that host. That is a worse day than the four-step rollout
+ * `.claude/rules/compatibility.md` describes, and it was chosen over the
+ * alternative, which is a fleet where the relay can still be asked to carry
+ * plaintext for as long as one machine has not been touched.
+ *
+ * The mechanism itself is unchanged and still live — `negotiateProtocolVersion`
+ * is the same function and `relaycheck` still asserts it by offering a version
+ * from the future. What moved is the floor, once, for a reason written down.
  */
-export const RELAY_PROTOCOL_MIN_VERSION = 1;
+export const RELAY_PROTOCOL_MIN_VERSION = 2;
 
 /**
  * What a peer that sends no version header is speaking.
@@ -239,6 +255,49 @@ export function parseAgentClis(text: string): AgentClis | null {
 }
 
 /**
+ * The X25519 static this machine answers on, announced on the dial.
+ *
+ * base64url, 32 raw bytes, so 43 characters with no padding.
+ *
+ * **Announced, never negotiated, and never asked for** — the same half of
+ * `compatibility.md`'s first rule that `DAEMON_VERSION_HEADER` and
+ * `AGENT_CLIS_HEADER` sit in, and it is what keeps *"the daemon makes exactly one
+ * control-plane request, ever"* true while still getting a generated key to the
+ * Authority. The dial is already authenticated by the tunnel key, and
+ * `resolveTunnelKey` derives the machine id **from** that credential rather than
+ * from any request field — so a daemon structurally cannot announce a key for a
+ * machine that is not its own. The announcement is exactly as trustworthy as
+ * "I am this machine", which is the property it needs and no more.
+ *
+ * ⚠ **A daemon that predates this sends no header, and that is one of three
+ * silences that must stay tellable apart.** No header at all, a header this
+ * reader refuses, and a machine whose key is not pinned yet are different facts
+ * with different remedies; only the first two are decided here, and both answer
+ * `null` — refused **whole**, never cut, because half a public key is a key
+ * nothing holds rather than a shorter one.
+ */
+export const MACHINE_KEY_HEADER = "x-reemoat-machine-key";
+
+/** 32 raw bytes in base64url is 43 characters. Nothing longer is one. */
+export const MAX_MACHINE_KEY_CHARS = 43;
+
+/**
+ * Read an announced machine key, or `null`.
+ *
+ * Strict about the alphabet as well as the length, for `b64uDecode`'s reason one
+ * file over: `Buffer.from(s, "base64url")` silently skips what it does not
+ * recognise, so `"ab!cd"` and `"abcd"` decode alike and a key becomes a family of
+ * keys. Here that would mean two different announcements pinning one row.
+ */
+export function parseMachineKey(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const value = text.trim();
+  if (value.length !== MAX_MACHINE_KEY_CHARS) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  return value;
+}
+
+/**
  * Per-stream handshake headers, carried on the h2 CONNECT request.
  *
  * h2 request headers are already a negotiated key/value handshake per stream,
@@ -262,8 +321,35 @@ export const STREAM_VERSION_HEADER = "reemoat-v";
  */
 export const STREAM_ENCRYPTION_HEADER = "reemoat-enc";
 
-/** The only encryption mode that exists today. */
-export const STREAM_ENCRYPTION_NONE = "none";
+/*
+ * ⚠ **`STREAM_ENCRYPTION_NONE` is gone, and its absence is the point.**
+ *
+ * It was the value the seam reserved — `"none"`, written by the relay on every
+ * stream, with the note that *"none of that is implemented and none of it should
+ * be until it is its own piece of work"*. It is now, and the honest way to finish
+ * the work is to delete the mode rather than leave it as a value somebody could
+ * still ask for. A constant that names plaintext is a downgrade waiting for a
+ * configuration; with the string gone there is nothing to set.
+ *
+ * A daemon on the old protocol cannot ask for it either, because
+ * `RELAY_PROTOCOL_MIN_VERSION` is 2 and its dial is refused above this layer.
+ */
+
+/**
+ * End-to-end encryption between an app and this daemon, with the relay carrying
+ * bytes it cannot read.
+ *
+ * `Noise_IK_25519_ChaChaPoly_BLAKE2s`, with the app's device key as the
+ * initiator's static and this machine's key as the responder's, and the framing
+ * of `@reemoat/protocol` inside it.
+ *
+ * ⚠ **The suite and the inner framing are one string on purpose.** A change to
+ * either is a new value, and an unrecognised value is a 501 on that one stream —
+ * so a version skew costs one request rather than a silent disagreement about
+ * what the bytes mean. That is the seam this header reserved, spent exactly as it
+ * was described.
+ */
+export const STREAM_ENCRYPTION_NOISE_IK = "noise-ik-25519-chachapoly-blake2s/1";
 
 /**
  * Who the relay believes is calling.
@@ -473,9 +559,6 @@ export const TUNNEL_PING_MAX_MISSES = 2;
  */
 export const RECONNECT_MIN_MS = 1_000;
 export const RECONNECT_MAX_MS = 30_000;
-
-/** How long the daemon will wait to reach its own listener before resetting the stream. */
-export const LOOPBACK_DIAL_TIMEOUT_MS = 5_000;
 
 /** Backoff with full jitter. Exported so both ends and `relaycheck` use the same curve. */
 export function reconnectDelayMs(attempt: number, random: () => number = Math.random): number {

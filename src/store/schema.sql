@@ -521,3 +521,63 @@ CREATE TABLE IF NOT EXISTS agent_strip (
   hidden        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (kind, ref)
 );
+
+
+-- The X25519 static key this machine is known by to an app that reaches it.
+--
+-- **The only key this daemon generates rather than learns.** That is why it is
+-- its own table instead of two more columns on `identity`: that row is described
+-- as *what this machine learned at enrollment, and the only thing it ever needs
+-- from a control plane*, and a key generated here falsifies both halves of the
+-- sentence. `identity` is also `CHECK (id = 1)` and this table has to hold more
+-- than one row — the live key plus every key ever retired — the same reason
+-- `signing_keys` is plural on the control plane.
+--
+-- ⚠ **`private_key` is the second recoverable secret in this file**, beside
+-- `identity.tunnel_key`, and it is a stronger one: the tunnel key proves which
+-- machine this is to a relay, while this one decrypts what an app sends. It sits
+-- in the same 0600 file in the same 0700 directory as the transcripts it
+-- protects, which is the same argument `identity.tunnel_key` already makes — a
+-- second file would be a second set of permissions to get right and no second
+-- protection. Anything that can read this file can already read the work.
+--
+-- ⚠ **At most one row may have `retired_at IS NULL`, and it is enforced — but
+-- not here.** The partial unique index `machine_keys_one_live` is created by
+-- `migrate()` in `sqlite.ts`, deliberately rather than by this file, because this
+-- file is one `exec` that runs *before* `claimDaemonLock` and before any repair.
+-- Two daemons racing on one file could once both mint a key (the lock was a read
+-- and then an unconditional write), so databases holding two live rows exist; a
+-- `CREATE UNIQUE INDEX` here would throw at schema load on exactly those files and
+-- the daemon would never start. The repair that has to precede it *retires a row*,
+-- which is destructive and must not run before the lock is claimed.
+--
+-- Nothing *rotates* a key today, and `retired_at` was added ahead of that
+-- deliberately rather than speculatively: the column costs nothing, and a
+-- rotation that had to add it later would have to add it to a table a live daemon
+-- is reading. It is not dead weight even so — `active()` filters on it,
+-- `retire()` writes it, and `migrateMachineKeysToOneLive` uses it to take a
+-- racer's row out of the answer without destroying the key in it. What a
+-- rotation *would* mean is an overlap — announce the new key, keep answering on
+-- the old until no app offers it — and nothing in this build can answer on two
+-- statics at once: `scripts/daemon.ts` reads one key and hands the tunnel one
+-- static. So the overlap is something a rotation **adds**, and it adds the
+-- removal of that index along with it. Until then a second live row buys no
+-- overlap and only poisons `active()`, whose `created_at DESC` would make every
+-- later start announce a key the control plane never pinned — a 409 on every dial,
+-- for ever.
+--
+-- A new table, so `SCHEMA_VERSION` does not move: this file is
+-- `CREATE … IF NOT EXISTS` and is re-applied on every open. The index does not
+-- move it either: an older daemon inserts here only when it has no live key, so
+-- it can never reach the constraint.
+CREATE TABLE IF NOT EXISTS machine_keys (
+  -- base64url(sha256(RFC 7638 thumbprint of the public JWK)). Derived rather
+  -- than random, so the same key is the same id wherever it is named — which is
+  -- what lets an operator compare what the daemon logged with what `cpctl`
+  -- prints, by eye.
+  kth         TEXT PRIMARY KEY,
+  public_key  TEXT    NOT NULL,
+  private_key TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL,
+  retired_at  INTEGER
+);

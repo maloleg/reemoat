@@ -102,3 +102,58 @@ export function localNetworkDetail(platform: HostPlatform): string {
     }
   }
 }
+
+/**
+ * What to call the platform a device reported, in a line of prose.
+ *
+ * ⚠ **The devices row read `macos · in use`**, which is the enum the installation
+ * registered itself with drawn straight into a sentence. This file exists to be
+ * the one place a sentence is allowed to name an operating system, and `osName` in
+ * `ui/agentCard.ts` does the equivalent for the other vocabulary — a daemon's
+ * `process.platform` — so that row was the one naming surface with no such
+ * function behind it. It lived in `DevicesSection.tsx` for exactly one change,
+ * with `webcheck.native-bridge.ts`'s census — *"exactly these files name an
+ * operating system"*, an exact set — red the whole time it did. It passes
+ * unchanged now that the body sits here, which is the shape that census is for:
+ * the fix is a move, never a spelling that slips past it.
+ *
+ * It is the client's vocabulary through and through — `describeDevice` sends
+ * `NativeBoot.platform`, which is Rust's `std::env::consts::OS` — so
+ * `hostPlatform` is what narrows it, and the rule that keeps the two vocabularies
+ * from crossing is honoured by *asking* it rather than by matching
+ * `darwin`/`win32` here, which is the mistake that would look right in review.
+ *
+ * `other` answers the raw string rather than a word this app invented for it.
+ * `std::env::consts::OS` also says `freebsd`, `ios` and `android`, and a row
+ * reading "Other" tells somebody less about their own computer than the lower
+ * case name it actually reported — `wire.ts`'s standing rule that an unknown
+ * value fails toward keeping working. It is never empty: the control plane
+ * refuses a registration whose platform clamps to nothing.
+ *
+ * Drawn sans and not mono by its caller, and that is the typography rule rather
+ * than an oversight: this is a clause in a sentence about a computer, not a
+ * string anybody retypes.
+ */
+export function platformName(raw: string): string {
+  const platform = hostPlatform(raw);
+  switch (platform) {
+    case "macos":
+      return "macOS";
+    case "windows":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    case "other":
+      return raw;
+    default: {
+      /*
+       * Not decoration: this answers `string`, `undefined` inhabits it, and a
+       * `switch` falling off the end returns exactly that — `localNetworkDetail`
+       * carries the same arm for the same reason, and `AgentGlyph` shipped the
+       * shape without one for four releases.
+       */
+      const exhaustive: never = platform;
+      return exhaustive;
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { check, report, storage } from "./webcheck.env.js";
-import { stripComments } from "./webcheck.source.js";
+import { srcFile, stripComments } from "./webcheck.source.js";
+import { ApiError, meansDeviceKeyMissing } from "../src/http.js";
 
 /* ------------------------------------------------------------------ *
  * A device, and the gate the control plane serves
@@ -239,6 +240,206 @@ const read = (rel: string): string => readFileSync(new URL(rel, SRC), "utf8");
 }
 
 /* ------------------------------------------------------------------ *
+ * The key travels with the registration, and the refusal is recoverable
+ *
+ * An installation that predates device keys reaches its first mint after an
+ * update with a row the control plane holds no key for, and so does one whose
+ * credential store was reset. If that were only a refusal, an update of the
+ * control plane would strand every machine until somebody signed in again on each
+ * of them. It is recoverable instead: the client re-registers the **same** id with
+ * the key its shell already holds, and mints again.
+ *
+ * `relaycheck` drives the server half against the real routes — the refusal, the
+ * re-registration adopting the row rather than making one, and the capability that
+ * follows. This half is the client's wiring, which a browser cannot drive because
+ * `registerDevice` answers `null` outside the shell by design.
+ * ------------------------------------------------------------------ */
+
+{
+  const cpSrc = stripComments(srcFile("cp.ts"));
+  const machineSrc = stripComments(srcFile("machine.ts"));
+
+  /*
+   * The registration carries the key. Without this line a fleet updates, every
+   * installation is refused a capability, and nothing anywhere fixes it.
+   */
+  check("the registration carries the shell's device key", /publicKey/.test(cpSrc), true);
+  check("read off the boot payload rather than invented", /boot\.devicePublicKey/.test(cpSrc), true);
+
+  /*
+   * ⚠ **And the mint applies the remedy the refusal names.** Keyed on the code
+   * through `meansDeviceKeyMissing`, never on the status: a 409 is shared by
+   * refusals that mean unrelated things, which is `meansMachineGone`'s rule.
+   */
+  check("the mint recognises the refusal", /meansDeviceKeyMissing/.test(machineSrc), true);
+  check("and answers it by registering the key", /registerDevice\(\)/.test(machineSrc), true);
+  /*
+   * Once. A registration that does not take has to surface as the refusal it is
+   * rather than as a loop against the control plane, which is the same guard the
+   * request path already spends on a retry.
+   */
+  check("exactly once, on the first attempt", /firstAttempt && meansDeviceKeyMissing/.test(machineSrc), true);
+
+  // The predicate itself, driven rather than read: it is a pure function and the
+  // one thing here that can be wrong without any of the wiring above being wrong.
+  check("the code is what it keys on", meansDeviceKeyMissing(new ApiError(409, "device_key_required", "no key")), true);
+  check(
+    "and a different 409 is not it",
+    meansDeviceKeyMissing(new ApiError(409, "device_needs_session", "no session")),
+    false,
+  );
+  check("nor is a transport failure", meansDeviceKeyMissing(new TypeError("offline")), false);
+}
+
+/* ------------------------------------------------------------------ *
+ * The hand mirror, and the one screen that reads what it was missing
+ *
+ * ⚠ **This is the fifth feature `wire.ts` has silently dropped, and the guard
+ * that exists for exactly this could not catch it.**
+ * `webcheck.plugin-protocol.ts` sweeps every interface in that file whose
+ * original it can find — and it looks each one up in a hard-coded list of `src/`
+ * files with no control-plane file in it, so `DeviceRecord` hits that sweep's
+ * `continue` and is compared against nothing at all. The control plane has been
+ * answering `hasKey` on **every** device row since the column landed, and the
+ * screen whose whole purpose is *can this installation reach a machine* could not
+ * read it: a device that could not open an encrypted channel to anything drew
+ * exactly like one that works.
+ *
+ * So the comparison is made here, where the control-plane file is already being
+ * read for other reasons, and it is a census rather than two named fields — a
+ * sixth dropped field is the same defect and must fail the same way.
+ * ------------------------------------------------------------------ */
+
+{
+  /** The declared field names of one interface, in declaration order. */
+  const fieldsOf = (source: string, name: string): string[] => {
+    const body = new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`).exec(stripComments(source))?.[1] ?? "";
+    return [...body.matchAll(/^\s*(\w+)\??:/gm)].map((one) => one[1] ?? "");
+  };
+
+  const served = fieldsOf(readFileSync(new URL("../../control-plane/src/devices.ts", import.meta.url), "utf8"), "DeviceRow");
+  const mirrored = fieldsOf(read("wire.ts"), "DeviceRecord");
+
+  report("both sides of the mirror were found", served.length > 0 && mirrored.length > 0, `${String(served.length)} served, ${String(mirrored.length)} mirrored`);
+  check("⭐ every field the control plane serves on a device row is declared here", served.filter((field) => !mirrored.includes(field)), []);
+  /*
+   * And the two this landed for, named as well as swept. The census above is what
+   * makes the sixth one fail; naming these two is what makes *this* failure legible
+   * when it happens, rather than a diff of two lists.
+   */
+  check("including the pair the encryption put there", [mirrored.includes("hasKey"), mirrored.includes("keySetAt")], [true, true]);
+
+  /*
+   * ⚠ **Optional on the mirror while required on the server, and the asymmetry is
+   * deliberate rather than laziness.** `public_key` and `key_set_at` are
+   * `migrate()` additions onto a `devices` table that shipped without them, so a
+   * control plane older than that release lists devices and sends neither.
+   * `undefined` means *nobody said*, which is not the same claim as `false`: a
+   * client that declared them required would mark every device on such a server as
+   * unable to reach anything, which is `SessionRecord.ip`'s rule and the reason
+   * `cp.ts`'s own `registerDevice` already reads `hasKey?: boolean`.
+   */
+  const mirrorSource = stripComments(read("wire.ts"));
+  check("the mirror declares them optional", /hasKey\?: boolean;/.test(mirrorSource) && /keySetAt\?: number \| null;/.test(mirrorSource), true);
+
+  /*
+   * And the screen. ⚠ **Keyed on `=== false`, never on `!row.hasKey`** — the
+   * absent value read as falsy would put the badge, and the sentence explaining
+   * it, on a whole account's devices on a control plane that simply predates the
+   * column, none of which is broken. Read off the file rather than rendered,
+   * because a `!` in front of a field is a one-character edit that changes nothing
+   * a type can see.
+   */
+  const devicesSection = stripComments(read("ui/settings/DevicesSection.tsx"));
+  check("⭐ the devices screen reads the field at all", /row\.hasKey/.test(devicesSection), true);
+  check("comparing it against false rather than for truthiness", /row\.hasKey === false/.test(devicesSection), true);
+  check("and never as a bare negation", /!row\.hasKey\b/.test(devicesSection), false);
+  /*
+   * **Three readers now, and the pair is still the assertion for two of them**: a
+   * badge somebody can see on the row, and one sentence above the list saying what
+   * to do about it. A badge with no sentence is a word nobody can act on; a
+   * sentence with no badge does not say *which* installation it is about.
+   *
+   * The third is `rekeyable`, added with the control below, and it is pinned by
+   * its own anchored line rather than by this count — which is the whole reason
+   * the floor stays a floor: a `report` can say how many readers it found and
+   * cannot say **which**, so the reader that matters gets an assertion naming it.
+   * The count was written as "twice" and was three within a release.
+   */
+  report(
+    "on both the row's badge and the sentence that explains it",
+    [...devicesSection.matchAll(/row\.hasKey === false/g)].length >= 2,
+    `${String([...devicesSection.matchAll(/row\.hasKey === false/g)].length)} readers`,
+  );
+
+  /*
+   * ⚠ **The one act that ends `hasKey: false`, and until this it had no assertion
+   * anywhere in the net.** `hostDeviceKeyReset` spent releases with three
+   * docblocks in three languages promising it and **no caller in `packages/web`
+   * at all**; `grep -rn hostDeviceKeyReset packages/web/scripts` answered nothing,
+   * so the control could be deleted again and every driver would stay green —
+   * which is precisely the state the feature was just rescued from.
+   *
+   * Read off the source rather than rendered, for the reason the `row.hasKey`
+   * lines above give: every one of these is a *condition on a control's
+   * existence*, and a control nobody draws type-checks.
+   */
+  check("⭐ the re-key control calls the shell's reset", /await hostDeviceKeyReset\(\);/.test(devicesSection), true);
+  /*
+   * ⚠ **And registers the device *after* it, never beside it.** The pair is
+   * sequential because `hostDeviceKeyReset` refreshes the cached `NativeBoot` on
+   * its way out and `cp.registerDevice` reads the new public half off exactly
+   * that — so a `Promise.all` would send the key that was just given up, and would
+   * send it *successfully*, leaving the row reporting the same `hasKey: false` it
+   * started from with nothing anywhere to say why.
+   *
+   * The ordered pattern is what carries this; the `Promise.all` refusal beside it
+   * is vacuous on its own and is only worth anything next to the positive half.
+   * Measured: the reverse order does not match, so the pattern is discriminating
+   * rather than satisfied by the two calls merely co-occurring.
+   */
+  /*
+   * ⚠ **Ordering by position, not by an adjacency pattern.** The first spelling
+   * of this was `/await hostDeviceKeyReset\(\);\s*const \w+ = await
+   * cp\.registerDevice\(\)/`, which pinned the two calls as *adjacent statements*
+   * — and it went red the moment `registerDevice()` was wrapped in the `try` that
+   * tells the three real outcomes of a re-key apart. That is a driver failing on
+   * an improvement, which is worse than one that misses a regression: it argues
+   * for undoing the fix. What is actually load-bearing is that the reset happens
+   * **first**, because the reset is irreversible and a registration that never
+   * follows it is the one state the screen has to be able to explain.
+   */
+  const resetAt = devicesSection.indexOf("hostDeviceKeyReset()");
+  const registerAt = devicesSection.indexOf("cp.registerDevice()");
+  report(
+    "both halves of a re-key are present to be ordered",
+    resetAt >= 0 && registerAt >= 0,
+    `reset at ${resetAt}, register at ${registerAt}`,
+  );
+  check("and registers the device after it", resetAt >= 0 && registerAt > resetAt, true);
+  check("so the two halves are never raced", /Promise\.all/.test(devicesSection), false);
+  /*
+   * The three conditions on the control, each on its own line because each is
+   * wrong in a different way and a single regex over all three would not say
+   * which went: a tab has no keyring to reset, somebody else's row would hand a
+   * third computer a key nobody asked for, and a row that already has a key has
+   * nothing to recover from.
+   */
+  check("the control exists only in the native shell", /const rekeyable = [^;]*inNativeShell\(\)/.test(devicesSection), true);
+  check("only on this installation's own row", /const rekeyable =[^;]*row\.current/.test(devicesSection), true);
+  check("and only where the key is what is missing", /const rekeyable =[^;]*row\.hasKey === false/.test(devicesSection), true);
+  check("and the button is gated on exactly that", /rekeyable &&/.test(devicesSection), true);
+  /*
+   * ⚠ **The verdict comes off the refreshed row, never off the registration.**
+   * `POST /v1/me/devices` answers a row id whether or not the key was taken, so
+   * "it answered" is not "it took" — and `=== false` here for the list's own
+   * reason one block up: absent is *nobody said*, which on a control plane that
+   * predates the column would report a re-key as refused on every machine.
+   */
+  check("and the verdict is read off the refreshed row", /listed\.hasKey === false/.test(devicesSection), true);
+}
+
+/* ------------------------------------------------------------------ *
  * Where the device id is kept in the shell, which is not the keyring
  * ------------------------------------------------------------------ */
 
@@ -257,22 +458,154 @@ const read = (rel: string): string => readFileSync(new URL(rel, SRC), "utf8");
    * only on the machines nobody develops on.
    */
   const NATIVE = new URL("../../native/src-tauri/src/", import.meta.url);
-  const rust = (rel: string): string => readFileSync(new URL(rel, NATIVE), "utf8");
+  /*
+   * ⚠ **Comments stripped, `cp.ts`'s reads one block up for the same reason.**
+   * Every assertion below searches for a rule these files also state in prose —
+   * the keyring's two secrets, the fallback writer, the refusal to enumerate — so
+   * a raw file satisfies the positive half whichever way round the *code* is, and
+   * the cheapest route back to green would be deleting the explanation.
+   *
+   * Measured before the change and after, because a strip is only free if nothing
+   * moves: all six answers in this block, and the secrets census, are identical
+   * either way today. What it closes is the direction that goes quiet rather than
+   * red — and it is load-bearing for the command sweep below, where the raw file
+   * carries **20** occurrences of the attribute against 17 real ones, three of
+   * them quoted by `commands.rs`'s own header, and where the first "body" the
+   * sweep found began inside that header's `//!` at line 21 and ran 3760
+   * characters to the first column-0 `}`.
+   *
+   * ⚠ **`stripComments` is a TypeScript stripper and these are Rust**, which is
+   * safe for the reason that makes it look unsafe: `//!` and `///` both begin
+   * `//`, so both go, and a Rust doc comment sits *above* the attribute it
+   * documents, so removing one leaves a blank line and cannot merge two bodies.
+   * The one hazard is a `//` inside a string literal, and the measurement is that
+   * `commands.rs` holds none; the other three carry `https://` inside test
+   * strings and every answer above is unchanged by it. Should a future edit put
+   * one where it matters, the census below goes **red** rather than quiet.
+   */
+  const rust = (rel: string): string => stripComments(readFileSync(new URL(rel, NATIVE), "utf8"));
   const credentialRs = rust("credential.rs");
   const configRs = rust("config.rs");
 
-  check("the device is kept in the configuration file", /fn (read|write|erase)_device\b/.test(configRs), true);
-  check("and the keyring does not know about one", /fn \w*device\w*\s*\(/i.test(credentialRs), false);
+  check("the device id is kept in the configuration file", /fn (read|write|erase)_device\b/.test(configRs), true);
+
   /*
-   * The secret set stays at one member, which is the property `credential.rs`
-   * states about itself — *"a named set with a single member … so adding a second
-   * is a visible edit in one place"* — and the seam it reserves is for a device
-   * **key**, which cannot use a `String` interface at all.
+   * ⚠ **The id and the key go to different places, and this pair is the assertion
+   * that they have not been folded together.**
+   *
+   * An id is an identifier the server handed back; a key is a secret. The id must
+   * survive a store that discards writes, or this app registers a new device every
+   * launch and burns the account's limit — which is why it is in the file. The key
+   * wants the keyring, and falls back to the same file **only** where the keyring
+   * will not keep it, because the alternative for that machine is no remote access
+   * at all.
+   *
+   * Two spellings, deliberately: `read_device` and `read_device_key` differ by a
+   * suffix, so an anchored pattern is the only way to tell them apart and a lazy
+   * one would call the feature done while it was half built.
+   */
+  check("and the device key is kept in the keyring", /fn read_device_key\b/.test(credentialRs), true);
+  check(
+    "with a fallback for a store that keeps nothing, in the file beside the id",
+    /fn read_device_key_fallback\b/.test(configRs),
+    true,
+  );
+
+  /*
+   * The secret set grows by a **visible edit in one place**, which is the property
+   * `credential.rs` states about itself and the whole reason it is a named set
+   * rather than a string at each call site. This is that edit, so the expected
+   * value moves with it rather than the assertion being deleted.
    */
   const secrets = [...credentialRs.matchAll(/^pub const (\w+): &str = /gm)].map((m) => m[1] ?? "");
-  check("the keyring still holds exactly one kind of secret", secrets, ["CREDENTIAL"]);
-  // And it still has no way to enumerate, which is the other half of that
-  // position: listing is what a key rotation wants, and shipping the verb is
-  // shipping the feature.
+  check("the keyring holds exactly two kinds of secret", secrets, ["CREDENTIAL", "DEVICE_KEY"]);
+  // And it still has no way to enumerate, which is the half of that position
+  // nothing here reverses: listing is what a key rotation wants, and shipping the
+  // verb is shipping the feature.
   check("and still cannot be enumerated", /fn list\b/.test(credentialRs), false);
+
+  /*
+   * ⚠ **The one property the whole device binding rests on, and no type can hold
+   * it: no command hands the private key to the page.**
+   *
+   * The shell answers with a public key and with the *output* of a
+   * Diffie-Hellman, never with the key — that is what makes a capability's binding
+   * worth something, because the page is the one place somebody else's JavaScript
+   * could run. Read off the source, since both a key and a shared secret are
+   * `String`s crossing one bridge and a swap between them would compile, run, and
+   * be wrong only in a way nothing observable would show.
+   */
+  const commandsRs = rust("commands.rs");
+  const deviceRs = rust("device.rs");
+  /*
+   * ⚠ **Both spellings of the attribute, because this sweep had gone silent over
+   * exactly the commands it exists to watch.** `#[tauri::command]` takes
+   * arguments, and the literal pattern matched only the bare form. Measured on
+   * `commands.rs`: **7 bodies of 17 commands**, and the ten it dropped are the
+   * `(async)` ones — `host_device_dh`, `host_device_key_reset`, `host_device_set`
+   * and `host_device_clear`, which is every command that touches a device key,
+   * among them. So the assertion below was being evaluated over a set of bodies
+   * none of which was ever going to mention the key, and reading as green for it.
+   *
+   * ⚠ **A floor cannot notice that, which is why the census replaces it.** A
+   * skipped body does not *lower* a count, it fails to raise one — so
+   * `commandBodies.length > 5` sat green over seven real bodies and would sit
+   * green over six. Differencing the bodies found against the attributes
+   * *present* is the shape that can fail instead: any attribute spelling this
+   * regex cannot turn into a body is a mismatch rather than an absence. It also
+   * catches the strip damaging the file, since a swallowed closing brace merges
+   * two bodies and lowers one side of that difference.
+   *
+   * The floor moves onto the attribute count for the same reason. `commandAttrs`
+   * counts the attribute *name* and nothing after it, which no argument list can
+   * shrink; the only edit that takes it to zero is the attribute being renamed,
+   * and that has to be red here rather than a census passing on `0 === 0`.
+   */
+  const commandAttrs = [...commandsRs.matchAll(/#\[tauri::command/g)].length;
+  const commandBodies = [...commandsRs.matchAll(/#\[tauri::command(?:\([^)]*\))?\][\s\S]*?\n\}/g)].map((m) => m[0]);
+  const swept = commandBodies.map((body) => /\bfn (\w+)/.exec(body)?.[1] ?? "");
+  report("the commands were found to read at all", commandAttrs > 5, `${String(commandAttrs)} declared`);
+  check("⭐ and every one of them was read as a body", commandBodies.length, commandAttrs);
+  /*
+   * One `fn` per body, which is the third leg: a merged or truncated body is the
+   * one way the strip above could damage this file, and it shows up here as an
+   * unnamed entry rather than as a number nobody would question. Measured today,
+   * all 17 hold exactly one function and exactly one attribute.
+   */
+  check("each of which is one named function", swept.filter((name) => name === ""), []);
+  /*
+   * And the named half, `DeviceRecord`'s census one block up for its reason: the
+   * census is what makes an eighteenth command fail, while naming the four this
+   * assertion exists for is what makes *this* failure legible rather than a diff
+   * of two numbers. A hand-written list is the shape this repository has been
+   * bitten by, and the direction is why this one is safe — a required-*member*
+   * list goes red the moment a member is skipped, where a hand-written *count*
+   * cannot go red at all.
+   */
+  check(
+    "including every command that handles a device key",
+    ["host_device_clear", "host_device_dh", "host_device_key_reset", "host_device_set"].filter(
+      (one) => !swept.includes(one),
+    ),
+    [],
+  );
+  /*
+   * Reported as function names rather than as whole bodies: the widened sweep
+   * carries 2.9 KB of Rust and a failure here has to be one line somebody can
+   * read. The predicate is unchanged.
+   */
+  check(
+    "no command returns what the keyring holds for a device",
+    commandBodies.filter((body) => /read_device_key\b/.test(body)).map((body) => /\bfn (\w+)/.exec(body)?.[1] ?? ""),
+    [],
+  );
+  check(
+    "and the module that does read it returns a shared secret instead",
+    /fn diffie_hellman[\s\S]*?shared\.as_bytes\(\)/.test(deviceRs),
+    true,
+  );
+  // The Noise specification's own refusal, and the reason it is here rather than
+  // assumed: a peer offering a low-order point forces an all-zero shared secret
+  // that both ends would agree on with neither having proved anything.
+  check("and refuses a peer key that contributes nothing", /was_contributory\(\)/.test(deviceRs), true);
 }

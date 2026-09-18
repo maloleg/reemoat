@@ -111,6 +111,18 @@ jobs:
       - name: typecheck
         run: pnpm typecheck
 
+      # The handshake against the published cross-implementation vectors. It is
+      # in `pnpm check` and was in no workflow for a release — the one driver in
+      # that chain with no step here — so a Noise implementation that had stopped
+      # interoperating with every other one deployed with every check green. The
+      # failures it is the only guard against are silent by construction: a nonce
+      # written big-endian, an HKDF borrowed from RFC 5869, a protocol name hashed
+      # where it should have been padded. Each is a handshake that still talks to
+      # itself, which is exactly what a self-test cannot see.
+      - name: protocolcheck
+        if: '!cancelled()'
+        run: pnpm protocolcheck
+
       - name: authcheck
         if: '!cancelled()'
         run: pnpm authcheck

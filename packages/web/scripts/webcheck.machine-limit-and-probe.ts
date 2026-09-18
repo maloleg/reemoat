@@ -1177,7 +1177,7 @@ process.stdout.write("\nthe machine limit\n");
 process.stdout.write("\na re-probe is not the host going away, and asking is not failing\n");
 {
   const { daemonRead, daemonReadable } = await import("../src/machine.js");
-  const { reachText } = await import("../src/ui/bits.js");
+  const { reachText, OFFLINE_TEXT } = await import("../src/ui/bits.js");
   const mach = stripComments(readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8"));
 
   // All four, because the interesting one is `probing` and a predicate over a
@@ -1234,19 +1234,30 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
    * all seven `OfflineReason` values rather than over the one arm that broke, since
    * a table entry emptied later fails exactly the same way and by hand.
    */
-  const REASONS = [
-    null,
-    "no_route",
-    "no_token",
-    "not_enrolled",
-    "cp_unreachable",
-    "over_limit",
-    "owner_disabled",
-  ] as const;
+  /*
+   * ⚠ **Derived from the table, never re-typed beside it.**
+   *
+   * This was a hand-written list of seven, asserted against the literal `28` — and
+   * `28` is four reaches times that same hand-written seven, so both halves moved
+   * together and neither could notice a reason the table had grown. `no_machine_key`
+   * was added to `OFFLINE_TEXT` and this sweep went on covering the other seven,
+   * green, which is the shape a count floor cannot see: a member left out does not
+   * lower the number, it fails to raise it.
+   *
+   * `OFFLINE_TEXT` is typed `Record<NonNullable<OfflineReason>, string>`, so the
+   * compiler already forces the table total over the union; taking the keys from it
+   * makes this sweep total too, by the same fact rather than by a second promise.
+   */
+  const REASONS = [null, ...(Object.keys(OFFLINE_TEXT) as (keyof typeof OFFLINE_TEXT)[])];
   const phrases = (["unknown", "probing", "online", "offline"] as const).flatMap((reach) =>
     REASONS.map((reason) => reachText(reach, reason)),
   );
-  check("the sweep found every reach and every reason", phrases.length, 28);
+  check("the sweep found every reach and every reason", phrases.length, 4 * (Object.keys(OFFLINE_TEXT).length + 1));
+  report(
+    "and the table it swept is the shipped one",
+    Object.keys(OFFLINE_TEXT).length > 0,
+    `${String(Object.keys(OFFLINE_TEXT).length)} reasons`,
+  );
   check("and none of them is punctuation standing in for a phrase", phrases.filter((one) => !/[a-z]/.test(one)), []);
   check(
     "the four reaches read as the four things they are",

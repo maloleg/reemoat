@@ -3,7 +3,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { signInError, signInReady } from "../account";
 import { gateNotice, showsGateLink } from "../gate";
 import { controlPlaneOrigin, inNativeShell, nativeBoot } from "../native";
-import { store } from "../store";
+import { signInAuth } from "../signInAuth";
 import type { InstanceConfig } from "../instance";
 import { Button, FIELD, Icon, LINK, SETTINGS_HEADING } from "./bits";
 
@@ -82,7 +82,7 @@ export function SignIn({
     if (busy || !signInReady(name, password)) return;
     setBusy(true);
     setError(null);
-    void store
+    void signInAuth()
       .login(name.trim(), password)
       .catch((cause: unknown) => setError(signInError(cause)))
       .finally(() => setBusy(false));
@@ -124,7 +124,7 @@ export function SignIn({
         {inNativeShell() && (
           <button
             type="button"
-            onClick={() => store.pickServer()}
+            onClick={() => signInAuth().pickServer()}
             /* ⚠ **Not while a sign-in is in flight.** `App.tsx` tests
                `pickingServer` above `phase`, so a login that succeeds behind this
                screen would leave somebody on the server form with a live session
@@ -245,14 +245,13 @@ export function SignIn({
           `index.html`, and the app redraws this screen with a changed URL. A
           relative href is a silent no-op under the shell.
 
-          **`target="_blank"`, and this is the one that is easy to lose.** The app
-          bundle is also what runs inside Telegram, where `<authority>/register` is
-          the *same origin* — so a plain anchor is a real navigation that leaves
-          the mini app's document and destroys the launch fragment `telegram.ts`
-          latches against, landing on a gate bundle that has no Telegram wiring at
-          all. `_blank` answers all three surfaces at once: the shell intercepts
-          the click and never reads it, Telegram opens the real browser and stays
-          put, and a desktop browser keeps whatever was typed on screen.
+          **`target="_blank"`, and this is the one that is easy to lose.** In a
+          browser `<authority>/register` is the *same origin* as the page this
+          screen is drawn on — so a plain anchor is a real navigation, and what it
+          unloads is this document, taking whatever was already typed into the two
+          fields with it. `_blank` answers both surfaces at once: the shell
+          intercepts the click in the capture phase and never reads the attribute,
+          and a browser keeps the form on screen behind the new tab.
 
           **`rel="noreferrer"`**, the house idiom beside it.
         */}

@@ -127,6 +127,15 @@ const USAGE = `cpctl — drive the Reemoat control plane
                                             machine that is enrolled and has an owner or grantees:
                                             redeeming replaces their daemon rather than reading it,
                                             so its owner mints their own with 'cpctl enroll' 
+  admin clearkey <machineId>                forget the encryption key pinned for a machine, so its
+                                            next dial pins the one it announces. The way out of a
+                                            daemon that dials for ever and never connects because
+                                            it announces a key this service pinned a different one
+                                            for — a restored backup, a wiped ~/.reemoat. On a daemon
+                                            new enough to send its key, re-enrolling does this by
+                                            itself; this is for the ones already out there.
+                                            ⚠ Nothing reaches that machine between this and its
+                                            next dial: there is no unencrypted mode
   admin revoke <machineId>                  revoke a machine
   admin relay                               tunnels connected, and how much each carried
   admin fleet                               what every machine is running, connected or not —
@@ -1607,6 +1616,47 @@ async function admin(args: string[]): Promise<void> {
         out("Start the daemon on that machine with:");
         out(enrollmentLines(body.controlPlaneUrl ?? "", body.code));
         out(`# single-use, expires ${new Date(body.expiresAt).toISOString()}`);
+      });
+      return;
+    }
+    /*
+     * The one repair in this file, and it is a repair rather than a policy.
+     *
+     * Its own verb rather than a flag on `setmachine`, which renames and is
+     * documented as touching nothing else: this changes what an app is told to
+     * expect from a machine, and a rename that could do that by accident is a
+     * flag away from somebody losing a fleet's reachability with a typo.
+     */
+    case "clearkey": {
+      const machineId = rest[0];
+      if (!machineId) fail("usage: cpctl admin clearkey <machineId>");
+      const body = await api<{ machineId: string; cleared: boolean; previousKey: string | null }>(
+        `/v1/admin/machines/${machineId}/machine-key`,
+        { method: "DELETE" },
+      );
+      show(body, () => {
+        /*
+         * "Nothing was pinned" is a different sentence rather than a failure, for
+         * the route's own reason: the operator asked for this machine to have no
+         * pin and it has none. Saying so stops them going looking for a second
+         * lever that does not exist.
+         */
+        if (!body.cleared) {
+          out(`${body.machineId} had no encryption key pinned — nothing to clear.`);
+        } else {
+          out(`cleared the encryption key pinned for ${body.machineId}.`);
+          // The only time this is ever printed anywhere. Nothing else in this
+          // service reports a pin, so an operator who wants a record of what was
+          // there has this line and no other chance at it.
+          out(`  was ${body.previousKey ?? ""}`);
+        }
+        out("Its next dial pins whatever it announces, so start or restart that daemon now.");
+        // Said even when nothing was cleared: an operator who ran this is in the
+        // middle of a machine that will not connect, and the window is the part
+        // that surprises people.
+        out("Until that dial nothing can reach it — a token minted now carries no key,");
+        out("and there is no unencrypted mode to fall back to. Sessions already open are");
+        out("unaffected: the key is read when a token is minted and never again.");
       });
       return;
     }

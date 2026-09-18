@@ -12,12 +12,14 @@ import {
   signupScreen,
   type GateScreen,
 } from "../../gate";
+import type { InstanceConfig } from "../../instance";
 import { LEGAL_DOCS, legalPath, legalTitle, legalPublishable } from "../../legal";
 import { navigate } from "../../router";
-import { store, type AppState } from "../../store";
+import { store, type GateState } from "../../gateStore";
 import { Button, FIELD, LINK, SETTINGS_HEADING, Spinner } from "../bits";
 import { SignIn } from "../SignIn";
-import { BackToSignIn, GateCard } from "./GateCard";
+import { GateCard, HANDOFF_LABEL, HANDOFF_PATH, ToHandoff } from "./GateCard";
+import { Handoff } from "./Handoff";
 
 /**
  * The five screens somebody reaches before there is a credential.
@@ -148,7 +150,7 @@ function PasteLink({ onToken }: { onToken: (token: string) => void }): ReactNode
   );
 }
 
-export function Gate({ screen, state }: { screen: GateScreen; state: AppState }): ReactNode {
+export function Gate({ screen, state }: { screen: GateScreen; state: GateState }): ReactNode {
   /*
    * Read once, from the fragment, and never from the path. `readGateToken`
    * refuses anything that is not token-shaped, so a link truncated by a chat app
@@ -172,7 +174,7 @@ export function Gate({ screen, state }: { screen: GateScreen; state: AppState })
       <GateCard
         title="This link is incomplete"
         lead="Some mail apps cut the end off a link. Paste the whole one from your email, or ask for a new one."
-        footer={<BackToSignIn />}
+        footer={<ToHandoff />}
       >
         {/*
          * ⚠ **The remedy for a link that arrived without its fragment**, which is
@@ -255,8 +257,16 @@ export function Gate({ screen, state }: { screen: GateScreen; state: AppState })
   if (!gateOutranksSession(screen) && state.phase === "ready" && state.me !== null) {
     return (
       <GateCard title={`You are signed in as ${state.me.name}.`}>
-        <Button tone="plain" className="mt-4 w-full" onClick={() => navigate("/", true)}>
-          Go to your machines
+        {/*
+         * ⚠ **The handoff, not `/`, and "Go to your machines" was never true
+         * here.** A session on this origin buys an account and nothing else:
+         * there is no machine list in this bundle to go to, and the control
+         * plane answers `404` at `/` on purpose because that address belongs to
+         * the app — which a browser could load and still reach no machine, for
+         * want of a device key. One destination, one label; `HANDOFF_LABEL`.
+         */}
+        <Button tone="plain" className="mt-4 w-full" onClick={() => navigate(HANDOFF_PATH, true)}>
+          {HANDOFF_LABEL}
         </Button>
         <Button tone="ghost" className="mt-2 w-full" onClick={() => void store.signOut()}>
           Sign out and use another account
@@ -265,17 +275,24 @@ export function Gate({ screen, state }: { screen: GateScreen; state: AppState })
     );
   }
 
+  /*
+   * The configuration goes to the three screens that **finish** rather than to
+   * all five. Each of those ends on the handoff card, which reads `appDownload`
+   * off it to decide whether it can offer a build at all — and `/register` and
+   * `/forgot` end on a card of their own, so handing them a config they never
+   * read would be a parameter nothing uses.
+   */
   switch (screen) {
     case "register":
       return <Register state={state} />;
     case "forgot":
       return <Forgot />;
     case "reset":
-      return <ResetPassword token={token ?? ""} />;
+      return <ResetPassword token={token ?? ""} config={state.config} />;
     case "confirm":
-      return <Confirm token={token ?? ""} />;
+      return <Confirm token={token ?? ""} config={state.config} />;
     case "verify":
-      return <VerifyEmail token={token ?? ""} />;
+      return <VerifyEmail token={token ?? ""} config={state.config} />;
   }
 }
 
@@ -283,7 +300,7 @@ export function Gate({ screen, state }: { screen: GateScreen; state: AppState })
  * Sign up
  * ------------------------------------------------------------------ */
 
-function Register({ state }: { state: AppState }): ReactNode {
+function Register({ state }: { state: GateState }): ReactNode {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -295,10 +312,10 @@ function Register({ state }: { state: AppState }): ReactNode {
   /*
    * **How this screen tells "the answer is coming" from "there is no answer".**
    *
-   * The store cannot: `loadConfig`'s catch is bare and load-bearing — a control
-   * plane rolled back past `/v1/instance` answers 404 and that is not an outage
-   * to draw — so `config` is `null` for both, for ever, and a signed-out tab
-   * never asks again. This screen therefore does its own asking and latches when
+   * The store cannot: `refreshConfig`'s catch is bare and load-bearing — a
+   * control plane rolled back past `/v1/instance` answers 404 and that is not an
+   * outage to draw — so `config` is `null` for both, for ever, and a signed-out
+   * tab never asks again. This screen therefore does its own asking and latches when
    * an attempt *finishes*, whatever it produced. It is the shape `Devices` uses
    * one file over, with the catch already spent inside the store: a settled read
    * that left the config `null` is a real answer, and this is where it stops
@@ -312,8 +329,10 @@ function Register({ state }: { state: AppState }): ReactNode {
 
   useEffect(() => {
     // Nothing to ask once it is known — and this is the guard that keeps a
-    // second `GET /v1/instance` off the ordinary visit, where `bootstrap`
-    // already fetched it before anybody reached this screen.
+    // second `GET /v1/instance` off the ordinary visit, where `gate-main.tsx`'s
+    // one-shot read landed before anybody reached this screen. It named
+    // `bootstrap` when this file read the app's store, which never ran on this
+    // surface and is not in this bundle at all now.
     if (screen !== "waiting") return;
     let live = true;
     // `refreshConfig` swallows the failure, by design, so this cannot be a
@@ -338,7 +357,7 @@ function Register({ state }: { state: AppState }): ReactNode {
    */
   if (screen === "waiting") {
     return (
-      <GateCard title="Create an account" footer={<BackToSignIn />}>
+      <GateCard title="Create an account" footer={<ToHandoff />}>
         <div className="mt-6 flex justify-center">
           <Spinner />
         </div>
@@ -361,7 +380,7 @@ function Register({ state }: { state: AppState }): ReactNode {
       <GateCard
         title="Cannot tell whether sign-up is open"
         lead="This control plane did not say what it allows, so this form cannot know what to ask for. It may be down, or it may be older than this screen."
-        footer={<BackToSignIn />}
+        footer={<ToHandoff />}
       >
         <Button
           tone="primary"
@@ -382,7 +401,7 @@ function Register({ state }: { state: AppState }): ReactNode {
       <GateCard
         title="Registration is closed"
         lead="Ask whoever runs this control plane for an account."
-        footer={<BackToSignIn />}
+        footer={<ToHandoff />}
       >
         <></>
       </GateCard>
@@ -405,7 +424,7 @@ function Register({ state }: { state: AppState }): ReactNode {
       <GateCard
         title="Check your mail"
         lead={`We sent a confirmation link to ${sentTo}. Open it to finish signing up.`}
-        footer={<BackToSignIn />}
+        footer={<ToHandoff />}
       >
         {/*
           The spam line is not filler. This service sends from a domain with no
@@ -470,10 +489,20 @@ function Register({ state }: { state: AppState }): ReactNode {
           setSentTo(email.trim());
           return;
         }
-        // No mail on this instance, so there is nothing to confirm and the
-        // server has already signed them in.
+        /*
+         * No mail on this instance, so there is nothing to confirm and the
+         * server has already signed them in.
+         *
+         * **To the handoff rather than to `/`.** The address is the one thing a
+         * navigation leaves behind, and `/` is the address this control plane
+         * refuses — so the card looked right and a reload showed the JSON
+         * envelope. It is also the one terminal state here that cannot say
+         * "account created" on the way: `adoptSession` patches the store, so the
+         * very next render of `Gate` takes the signed-in branch above and
+         * unmounts this form before any state it set could be drawn.
+         */
         await store.adoptSession(answer.session);
-        navigate("/", true);
+        navigate(HANDOFF_PATH, true);
       })
       .catch((cause: unknown) => setError(registerError(cause)))
       .finally(() => setBusy(false));
@@ -501,7 +530,7 @@ function Register({ state }: { state: AppState }): ReactNode {
    */
   if (state.config?.legal === true && !legalPublishable()) {
     return (
-      <GateCard title="Sign-up is unavailable" footer={<BackToSignIn />}>
+      <GateCard title="Sign-up is unavailable" footer={<ToHandoff />}>
         {/* The documents are not named here, and that is `legalTitle`'s rule rather
             than brevity: every sentence that names one takes the words from there,
             so a fourth document appears by existing rather than by somebody
@@ -521,7 +550,7 @@ function Register({ state }: { state: AppState }): ReactNode {
   }
 
   return (
-    <GateCard title="Create an account" footer={<BackToSignIn />}>
+    <GateCard title="Create an account" footer={<ToHandoff />}>
       <form onSubmit={submit}>
         <FieldLabel htmlFor="reg-name">Username</FieldLabel>
         <input
@@ -716,7 +745,7 @@ function Forgot(): ReactNode {
       <GateCard
         title="Check your mail"
         lead="If that address has an account here, a reset link is on its way. It works once and expires in an hour."
-        footer={<BackToSignIn />}
+        footer={<ToHandoff />}
       >
         <p className="mt-3 text-sm text-muted">If it does not arrive, check your spam folder.</p>
       </GateCard>
@@ -739,7 +768,7 @@ function Forgot(): ReactNode {
     <GateCard
       title="Reset your password"
       lead="We send a link to the address on your account."
-      footer={<BackToSignIn />}
+      footer={<ToHandoff />}
     >
       <form onSubmit={submit}>
         <label htmlFor="forgot-email" className={label}>
@@ -771,7 +800,7 @@ function Forgot(): ReactNode {
  * Spend a reset or invitation link
  * ------------------------------------------------------------------ */
 
-function ResetPassword({ token }: { token: string }): ReactNode {
+function ResetPassword({ token, config }: { token: string; config: InstanceConfig | null }): ReactNode {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
@@ -782,18 +811,31 @@ function ResetPassword({ token }: { token: string }): ReactNode {
   const ready = !busy && password.length > 0 && confirm.length > 0 && problem === null;
 
   if (keysLeft !== null) {
+    /*
+     * ⚠ **The flow ends *at* the handoff rather than at a card pointing to one.**
+     * This was a `GateCard` whose single button said "Go to your machines" and
+     * navigated to `/` — a screen this bundle does not contain, at an address the
+     * control plane answers `404` at. What the reader needs after setting a
+     * password is where the app is, which is this card's whole subject, so the
+     * card carries the heading of the thing that just happened instead of being a
+     * second page in front of it.
+     *
+     * The surviving keys are `children` because they are the one sentence this
+     * flow has left to say: a reset revokes every *session* and deliberately
+     * leaves API keys alone, so somebody resetting because they believe an
+     * account is compromised has to be told the other credential still works and
+     * where to retire it. That remedy names a screen in the app, which is exactly
+     * the card it now sits on.
+     */
     return (
-      <GateCard title="Password set" lead="You are signed in, and every other device was signed out.">
+      <Handoff config={config} title="Password set" lead="You are signed in, and every other device was signed out.">
         {keysLeft > 0 && (
           <p className="mt-3 text-sm text-muted">
             This account still has {keysLeft} API key{keysLeft === 1 ? "" : "s"}. They were left alone — retire them
-            under Settings → Account if you think somebody else has one.
+            under Settings → API keys in the app if you think somebody else has one.
           </p>
         )}
-        <Button tone="primary" className="mt-4 w-full" onClick={() => navigate("/", true)}>
-          Go to your machines
-        </Button>
-      </GateCard>
+      </Handoff>
     );
   }
 
@@ -816,7 +858,7 @@ function ResetPassword({ token }: { token: string }): ReactNode {
     <GateCard
       title="Choose a password"
       lead="Setting it signs you in and signs out every other device."
-      footer={<BackToSignIn />}
+      footer={<ToHandoff />}
     >
       <form onSubmit={submit}>
         {/* A password manager updating a saved entry has to know which entry. */}
@@ -858,7 +900,7 @@ function ResetPassword({ token }: { token: string }): ReactNode {
  * Finish a sign-up
  * ------------------------------------------------------------------ */
 
-function Confirm({ token }: { token: string }): ReactNode {
+function Confirm({ token, config }: { token: string; config: InstanceConfig | null }): ReactNode {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState<string | null>(null);
@@ -876,26 +918,33 @@ function Confirm({ token }: { token: string }): ReactNode {
   };
 
   /*
-   * **Confirmed, and then the sign-in form — not the app.**
+   * **Confirmed, and then the app — not a sign-in form.**
    *
    * This used to adopt a session and land on the machine list, so the link in
    * the mail *was* a credential: whoever reached that message was signed in with
    * one tap and never needed the password. A mailbox proves control of an
    * address; it does not prove you are the person who chose the password at
    * sign-up, and this is the one flow where those can be different people,
-   * because the password already exists and was chosen minutes ago.
+   * because the password already exists and was chosen minutes ago. **That half
+   * is unchanged**: nothing here adopts a session, and the name is repeated back
+   * because it is the thing they now have to type — somebody confirming a day
+   * later has genuinely forgotten which one they picked.
    *
-   * So the card states what happened and sends them to the form. The name is
-   * repeated back because it is the thing they now have to type, and somebody
-   * confirming a day later has genuinely forgotten which one they picked.
+   * ⚠ **What was wrong is where the button went.** It said "Sign in" under a lead
+   * that had just said *"Sign in as {name} to get started"*, and navigated to `/`
+   * — which this bundle has no sign-in form at and the control plane answers
+   * `404` at. Two sentences promising a form, and one card about downloading an
+   * app behind them. The sign-in this flow is talking about happens **in the
+   * app**, so the card that says where the app is *is* the next step, and it
+   * carries this flow's own heading rather than the generic one.
    */
   if (confirmed !== null) {
     return (
-      <GateCard title="Account confirmed" lead={`Sign in as ${confirmed} to get started.`}>
-        <Button tone="primary" className="mt-4 w-full" onClick={() => navigate("/", true)}>
-          Sign in
-        </Button>
-      </GateCard>
+      <Handoff
+        config={config}
+        title="Account confirmed"
+        lead={`The account ${confirmed} is ready. You sign in with the password you chose when you signed up.`}
+      />
     );
   }
 
@@ -916,7 +965,7 @@ function Confirm({ token }: { token: string }): ReactNode {
     <GateCard
       title="Confirm your account"
       lead="This finishes your sign-up. You then sign in with the password you chose."
-      footer={<BackToSignIn />}
+      footer={<ToHandoff />}
     >
       {error !== null && <p className="mt-3 text-sm text-danger">{error}</p>}
       <Button tone="primary" className="mt-4 w-full" disabled={busy} onClick={finish}>
@@ -930,7 +979,7 @@ function Confirm({ token }: { token: string }): ReactNode {
  * Confirm an address on an account that already exists
  * ------------------------------------------------------------------ */
 
-function VerifyEmail({ token }: { token: string }): ReactNode {
+function VerifyEmail({ token, config }: { token: string; config: InstanceConfig | null }): ReactNode {
   const [state, setState] = useState<"working" | "done" | "failed">("working");
   const [error, setError] = useState<string | null>(null);
   const [address, setAddress] = useState("");
@@ -971,7 +1020,7 @@ function VerifyEmail({ token }: { token: string }): ReactNode {
      * somebody who, by the branch above, is certainly signed in.
      */
     return (
-      <GateCard title="Confirming your address" footer={<BackToSignIn>Go to your machines</BackToSignIn>}>
+      <GateCard title="Confirming your address" footer={<ToHandoff />}>
         <div className="mt-6 flex justify-center">
           <Spinner />
         </div>
@@ -981,7 +1030,7 @@ function VerifyEmail({ token }: { token: string }): ReactNode {
 
   if (state === "failed") {
     return (
-      <GateCard title="That link did not work" footer={<BackToSignIn />}>
+      <GateCard title="That link did not work" footer={<ToHandoff />}>
         <p className="mt-3 text-sm text-danger">{error}</p>
         <p className="mt-3 text-xs text-muted">
           If you are signed in on another device, ask for a new link under Settings → Account.
@@ -990,11 +1039,12 @@ function VerifyEmail({ token }: { token: string }): ReactNode {
     );
   }
 
-  return (
-    <GateCard title="Address confirmed" lead={`${address} can now reset this account's password.`}>
-      <Button tone="primary" className="mt-4 w-full" onClick={() => navigate("/", true)}>
-        Go to your machines
-      </Button>
-    </GateCard>
-  );
+  /*
+   * ⚠ **"Go to your machines" named the one thing this surface has not got.**
+   * The button navigated to `/`, which is the app's address and is served by
+   * nothing here — and the reader of this card is signed in on the *control
+   * plane*, which is an account rather than a fleet. So the flow ends on the
+   * handoff, under the heading of what just happened.
+   */
+  return <Handoff config={config} title="Address confirmed" lead={`${address} can now reset this account's password.`} />;
 }

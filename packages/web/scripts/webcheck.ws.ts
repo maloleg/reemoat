@@ -15,6 +15,7 @@ import { SessionStream, type Stream } from "./webcheck.modules.js";
 // Type-only, so it is erased rather than evaluating `machine.ts` ahead of the
 // `window` stub — the rule `webcheck.modules.ts` states. Imported rather than
 // re-declared: a hand-written copy of this shape is what went stale below.
+import type { StreamSocket } from "../src/e2ee.js";
 import type { Route } from "../src/machine.js";
 
 /* ------------------------------------------------------------------ *
@@ -154,6 +155,22 @@ export const machine = {
    */
   streamUrl: (session: string, since: number, _token: string, _route: Route): string =>
     `ws://127.0.0.1:${port}/sessions/${session}/stream?since=${since}&token=t_ok`,
+  /*
+   * What `SessionStream.open` actually calls now, and it is a different question
+   * from {@link streamUrl}.
+   *
+   * ⚠ **A real `WebSocket`, deliberately, on a `kind: "relay"` route.** These
+   * sections are about rotation, the cursor and the close-code table, and the
+   * whole claim `StreamSocket` rests on is that those are identical on both
+   * transports — so a fixture that reached for the encrypted channel here would
+   * be testing the channel instead, and would need a relay, a daemon and a device
+   * key to do it. What it must keep is the *signature*: four arguments and a
+   * `StreamSocket` out, so a class that starts passing a fifth fails here rather
+   * than silently on a phone. `webcheck.e2ee.ts` is where the channel's own half
+   * of this is driven.
+   */
+  openStream: (session: string, since: number, token: string, route: Route): StreamSocket =>
+    new WebSocket(machine.streamUrl(session, since, token, route)),
 };
 
 /** Everything the sink was told, in order, so gaps and duplicates are both visible. */

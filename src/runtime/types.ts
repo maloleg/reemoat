@@ -21,7 +21,15 @@ import type { GitExec } from "../git.js";
  * and it is the seam a *confining* runtime would fill if one is ever wanted
  * again. `clientFileIo`, `login`, `git` and `launch` are exactly the four places
  * a sandbox has to answer differently, which is why they are still members and
- * not inlined. Reserved, in the same voice as the relay's `reemoat-enc: none`.
+ * not inlined.
+ *
+ * ⚠ **The comparison that used to end this paragraph is spent.** It read
+ * *"reserved, in the same voice as the relay's `reemoat-enc: none`"*, and that
+ * seam has been filled: the relay carries one encryption mode now and `none` is
+ * not a value anything can ask for. What the sentence meant is still exactly what
+ * this interface is, and it does not need the other half to say so — an interface
+ * with one implementation, kept because every place a second one would answer
+ * differently already carries a comment saying which and why.
  *
  * What is **not** kept is a `kind` discriminant. It had no reader anywhere, and
  * an unread discriminant on the one interface that survived a runtime deletion is

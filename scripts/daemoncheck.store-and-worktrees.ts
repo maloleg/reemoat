@@ -23,9 +23,11 @@ import { SessionRegistry } from "../src/registry.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { createApp } from "../src/server.js";
 import { DEFAULT_MIN_SESSIONS, SCHEMA_VERSION, openStores } from "../src/store/sqlite.js";
+import { ensureMachineKey } from "../src/machinekey.js";
+import { jwkThumbprint, x25519Jwk } from "../src/token.js";
 import { createWorkspace, inspectRepo, removeWorkspace, WorktreeError } from "../src/worktree.js";
 import { tmp } from "./tmp.js";
-import { check } from "./daemoncheck.env.js";
+import { check, report } from "./daemoncheck.env.js";
 import {
   sandbox,
   users,
@@ -1030,6 +1032,268 @@ process.stdout.write("\nthe database, across a restart\n");
     { kind: "harness", ref: "codex", hidden: true },
   ]);
   third.close();
+}
+
+/* ------------------------------------------------------------------ *
+ * The machine's own X25519 static
+ * ------------------------------------------------------------------ */
+
+/**
+ * The key an app authenticates this machine by, which had no driver at all.
+ *
+ * ⚠ **Nothing in `scripts/` or `packages/web/scripts/` reached
+ * `SqliteMachineKeyStore` or `ensureMachineKey` before this section, and the cost
+ * of that gap is asymmetric with every other store in this file.** A session row
+ * that comes back wrong is one conversation; a credential that comes back wrong is
+ * one re-paste. This one is generated **once in the life of a machine** and the
+ * control plane pins the first key it is told about — `pinMachineKey` answers
+ * `mismatch` and the dial is refused, rather than adopting the new one, which is
+ * trust-on-first-use chosen on purpose. So a bug that mints a fresh key on the
+ * *second* start darkens the machine permanently, and does it on the one path
+ * nobody is watching: the daemon comes up, dials in, announces a static the
+ * Authority will not take, and every app that tries to reach it fails a handshake
+ * that has no key to send a refusal under. Re-enrollment is the only way back and
+ * nothing says that is what is needed.
+ *
+ * So the subject here is not the SQL. It is the two properties the whole E2EE
+ * design rests on — **the key survives a restart unchanged**, and **`active()`
+ * names exactly one row** — driven against a real store on a real **file**, opened
+ * twice. An in-memory store cannot tell "held in a `Map` for the life of this
+ * process" from "written to disk", and that is precisely the distinction being
+ * asserted.
+ */
+process.stdout.write("\nthe machine's own key\n");
+{
+  const keyPath = join(sandbox, "machinekey", "reemoat.db");
+
+  const first = openStores({ path: keyPath, instanceId: "i_mk_a" });
+  // Before anything generates one. A machine enrolled before this table existed
+  // starts here rather than migrating: it generates at its next start and
+  // announces at its next dial, with nobody touching the host.
+  check("a machine that has never run answers no key at all", first.machineKeys.active(), null);
+  const minted = ensureMachineKey(first.machineKeys, now);
+  check("and generating one makes it the answer", first.machineKeys.active(), minted);
+  first.close();
+
+  /*
+   * The whole property, in one comparison: a second daemon on the same file gets
+   * the same key back rather than a new one.
+   *
+   * **The private half is compared too, and that is not belt-and-braces.**
+   * `ensureMachineKey` reads back from the store after writing instead of
+   * returning the object it just built — because `save` is `DO NOTHING` on
+   * conflict, so a process that lost a race wrote nothing and would otherwise be
+   * handed a secret the database does not hold. Comparing `kth` alone would pass
+   * with that read-back deleted, since the thumbprint of a key nobody stored is
+   * still a thumbprint.
+   */
+  const second = openStores({ path: keyPath, instanceId: "i_mk_b" });
+  check("the same key comes back on the next start", ensureMachineKey(second.machineKeys, now + 60_000), minted);
+  check(
+    "and the second start wrote no second row",
+    Number(second.db.prepare("SELECT count(*) AS n FROM machine_keys").get()?.["n"]),
+    1,
+  );
+
+  /*
+   * Two TEXT columns holding raw key material, so the encoding *is* the contract:
+   * `src/e2ee.ts` decodes these into a 32-byte static and the handshake has no
+   * other length.
+   *
+   * ⚠ **The length is the assertion because the decoder is lenient.**
+   * `Buffer.from(value, "base64url")` does not throw on a character it does not
+   * recognise — it drops it and answers a short buffer — so a value mangled by the
+   * TEXT round trip decodes to *something* and only its size says so. The
+   * re-encode comparison is the other half: it is what catches a value that
+   * happens to decode to 32 bytes while not being the string that was stored.
+   */
+  for (const [half, value] of [
+    ["public", minted.publicKey],
+    ["private", minted.privateKey],
+  ] as const) {
+    const raw = Buffer.from(value, "base64url");
+    report(
+      `the ${half} half survives the TEXT round trip as 32 base64url bytes`,
+      raw.length === 32 && raw.toString("base64url") === value,
+      `${value.length} chars in the column, ${raw.length} bytes out`,
+    );
+  }
+
+  /*
+   * And that the row's name is *derived from* the key rather than stored beside
+   * it. `kth` is what the Authority pins, what the tunnel dial announces and what
+   * an operator compares by eye against `cpctl`; a row whose id does not hash to
+   * its own public half is a machine pinned under a name nothing else computes.
+   */
+  check(
+    "the row's name is the thumbprint of its own public half",
+    minted.kth,
+    jwkThumbprint(x25519Jwk(Buffer.from(minted.publicKey, "base64url"))),
+  );
+
+  /*
+   * `active()` is `WHERE retired_at IS NULL ORDER BY created_at DESC, kth ASC
+   * LIMIT 1`, and every clause of that is load-bearing for a rotation **that does
+   * not exist yet** — which is exactly why it is asserted now. The store's own
+   * docblock says the plural is there because "the only safe rotation is an
+   * overlap, and an overlap needs two rows"; an ordering nothing executes is an
+   * ordering that is right by inspection only, and inspection is what put `kth
+   * ASC` there in the first place.
+   *
+   * The overlap rows are inserted by hand, because there is no supported way to
+   * produce one: `ensureMachineKey` refuses to mint a second key while one is
+   * live, which is the property asserted three lines up.
+   */
+  const insert = second.db.prepare(
+    "INSERT INTO machine_keys (kth, public_key, private_key, created_at, retired_at) VALUES (?, ?, ?, ?, ?)",
+  );
+
+  /*
+   * ⚠ **First, the thing that made the overlap below impossible to write.**
+   * `machine_keys_one_live` is a partial unique index over `retired_at IS NULL`,
+   * created by `migrate()` rather than by `schema.sql`, and it is the ONLY
+   * mechanism by which a daemon that lost a startup race learns that it lost:
+   * `kth` is the thumbprint of the key generated one line earlier, so two racers
+   * hash to two different primary keys and the `kth` conflict absorbs nothing.
+   * Before it, both racers wrote, `active()` answered the newer by
+   * `created_at DESC`, and the machine announced a key the Authority had not
+   * pinned — refused 409 at every dial, for ever, repairable only by
+   * `cpctl admin clearkey`.
+   *
+   * This assertion is that fix's negative control and belongs above the overlap
+   * rather than after it, because the overlap has to destroy the index to exist.
+   */
+  let refusedSecondLive: string | null = null;
+  try {
+    insert.run("k_racer", "pub_racer", "sec_racer", now + 1, null);
+  } catch (cause) {
+    refusedSecondLive = cause instanceof Error ? cause.message : String(cause);
+  }
+  report(
+    "a second live key is refused by the index rather than quietly stored",
+    refusedSecondLive !== null && refusedSecondLive.includes("machine_keys_one_live"),
+    refusedSecondLive ?? "the INSERT was accepted",
+  );
+  check("and the machine's key is still the one it minted", second.machineKeys.active()?.kth, minted.kth);
+
+  /*
+   * ⚠ **The index is dropped for the rest of this section, deliberately.**
+   * Everything below asserts `active()`'s `ORDER BY created_at DESC, kth ASC` and
+   * `retire()`'s fall-through, which exist for a rotation that does not exist
+   * yet — and a rotation is an overlap, which is exactly the state the index now
+   * forbids. Two honest options: delete these assertions with the capability, or
+   * keep pinning the ordering the future rotation will depend on and pay for it
+   * by dropping the index in this one fixture. The second is chosen because "an
+   * ordering nothing executes is an ordering that is right by inspection only"
+   * is this section's own argument, and inspection is what put `kth ASC` there.
+   *
+   * Whoever builds rotation has to confront the index and decide what replaces
+   * it. That is the intended outcome and better than leaving a door open today
+   * so that an accident can walk through it.
+   */
+  second.db.exec("DROP INDEX machine_keys_one_live");
+  insert.run("k_newer", "pub_newer", "sec_newer", now + 1_000, null);
+  check("a newer live row is the one a handshake answers on", second.machineKeys.active()?.kth, "k_newer");
+  // Same instant, two rows. Two keys generated on one millisecond still have to
+  // rank, or "the current key" is whatever SQLite felt like returning and two
+  // reads of one database can disagree.
+  insert.run("k_aaa", "pub_aaa", "sec_aaa", now + 1_000, null);
+  check("a same-millisecond tie is broken by the name, ascending", second.machineKeys.active()?.kth, "k_aaa");
+  // A retired row is skipped rather than merely deprioritised, which is a
+  // different statement: it is the newest row in the table and must lose anyway.
+  insert.run("k_zzz", "pub_zzz", "sec_zzz", now + 9_000, now + 9_500);
+  check("a retired row is skipped however new it is", second.machineKeys.active()?.kth, "k_aaa");
+
+  /*
+   * `retire()` has no caller in `src/` at all — a rotation would be its first —
+   * so this is the only thing in the repository that executes it. What it owes is
+   * narrow and total: take one row out of the answer and leave the next live one
+   * standing, which is the whole of what an overlap is.
+   */
+  second.machineKeys.retire("k_aaa", now + 2_000);
+  check("retiring the active key falls through to the next live row", second.machineKeys.active()?.kth, "k_newer");
+  second.machineKeys.retire("k_newer", now + 2_000);
+  check("and again, down to the key this machine generated", second.machineKeys.active()?.kth, minted.kth);
+  // The `AND retired_at IS NULL` half of the UPDATE: retiring something twice
+  // must not move the moment it was retired, because that moment is the only
+  // record of when a key stopped being announced.
+  second.machineKeys.retire("k_aaa", now + 3_000);
+  check(
+    "and retiring one twice leaves the first answer standing",
+    Number(second.db.prepare("SELECT retired_at AS t FROM machine_keys WHERE kth = 'k_aaa'").get()?.["t"]),
+    now + 2_000,
+  );
+
+  /*
+   * `save` is `ON CONFLICT DO NOTHING` rather than an upsert, and the reason is in
+   * the primary key: `kth` is a hash *of the public half*, so a conflict means
+   * this exact key is already here. An upsert would let a second caller overwrite
+   * a private key that the first caller has already handed to a live session.
+   */
+  second.machineKeys.save({
+    kth: minted.kth,
+    publicKey: "not-the-stored-public-half",
+    privateKey: "not-the-stored-private-half",
+    createdAt: now + 4_000,
+  });
+  check("saving a key that is already there changes nothing", second.machineKeys.active(), minted);
+  second.close();
+}
+
+/*
+ * ⚠ **And the file every machine already enrolled is about to be opened as.**
+ *
+ * `machine_keys` was added to `schema.sql` with no `SCHEMA_VERSION` bump — which
+ * is correct, and the v6 section below carries the argument — so `migrate()` does
+ * not mention the table and the only thing that creates it is `CREATE TABLE IF NOT
+ * EXISTS` re-applied on every open. That is a real upgrade path with a real
+ * failure: were the schema not re-applied, `active()` would throw `no such table`
+ * on the first start after an update and the daemon would not come up at all,
+ * because `SqliteMachineKeyStore` prepares its statements in its constructor and
+ * every method there throws rather than swallowing.
+ *
+ * The second assertion is the one with teeth. A machine that upgrades must have
+ * **no key yet** — it generates at this start and announces at its next dial, and
+ * the Authority pins it then — so a build that somehow found a row here would be
+ * announcing a static somebody else generated.
+ */
+{
+  const upgradeDir = join(sandbox, "pre-machinekeys");
+  const upgradePath = join(upgradeDir, "reemoat.db");
+  mkdirSync(upgradeDir, { recursive: true });
+  {
+    const raw = new DatabaseSync(upgradePath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    // Stamped at the version this build is at, with the table simply absent —
+    // which is exactly the shape of a file written by the release before
+    // `machine_keys` existed, since adding it moved no version.
+    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    raw.close();
+  }
+  const tableCount = (db: DatabaseSync): unknown =>
+    db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='machine_keys'").get()?.["n"];
+  {
+    // The non-vacuity half: without it this whole block would pass against a file
+    // that already had the table, and would be asserting nothing about upgrading.
+    const raw = new DatabaseSync(upgradePath);
+    check("the fixture really is a file with no machine_keys table", tableCount(raw), 0);
+    raw.close();
+  }
+  const upgraded = openStores({ path: upgradePath, instanceId: "i_mk_upgrade" });
+  check("an upgraded file gains the table on open", tableCount(upgraded.db), 1);
+  check("and the machine has no key until it generates one", upgraded.machineKeys.active(), null);
+  check(
+    "and the version does not move for it",
+    Number(upgraded.db.prepare("PRAGMA user_version").get()?.["user_version"]),
+    SCHEMA_VERSION,
+  );
+  const afterUpgrade = ensureMachineKey(upgraded.machineKeys, now);
+  report(
+    "and a key generated on that file is one the row really holds",
+    JSON.stringify(upgraded.machineKeys.active()) === JSON.stringify(afterUpgrade),
+    `kth ${afterUpgrade.kth.slice(0, 10)}…, created_at ${afterUpgrade.createdAt}`,
+  );
+  upgraded.close();
 }
 
 /* ------------------------------------------------------------------ *

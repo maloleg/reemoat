@@ -14,6 +14,7 @@ mod commands;
 mod config;
 mod credential;
 mod daemon;
+mod device;
 mod local;
 mod proxy;
 
@@ -83,6 +84,8 @@ pub fn run() {
             commands::host_credential_clear,
             commands::host_device_set,
             commands::host_device_clear,
+            commands::host_device_dh,
+            commands::host_device_key_reset,
             commands::host_cp,
             commands::host_copy_text,
             commands::host_open_external,

@@ -52,6 +52,12 @@ RUN npm install -g --no-fund --no-audit pnpm@11.17.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/control-plane/package.json ./packages/control-plane/
 COPY packages/web/package.json ./packages/web/
+# ⚠ **`packages/protocol` is a workspace member, so its manifest belongs here even
+# though nothing in the *runtime* image imports it.** `--frozen-lockfile` verifies
+# the lockfile against every importer before installing the filtered subset, so a
+# missing manifest fails the install rather than the build — a different and much
+# more confusing error than the one a missing source directory gives.
+COPY packages/protocol/package.json ./packages/protocol/
 
 # ---------------------------------------------------------------------------
 # gate — vite, in its own stage so its toolchain never reaches the runtime image
@@ -89,6 +95,16 @@ RUN pnpm install --frozen-lockfile --filter @reemoat/web
 COPY tsconfig.json ./
 COPY packages/web/tsconfig.json packages/web/vite.gate.config.ts packages/web/gate.html ./packages/web/
 COPY packages/web/src ./packages/web/src
+# ⚠ **The gate's import closure reaches the crypto package, which is why this line
+# exists and why it is easy to miss.** `gate-main.tsx` → `store.ts` → `machine.ts`
+# → `e2ee.ts` → `@reemoat/protocol`, and the package is consumed as *source*: there
+# is no build step anywhere in this repository, so `exports` points at
+# `src/index.ts` and Vite compiles it here. Without this the gate build fails with
+# `Cannot find module`, and `webcheck`'s own closure walker cannot warn about it —
+# its resolver opens with `if (!spec.startsWith(".")) return null;`, so a bare
+# workspace specifier is invisible to it by design. `imagecheck` is what catches
+# this; nothing else can.
+COPY packages/protocol/src ./packages/protocol/src
 # `public/` is copied to the root of the build output by Vite, and `gate.html`
 # names both files in it. Its own line rather than the one above, because that
 # COPY takes a file list and this is a directory — and it is the second half of

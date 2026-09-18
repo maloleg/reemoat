@@ -67,6 +67,7 @@ import {
   safeRelPath,
 } from "./changes.js";
 import {
+  clampBlob,
   estimateBytes,
   keepsItsConversation,
   oldestAvailable,
@@ -143,7 +144,178 @@ const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
  */
 const ATTACH_REPLAY_MAX = 2_000;
 const BATCH_MAX_EVENTS = 200;
+/**
+ * The largest `events` frame this socket will write, **in the bytes it writes**.
+ *
+ * ⚠ **This was an estimate, and the gap between the estimate and the wire was a
+ * permanent transcript stall.** `flush` accumulated `estimateBytes`, which charges
+ * `String.length` — UTF-16 units of the *unescaped* string — while what goes out
+ * is `JSON.stringify` in UTF-8. Replaying that arithmetic over real events: four
+ * `text` events of CJK are charged 469 KiB and are **1406 KiB** on the wire, and
+ * four `agent_log` lines of ESC — which is what a coding CLI's stderr is made of,
+ * escaping to `\u001b`, six bytes per charged unit — are charged the same 469 KiB
+ * and are **2813 KiB**. Both are past `MAX_SOCKET_MESSAGE_BYTES`, so on the
+ * encrypted path the far end's `MessageAssembler` refused the message,
+ * `e2ee.ts` failed the whole channel, and `stream.ts` reconnected **with the
+ * cursor unchanged** onto the same batch, which split the same way and failed
+ * again: a transcript that never moves, with nothing logged, on large sessions
+ * only and never on loopback.
+ *
+ * So the number accumulated in {@link StreamConnection.flush} is
+ * `Buffer.byteLength` of the very string that is about to be sent, and each event
+ * is encoded **once** — the pieces are kept and joined rather than measured and
+ * then stringified a second time, which is the arrangement {@link controlItem}
+ * already makes for a control frame.
+ *
+ * **The first event is still taken whatever it weighs, and that is what keeps
+ * this from wedging in a different way.** A cut that could refuse every event
+ * would emit an empty batch for ever and drain nothing — the same stall with a
+ * different cause. Nothing is added once the running total is past this bound, so
+ * a batch is `max(this, one event)` rather than this plus one.
+ *
+ * **Half of `MAX_SOCKET_MESSAGE_BYTES`, and the half is the headroom that
+ * exemption spends.** `truncateEvent` clips an event toward
+ * `DEFAULT_MAX_EVENT_BYTES` — 128 KiB *charged*, so at most ~768 KiB once every
+ * unit escapes to six bytes — which fits inside the remaining half.
+ *
+ * ⚠ **That is a property of *some* of `truncateEvent`'s arms, and the hedge that
+ * used to stand here — "several of its arms deliberately keep an unshrinkable
+ * field and rely on an ingest bound instead" — described one group of three.**
+ * Re-counted 2026-09-17: **19 `case` labels over 14 return branches**, against a
+ * 19-member `SessionEvent` union, with no `default`, so the switch is exhaustive
+ * by the compiler. What the arms do partitions them three ways.
+ *
+ * *Cut to the budget here — 9 labels, 8 branches.* `text`, `prompt` (whose text
+ * budget is reduced by what its attachments already spend), `agent_log`,
+ * `file_change` (half each to `oldText` and `newText`), `tool_call`, `other`,
+ * `error`, and the `permission_request`/`permission_resolved` pair. These do
+ * converge on `maxBytes`.
+ *
+ * *Budgeted **per item** against a 64-byte floor — 4 labels, 4 branches.*
+ * `tool_call_update`'s content blocks, `plan`'s entries, `workspace`'s warnings
+ * and `agent_config`'s descriptions. What these charge scales with an item
+ * **count** rather than with `maxBytes`, so the floor is the bound and not the
+ * budget: at n entries `plan` charges `128 + Σ(content.length + 32)` however
+ * small the per-item budget goes.
+ *
+ * *Returned unchanged — 6 labels, 2 branches.* `context_cleared`,
+ * `session_started`, `status`, `turn_end`, and the
+ * `elicitation_request`/`elicitation_resolved` pair.
+ *
+ * ⚠ **The unshrinkable fields, and which of them an ingest bound actually
+ * covers.** Real, each verified: `text`'s `messageId` (`MAX_MESSAGE_ID_CHARS`,
+ * 256); `prompt`'s attachments (`MAX_PROMPT_ATTACHMENTS`, 10, plus `uploads.ts`'s
+ * name and mime caps); both tool arms' `parentToolCallId`
+ * (`MAX_PARENT_ID_CHARS`, 256) and `locations` (`MAX_TOOL_LOCATIONS`, 64, and
+ * cut here as well); the update's `images` (`MAX_IMAGES_PER_UPDATE`, 8) and its
+ * blocks' total (`MAX_TOOL_OUTPUT_BYTES`, 32 KiB, with a visible `break` at
+ * ingest); the permission pair's `options` (`MAX_PERMISSION_OPTIONS`, 24, under
+ * an 8 KiB `MAX_PERMISSION_SNAPSHOT_BYTES` refusal over `{title, options}`
+ * together); `elicitation_resolved`'s answers (`MAX_ELICITATION_ANSWER_CHARS`,
+ * 2048, clipped in `registry.ts` and refused on the route). `status` and
+ * `turn_end` need none — union literals and numbers.
+ *
+ * ⚠ **Four rely on nothing at all, and that is the correction.**
+ * `context_cleared` carries two agent-minted session ids whose real length
+ * `estimateBytes` charges, so this function is entered and has nothing to do —
+ * there is no `MAX_AGENT_SESSION_ID` anywhere in `src/`. `session_started` is
+ * sharper still: an agent-minted `sessionId`, the adapter's `agentInfo` and its
+ * `modes`, charged a **flat 192**, so the function is never entered on it at
+ * all. And `elicitation_request`'s own comment says its `message` is "clipped at
+ * ingest in `session.ts`" — `MAX_ELICITATION_MESSAGE_CHARS` was retired,
+ * `MAX_ELICITATION_FORM_BYTES` weighs the *form* and `message` is not a field of
+ * it, so that arm now names a bound that no longer exists. **And
+ * `elicitation_resolved` is the fourth**, easy to miss because it shares
+ * `truncateEvent`'s arm with `elicitation_request` (`events.ts:2085`, `return
+ * event`) while having its *own* `estimateBytes` case that charges
+ * `256 + message.length` plus every answer's key, label and value at their real
+ * lengths — so it carries strictly more than the request it answers and is
+ * shrunk by exactly as little. `plan.entries` is a fifth of a different kind:
+ * `session.ts` pushes the agent's array through uncapped, so the count that arm
+ * divides by is itself unbounded.
+ *
+ * The conclusion the old sentence reached is unchanged and only its premise was
+ * wrong: one event over the wire ceiling is still **sent** rather than dropped,
+ * because dropping it wedges the client's own cursor (see {@link encodeStored})
+ * and the transcript is what the daemon is for.
+ *
+ * ⚠ **Nothing compares this to `MAX_SOCKET_MESSAGE_BYTES`**, which lives in
+ * `packages/protocol`: `packages/web` may not import `src/`, so the app's copy is
+ * a literal, and deriving this one from the import while the app's stayed a
+ * literal would hide the pair rather than tie it. What holds this end is
+ * `daemoncheck.stream-and-events.ts`'s *"the outbound batch, cut on bytes rather
+ * than on an estimate"*, which reads `data.length` off a real `ws` client rather
+ * than re-serialising at the call site — measured 432,364 bytes widest with this
+ * cut and 3,026,371 with the estimate one restored. Driven on the **direct** path
+ * deliberately: over a channel the overflow is answered by `fail()`, which ends
+ * the stream, so exactly one frame crosses either way and no count taken at the
+ * peer could tell a refusal from a healthy socket.
+ *
+ * `log.read`'s third argument in `attach` is this number in the **store's** units
+ * — a different unit for the same idea, deliberately left alone: there it only
+ * decides how many rows one turn of a `for(;;)` that runs until the log is
+ * drained will materialise, so it bounds nothing.
+ */
 const BATCH_MAX_BYTES = 512 * 1024;
+/**
+ * The largest **control** frame this socket will write, in the bytes it writes.
+ *
+ * The same number as {@link BATCH_MAX_BYTES} and against the same ceiling, which
+ * only the *receiver* enforces: past `MAX_SOCKET_MESSAGE_BYTES` the far end's
+ * `MessageAssembler` refuses the message, `e2ee.ts` fails the whole channel, and
+ * `stream.ts` reconnects with its cursor unchanged onto the frame that just
+ * failed. On the event arm that was a transcript that stopped partway. Here it is
+ * worse: `hello` is **always the first frame of an attach** — see
+ * {@link StreamConnection.attach} — and it carries `managed.snapshot()`, so the
+ * transcript never starts at all, on whichever machine has the most going on.
+ *
+ * ⚠ **The control arm had no size test whatever**, and the ~93 KB a snapshot is
+ * quoted at elsewhere in this tree is the *background-task* bound rather than the
+ * whole record. Field by field, with the bound that actually applies to each:
+ *
+ * - `queuedPrompts` — `MAX_QUEUED_PROMPTS` (8) entries of `{id, seq, at}`, tens
+ *   of bytes each.
+ * - `backgroundTasks` — `MAX_TRACKED_ASYNC_TASKS` (32) × the 2 888 characters
+ *   `acp/asynctasks.ts`'s clips allow. That product *is* the ~93 KB, and it is
+ *   the largest **bounded** thing on the record.
+ * - `agentConfig` — `snapshotConfig` drops every description but the selected
+ *   one, clips that to 120 characters, and cuts each option's choices to
+ *   `MAX_SNAPSHOT_CHOICES` (40). Bounded in the two dimensions measured to grow.
+ * - `title` (`MAX_TITLE_CHARS`, 120), `exit.detail` (`MAX_EXIT_DETAIL_CHARS`,
+ *   512), `resume` (64 + 512). Scalars otherwise.
+ * - `pendingPermissions` — **unbounded in count.** One entry is at most 8 KiB of
+ *   `{title, options}` (`MAX_PERMISSION_SNAPSHOT_BYTES`, a refusal weighed in
+ *   real UTF-8 by `jsonBytes`) plus `rawInput` and `content` at
+ *   `MAX_PERMISSION_BLOB_BYTES` (8 KiB) each — about 24 KiB. The only gate on how
+ *   many may be parked at once is `refusalReason()`, which asks whether a turn is
+ *   running and never how many are already waiting, and nothing stops an agent
+ *   issuing them in parallel inside one turn. At 24 KiB an entry, 22 of them
+ *   pass this bound and 43 pass the ceiling it protects.
+ * - `pendingElicitations` — **unbounded in count** by the identical gate, which
+ *   `resolveElicitation` reuses verbatim, and unbounded *per entry* besides:
+ *   `MAX_ELICITATION_FORM_BYTES` weighs the **form**, `message` is not a field of
+ *   it, and the `MAX_ELICITATION_MESSAGE_CHARS` clip that used to bound it was
+ *   retired. One question can be arbitrarily large on its own.
+ * - `agentSessionId` and `agentHandle` — agent-minted, bounded nowhere.
+ *
+ * So {@link controlItem} **fits** the frame instead of guessing at it, and
+ * {@link fitSnapshotFrame} is the ladder. ⚠ Nothing compares this to
+ * `MAX_SOCKET_MESSAGE_BYTES`, for the reason {@link BATCH_MAX_BYTES} already
+ * gives from the other side: `packages/web` may not import `src/`, so the app's
+ * copy is a literal, and deriving one end while the other stayed a literal would
+ * hide the pair rather than tie it. This is the third literal in the fleet.
+ */
+export const CONTROL_MAX_BYTES = 512 * 1024;
+/**
+ * `JSON.stringify({ type: "events", events })`, split at the seam so
+ * {@link StreamConnection.flush} can join the encoded events itself and know the
+ * byte count as it goes. Both are ASCII, so `length` is the byte length — and the
+ * concatenation is byte-for-byte what stringifying the whole object would return,
+ * which is the property that lets the measurement replace the serialization
+ * rather than be added to it.
+ */
+const EVENTS_FRAME_OPEN = '{"type":"events","events":[';
+const EVENTS_FRAME_CLOSE = "]}";
 const SOCKET_HIGH_WATER = 1024 * 1024;
 const PING_INTERVAL_MS = 20_000;
 const COLLAPSE_WINDOW_MS = 30_000;
@@ -179,6 +351,29 @@ export const EVENTS_PAGE_LIMIT = 5_000;
  * input (deflate's stored-block worst case is ~0.01%), so `768 KiB < 1 MiB` holds
  * for the compressed bytes that actually cross the tunnel — with 256 KiB spare for
  * the response headers riding the same stream.
+ *
+ * ⚠ **That argument is stated in *bytes* and this number is charged UTF-16
+ * units, and the step between them is deliberately left open.** The budget is
+ * spent per row against `retained.bytes` in `MemoryEventStore.read`, and against
+ * the `bytes` column in `sqlite.ts`'s — both of which are `estimateBytes`, which
+ * charges `String.length` of the **unescaped** string. So an escape-heavy
+ * conversation makes a 768 KiB page some 4.6 MiB of UTF-8: the identical
+ * charged-vs-wire mismatch {@link BATCH_MAX_BYTES} was repaired for.
+ *
+ * **It is not the same defect, and "making the two consistent" would be a
+ * behaviour change rather than a fix.** That one bounded a WebSocket *frame*,
+ * where `MAX_SOCKET_MESSAGE_BYTES` is enforced by the receiver's
+ * `MessageAssembler`: over the ceiling the far end refused the message, the
+ * channel failed, and the client reconnected onto the same batch for ever.
+ * **There is no reassembler on this path.** A page body is an HTTP response;
+ * nothing refuses it for being large, and what is left is the h2 window above —
+ * a wedge risk that gzip closes, with the 437 390 bytes below as the only
+ * measurement on record. Recut on `Buffer.byteLength` this would shrink a page
+ * to a fraction of {@link EVENTS_PAGE_LIMIT} events and multiply round trips,
+ * which is exactly the cost that constant's own docblock says was just bought
+ * back — 68 requests down to 7. The unit is left as it is, knowingly, and this
+ * paragraph is here so the next reader does not spend that to fix a stall that
+ * cannot happen.
  *
  * It was 2 MiB, and at 2 MiB a real 2000-event page compressed to 437 390 bytes —
  * past the old 256 KiB window, which is how this was found. The cost of the change
@@ -4719,6 +4914,14 @@ class StreamConnection {
   /**
    * `replaying` is the attach's own drain saying so, and it decides nothing but
    * the honesty of a collapse. See {@link ATTACH_REPLAY_MAX}.
+   *
+   * ⚠ **`bytes` here is charged heap and is deliberately *not* the number the
+   * batch is cut on.** It feeds `MAX_QUEUE_BYTES`, which bounds what this process
+   * is **holding** for a client that has stopped reading — so UTF-16 units of the
+   * strings in memory is the right unit, the same argument {@link controlItem}
+   * makes about `length`. What goes on the wire is measured where it is written;
+   * see {@link BATCH_MAX_BYTES}. Making these two "consistent" would put the
+   * wrong unit on one of them.
    */
   private emit(stored: StoredEvent, replaying = false): void {
     if (this.closed || stored.seq <= this.cursor) return;
@@ -4809,24 +5012,50 @@ class StreamConnection {
     if (head.kind === "control") {
       this.queue.shift();
       this.queuedBytes -= head.bytes;
-      // Already encoded, by `controlItem`, which is where the byte count came
-      // from. Encoding it again here is what that arrangement exists to avoid.
+      // Already encoded — and already *fitted* to {@link CONTROL_MAX_BYTES} — by
+      // `controlItem`, which is where both the string and the byte count came
+      // from. Encoding it again here is what that arrangement exists to avoid,
+      // and the fit cannot move down here for the same reason: this method holds
+      // the payload string and nothing else. Keeping the frame *object* on the
+      // `QueueItem` so it could be fitted late would retain the whole snapshot
+      // the payload replaced, for as long as the queue holds it — which is the
+      // retention `MAX_QUEUE_BYTES` exists to stop.
       payload = head.payload;
     } else {
-      const events: StoredEvent[] = [];
-      let bytes = 0;
-      while (this.queue.length > 0 && events.length < BATCH_MAX_EVENTS) {
+      /*
+       * ⚠ **Measured, not estimated — see {@link BATCH_MAX_BYTES}.** Each event
+       * is encoded once here and the pieces are joined, so `bytes` is exactly
+       * `Buffer.byteLength(payload, "utf8")` and the cut happens on the number
+       * the far end's `MessageAssembler` will accumulate rather than on a count
+       * of the UTF-16 units inside it. The join is byte-for-byte what
+       * `JSON.stringify({ type: "events", events })` returned, so nothing
+       * downstream can tell the difference.
+       *
+       * The one event this breaks on is re-encoded on the next flush, and that
+       * is the whole cost of knowing the size of a string before writing it. It
+       * is paid back by no longer building the intermediate `StoredEvent[]` and
+       * by `safeStringify` no longer walking the same batch a second time.
+       */
+      const encoded: string[] = [];
+      let bytes = EVENTS_FRAME_OPEN.length + EVENTS_FRAME_CLOSE.length;
+      let lastSeq: number | null = null;
+      while (this.queue.length > 0 && encoded.length < BATCH_MAX_EVENTS) {
         const next = this.queue[0]!;
         if (next.kind !== "event") break;
-        if (events.length > 0 && bytes + next.bytes > BATCH_MAX_BYTES) break;
+        const one = encodeStored(next.stored);
+        // `+ 1` for the comma that separates it from the event before it.
+        const size = Buffer.byteLength(one, "utf8") + (encoded.length > 0 ? 1 : 0);
+        // The first is taken whatever it weighs, or one oversized event would
+        // produce an empty batch for ever — see {@link BATCH_MAX_BYTES}.
+        if (encoded.length > 0 && bytes + size > BATCH_MAX_BYTES) break;
         this.queue.shift();
         this.queuedBytes -= next.bytes;
-        events.push(next.stored);
-        bytes += next.bytes;
+        encoded.push(one);
+        bytes += size;
+        lastSeq = next.stored.seq;
       }
-      const last = events[events.length - 1];
-      if (last) this.lastSentSeq = last.seq;
-      payload = safeStringify({ type: "events", events });
+      if (lastSeq !== null) this.lastSentSeq = lastSeq;
+      payload = `${EVENTS_FRAME_OPEN}${encoded.join(",")}${EVENTS_FRAME_CLOSE}`;
     }
 
     this.sending = true;
@@ -4981,10 +5210,190 @@ function parseElicitationAnswer(body: Record<string, unknown>): ElicitationAnswe
  * UTF-16 code units rather than bytes — `jsonSize` measures the event side the
  * same way, and a ceiling on retained heap wants the string this process is
  * holding rather than what the socket will put on the wire.
+ *
+ * ⚠ **And the frame is *fitted* here as well as weighed, because the wire has a
+ * second ceiling this arm was not checked against at all.** `bytes` above is
+ * charged heap for `MAX_QUEUE_BYTES`; {@link CONTROL_MAX_BYTES} is the number the
+ * far end's `MessageAssembler` will accumulate, and a control frame past it fails
+ * the channel. The two are different units for different questions and both are
+ * now asked — the heap one off whatever string survives the fit, so `queuedBytes`
+ * still measures what is really held.
+ *
+ * The ordinary frame pays **one `Buffer.byteLength` over a string already in
+ * hand** and nothing else: no second encode, and {@link fitSnapshotFrame} is not
+ * entered. That gate matters because this runs on the emit path — `touchSafe()`
+ * fans a snapshot out to every attached client — which this class's own contract
+ * says may never slow the agent down.
  */
 function controlItem(frame: unknown): QueueItem {
-  const payload = safeStringify(frame);
+  const built = safeStringify(frame);
+  if (Buffer.byteLength(built, "utf8") <= CONTROL_MAX_BYTES) return heldFrame(built);
+  return heldFrame(fitSnapshotFrame(frame, built));
+}
+
+/** {@link controlItem}'s `+ 64` and its `length`, off the payload that survived the fit. */
+function heldFrame(payload: string): QueueItem {
   return { kind: "control", payload, bytes: payload.length + 64 };
+}
+
+/**
+ * A control frame over {@link CONTROL_MAX_BYTES}, reduced until it fits.
+ *
+ * ⚠ **Exported for `daemoncheck` and for nothing else.** Every rung below is
+ * reached only by a snapshot no offline fixture can assemble — pending
+ * permissions are minted by an ACP agent, and a driver that can raise one raises
+ * exactly one, well under this ceiling. So the alternative to exporting was a
+ * ladder nothing executes: measured, deleting this function and calling
+ * `safeStringify` alone left every driver in this repository green. That is the
+ * same shape as the plan-mode curation that stayed green for months over a card
+ * nobody could reach, and `CipherState.at` is the precedent for opening a seam
+ * rather than shipping one. Nothing in `src/` calls it but {@link controlItem}.
+ *
+ * Two rungs, each one re-encoded and re-measured on `Buffer.byteLength` rather
+ * than estimated — charging an estimate against a wire ceiling is the defect
+ * {@link BATCH_MAX_BYTES} records, and repeating it here would repeat it on the
+ * one frame that cannot afford it. The rung before both of them is not in this
+ * function at all: the frame exactly as built, already checked by the caller, so
+ * **every frame that fits is byte-identical to what this daemon sent before** and
+ * no session that worked can tell this function exists.
+ *
+ * **The first rung here reduces, and every shape it produces is one the client
+ * already handles.** `backgroundTasks[].outputFilePath` goes to `null` —
+ * precisely the projection `snapshot({listing: true})` already makes, and the one
+ * field in that record nothing draws. Each pending permission's `rawInput` and `content` become
+ * `clampBlob(…, 0)`, which is the `{truncated: true, bytes}` stand-in
+ * `PendingPermissionSnapshot` already declares both of them may be; `0` rather
+ * than a fresh literal because `clampBlob`'s own note forbids a second,
+ * subtly-different idea of what truncation looks like, and `jsonSize` of any
+ * non-nullish value is at least 1, so the bound always bites. What survives is
+ * every row with its title and its options — everything an Approve button needs,
+ * so a frame reduced this far is still answerable from the list.
+ *
+ * **The second halves the two parked lists until they fit, floor one each.** Both
+ * are `[...map.values()]` in insertion order and `raisedAt` is stamped at
+ * insertion, so a prefix is the *oldest* and `oldestWait` still names the real
+ * one; keeping at least one of a non-empty list keeps `needsHuman` true and keeps
+ * the card `SessionView` draws the right one. What is lost is real and visible
+ * rather than hidden — `waitingCount` under-reports, and the rows past the cut
+ * are gone from the frame — and it is recoverable: every one of them is in the
+ * log as a `permission_request` or `elicitation_request` event the transcript
+ * draws, and answering the oldest shrinks the next frame, so the cut lifts as
+ * work is done. Halved rather than cut flat to one, so a list that would nearly
+ * have fitted keeps nearly all of it, at a cost of at most ⌈log2 n⌉ encodes over
+ * a payload that halves as it goes.
+ *
+ * ⚠ **Measured 2026-09-17, this ladder run outside the daemon over a synthetic
+ * `hello`** carrying 32 background tasks at `acp/asynctasks.ts`'s clip ceilings
+ * and n permissions at theirs — 8 KiB of `{title, options}`, 8 KiB of `rawInput`,
+ * 8 KiB of `content`. n=5 is 184 392 bytes and goes out **byte-identical**; n=20
+ * is 546 917 and rung one alone brings it to 206 101 with **all twenty rows
+ * kept**; n=30 is 788 607 → 288 231, again all thirty, still rung one; n=60 is
+ * 1 513 677 and **one** halving brings it to 288 231 with 30 kept; n=200 is
+ * 4 897 537 and **two** halvings bring it to 452 491 with 50 kept. So the cut is
+ * proportional and not down to a single row: it spends the whole 512 KiB.
+ *
+ * ⚠ **The ladder terminates in practice and not in principle, and the residue is
+ * named rather than papered over.** `agentSessionId`, `agentHandle`, each
+ * surviving elicitation's `message` and `agentConfig`'s choice ids and names are
+ * agent-minted and bounded nowhere (see {@link CONTROL_MAX_BYTES}), so a hostile
+ * or broken ACP binary defeats every rung with one enormous string. The fix for
+ * those is an ingest bound in `session.ts`, not another number here; what this
+ * guarantees is that the **reachable** case — an agent parking permissions in
+ * parallel inside one turn — no longer wedges the attach. Whatever the last rung
+ * produced is sent rather than dropped, for {@link BATCH_MAX_BYTES}'s reason one
+ * arm over: a `hello` that never arrives is a transcript that never starts, which
+ * is the stall, not the cure for it.
+ */
+export function fitSnapshotFrame(frame: unknown, built: string): string {
+  const session = snapshotOnFrame(frame);
+  if (session === null) return built;
+  const rest = frame as Record<string, unknown>;
+
+  const trimmed: SessionSnapshot = {
+    ...session,
+    backgroundTasks: session.backgroundTasks.map((task) => ({ ...task, outputFilePath: null })),
+    pendingPermissions: session.pendingPermissions.map((pending) => ({
+      ...pending,
+      rawInput: clampBlob(pending.rawInput, 0),
+      content: clampBlob(pending.content, 0),
+    })),
+  };
+  let payload = safeStringify({ ...rest, session: trimmed });
+  if (Buffer.byteLength(payload, "utf8") <= CONTROL_MAX_BYTES) return payload;
+
+  // Both lists halve on the same counter: `slice` on the shorter one is a no-op
+  // once it is past its length, so the longer one goes on shrinking without a
+  // second loop, and a list of one is never cut to none.
+  let keep = Math.max(trimmed.pendingPermissions.length, trimmed.pendingElicitations.length);
+  while (keep > 1) {
+    keep = Math.floor(keep / 2);
+    payload = safeStringify({
+      ...rest,
+      session: {
+        ...trimmed,
+        pendingPermissions: trimmed.pendingPermissions.slice(0, keep),
+        pendingElicitations: trimmed.pendingElicitations.slice(0, keep),
+      },
+    });
+    if (Buffer.byteLength(payload, "utf8") <= CONTROL_MAX_BYTES) return payload;
+  }
+  return payload;
+}
+
+/**
+ * The snapshot a control frame carries, or `null` where it carries none.
+ *
+ * Hand-written, and it checks the three collections the rungs map over rather
+ * than only the `session` key: a frame whose `session` were some other shape
+ * falls back to being sent as built instead of throwing on the emit path. `hello`
+ * and `snapshot` are the two frames that reach the first answer today — and
+ * `collapse`'s own recovery snapshot is one of them, which is the frame that
+ * follows an overflow and had the same hole. `lagged`, `caught_up` and the rest
+ * reach the second and are nowhere near the bound.
+ */
+function snapshotOnFrame(frame: unknown): SessionSnapshot | null {
+  if (typeof frame !== "object" || frame === null) return null;
+  const session = (frame as { session?: unknown }).session;
+  if (typeof session !== "object" || session === null) return null;
+  const snapshot = session as SessionSnapshot;
+  return Array.isArray(snapshot.backgroundTasks) &&
+    Array.isArray(snapshot.pendingPermissions) &&
+    Array.isArray(snapshot.pendingElicitations)
+    ? snapshot
+    : null;
+}
+
+/**
+ * One stored event, encoded, and **never a hole**.
+ *
+ * {@link safeStringify}'s stand-in is a whole *frame* — `{type:"error",…}` — and
+ * this string goes **inside** a frame's `events` array, where that object is not a
+ * `StoredEvent` and `stream.ts`'s reducer would carry it as one. Nor may the event
+ * simply be dropped: the client checks `seq === lastAppliedSeq + 1` on **every**
+ * event in a batch and answers a hole by reconnecting at its own cursor, which
+ * replays the same event, which is skipped again — a reconnect loop with no end,
+ * i.e. the permanent stall {@link BATCH_MAX_BYTES} exists to remove, put back by
+ * the repair itself. So the seq is kept and the *event* becomes the stand-in,
+ * which is the same substitution `MemoryEventStore.append` already makes for an
+ * event it cannot weigh, in the same shape.
+ *
+ * Unreachable in practice — every event is parsed JSON out of an adapter or out of
+ * SQLite, so there is nothing cyclic and no `bigint` to throw on — which is
+ * precisely why it must not be the one path that stalls. The stand-in's own
+ * `JSON.stringify` cannot throw: every value in it is a primitive.
+ */
+function encodeStored(stored: StoredEvent): string {
+  try {
+    return JSON.stringify(stored);
+  } catch (error) {
+    // See above: not reachable from a parsed event, and a dropped seq is a client
+    // that reconnects onto the same batch for ever.
+    return JSON.stringify({
+      seq: stored.seq,
+      ts: stored.ts,
+      event: { type: "error", message: `event could not be encoded: ${describeError(error)}`, data: null },
+    });
+  }
 }
 
 function safeStringify(value: unknown): string {

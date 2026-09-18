@@ -1,8 +1,20 @@
-import { mintToken } from "./cp";
+import { mintToken, registerDevice } from "./cp";
+import {
+  ChannelRefused,
+  bodyBytes,
+  bodyText,
+  openChannel,
+  type Channel,
+  type ChannelFactory,
+  type ChannelRequest,
+  type ChannelResponse,
+  type StreamSocket,
+} from "./e2ee";
 import {
   ApiError,
   contentTypeFor,
   isTransportFailure,
+  meansDeviceKeyMissing,
   meansMachineGone,
   meansWrongMachine,
   parseBody,
@@ -203,6 +215,67 @@ export type OfflineReason =
   | "cp_unreachable"
   | "over_limit"
   | "owner_disabled"
+  /**
+   * The machine has never told the Authority a key to be reached under.
+   *
+   * ⚠ **The one offline reason that is not about reachability at all.** The
+   * daemon is running, the tunnel is up, and the relay would carry bytes to it —
+   * what is missing is the X25519 static a machine announces on its dial, without
+   * which there is no `Noise_IK` to run and therefore no way to talk to it that
+   * this relay could not read. It is a *refusal to fall back*, and it is the
+   * single place in this client where "no encryption available" is spelled out
+   * rather than silently degraded.
+   *
+   * Cleared by updating the daemon on that machine: the announcement rides the
+   * next dial, which happens within seconds of it restarting, so nobody
+   * re-enrolls anything.
+   */
+  | "no_machine_key"
+  /**
+   * *This installation* holds no key the Authority will name in a capability.
+   *
+   * ⚠ **The device-side twin of {@link OfflineReason.no_machine_key}, and until
+   * now only the machine half had a reason of its own.** That one is a daemon
+   * that has never announced a static and reads "needs a newer daemon". This one
+   * is the same shape pointed the other way: the machine is fine, the tunnel is
+   * up, and what is missing is the X25519 static *this computer* is supposed to
+   * hold — a shell whose credential store answered nothing, or a row registered
+   * before device keys existed.
+   *
+   * ⚠ **Not a browser**, which an earlier spelling of this sentence claimed.
+   * `POST /v1/tokens` guards `device_key_required` on `caller.deviceId !== null`
+   * (`packages/control-plane/src/app.ts:4644`) and a browser sign-in sends no
+   * device, so it is minted an *unbound* capability rather than refused; and
+   * `e2ee.ts`'s `dial()` throws a plain `Error` for a missing static, which
+   * `probe` swallows into `no_route`. A browser's permanent state is `no_route`,
+   * and this reason is unreachable there.
+   *
+   * `POST /v1/tokens` refuses that with `device_key_required`, and `mint` applies
+   * the one remedy it has — registering the key this shell is already holding.
+   * When that registration does not take, **every** machine on the account is
+   * unreachable for one cause that has nothing to do with any of them, so the
+   * sentence has to be about this app rather than about the row it is drawn on.
+   *
+   * ⚠ **And re-registering is not a remedy at all where the key itself is what
+   * was refused.** `readDeviceInput` nulls a `publicKey` it cannot parse and
+   * **keeps** the registration, so the row answers `hasKey: false` for ever and
+   * the id coming back from `POST /v1/me/devices` is not evidence the remedy
+   * took — `mint`'s retry below says so at the code. Re-sending the same bytes,
+   * which is all a sign-in or a `registerDevice()` can do, arrives at the same
+   * refusal every time. What leaves the state is a **new** key, and only the
+   * shell can make one: `hostDeviceKeyReset()` behind the Re-key control on
+   * `DevicesSection`'s row, which `OFFLINE_TEXT.no_device_key` is the sentence
+   * pointing at. A browser reaches neither, which is the one arm of this reason
+   * that has no exit and is not meant to have one.
+   *
+   * ⚠ **It was reported as `no_token`, which is a sentence about a *credential*
+   * for a cause that is a missing **key**.** "no token" sends somebody to look at
+   * their sign-in, which is working, and then at their machines, which are also
+   * working, and there was no remedy anywhere on the screen. The machine-side
+   * twin got its own reason and its own instruction when it landed; this half got
+   * neither.
+   */
+  | "no_device_key"
   | null;
 
 /** Why a session URL has no row behind it. See {@link missingRowReason}. */
@@ -430,6 +503,50 @@ function isReplayable(method: string | undefined): boolean {
   return verb === "GET" || verb === "DELETE";
 }
 
+/**
+ * A refused channel, said in the vocabulary the rest of this client speaks.
+ *
+ * ⚠ **`ChannelRefused` is an `Error` and `isTransportFailure` is a *negation* —
+ * "not an `ApiError`" — so every refusal the daemon took the trouble to deliver
+ * was classified as a dropped connection.** That predicate is a negation on
+ * purpose (the browser withholds why a `fetch` rejected, so there is nothing
+ * finer to key on) and `e2ee.ts`'s own docblock declines to state a second
+ * opinion about it for the same reason. So the reconciliation belongs *here*, at
+ * the one boundary where the two vocabularies meet, and it is a translation
+ * rather than a second predicate: below this line nothing in this file knows a
+ * channel refusal exists.
+ *
+ * Three things were wrong while it did not exist, and every one of them is a
+ * behaviour rather than a wording:
+ *
+ *   - **A `502 truncated` was retried.** `src/e2ee.ts`'s `fail()` `end()`s the
+ *     stream rather than `destroy()`ing it precisely so that frame survives and
+ *     reaches the app as a refusal — which `settleTransport` then read as a dead
+ *     link, dropped the route memo, and **replayed** for any replayable method.
+ *     Q6.103 is the measurement that bought the frame; this is what it was for.
+ *   - **`token_expired` at `HELLO` reached nothing that could act on it.** The
+ *     unconditional re-mint lives on the `ApiError` path and a `ChannelRefused`
+ *     never joined it, so a capability that aged out between two requests failed
+ *     as weather instead of being renewed.
+ *   - **`errorText` said "the connection failed, and whether the request arrived
+ *     is not known"** for `unbound_capability`, `wrong_machine` and
+ *     `wrong_device` alike — burying the verifier's own code, which is the only
+ *     part of that failure anybody can act on.
+ *
+ * The `reason` becomes the `code` verbatim, including the ones that are prose
+ * rather than a name (`truncated`, `the channel failed`). That is the honest
+ * shape: `parseBody` already mints codes nobody chose — `http_404` for a bare
+ * Hono 404 — and a code no predicate recognises falls through every one of them,
+ * which is `wire.ts`'s standing rule about an unknown value.
+ *
+ * Anything that is *not* a refusal is returned untouched, so one `catch` covers
+ * both and a genuine socket death still reaches the transport path.
+ */
+function asAnsweredRefusal(error: unknown, machine: string): unknown {
+  if (!ChannelRefused.is(error)) return error;
+  return new ApiError(error.status, error.reason, `${machine} refused this connection: ${error.reason}`);
+}
+
 export class MachineConnection {
   readonly id: MachineId;
   private name: string;
@@ -445,6 +562,23 @@ export class MachineConnection {
 
   private token: { value: string; expiresAt: number } | null = null;
   private minting: Promise<string> | null = null;
+  /**
+   * The machine's X25519 static, base64url, as the Authority last reported it.
+   *
+   * Arrives on the same `POST /v1/tokens` answer as `relayUrl` and `relayOnline`,
+   * and for the reason those are there: minting is also how a client learns where
+   * a machine is, and a key and a route are the same kind of fact. Kept in step by
+   * construction rather than by a second fetch.
+   *
+   * `null` for a machine that has not dialled since it learned to announce one.
+   * That is a sentence about updating that machine, never a session without
+   * encryption — see {@link OfflineReason.no_machine_key}.
+   */
+  private machineKey: string | null = null;
+  /** Every encrypted connection to this machine, and what it was built for. */
+  private channel: Channel | null = null;
+  private channelKey: string | null = null;
+  private channelBase: string | null = null;
   private chosen: Route | null = null;
   private resolving: Promise<Route | null> | null = null;
   /**
@@ -467,7 +601,19 @@ export class MachineConnection {
 
   private readonly onChange: () => void;
 
-  constructor(record: MachineRecord, onChange: () => void) {
+  constructor(
+    record: MachineRecord,
+    onChange: () => void,
+    /**
+     * How this machine's encrypted connections are made.
+     *
+     * Defaulted, so the one caller that matters — `store.ts` — never names it,
+     * and a driver asserting a *routing* rule can stand a relay arm in without a
+     * daemon behind it. See {@link Channel} for why the seam exists and why it is
+     * not a switch.
+     */
+    private readonly channels: ChannelFactory = openChannel,
+  ) {
     this.id = record.id as MachineId;
     this.name = record.name;
     this.relayUrl = record.relayUrl;
@@ -641,11 +787,29 @@ export class MachineConnection {
     return this.overLimit || this.ownerDisabled;
   }
 
-  private async mint(): Promise<string> {
+  private async mint(firstAttempt = true): Promise<string> {
     let issued;
     try {
       issued = await mintToken(this.id);
     } catch (error) {
+      /*
+       * The one refusal this client can fix by itself, and it fixes it here.
+       *
+       * Every installation that predates device keys reaches its first mint after
+       * an update with a row the control plane has no key for, and so does one
+       * whose credential store was reset. The refusal names the remedy —
+       * register the key this shell already holds — so applying it at the point of
+       * the refusal is what stops the whole fleet needing a person to sign in
+       * again on every machine.
+       *
+       * **Once**, and the guard is the same `firstAttempt` the request path uses:
+       * a registration that does not take must surface as the refusal it is
+       * rather than as a loop against the control plane.
+       */
+      if (firstAttempt && meansDeviceKeyMissing(error)) {
+        const registered = await registerDevice().catch(() => null);
+        if (registered !== null) return await this.mint(false);
+      }
       /*
        * The one outage that must not stop anything.
        *
@@ -665,7 +829,29 @@ export class MachineConnection {
       }
       this.token = null;
       this.reach = "offline";
-      this.offlineReason = isTransportFailure(error) ? "cp_unreachable" : "no_token";
+      /*
+       * ⚠ **Three answers rather than two, because a missing *key* was being
+       * reported as a missing *token*.**
+       *
+       * `device_key_required` reaches here twice over, and both ways used to land
+       * on `no_token`: on the retry above, when `registerDevice()` answered a row
+       * id and the Authority still has no key for it — the route keeps a
+       * registration whose `publicKey` it refused and reports `hasKey: false`, so
+       * the id coming back is not evidence the remedy took — and on the first
+       * attempt, when there was nothing to register at all because
+       * `describeDevice()` answered `null`. A browser is the second case for
+       * every machine on the account, forever.
+       *
+       * The remedy is on this computer either way, which is what
+       * {@link OfflineReason.no_device_key} exists to be able to say. Keyed on
+       * the code rather than on the attempt, so the first-attempt case — the one
+       * with no registration to re-fail — is covered by the same line.
+       */
+      this.offlineReason = isTransportFailure(error)
+        ? "cp_unreachable"
+        : meansDeviceKeyMissing(error)
+          ? "no_device_key"
+          : "no_token";
       this.lastError = describe(error);
       this.onChange();
       throw error;
@@ -702,6 +888,16 @@ export class MachineConnection {
     // we may reach it. Kept in step by construction rather than by a second fetch.
     this.relayUrl = issued.machine.relayUrl;
     this.relayOnline = issued.machine.relayOnline;
+    /*
+     * And what to encrypt to when we get there.
+     *
+     * `?? null` rather than left alone on absence, because an Authority that has
+     * stopped reporting a key for this machine is telling us something — the row
+     * was cleared, or the machine was re-enrolled onto a new one — and a
+     * remembered key would then be used to start a handshake that can only fail.
+     * Dropping it costs the honest sentence instead.
+     */
+    this.machineKey = issued.machine.key ?? null;
 
     this.onChange();
     return issued.token;
@@ -726,6 +922,17 @@ export class MachineConnection {
   forgetRoute(): void {
     if (this.chosen === null) return;
     this.chosen = null;
+    /*
+     * The open connections go with the belief.
+     *
+     * Every caller of this reaches it because the path stopped working — a
+     * transport failure, a `no_tunnel`, a network that changed under a phone — and
+     * a pooled connection established over that path is exactly as dead as the
+     * route memo is stale. Keeping them would mean the re-probe succeeds, hands
+     * back a route, and the first request on it is then spent discovering that
+     * the socket underneath died while the screen was off.
+     */
+    this.closeChannel();
     this.onChange();
   }
 
@@ -854,7 +1061,18 @@ export class MachineConnection {
     const relay = this.relayOnline ? this.relayUrl : null;
     if (relay === null) return this.settleRoute(null, "no_route");
 
-    const health = await this.probe(relay, token);
+    /*
+     * ⚠ **A machine with no announced key is refused here rather than at the
+     * first request, and that placement is the refusal to downgrade.** Everything
+     * below this line reaches the machine through an encrypted channel; there is
+     * no second path, no plaintext arm and no flag that would produce one. So the
+     * honest answer is that the route does not exist yet, with a reason that says
+     * what to do about it — not a route that works for `/health` and fails for
+     * everything a person actually wanted.
+     */
+    if (this.machineKey === null) return this.settleRoute(null, "no_machine_key");
+
+    const health = await this.probe({ base: relay, kind: "relay" }, token);
     if (health === null) return this.settleRoute(null, "no_route");
     this.health = health;
     return this.settleRoute({ base: relay, kind: "relay" }, null);
@@ -924,7 +1142,7 @@ export class MachineConnection {
     // Proven. `/health` is unauthenticated, so it is asked *after* the identity is
     // settled rather than before — a shape nothing else could have told us apart
     // from a stranger answering 200.
-    return await this.probe(base, null);
+    return await this.probe({ base, kind: "local" }, null);
   }
 
   /**
@@ -946,18 +1164,196 @@ export class MachineConnection {
     }
   }
 
-  private async probe(base: string, token: string | null): Promise<DaemonHealth | null> {
+  /**
+   * Ask the daemon whether it is there, over the transport a request would use.
+   *
+   * ⚠ **The relay arm goes through the channel, and that is the point of asking
+   * at all.** A probe that used a different transport from the requests it is
+   * clearing the way for would answer a question nobody had: what it now proves
+   * is that the tunnel is up, the daemon answered, the machine holds the private
+   * half of the key the Authority named, and this installation's device key is
+   * one the daemon accepts. Every one of those has to hold before a request can
+   * work, and all four are settled by one `GET /health`.
+   *
+   * The loopback arm stays `fetch` against an *unauthenticated* route, which is
+   * why {@link proveLocal} establishes the machine first and calls this second.
+   */
+  private async probe(route: Route, token: string | null): Promise<DaemonHealth | null> {
     try {
-      const response = await fetch(new URL("/health", base), {
+      if (route.kind === "relay") {
+        const answer = await this.overChannel(route, {
+          method: "GET",
+          path: "/health",
+          headers: token === null ? {} : { authorization: `Bearer ${token}` },
+          timeoutMs: PROBE_TIMEOUT_MS,
+        });
+        if (answer.status < 200 || answer.status > 299) return null;
+        return JSON.parse(bodyText(answer.body)) as DaemonHealth;
+      }
+      const response = await fetch(new URL("/health", route.base), {
         signal: withTimeout(PROBE_TIMEOUT_MS),
         headers: token === null ? {} : { authorization: `Bearer ${token}` },
       });
       if (!response.ok) return null;
       return (await response.json()) as DaemonHealth;
     } catch {
-      // Unreachable, refused, blocked or too slow. All the same answer here.
+      // Unreachable, refused, blocked, unopenable or too slow. All the same
+      // answer here, and deliberately: this is the question "can I reach it",
+      // and every one of those is "no".
+      //
+      // ⚠ That now includes a channel the daemon *answered* by refusing —
+      // `overChannel` has already turned it into an `ApiError`, and it is
+      // swallowed here like the rest. The distinction the translation buys is
+      // about a *request*, where an answered refusal must not be replayed and
+      // carries a sentence somebody reads; a probe returns a boolean dressed as
+      // a health record, and "the machine said no" is still no. What the caller
+      // then draws is `probeRoute`'s `no_route`, which is honest: an installation
+      // this whole account cannot reach anything from is `mint`'s refusal and
+      // lands on {@link OfflineReason.no_device_key} one step earlier.
       return null;
     }
+  }
+
+  /* ---------------------------------------------------------------- *
+   * The encrypted channel
+   * ---------------------------------------------------------------- */
+
+  /**
+   * This machine's channels, built on the key and the route it was last told.
+   *
+   * ⚠ **Rebuilt rather than mutated when either moves**, and both move on the
+   * same answer. A `MachineChannel` holds open connections whose Noise sessions
+   * were established against one static key and dialled at one relay; keeping
+   * them across a change would mean a pool where some connections reach the
+   * machine and some reach whatever used to be at that address. Disposing is one
+   * handshake's cost and removes the whole question.
+   *
+   * Throws rather than answering `null`, because every caller is mid-request and
+   * has no smaller thing to do. The refusals it raises are the two that are
+   * genuinely different: a machine that has announced no key (update it), and an
+   * installation that holds none (this shell cannot reach anything remote).
+   */
+  private channelFor(route: Route): Channel {
+    const key = this.machineKey;
+    if (key === null) {
+      throw new ApiError(
+        503,
+        "machine_key_missing",
+        `${this.name} has not told the control plane an encryption key — update the daemon on that machine`,
+        null,
+      );
+    }
+    if (this.channel !== null && (this.channelKey !== key || this.channelBase !== route.base)) {
+      this.channel.dispose();
+      this.channel = null;
+    }
+    if (this.channel === null) {
+      this.channelKey = key;
+      this.channelBase = route.base;
+      this.channel = this.channels({
+        relayUrl: route.base,
+        machineKey: key,
+        /*
+         * A callback rather than a value, because a channel outlives a token.
+         * `ensureToken` is the one place that decides whether the held one is
+         * still good, and a second copy of that rule is a second thing to be
+         * wrong about `serverTime`.
+         */
+        credential: async () => ({ token: await this.ensureToken(), expiresAt: this.token?.expiresAt ?? 0 }),
+        /*
+         * The remedy for a re-keyed installation, and the mirror of the one
+         * `mint` applies for an unregistered one. The order matters: register
+         * first so the Authority holds the key this shell actually has, then mint
+         * so the next capability names it. Minting without registering would
+         * re-issue the same stale binding and the handshake would fail again.
+         */
+        onWrongDevice: async () => {
+          await registerDevice();
+          await this.ensureToken(true);
+        },
+      });
+    }
+    return this.channel;
+  }
+
+  /**
+   * One request over this machine's channel, with a refusal kept as a refusal.
+   *
+   * ⚠ **The single door every channel request goes through, and that is the
+   * whole of why it exists.** `probe`, `send` and `download` each drove
+   * `channelFor(route).request(...)` themselves, so the translation in
+   * {@link asAnsweredRefusal} would have had to be written three times and
+   * forgotten on the fourth — and the fourth is the one that matters, because a
+   * missing copy is not a compile error, it is one route where an answered
+   * refusal is replayed as a dead link.
+   *
+   * It also catches what {@link channelFor} itself throws — the `503
+   * machine_key_missing` for a machine that has announced no static — which is
+   * already an `ApiError` and passes through untouched. That one used to reach
+   * the transport path and drop a route memo over a refusal this client raised
+   * against itself.
+   */
+  private async overChannel(route: Route, wanted: ChannelRequest): Promise<ChannelResponse> {
+    try {
+      return await this.channelFor(route).request(wanted);
+    } catch (error) {
+      throw asAnsweredRefusal(error, this.name);
+    }
+  }
+
+  /** Give up every open connection. Called where the route belief is dropped. */
+  private closeChannel(): void {
+    this.channel?.dispose();
+    this.channel = null;
+    this.channelKey = null;
+    this.channelBase = null;
+  }
+
+  /**
+   * One request, on whichever of the two transports this route names.
+   *
+   * ⚠ **This is the only branch on `route.kind` that decides how bytes travel**,
+   * and it is why `request`, `upload` and `download` each have exactly one. The
+   * loopback arm is `fetch` and stays `fetch`: it is a connection to `127.0.0.1`
+   * made by a process running as the same uid, so there is nothing between the
+   * two ends to encrypt against, and adding a handshake there would buy nothing
+   * and cost the one path that has to keep working while the Authority is down.
+   */
+  private async send(
+    route: Route,
+    token: string,
+    path: string,
+    init: RequestInit,
+    timeoutMs: number,
+    extra: { onProgress?: ((fraction: number) => void) | undefined; signal?: AbortSignal | undefined } = {},
+  ): Promise<{ status: number; statusText: string; bytes: Uint8Array }> {
+    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+    const contentType = contentTypeFor(init.body);
+    if (contentType !== null) headers["content-type"] = contentType;
+
+    if (route.kind === "relay") {
+      const answer = await this.overChannel(route, {
+        method: (init.method ?? "GET").toUpperCase(),
+        path,
+        headers,
+        body: await bodyBytes(init.body),
+        onProgress: extra.onProgress,
+        signal: extra.signal,
+        timeoutMs,
+      });
+      return { status: answer.status, statusText: answer.statusText, bytes: answer.body };
+    }
+
+    const response = await fetch(new URL(path, route.base), {
+      ...init,
+      headers,
+      signal: withTimeout(timeoutMs, extra.signal ?? init.signal ?? undefined),
+    });
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      bytes: new Uint8Array(await response.arrayBuffer()),
+    };
   }
 
   /* ---------------------------------------------------------------- *
@@ -973,31 +1369,17 @@ export class MachineConnection {
    */
   async request<T>(path: string, init: RequestInit = {}, firstAttempt = true): Promise<T> {
     const { route, token } = await this.prepare();
-    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
-    const contentType = contentTypeFor(init.body);
-    if (contentType !== null) headers["content-type"] = contentType;
-
     const timeout = slowRoute(init.method, path) ? SLOW_ROUTE_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     const retry = (): Promise<T> => this.request<T>(path, init, false);
 
-    let response: Response;
+    let answer: { status: number; statusText: string; bytes: Uint8Array };
     try {
-      response = await fetch(new URL(path, route.base), {
-        ...init,
-        headers,
-        signal: withTimeout(timeout, init.signal ?? undefined),
-      });
+      answer = await this.send(route, token, path, init, timeout, { signal: init.signal ?? undefined });
     } catch (error) {
       return this.settleTransport(error, isReplayable(init.method), firstAttempt, retry);
     }
 
-    return this.settleAnswer<T>(
-      response.status,
-      response.statusText,
-      await response.text(),
-      firstAttempt,
-      retry,
-    );
+    return this.settleAnswer<T>(answer.status, answer.statusText, bodyText(answer.bytes), firstAttempt, retry);
   }
 
   /**
@@ -1020,6 +1402,16 @@ export class MachineConnection {
    * What a *transport* failure means, and whether to try once more.
    *
    * Always either retries or throws, so a caller's `catch` arm ends here.
+   *
+   * ⚠ **An answered refusal can reach this `catch` as well, and reading one as a
+   * dead link is a bug rather than a rounding error.** Three callers hand
+   * everything their `try` threw straight to this method, and over an encrypted
+   * channel not everything in there is weather: {@link asAnsweredRefusal} turns a
+   * refused channel into an `ApiError`, and {@link channelFor} raises one
+   * directly for a machine that has announced no key. Both used to land on the
+   * route-drop-and-replay below — which is exactly what `src/e2ee.ts` `end()`s a
+   * failed stream to prevent (Q6.103). So the dispatch is the first statement
+   * here, and what follows it is what the name says: a link that died.
    */
   private async settleTransport<T>(
     error: unknown,
@@ -1027,6 +1419,7 @@ export class MachineConnection {
     firstAttempt: boolean,
     retry: () => Promise<T>,
   ): Promise<T> {
+    if (ApiError.isApiError(error)) return this.settleRefusal(error, firstAttempt, retry);
     /*
      * The route stopped answering. Forget it and try once more, which turns
      * "my network changed" into one slow request rather than a dead screen:
@@ -1057,9 +1450,11 @@ export class MachineConnection {
      * lets a person decide — the route memo is still dropped either way, so the
      * *next* request lands on the path that works.
      *
-     * The `token_expired` retry in `settleAnswer` is different and stays
-     * unconditional: a parsed `ApiError` is proof the daemon refused the request
-     * rather than performed it.
+     * The `token_expired` retry in {@link settleRefusal} is different and stays
+     * unconditional: an `ApiError` is proof the daemon refused the request rather
+     * than performed it — which is true of one parsed out of a body and equally
+     * true of one translated from a refused channel, since a capability turned
+     * away at `HELLO` never reached a handler either.
      */
     if (firstAttempt && replayable) {
       this.forgetRoute();
@@ -1077,11 +1472,16 @@ export class MachineConnection {
    *
    * Takes a status and a body string rather than a `Response`, because an upload
    * runs on `XMLHttpRequest` — `fetch` reports no upload progress — and there is
-   * no `Response` there to hand over. This is the single place three rules live:
-   * the `409`-carrying-a-success-body parse (in `parseBody`), the reach flip back
-   * to online, and `meansMachineGone`. A second copy of the last one renders a
-   * machine as up while every request under it fails, which is the exact defect
-   * the comment below records.
+   * no `Response` there to hand over. This is the single place two rules live:
+   * the `409`-carrying-a-success-body parse (in `parseBody`), and the reach flip
+   * back to online.
+   *
+   * ⚠ **The third rule that used to be listed here — `meansMachineGone` — is
+   * {@link settleRefusal}'s now, and it moved rather than multiplied.** What a
+   * refusal means stopped being a property of *this* door the moment a channel
+   * handshake could raise one too, and the old warning still applies word for
+   * word: a second copy of that rule renders a machine as up while every request
+   * under it fails.
    */
   private async settleAnswer<T>(
     status: number,
@@ -1099,59 +1499,91 @@ export class MachineConnection {
       }
       return body;
     } catch (error) {
-      if (firstAttempt && ApiError.isApiError(error) && error.code === "token_expired") {
-        await this.ensureToken(true);
-        return retry();
-      }
+      return this.settleRefusal(error, firstAttempt, retry);
+    }
+  }
+
+  /**
+   * What an answered *refusal* means, wherever it was answered.
+   *
+   * ⚠ **One body for two doors, because the rules in it are about the refusal
+   * and not about which `catch` caught it.** It was `settleAnswer`'s `catch`
+   * alone, which only ever sees what `parseBody` throws — so the moment a
+   * refusal could also arrive from a channel handshake, every rule here was
+   * unreachable for half the fleet's failures. A second copy in
+   * {@link settleTransport} would be the defect the `meansMachineGone` comment
+   * below already records, in a second place: two arms deciding whether a machine
+   * is gone, drifting until one of them draws a machine as up while every request
+   * under it fails.
+   *
+   * Always either retries or throws, which is what makes it safe to be the tail
+   * of both.
+   */
+  private async settleRefusal<T>(error: unknown, firstAttempt: boolean, retry: () => Promise<T>): Promise<T> {
+    if (firstAttempt && ApiError.isApiError(error) && error.code === "token_expired") {
       /*
-       * **The one status rule the relay candidate must not get.**
-       *
-       * `forgetRoute`'s docblock says a route is never dropped on an HTTP status
-       * other than `no_tunnel`, and that stays true — this does not call it. What
-       * this handles is narrower and only exists on the loopback arm: the daemon on
-       * this computer says the token was issued for a *different* machine, which
-       * means the file naming it is stale. A daemon re-enrolled, or a second one
-       * took the port. `route.kind` is the guard rather than the code alone, because
-       * down the tunnel the relay has already derived the machine from the same
-       * verified `aud` before a byte moved — a `wrong_machine` from *there* is two
-       * services disagreeing about one fact, and not a reason for one client to
-       * abandon the only path it has.
-       *
-       * ⚠ **Retrying a non-replayable method is safe here, and here only.** A
-       * `wrong_machine` 401 comes from the middleware `src/server.ts` mounts above
-       * every route, so no handler ran: nothing was created, no prompt was
-       * delivered, no upload was stored. That is what `isReplayable` exists to be
-       * unsure about on a *transport* failure, and what a parsed refusal settles.
+       * ⚠ **The channel has to go with the token, and re-minting alone does not
+       * reach it.** `src/e2ee.ts` pins the capability presented at `HELLO` onto
+       * every inner request and *replaces* whatever the client sent, so on the
+       * relay arm the credential that just expired is the session's rather than
+       * this request's: a fresh token handed to a pooled connection is a header
+       * the daemon throws away, and the retry earns the same 401. Dropping the
+       * pool costs one handshake and is the only thing that makes the renewal
+       * take effect. A no-op on the loopback arm, where there is no channel —
+       * which is why it is unconditional rather than guarded on `route.kind`.
        */
-      if (this.chosen?.kind === "local" && meansWrongMachine(error)) {
-        this.denyLocal();
-        if (firstAttempt) return retry();
-        throw error;
-      }
-      /*
-       * **`no_tunnel` is the one HTTP answer that means the machine is gone, and
-       * nothing was reading it.** `forgetRoute`'s own doc says it is called on
-       * exactly this status and on no other; that call site did not exist. A
-       * daemon that stops, or loses its tunnel, answers every request through the
-       * relay with this — and since a parsed `ApiError` never reached the
-       * transport `catch`, `chosen` stayed memoised and `reach` stayed
-       * `"online"`. `store.ts`'s poll then re-probes only machines already marked
-       * offline, so the row rendered as up, indefinitely, while every request
-       * under it failed. The socket close path recovered it, but only for a
-       * session actually being streamed.
-       *
-       * **Keyed on the code, never on the status.** The daemon answers its own
-       * `503 unresponsive` when a browse path sits on a stalled mount, and that
-       * is the daemon talking — reading it as "machine unreachable" would black
-       * out a healthy machine because one directory did not answer.
-       */
-      if (meansMachineGone(error)) {
-        this.forgetRoute();
-        this.markUnreachable("no_route", (error as ApiError).message);
-        this.refetchRoute();
-      }
+      this.closeChannel();
+      await this.ensureToken(true);
+      return retry();
+    }
+    /*
+     * **The one status rule the relay candidate must not get.**
+     *
+     * `forgetRoute`'s docblock says a route is never dropped on an HTTP status
+     * other than `no_tunnel`, and that stays true — this does not call it. What
+     * this handles is narrower and only exists on the loopback arm: the daemon on
+     * this computer says the token was issued for a *different* machine, which
+     * means the file naming it is stale. A daemon re-enrolled, or a second one
+     * took the port. `route.kind` is the guard rather than the code alone, because
+     * down the tunnel the relay has already derived the machine from the same
+     * verified `aud` before a byte moved — a `wrong_machine` from *there* is two
+     * services disagreeing about one fact, and not a reason for one client to
+     * abandon the only path it has.
+     *
+     * ⚠ **Retrying a non-replayable method is safe here, and here only.** A
+     * `wrong_machine` 401 comes from the middleware `src/server.ts` mounts above
+     * every route, so no handler ran: nothing was created, no prompt was
+     * delivered, no upload was stored. That is what `isReplayable` exists to be
+     * unsure about on a *transport* failure, and what a parsed refusal settles.
+     */
+    if (this.chosen?.kind === "local" && meansWrongMachine(error)) {
+      this.denyLocal();
+      if (firstAttempt) return retry();
       throw error;
     }
+    /*
+     * **`no_tunnel` is the one HTTP answer that means the machine is gone, and
+     * nothing was reading it.** `forgetRoute`'s own doc says it is called on
+     * exactly this status and on no other; that call site did not exist. A
+     * daemon that stops, or loses its tunnel, answers every request through the
+     * relay with this — and since a parsed `ApiError` never reached the
+     * transport `catch`, `chosen` stayed memoised and `reach` stayed
+     * `"online"`. `store.ts`'s poll then re-probes only machines already marked
+     * offline, so the row rendered as up, indefinitely, while every request
+     * under it failed. The socket close path recovered it, but only for a
+     * session actually being streamed.
+     *
+     * **Keyed on the code, never on the status.** The daemon answers its own
+     * `503 unresponsive` when a browse path sits on a stalled mount, and that
+     * is the daemon talking — reading it as "machine unreachable" would black
+     * out a healthy machine because one directory did not answer.
+     */
+    if (meansMachineGone(error)) {
+      this.forgetRoute();
+      this.markUnreachable("no_route", (error as ApiError).message);
+      this.refetchRoute();
+    }
+    throw error;
   }
 
   /**
@@ -1162,7 +1594,7 @@ export class MachineConnection {
    * let the bytes be counted as they go — is Chromium-only, so it does not exist
    * on the phone this client is shaped around. What it is *not* is a second
    * transport: route resolution, token minting, `meansMachineGone` and the
-   * unreachable bookkeeping all run through the same three helpers above.
+   * unreachable bookkeeping all run through the same four helpers above.
    *
    * Only the caller's own abort is a cancel. It must not be reported as a
    * transport failure and must not mark the machine unreachable — somebody
@@ -1181,11 +1613,32 @@ export class MachineConnection {
 
     let answer: { status: number; statusText: string; text: string };
     try {
-      answer = await sendWithProgress(new URL(path, route.base), file, token, onProgress, {
-        stallMs,
-        hardMs,
-        signal,
-      });
+      if (route.kind === "relay") {
+        /*
+         * ⚠ **Over a channel there is no `XMLHttpRequest` and no stall budget,
+         * and neither is missed.** `sendWithProgress` exists because `fetch`
+         * reports no upload progress and a `ReadableStream` request body is
+         * Chromium-only — so the only way to count bytes as they went was to
+         * drive the request with an API from 2006 and watch its events. Inside a
+         * channel the bytes are handed to the socket one chunk at a time and the
+         * socket says when it took them, so progress *is* the loop. The stall
+         * budget goes with it for the same reason: {@link uploadDeadlines}'s
+         * `hardMs` bounds the whole request, and the chunk loop cannot advance
+         * past a socket that has stopped draining — which is the state the stall
+         * timer existed to notice.
+         */
+        const sent = await this.send(route, token, path, { method: "POST", body: file }, hardMs, {
+          onProgress,
+          signal,
+        });
+        answer = { status: sent.status, statusText: sent.statusText, text: bodyText(sent.bytes) };
+      } else {
+        answer = await sendWithProgress(new URL(path, route.base), file, token, onProgress, {
+          stallMs,
+          hardMs,
+          signal,
+        });
+      }
     } catch (error) {
       // The caller asked for this. Not a network fact, so nothing is recorded.
       if (signal.aborted) throw error;
@@ -1212,31 +1665,60 @@ export class MachineConnection {
     const { route, token } = await this.prepare();
     const retry = (): Promise<Blob> => this.download(path, false);
 
-    let response: Response;
+    let answer: { status: number; statusText: string; headers: Record<string, string>; bytes: Uint8Array };
     try {
-      response = await fetch(new URL(path, route.base), {
-        headers: { authorization: `Bearer ${token}` },
-        signal: withTimeout(TRANSFER_TIMEOUT_MS),
-      });
+      if (route.kind === "relay") {
+        const got = await this.overChannel(route, {
+          method: "GET",
+          path,
+          headers: { authorization: `Bearer ${token}` },
+          timeoutMs: TRANSFER_TIMEOUT_MS,
+        });
+        answer = { status: got.status, statusText: got.statusText, headers: got.headers, bytes: got.body };
+      } else {
+        const response = await fetch(new URL(path, route.base), {
+          headers: { authorization: `Bearer ${token}` },
+          signal: withTimeout(TRANSFER_TIMEOUT_MS),
+        });
+        const headers: Record<string, string> = {};
+        response.headers.forEach((value, name) => {
+          headers[name.toLowerCase()] = value;
+        });
+        answer = {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+          bytes: new Uint8Array(await response.arrayBuffer()),
+        };
+      }
     } catch (error) {
       return this.settleTransport(error, isReplayable("GET"), firstAttempt, retry);
     }
 
-    if (!response.ok) {
+    if (answer.status < 200 || answer.status > 299) {
       // Always throws — `parseBody` refuses every non-2xx. Typed as `Blob` only
       // so the two branches agree; nothing downstream sees this value.
-      return this.settleAnswer<Blob>(
-        response.status,
-        response.statusText,
-        await response.text(),
-        firstAttempt,
-        retry,
-      );
+      return this.settleAnswer<Blob>(answer.status, answer.statusText, bodyText(answer.bytes), firstAttempt, retry);
     }
 
-    // Read the length *before* the body, so an oversized file is refused rather
-    // than resident. Safelisted cross-origin; `content-disposition` is not.
-    const declared = Number(response.headers.get("content-length") ?? "");
+    /*
+     * The ceiling, still read off the declared length rather than off what
+     * arrived.
+     *
+     * ⚠ **On the channel it is now a *second* line of defence rather than the
+     * only one**, and that is worth saying because the two paths differ. Over
+     * `fetch` this ran before `response.blob()`, so an oversized file was refused
+     * rather than made resident — the whole point. Over a channel the frames have
+     * already been reassembled by the time this runs, so the memory has been
+     * spent; what the check still buys is that nothing hands a caller a file
+     * larger than it is prepared for. The daemon's own `MAX_BODY_BYTES` is the
+     * bound that matters on that path, and it is on the far side of the
+     * encryption where it belongs.
+     *
+     * `content-length` is safelisted cross-origin and `content-disposition` is
+     * not, which is why the size and not the name is what is read here.
+     */
+    const declared = Number(answer.headers["content-length"] ?? "");
     if (Number.isFinite(declared) && declared > MAX_DOWNLOAD_BYTES) {
       throw new ApiError(413, "file_too_large", "that file is too large to download here", {
         bytes: declared,
@@ -1249,7 +1731,8 @@ export class MachineConnection {
       this.offlineReason = null;
       this.onChange();
     }
-    return response.blob();
+    const type = answer.headers["content-type"];
+    return new Blob([answer.bytes as Uint8Array<ArrayBuffer>], type === undefined ? {} : { type });
   }
 
   /**
@@ -1273,6 +1756,32 @@ export class MachineConnection {
     url.searchParams.set("since", String(since));
     url.searchParams.set("token", token);
     return url.toString();
+  }
+
+  /**
+   * One session's live socket, on whichever transport this route names.
+   *
+   * ⚠ **The credential is a query parameter on one arm and not on the other**,
+   * and the asymmetry is the improvement rather than an oversight.
+   * {@link streamUrl} above is the loopback arm and keeps `?token=` because a
+   * browser genuinely cannot set a header on a `WebSocket` handshake — but that
+   * URL never leaves this computer. Over the relay the socket is a *frame* inside
+   * a channel whose capability was presented once at the handshake, so there is
+   * no URL carrying a credential anywhere on that path: not in the app, not at
+   * the relay, and not on the daemon's own loopback dial, where `src/e2ee.ts`
+   * sends a header because Node can.
+   *
+   * Returns a {@link StreamSocket} rather than a `WebSocket`, which a real
+   * `WebSocket` satisfies structurally — so `stream.ts` keeps its rotation, its
+   * `Math.max` cursor, its dedup and its close-code table with one line changed
+   * and none of them aware there are two transports.
+   */
+  openStream(session: string, since: number, token: string, route: Route): StreamSocket {
+    if (route.kind === "relay") {
+      const path = `/sessions/${encodeURIComponent(session)}/stream?since=${String(since)}`;
+      return this.channelFor(route).openSocket(path);
+    }
+    return new WebSocket(this.streamUrl(session, since, token, route));
   }
 
   markUnreachable(reason: OfflineReason, detail: string | null = null): void {

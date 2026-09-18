@@ -99,6 +99,42 @@ export const SCHEMA_VERSION = 6;
 const BUSY_TIMEOUT_MS = 250;
 
 /**
+ * How many times `claimDaemonLock` re-reads the row and re-tries its conditional
+ * claim.
+ *
+ * An attempt loses only when another process rewrote the `daemon` row between
+ * this one's read and its write — which is the state the lock exists to refuse —
+ * so an unbounded loop would be a spin against a live competitor. Three is a
+ * bound rather than a tuning: it turns "somebody is racing me right now" into an
+ * error with a sentence in it instead of a hang.
+ */
+const DAEMON_LOCK_ATTEMPTS = 3;
+
+/**
+ * The partial unique index that holds *at most one live machine key*.
+ *
+ * One literal rather than two, because the two places that name it sit ~2,000
+ * lines apart and disagreeing fails in the worst direction:
+ * `migrateMachineKeysToOneLive` creates it, and `SqliteMachineKeyStore.save`
+ * recognises its violation **by name** in order to absorb exactly that one
+ * failure and rethrow every other. A drifted spelling would turn the one
+ * absorbable failure into an uncaught `ERR_SQLITE_ERROR` out of a daemon's start.
+ */
+const MACHINE_KEY_LIVE_INDEX = "machine_keys_one_live";
+
+/**
+ * `SQLITE_CONSTRAINT_UNIQUE`.
+ *
+ * Measured on node 26's `node:sqlite`: a second live row throws an `Error` with
+ * `code === "ERR_SQLITE_ERROR"`, `errcode === 2067` and the message
+ * `UNIQUE constraint failed: index 'machine_keys_one_live'`. A primary-key
+ * collision on the same table is a **different** number — 1555,
+ * `SQLITE_CONSTRAINT_PRIMARYKEY` — which is half of why
+ * `isLiveMachineKeyConflict` can be as narrow as it is.
+ */
+const SQLITE_CONSTRAINT_UNIQUE = 2067;
+
+/**
  * Eviction runs down to a mark *below* the bound rather than exactly to it.
  *
  * That is the whole of "amortized": one DELETE every ~256 appends instead of one
@@ -207,6 +243,8 @@ export interface StoreBundle {
   events: SqliteEventStore;
   sessions: SqliteSessionStore;
   identity: SqliteIdentityStore;
+  /** The X25519 statics an app authenticates this machine by. */
+  machineKeys: SqliteMachineKeyStore;
   credentials: SqliteAgentCredentialStore;
   /** Keys for the systems a harness can be routed at. */
   systemCredentials: SqliteSystemCredentialStore;
@@ -327,6 +365,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
   events.seedFloors(sessions.list());
 
   const identity = new SqliteIdentityStore(db);
+  const machineKeys = new SqliteMachineKeyStore(db);
   const credentials = new SqliteAgentCredentialStore(db);
   const systemCredentials = new SqliteSystemCredentialStore(db, options.onDegraded);
   const customAgents = new SqliteCustomAgentStore(db, options.onDegraded);
@@ -341,6 +380,7 @@ export function openStores(options: OpenStoresOptions): StoreBundle {
     events,
     sessions,
     identity,
+    machineKeys,
     credentials,
     systemCredentials,
     customAgents,
@@ -412,12 +452,37 @@ function applyPragmas(db: DatabaseSync, inMemory: boolean): void {
 }
 
 /**
- * The one thing `schema.sql` cannot express.
+ * What `schema.sql` cannot express — which is no longer only columns.
  *
  * That file is re-applied on every open and every statement in it is `CREATE
- * ... IF NOT EXISTS`, which is idempotent for whole tables and useless for a
- * column added to a table that already exists. A new table needs nothing here;
- * `sessions.owner_subject` does.
+ * ... IF NOT EXISTS`, which is idempotent for whole tables and useless for
+ * anything narrower. Three kinds of thing end up here, and the third is not a
+ * shape change at all:
+ *
+ *   - **A column on a table that already exists.** A new *table* needs nothing
+ *     here; `sessions.owner_subject` does. Most of this function is that.
+ *   - **A table shape `ALTER TABLE` cannot reach.** `migrateCredentialsToV6`
+ *     rekeys `agent_credentials` by the documented create-copy-drop-rename,
+ *     because SQLite cannot `DROP COLUMN` a member of the primary key — and it
+ *     drops `forge_accounts` outright, for what is in it.
+ *   - **A repair that changes data.** `migrateMachineKeysToOneLive` *retires*
+ *     every live `machine_keys` row but the oldest, and only then creates
+ *     `MACHINE_KEY_LIVE_INDEX`. That order is forced: the index cannot be
+ *     created at all on a file that already holds two live rows — which is
+ *     exactly the file the repair exists for — so the index can sit neither in
+ *     `schema.sql` nor ahead of the retirement.
+ *
+ * ⚠ **So this is not a shape-only function, and a reader who assumes it is will
+ * not expect a migration to rewrite rows or to speak.** All three of this file's
+ * prints hang off it — the collapsed credential, the dropped forge accounts, the
+ * retired machine keys — and they are the sanctioned exception to *"nothing in
+ * `src/` writes to stdout or stderr"* (Q4.29) for one reason: they run inside
+ * `openStores`, before the daemon has wired `onDegraded` or any other callback,
+ * so this is the only moment anybody can be told. None of the three is undone by
+ * anything in this build — the retirement at least leaves the private half on
+ * disk, the other two drop rows — which is why each print names both what it did
+ * and what the operator can still do about it: re-paste, revoke, or
+ * `cpctl admin clearkey`.
  *
  * Decided from `PRAGMA table_info` rather than from `user_version`, for two
  * reasons. It is idempotent by construction — it asks the database what it
@@ -425,11 +490,16 @@ function applyPragmas(db: DatabaseSync, inMemory: boolean): void {
  * the case where the stamp is wrong, which is reachable today: `stampSchemaVersion`
  * writes the stamp on a fresh file before anything else touches it, so a crash
  * between the two would leave a v2 stamp over a v1 table. Asking the table
- * cannot be wrong about the table.
+ * cannot be wrong about the table. Both destructive steps re-derive the same way
+ * — from the column they would rewrite, from `sqlite_master`, and from the rows
+ * that are actually live — so running twice is a no-op rather than a second
+ * rewrite.
  *
- * Runs between `refuseNewerSchema` and `stampSchemaVersion`, so the version is
- * stamped only once the file
- * genuinely matches it.
+ * Fenced on both sides, and every fence is about the destructive half. After
+ * `claimDaemonLock`, so no process rewrites rows in a file it is about to be
+ * refused; after `refuseNewerSchema`, so a file written by a newer build is never
+ * collapsed by this one; before `stampSchemaVersion`, so the version on disk
+ * still means every migration in this build has run against this file.
  */
 function migrate(db: DatabaseSync): void {
   const columns = db.prepare("PRAGMA table_info(sessions)").all();
@@ -526,6 +596,7 @@ function migrate(db: DatabaseSync): void {
   if (!has("relay_url")) db.exec("ALTER TABLE identity ADD COLUMN relay_url TEXT");
 
   migrateCredentialsToV6(db);
+  migrateMachineKeysToOneLive(db);
 }
 
 /**
@@ -604,8 +675,9 @@ function migrateCredentialsToV6(db: DatabaseSync): void {
   }
 
   // Counted before it is dropped, because after the DROP there is nothing left to
-  // count and nobody to tell. This is one of the two prints in this file — the
-  // collapsed-credential one above is the other — and together they are one of
+  // count and nobody to tell. This is one of the three prints in this file — the
+  // collapsed-credential one above and `migrateMachineKeysToOneLive`'s retirement
+  // notice below are the others — and together they are one of
   // the two sanctioned exceptions in `src/`, `src/plugins/runner.ts`'s stderr
   // write being the other (Q4.29); it earns the exception: the alternative is
   // destroying a credential somebody
@@ -633,6 +705,91 @@ function migrateCredentialsToV6(db: DatabaseSync): void {
       );
     }
   }
+}
+
+/**
+ * At most one live machine key, and the index that makes that true of the store
+ * rather than only of its callers.
+ *
+ * ⚠ **This exists because two daemons could once both mint one.**
+ * `claimDaemonLock` is a compare-and-set now and refuses the second process
+ * before any store is handed out — but it was a read followed by an
+ * unconditional write for every release up to this one, and a file that lost
+ * that race is on somebody's disk right now. `machine_keys.kth` is the
+ * thumbprint of the key the caller has just *generated*, so two racers produce
+ * two different primary keys, `ON CONFLICT(kth) DO NOTHING` never fires, and both
+ * rows land with `retired_at` NULL. `active()` orders `created_at DESC`, so every
+ * later start announces the **newer** key — which is not the one the Authority
+ * pinned on first enrollment, so every dial is refused 409 for ever and nothing
+ * on the machine says why. That is the state `cpctl admin clearkey` had to be
+ * written to repair.
+ *
+ * **The oldest live row is kept, and the argument is about who reached the
+ * Authority first.** Both racers walk the same path in the same order between
+ * generating a key and dialling, so the process holding the earlier `created_at`
+ * is the one that got to `enroll()` and to the dial first — and trust-on-first-use
+ * means the Authority pinned whichever key reached it first. That premise is
+ * checkable rather than assumed: `pinMachineKey` is one conditional `UPDATE ...
+ * WHERE machine_key IS NULL`, so the first *writer* wins and every later
+ * announcement is compared against it. An enrollment code is
+ * single-use, so at most one of the two can have enrolled at all. And after the
+ * lock fix, the process that created the *later* key is exactly the one
+ * `claimDaemonLock` now refuses: retiring its row is undoing the write the fixed
+ * lock would have prevented. It is a deterministic best estimate rather than a
+ * proof, which is why the print names the escape hatch instead of claiming the
+ * machine is fixed.
+ *
+ * **Retired rather than deleted**, so the private half stays on disk: a machine
+ * that really had been working on the newer key loses nothing that cannot be put
+ * back by hand. The `AND retired_at IS NULL` on the UPDATE is what makes a second
+ * run a no-op rather than a rewrite of when a key stopped being announced.
+ *
+ * It **prints**, for `migrateCredentialsToV6`'s reason and under the same
+ * exception: this runs inside `openStores`, before the daemon has wired any
+ * callback, so it is the only moment anybody can be told that a key stopped being
+ * announced. `onDegraded` would be the wrong channel even where one existed —
+ * `scripts/daemon.ts` prefixes it `store degraded:`, and a one-time repair is not
+ * a degradation.
+ *
+ * `SCHEMA_VERSION` deliberately does not move for the index, for
+ * `resume_gave_up`'s reason in `migrate` above: an older daemon inserts into this
+ * table only when `active()` is already null, so it can never reach the
+ * constraint, and a bump would turn every rollback into a daemon that will not
+ * start in exchange for exactly that nothing.
+ *
+ * And it cannot live in `schema.sql`. That file is one `exec` that runs **before**
+ * `claimDaemonLock` and before this repair, so on the very files this exists for —
+ * the ones already holding two live rows — `CREATE UNIQUE INDEX` throws at
+ * *creation* (measured: errcode 2067 there, not at some later insert) and the
+ * daemon would never start. Idempotent by re-derivation from the table, like the
+ * rest of `migrate()`.
+ */
+function migrateMachineKeysToOneLive(db: DatabaseSync): void {
+  // No `sqlite_master` guard, unlike the `forge_accounts` half above: `schema.sql`
+  // creates `machine_keys` with `IF NOT EXISTS` and is applied before `migrate`
+  // runs, so the table is always here. `forge_accounts` needed the guard precisely
+  // because nothing creates it any more.
+  const [kept, ...losers] = db
+    .prepare("SELECT kth FROM machine_keys WHERE retired_at IS NULL ORDER BY created_at ASC, kth ASC")
+    .all()
+    .map((row) => String(row["kth"]));
+  if (kept !== undefined && losers.length > 0) {
+    const retire = db.prepare("UPDATE machine_keys SET retired_at = ? WHERE kth = ? AND retired_at IS NULL");
+    const at = Date.now();
+    for (const kth of losers) retire.run(at, kth);
+    console.error(
+      `Reemoat: this database held ${losers.length + 1} live machine keys, which only two daemons ` +
+        `racing on one file could produce. Kept the oldest (${kept}); retired ${losers.join(", ")}. ` +
+        "If this machine is still refused on every dial, the control plane pinned one of the " +
+        "retired keys: clear it with `cpctl admin clearkey <machineId>` and restart this daemon.",
+    );
+  }
+  // Unconditional and `IF NOT EXISTS`, so a fresh file gets it too and there is
+  // exactly one shape of this table in the fleet from here on.
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS ${MACHINE_KEY_LIVE_INDEX} ` +
+      "ON machine_keys (retired_at IS NULL) WHERE retired_at IS NULL",
+  );
 }
 
 /**
@@ -664,36 +821,153 @@ function stampSchemaVersion(db: DatabaseSync): void {
   }
 }
 
+/** What one process saw in the single `daemon` row, or `null` for an empty table. */
+export interface DaemonRow {
+  instanceId: string;
+  pid: number;
+  startedAt: number;
+}
+
 /**
- * Refuses to start when another daemon already owns this file.
+ * Compare-and-set the single `daemon` row: take it only if it still holds
+ * exactly what this caller `observed`. Answers whether this caller got it.
+ *
+ * ⚠ **`IS` rather than `=` on all three columns — and the reason written here
+ * before was measured and is false.** It claimed that with `=` the
+ * nothing-observed case binds three NULLs and "an upsert whose `WHERE` is NULL
+ * updates nothing *and* tells you nothing". The second half does not hold:
+ * SQLite skips a `DO UPDATE ... WHERE` evaluating to NULL by the same rule it
+ * skips a false one, and reports the skip as `changes: 0` either way. Measured on
+ * node 26.3.0's `node:sqlite`, this exact upsert with `=` substituted for `IS`
+ * over a copy of this exact table, in all four states a caller can reach — empty
+ * table / observed nothing, racer row present / observed nothing (the interleave
+ * this exists for), row present / observed that row, row present / observed a
+ * stale row — both spellings answer `changes` 1, 0, 1, 0 and leave the same row
+ * behind. `=` is not blind here, so that is not the argument.
+ *
+ * **What `IS` buys is a comparison that is total.** `SELECT 'x' = NULL` is NULL
+ * where `SELECT 'x' IS NULL` is 0 (measured, same probe). So with `=` the
+ * nothing-observed case refuses for the right reason only while a bound NULL can
+ * never be a genuine match — which is not a property of this statement at all but
+ * of three `NOT NULL`s written one file over in `schema.sql`. `IS` says what this
+ * function means on its own: the row still holds exactly these three values, NULL
+ * included. The two spellings come apart the moment that schema fact does —
+ * measured on the same upsert over a nullable `instance_id` genuinely holding
+ * NULL, `IS` takes the row (`changes: 1`) and `=` refuses it (`changes: 0`),
+ * which in a compare-and-set loop is a daemon that can never claim a row it
+ * correctly observed.
+ *
+ * Under either spelling "I saw an empty table" loses cleanly against a row a
+ * racer has since inserted, which is the whole interleave this function exists
+ * for.
+ *
+ * Exported as a **seam**. The interleave it makes safe — two processes that both
+ * read an empty table, then both write — cannot be produced through `openStores`,
+ * which always makes its own read immediately before its own write; standing in
+ * for the losing racer means passing a *stale* observation, and only a caller
+ * that owns the observation can do that.
+ *
+ * ⚠ **And nothing outside this file calls it.** This said `scripts/daemoncheck.*`
+ * was the only other caller and was "the entire reason this is not a closure
+ * inside `claimDaemonLock`" — that driver was never written. No file but this one
+ * calls it, and `claimDaemonLock` one screen below is the only caller it has ever
+ * had. So the compare-and-set is asserted **nowhere**,
+ * and a regression to the unconditional `DO UPDATE` it replaced — the one whose
+ * measurement is in `claimDaemonLock`'s docblock — would be caught by no driver
+ * in this repository. Closing that needs both halves of one case and neither
+ * alone: a *stale* observation must answer `false` with the racer's row still
+ * standing (an unconditional write turns that one `true`), and the *matching*
+ * observation must answer `true` (which is what fails against a statement that
+ * never updates anything at all).
+ */
+export function takeDaemonRow(db: DatabaseSync, claimant: DaemonRow, observed: DaemonRow | null): boolean {
+  const result = db
+    .prepare(
+      "INSERT INTO daemon (id, instance_id, pid, started_at) VALUES (1, ?, ?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET instance_id = excluded.instance_id, " +
+        "pid = excluded.pid, started_at = excluded.started_at " +
+        "WHERE daemon.instance_id IS ? AND daemon.pid IS ? AND daemon.started_at IS ?",
+    )
+    .run(
+      claimant.instanceId,
+      claimant.pid,
+      claimant.startedAt,
+      observed?.instanceId ?? null,
+      observed?.pid ?? null,
+      observed?.startedAt ?? null,
+    );
+  return Number(result.changes) > 0;
+}
+
+/**
+ * Refuses to start when another daemon already owns this file, and claims it in
+ * one conditional statement rather than two unconditional ones.
  *
  * Two daemons on one path would hold stale in-memory `lastSeq` counters, collide
  * on the primary key, and drive every append in *both* processes into the
  * degradation path — and each would try to reap the other's agents as orphans.
+ *
+ * ⚠ **It was a SELECT and then an unconditional INSERT, and the gap between the
+ * two *was* the race.** Measured with two `DatabaseSync` handles on one WAL file,
+ * interleaved exactly as two daemons starting together against a file with no
+ * `daemon` row: both reads answer `undefined`, both upserts report `changes: 1`,
+ * the second silently overwrites the first, and **neither throws**. Both processes
+ * then walk on into `ensureMachineKey` and mint a machine key each — which is a
+ * permanent 409 on every dial, and is what `migrateMachineKeysToOneLive` above
+ * exists to repair. The claim is now conditional on the row still holding what
+ * this process *observed*, so a racer that read the same empty table gets
+ * `changes: 0`, loops, sees the winner on its next read, and is refused by the
+ * liveness check.
+ *
+ * The liveness probe cannot move into the SQL and that is why this is still a read
+ * *and* a write: `isAlive` is `process.kill(pid, 0)`, which SQLite has no
+ * expression for. What changed is that the write is now conditional on the read,
+ * which is the part that was missing.
  *
  * Rejected the harder `PRAGMA locking_mode = EXCLUSIVE`: it would make the file
  * unreadable by the `sqlite3` CLI while the daemon runs, and for a tool whose
  * whole value is "you can find out what your agents are doing", losing external
  * inspectability of the transcript store is a bad trade for a misconfiguration
  * that a clear error message already covers.
+ *
+ * Rejected `BEGIN IMMEDIATE` around the pair for a nearer reason: the loser does
+ * not lose, it *waits* out `BUSY_TIMEOUT_MS` and then throws a generic `database
+ * is locked` — measured, two handles on one WAL file: 322 ms against a 250 ms
+ * `busy_timeout`, then `ERR_SQLITE_ERROR` errcode 5 with no mention of what it
+ * lost to. That makes the only observable a **timeout**, which is on this
+ * repository's list of assertion shapes that stay green because they cannot
+ * fail; `changes` is a value, and a value can be asserted. It would
+ * also let an `sqlite3` write transaction somebody left open refuse the daemon a
+ * start, which is the same external-inspectability trade the paragraph above
+ * already declines.
  */
 function claimDaemonLock(db: DatabaseSync, instanceId: string, path: string): void {
-  const row = db.prepare("SELECT instance_id, pid, started_at FROM daemon WHERE id = 1").get();
-  if (row) {
-    const pid = Number(row["pid"]);
-    const startedAt = Number(row["started_at"]);
-    if (pid !== process.pid && startedAt >= bootTime() && isAlive(pid)) {
-      throw new Error(
-        `another Reemoat daemon (pid ${pid}, instance ${String(row["instance_id"])}) owns ${path}.\n` +
-          "  Stop it, or point this one somewhere else with REEMOAT_DB.",
-      );
+  for (let attempt = 0; attempt < DAEMON_LOCK_ATTEMPTS; attempt += 1) {
+    const row = db.prepare("SELECT instance_id, pid, started_at FROM daemon WHERE id = 1").get();
+    let observed: DaemonRow | null = null;
+    if (row) {
+      const pid = Number(row["pid"]);
+      const startedAt = Number(row["started_at"]);
+      if (pid !== process.pid && startedAt >= bootTime() && isAlive(pid)) {
+        throw new Error(
+          `another Reemoat daemon (pid ${pid}, instance ${String(row["instance_id"])}) owns ${path}.\n` +
+            "  Stop it, or point this one somewhere else with REEMOAT_DB.",
+        );
+      }
+      observed = { instanceId: String(row["instance_id"]), pid, startedAt };
     }
+    if (takeDaemonRow(db, { instanceId, pid: process.pid, startedAt: Date.now() }, observed)) return;
   }
-  db.prepare(
-    "INSERT INTO daemon (id, instance_id, pid, started_at) VALUES (1, ?, ?, ?) " +
-      "ON CONFLICT(id) DO UPDATE SET instance_id = excluded.instance_id, " +
-      "pid = excluded.pid, started_at = excluded.started_at",
-  ).run(instanceId, process.pid, Date.now());
+  // Only reachable while another process is rewriting this row *right now*, which
+  // is the state this function exists to refuse — so refusing is the answer rather
+  // than looping. `openStores`' caller turns any throw here into `could not open
+  // <path>` and exit 2, which is the same ending the message above already has.
+  throw new Error(
+    `could not claim ${path}: another process rewrote the daemon row under every one of ` +
+      `${DAEMON_LOCK_ATTEMPTS} attempts.\n` +
+      "  Something else is starting against this file right now. Stop it, or point this one " +
+      "somewhere else with REEMOAT_DB.",
+  );
 }
 
 /* ------------------------------------------------------------------------- *
@@ -2501,6 +2775,145 @@ export class SqliteIdentityStore {
       identity.relayUrl,
     );
   }
+}
+
+/** One X25519 static this machine answers on, as it is stored. */
+export interface StoredMachineKey {
+  /** The RFC 7638 thumbprint, which is the name this key is known by everywhere. */
+  kth: string;
+  /** 32 raw bytes, base64url. */
+  publicKey: string;
+  /** 32 raw bytes, base64url. The secret half; never leaves this process. */
+  privateKey: string;
+  createdAt: number;
+  retiredAt: number | null;
+}
+
+/**
+ * The X25519 statics this machine answers on.
+ *
+ * **Plural because retired rows accumulate, and at most one of them may be
+ * live** — enforced by `MACHINE_KEY_LIVE_INDEX`, the partial unique index over
+ * `retired_at IS NULL` that `migrateMachineKeysToOneLive` creates. `active()` is
+ * still `ORDER BY created_at DESC, kth ASC` and is left exactly as it is: with one
+ * live row the ordering is unobservable, and it is the ordering a rotation would
+ * be built on rather than one it would have to replace.
+ *
+ * ⚠ **The index narrows a documented future, and the trade is measured.** This
+ * docblock used to say the plural was here because "the only safe rotation is an
+ * overlap, and an overlap needs two rows". Nothing in this build can *answer* on
+ * two statics: `scripts/daemon.ts` calls `ensureMachineKey` once and hands
+ * `RelayTunnel.start` a single `machineKey`/`staticKey`, so a second live row buys
+ * no overlap and only poisons `active()` — it is how a machine ends up announcing
+ * a key the Authority never pinned, which is a permanent 409. A rotation that
+ * wants a real overlap drops this index in the same migration that teaches the
+ * responder to hold two keys at once; that is one line, and it is much cheaper
+ * than the failure class the index closes today.
+ *
+ * Like `SqliteIdentityStore`, every method here **throws rather than swallowing**,
+ * with exactly one exception: `save` absorbs the live-row index's constraint
+ * failure and nothing else, because losing that particular race means the winner's
+ * key is already in the table for the caller to read back. A daemon that cannot
+ * read its own key cannot be reached by any app, and starting anyway would mean a
+ * machine that looks online and refuses every handshake — which is worse than not
+ * starting.
+ */
+export class SqliteMachineKeyStore {
+  private readonly activeStmt: StatementSync;
+  private readonly saveStmt: StatementSync;
+  private readonly retireStmt: StatementSync;
+
+  constructor(db: DatabaseSync) {
+    this.activeStmt = db.prepare(
+      "SELECT kth, public_key, private_key, created_at, retired_at FROM machine_keys " +
+        "WHERE retired_at IS NULL ORDER BY created_at DESC, kth ASC LIMIT 1",
+    );
+    this.saveStmt = db.prepare(
+      "INSERT INTO machine_keys (kth, public_key, private_key, created_at) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT(kth) DO NOTHING",
+    );
+    this.retireStmt = db.prepare("UPDATE machine_keys SET retired_at = ? WHERE kth = ? AND retired_at IS NULL");
+  }
+
+  /** The key this machine answers on now, or `null` before one is generated. */
+  active(): StoredMachineKey | null {
+    const row = this.activeStmt.get();
+    if (!row) return null;
+    return {
+      kth: String(row["kth"]),
+      publicKey: String(row["public_key"]),
+      privateKey: String(row["private_key"]),
+      createdAt: Number(row["created_at"] ?? 0),
+      retiredAt: row["retired_at"] == null ? null : Number(row["retired_at"]),
+    };
+  }
+
+  /**
+   * Record a key.
+   *
+   * `DO NOTHING` rather than an upsert: the primary key is a hash *of the public
+   * half*, so a conflict means this exact key is already here, and overwriting
+   * would replace a private key with a byte-identical one.
+   *
+   * ⚠ **It is not a race guard, and this docblock claimed it was** — "at worst
+   * hide that two callers raced to generate". A race cannot reach the conflict at
+   * all: `kth` is `jwkThumbprint(x25519Jwk(publicKey))` over a key the caller has
+   * just generated, so two processes arriving together produce two *different*
+   * keys and two different primary keys. Both INSERTs would succeed, and the table
+   * would be left holding two rows with `retired_at` NULL — one of which
+   * `active()` will never choose again, while it is the row whose private half a
+   * live session may already have been built on.
+   *
+   * **What forbids that is the schema now, not a caller.**
+   * `MACHINE_KEY_LIVE_INDEX` is unique over `retired_at IS NULL`, so the loser's
+   * INSERT is refused with `SQLITE_CONSTRAINT_UNIQUE` — and this method absorbs
+   * that one failure rather than throwing, because by then the winner's key *is*
+   * in the table and `ensureMachineKey`'s read-back is about to return it. Two
+   * defences on purpose, and they are not redundancy: `claimDaemonLock` refuses
+   * the second daemon before any store is handed out, which is a caller's
+   * discipline and the fast path; the index refuses the second live *row* if a
+   * future caller ever gets past the lock, which is what makes the invariant true
+   * of this store rather than merely cited by it.
+   */
+  save(key: Omit<StoredMachineKey, "retiredAt">): void {
+    try {
+      this.saveStmt.run(key.kth, key.publicKey, key.privateKey, key.createdAt);
+    } catch (error) {
+      // Nothing is reported and nothing is retried on purpose: the only failure
+      // swallowed here is "somebody else already holds the live row", and the
+      // caller's next statement is the read-back that returns their key. A
+      // warning would fire on a path that is already correct, and a retry would
+      // be a retry of an INSERT that must never win.
+      if (!isLiveMachineKeyConflict(error)) throw error;
+    }
+  }
+
+  /** Retire one key by name. Nothing calls this yet; a rotation would. */
+  retire(kth: string, now = Date.now()): void {
+    this.retireStmt.run(now, kth);
+  }
+}
+
+/**
+ * Is this the live-row index refusing a second machine key, and nothing else?
+ *
+ * **Two independent things are matched, and both are load-bearing.** The errcode
+ * alone would be close to enough — `save`'s statement carries its own
+ * `ON CONFLICT(kth) DO NOTHING`, which resolves a primary-key collision before any
+ * index is consulted (measured: a re-save of the same `kth` answers
+ * `changes: 0`), and a raw primary-key violation would in any case be errcode
+ * **1555** rather than 2067. The name is what keeps this narrow *in the future*:
+ * the day somebody adds a second unique constraint to `machine_keys`, its
+ * violation stays a throw instead of becoming a silent no-op that loses a key.
+ *
+ * A store that swallows the wrong error is a machine with no key that says
+ * nothing, which is the failure this whole area exists to avoid — so the
+ * predicate is deliberately harder to satisfy than it strictly has to be.
+ */
+function isLiveMachineKeyConflict(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const errcode = (error as { errcode?: unknown }).errcode;
+  return Number(errcode) === SQLITE_CONSTRAINT_UNIQUE && error.message.includes(MACHINE_KEY_LIVE_INDEX);
 }
 
 /* ------------------------------------------------------------------------- *

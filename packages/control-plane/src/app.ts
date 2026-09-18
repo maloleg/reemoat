@@ -10,8 +10,11 @@ import {
   RELAY_PROTOCOL_MIN_VERSION,
   RELAY_PROTOCOL_VERSION,
   parseAgentClis,
+  parseMachineKey,
 } from "../../../src/relay/protocol.js";
-import { signToken, type TokenClaims } from "../../../src/token.js";
+import { jwkThumbprint, signToken, x25519Jwk, type TokenClaims } from "../../../src/token.js";
+import { deviceKeyFor } from "./devices.js";
+import { machineKeyFor, setMachineKey } from "./machinekeys.js";
 import {
   activePublicKeys,
   activeSigningKeys,
@@ -482,11 +485,12 @@ export interface ControlPlaneOptions {
    * The built **gate** bundle — the five sign-up and recovery screens, the legal
    * documents, and the handoff page. `null` or absent serves no HTML at all.
    *
-   * Separate from {@link ControlPlaneOptions.webRoot}, which is the whole app,
-   * and the split is the deployment: this one is in the image and served
-   * unconditionally, because every flow it carries begins in a mail client and
-   * has nowhere else to land; that one is a checkout's or a mounted directory's
-   * and is off by default.
+   * ⚠ **The only bundle this service serves.** It used to be the smaller of two:
+   * a second option named a built copy of the whole *app*, off by default and
+   * pointed at a checkout. That is deleted — a browser holds no device key, so it cannot open
+   * an encrypted channel to a daemon, and an app it can load but cannot use is
+   * worse than no app. The gate stays because every flow it carries begins in a
+   * **mail client** and has nowhere else to land.
    */
   gateRoot?: string | null;
   /**
@@ -501,22 +505,14 @@ export interface ControlPlaneOptions {
   /** Live tunnel state, or `null` when the relay is switched off. */
   relay?: RelayView | null;
   /**
-   * Absolute path to the built web client, or `null`/missing to serve no UI.
-   *
-   * A missing directory is not an error: `pnpm cp` has to start in a checkout
-   * that has never run a frontend build, and refusing to would make the API
-   * depend on a bundler.
-   */
-  webRoot?: string | null;
-  /**
    * Absolute path to `deploy/bootstrap.sh`, or `null`/missing to serve no
    * installer.
    *
    * `null` by default so `relaycheck`, which builds apps directly, needs no
    * change and no fixture: an option nobody passes registers no route. `main.ts`
-   * resolves the real path the same way it resolves `webRoot` — from its own
-   * file URL rather than the working directory — and `REEMOAT_CP_INSTALL=0`
-   * switches it off.
+   * resolves the real path from its own file URL rather than from the working
+   * directory, so it is the same in a checkout and in the image, and
+   * `REEMOAT_CP_INSTALL=0` switches it off.
    */
   bootstrapScript?: string | null;
   /**
@@ -602,15 +598,15 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   /*
    * Response headers, second, and **unconditionally**.
    *
-   * ⚠ **This sat inside `if (webRoot !== null && existsSync(webRoot))`, at the
-   * bottom of the file, and both halves of that were wrong.** An instance with
-   * `REEMOAT_CP_WEB=0` — the deployed shape whenever the bundle is served by
-   * something else — registered no header middleware at all. And registration
+   * ⚠ **This sat inside a guard on whether an app bundle was being served, at
+   * the bottom of the file, and both halves of that were wrong.** An instance
+   * serving no bundle — which is now every instance — registered no header
+   * middleware at all. And registration
    * order decides more than the guard did: Hono composes the handlers that match
    * a request in the order they were added and a route handler returns without
    * calling `next()`, so an `app.use("*")` registered *below* every `/v1` route
-   * never ran for one. The policy reached `serveStatic` and the SPA fallback and
-   * nothing else, which is why `/v1/*` JSON went out bare in **both**
+   * never ran for one. The policy reached the static mount and the page fallback
+   * below it and nothing else, which is why `/v1/*` JSON went out bare in **both**
    * configurations. Up here it wraps everything, the same argument
    * `gzipResponses` above it already makes about itself.
    *
@@ -657,11 +653,14 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    *
    * `/assets/` was tested first and returned, so *anything* answered 200 under
    * that prefix took the immutable arm whatever had actually been served. And
-   * something is: `looksLikeAsset` only refuses paths whose last segment has a
-   * dot, so an extensionless `/assets/foo` missed `serveStatic`, missed that
-   * refusal, and was answered by the SPA fallback with `index.html` — which
-   * then received a one-year immutable *public* directive on the exact file
-   * this middleware exists to keep fresh, poisoning any shared cache in front.
+   * something was: the fallback's asset test only refused paths whose last
+   * segment had a dot, so an extensionless `/assets/foo` missed `serveStatic`,
+   * missed that refusal, and was answered with `index.html` — which then received
+   * a one-year immutable *public* directive on the exact file this middleware
+   * exists to keep fresh, poisoning any shared cache in front. ⚠ **That fallback
+   * is deleted with the app bundle it served**, and this middleware is kept
+   * unchanged: it asks what was *served* rather than what was asked for, which is
+   * the half that was structural rather than a patch.
    *
    * Asking what was served rather than what was asked for makes that
    * structurally impossible instead of merely unlikely: an HTML body can never
@@ -1471,6 +1470,21 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     const body = await readJsonObject(c);
     if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
     const code = body["code"];
+    /*
+     * The daemon's own X25519 static, optional and additive.
+     *
+     * This is the **strongest** of the two ways a machine key reaches this
+     * service: it is handled here, in the API process, against a single-use code,
+     * so it never passes through the relay at all. The other way — announced on
+     * the tunnel dial — is what lets a machine enrolled before any of this existed
+     * migrate without anybody touching the host, and it is pinned on first use
+     * rather than trusted outright.
+     *
+     * Refused to `null` rather than refusing the enrollment: a daemon older than
+     * this sends nothing, and a daemon that sent something unreadable has a bug
+     * that must not cost it the one control-plane request it will ever make.
+     */
+    const announcedKey = parseMachineKey(body["machineKey"]);
     if (typeof code !== "string" || code.length === 0) {
       return jsonError(c, 400, "bad_request", "code is required");
     }
@@ -1586,6 +1600,17 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * worthless without a relay to present it to.
      */
     const tunnelKey = issueTunnelKey(db, machineId);
+
+    /*
+     * Recorded unconditionally, and this is the one place a pin is replaced.
+     *
+     * Redeeming a code already retires the machine's live tunnel key, so this is
+     * the act that means *this machine is starting again* — which makes it the
+     * natural home for the rotation story rather than a second mechanism beside
+     * it. A daemon whose key is gone generates a fresh one and its owner redeems
+     * a fresh code; there is no third thing to run.
+     */
+    if (announcedKey !== null) setMachineKey(db, machineId, announcedKey, now);
 
     // Every active key, not just the signing one: a daemon never comes back for
     // more, so a rotation in flight has to be handed over in full or the daemon
@@ -3235,7 +3260,18 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       caller.sessionId,
       caller.userId,
     );
-    return c.json({ id: deviceId, name: input.name, platform: input.platform });
+    /*
+     * `hasKey` rather than the key: the caller just sent it, so echoing it back
+     * says nothing — what it cannot otherwise know is whether this service kept
+     * it, which is exactly what a client that has just re-keyed needs to hear
+     * before it tries to mint.
+     */
+    return c.json({
+      id: deviceId,
+      name: input.name,
+      platform: input.platform,
+      hasKey: deviceKeyFor(db, deviceId) !== null,
+    });
   });
 
   /* ---------------------------------------------------------------- *
@@ -3318,6 +3354,18 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         createdAt: row.createdAt,
         revokedAt: row.revokedAt,
         lastSeenAt: row.lastSeenAt,
+        /*
+         * Whether this installation can reach a machine at all, as one word.
+         *
+         * ⚠ **Not the key.** The screen's question is *can this one connect*, and
+         * answering it with 43 characters of base64url would put a value on a row
+         * for somebody to copy, compare, or paste into a support conversation —
+         * none of which is a thing to do with a key. `false` covers a row from
+         * before keys existed and one whose credential store lost the key, and
+         * both draw the same sentence because both have the same remedy.
+         */
+        hasKey: row.hasKey,
+        keySetAt: row.keySetAt,
         // Which row this request came through, so the client can label it and
         // warn before somebody retires the thing they are holding.
         current: caller.deviceId !== null && row.id === caller.deviceId,
@@ -4575,6 +4623,33 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       return jsonError(c, 403, "no_scopes", "this grant carries no usable scopes");
     }
 
+    /*
+     * The key this capability is bound to, and the only way to be sure it is a
+     * capability rather than a bearer token.
+     *
+     * ⚠ **A capability is minted without one only for a caller that has no
+     * installation to bind to**, which is an API key — a key is not a sign-in, so
+     * there is no device, which is the same reason `POST /v1/me/devices` refuses
+     * one. Such a capability works over loopback and is refused by any daemon it
+     * reaches over an encrypted channel, which is the honest shape: the binding
+     * is a property of the channel, so a caller with no channel is not being let
+     * off anything.
+     *
+     * For a signed-in installation that has registered no key, the answer is a
+     * **refusal with a remedy** rather than an unbound capability. Minting one
+     * would hand somebody a credential that cannot open a session and a message
+     * about the wrong thing when it fails.
+     */
+    const deviceKey = caller.deviceId === null ? null : deviceKeyFor(db, caller.deviceId);
+    if (caller.deviceId !== null && deviceKey === null) {
+      return jsonError(
+        c,
+        409,
+        "device_key_required",
+        "this installation has not registered a device key, so no capability can be bound to it",
+      );
+    }
+
     const nowSeconds = Math.floor(Date.now() / 1000);
     const claims: TokenClaims = {
       iss: issuer,
@@ -4587,6 +4662,20 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       nbf: nowSeconds,
       exp: nowSeconds + tokenTtlSeconds,
       scp: scopes,
+      /*
+       * RFC 7800's confirmation claim. The daemon compares this against the static
+       * key the encrypted handshake authenticated, so a copy of this capability is
+       * worth nothing to whoever copied it.
+       *
+       * The thumbprint is computed here from the same function the daemon uses —
+       * one implementation in `src/token.ts`, which this service is allowed to
+       * reach — because two spellings of one key's name is the way a right device
+       * comes to read as a wrong one.
+       */
+      ...(deviceKey === null ? {} : { cnf: { jkt: jwkThumbprint(x25519Jwk(Buffer.from(deviceKey, "base64url"))) } }),
+      // Advisory, never a decision, and only so a refusal can name an
+      // installation somebody can go and look at.
+      ...(caller.deviceId === null ? {} : { dev: caller.deviceId }),
     };
 
     return c.json({
@@ -4605,6 +4694,21 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         // The one that decides whether the browser reaches this machine at all.
         relayUrl: relayUrlFor(machineId),
         relayOnline: relayOnline(machineId),
+        /*
+         * The static the app must see this machine answer on.
+         *
+         * Here rather than on `GET /v1/machines`, and in the same answer as the
+         * route, for the reason the route itself is here: minting is also how a
+         * client learns where a machine is, and splitting the two would create two
+         * facts that can disagree about one machine. A key and a route are the
+         * same kind of fact — both are *how to reach this thing* — so they are
+         * kept in step by construction rather than by a second fetch.
+         *
+         * `null` for a machine that has not dialled since it learned to announce
+         * one. The client turns that into a sentence about updating that machine,
+         * never into a session without it: there is no mode to fall back to.
+         */
+        key: machineKeyFor(db, machineId),
       },
       // So a client can tell "my clock is wrong" from "the token was refused".
       serverTime: Date.now(),
@@ -5097,7 +5201,14 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      * `http://` for a service running plain HTTP behind Traefik, and would then
      * decide a correctly configured `https://` value was a different origin.
      */
-    const mailSettings = mailConfigured(db, webRoot === null ? installOrigin(c, trustedProxyHops) : null);
+    /*
+     * ⚠ **The condition is gone because it had one answer.** It read *"if this
+     * process serves no app bundle, tell the caller which address to reach the
+     * gate on"* — and no process serves one any more, so the address is always
+     * wanted. `installOrigin` rather than `publicUrl` is what keeps the
+     * comparison honest behind a TLS proxy.
+     */
+    const mailSettings = mailConfigured(db, installOrigin(c, trustedProxyHops));
     return c.json({
       settings: SETTING_KEYS.map((key) => {
         const resolved = readSetting(db, key);
@@ -6336,6 +6447,77 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   });
 
   /**
+   * Forget the encryption key pinned for a machine, so its next dial pins the one
+   * it announces.
+   *
+   * **The escape hatch `machinekeys.ts` argues trust-on-first-use from, made
+   * reachable.** That module refuses a dial announcing a key that disagrees with
+   * the pinned one, and justifies refusing rather than adopting by saying the way
+   * back is re-enrollment. That is now true — `POST /v1/enroll` replaces the pin
+   * when the daemon sends its key with the code — but it is true only for a daemon
+   * new enough to *send* one. Every daemon already in the field announces its key
+   * on the dial alone, so re-enrolling one of those leaves the stale pin exactly
+   * where it was and the 409 repeating on its backoff for ever. For those machines
+   * this route is the whole remedy, and the alternative it replaces is editing this
+   * service's SQLite by hand.
+   *
+   * ⚠ **It re-opens the first-use window for one machine, and that is the cost.**
+   * Whatever dials next is pinned. What bounds it is the credential that dial
+   * already had to present: `resolveTunnelKey` derives the machine id **from** the
+   * tunnel key rather than from any field the caller sends, so the only party that
+   * can pin a key here is one that can already hold this machine's tunnel — which
+   * is what "being this machine" means. Clearing widens *when* a key may be pinned,
+   * never *who* may pin one.
+   *
+   * ⚠ **And it makes the machine unreachable until that dial.** `POST /v1/tokens`
+   * answers `machine.key: null` for an unpinned machine, and the app has no
+   * unencrypted mode to fall back to — it draws a sentence about that machine
+   * rather than opening a session. Sessions already running are untouched: the pin
+   * is read when a capability is minted and never again. `cpctl` says both halves
+   * out loud, because the operator running this is the one who has to know the
+   * order.
+   *
+   * Idempotent, for `DELETE /v1/admin/users/:id/machine-limit`'s reason: an
+   * operator asking for this machine to have no pin got what they asked for
+   * whether or not a row changed, and `cleared` says which it was rather than
+   * turning the second attempt into an error.
+   *
+   * `previousKey` is returned deliberately. It is a public key, this route is
+   * admin-only, and this is the only moment anybody can write down what *was*
+   * pinned — nothing else in this service ever reports it, so refusing it here
+   * would mean the act of repairing a mismatch also destroys the evidence of what
+   * the mismatch was.
+   *
+   * Refused for a revoked machine, mirroring the enrollment mint above: a revoked
+   * machine dials nothing, so there is no pin for it to repair and the honest
+   * answer names the state rather than quietly succeeding at nothing.
+   */
+  app.delete("/v1/admin/machines/:id/machine-key", requireAdmin, (c) => {
+    const machineId = c.req.param("id");
+    const machine = db.prepare("SELECT id, revoked_at FROM machines WHERE id = ?").get(machineId);
+    if (!machine) return jsonError(c, 404, "machine_not_found", "no such machine");
+    if (machine["revoked_at"] !== null) {
+      return jsonError(c, 403, "machine_revoked", "this machine has been revoked");
+    }
+
+    /*
+     * Read before the write, and this is the one statement outside
+     * `machinekeys.ts` that touches the column.
+     *
+     * That module holds the *policy* — pin the first, accept the same, refuse a
+     * different one — which is a rule about what a dial may do. This is an
+     * operator undoing the result of that rule, which is not a fourth outcome of
+     * the policy and does not belong inside it. The read is `machineKeyFor`, so
+     * what is reported here cannot come to disagree with what `POST /v1/tokens`
+     * would have handed an app one request earlier.
+     */
+    const previousKey = machineKeyFor(db, machineId);
+    db.prepare("UPDATE machines SET machine_key = NULL, machine_key_set_at = NULL WHERE id = ?").run(machineId);
+
+    return c.json({ machineId, cleared: previousKey !== null, previousKey });
+  });
+
+  /**
    * The admin's revoke, and it is the owner's route's twin — same three writes,
    * same transaction, same `burnMachineCodes`. See `POST /v1/machines/:id/revoke`
    * for why the ownership row has to go with the other two.
@@ -6743,9 +6925,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * `callerAuth` is mounted on `/v1/*`, so nothing outside that prefix has ever
    * reached it. What decides this route's placement is the two handlers *below*
    * it. It must come before `serveStatic`, or a stray `install.sh` in `dist`
-   * would answer first with an unsubstituted copy; and before the SPA fallback,
-   * which refuses it anyway — `looksLikeAsset` matches a trailing `.sh`, which
-   * is exactly what makes `/install.sh` a free path.
+   * would answer first with an unsubstituted copy. (The SPA fallback it also had
+   * to precede is gone with the app bundle; the gate's closed list never claimed
+   * this path.)
    *
    * ⚠ **The substituted value is caller-influenced, and unquoted it is remote
    * code execution in a script people pipe into `sh`.** `publicUrl` is
@@ -6827,9 +7009,10 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * only remedy this service has for a forgotten password, and with SMTP
    * configured an account does not exist until `/confirm` is opened.
    *
-   * `webRoot` is the whole app, and the image carries none of it —
-   * `REEMOAT_CP_WEB` names a path on a checkout or a mounted directory. Off is
-   * the default and the deployed shape: the Reemoat app compiles its own copy of
+   * ⚠ **There is one bundle now.** A second option named a built copy of the
+   * whole app for a checkout to serve; it is deleted, because a browser cannot
+   * reach a daemon at all any more — no device key, no encrypted channel — so
+   * what it could load it could not use. The Reemoat app compiles its own copy of
    * the interface into its binary and never downloads one.
    *
    * ⚠ **The gate is a separate *build*, not a second entry point in the app's.**
@@ -6840,18 +7023,6 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * directory and be structurally unable to serve the other.
    * ------------------------------------------------------------------ */
   const gateRoot = options.gateRoot ?? null;
-  /*
-   * Read **before** the gate block, not after it, and that ordering is the whole
-   * of the fix below. Hono runs handlers in registration order, so the gate's
-   * closed-list `app.get("*")` is reached first and — when it answered the 404
-   * itself — the app's static mount and SPA fallback fifty lines down were
-   * unreachable. Every app address answered `{"error":"not_found"}` on any
-   * deployment carrying both bundles, which is exactly what `REEMOAT_CP_WEB`
-   * documents. Nothing caught it: `relaycheck` builds one app with a `gateRoot`
-   * and a different app with a `webRoot`, and never one with both.
-   */
-  const webRoot = options.webRoot ?? null;
-  const servesApp = webRoot !== null && existsSync(webRoot);
   if (gateRoot !== null && existsSync(gateRoot)) {
     app.use("*", serveStatic({ root: gateRoot, precompressed: true }));
 
@@ -6876,94 +7047,25 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       [...GATE_SCREEN_PATHS, ...LEGAL_DOC_PATHS, APP_HANDOFF_PATH].map((name) => `/${name}`),
     );
 
-    app.get("*", async (c, next) => {
+    app.get("*", async (c) => {
       const path = c.req.path;
       if (!GATE_PATHS.has(path)) {
         /*
-         * ⚠ **`next()` and never a 404 when an app is also served here.** The
-         * closed list is a statement about what *the gate* answers, not about
-         * what this service answers — so a path outside it has to fall through
-         * to the app's own static mount and SPA fallback below. Answering here
-         * makes this handler the last word for every address the app owns.
+         * ⚠ **This deferred to a second bundle and now cannot, because there is
+         * not one.** `REEMOAT_CP_WEB` named a built copy of the *app* that this
+         * service would mount beside the gate; it is deleted, because a browser
+         * holds no device key and therefore cannot open an encrypted channel to
+         * any daemon — serving it the app means serving a machine list that opens
+         * nothing.
          *
-         * The 404 stays for the deployed shape, which carries no app bundle at
-         * all: there it is the only refusal there is, and it is the one this
-         * service answers everywhere else.
+         * So the 404 is unconditional, which is what the deployed shape always
+         * did anyway. The registration-order trap this block recorded is gone
+         * with the second bundle rather than fixed: there is one static mount, so
+         * there is nothing for the gate's closed list to shadow.
          */
-        if (servesApp) return await next();
         return jsonError(c, 404, "not_found", "no such endpoint");
       }
       return serveGate(c, async () => undefined);
-    });
-  }
-
-  if (servesApp && webRoot !== null) {
-    app.use("*", serveStatic({ root: webRoot, precompressed: true }));
-
-    /*
-     * The SPA fallback serves the *same file from disk* that `/` does.
-     *
-     * It used to hold a `readFileSync` copy taken once at registration, on the
-     * reasoning that the bundle is immutable per build and a rebuild restarts the
-     * process. The first half is true and the second is not: `pnpm web:build`
-     * rewrites `dist/` under a running control plane, and nothing restarts it.
-     *
-     * What that produced is the worst shape a bug can have — the two ways of
-     * getting the same page disagreed. `/` goes through `serveStatic`, which stats
-     * and streams from disk, so it returned the *new* HTML with the new hashed
-     * chunk names. Every client-side route (`/m/:machine/s/:session`, `/settings`)
-     * fell through to here and returned the *old* HTML, naming chunks Vite had
-     * already deleted. Measured 2026-08-01 against a running instance: `/` served
-     * `index-BnlrEjly.js` while `/m/…/s/…` served `index-0vnvikLW.js`, and that
-     * file answered `404`. So the home screen worked and reloading on a session
-     * gave a blank white page with an empty `<div id="root">` — no error, nothing
-     * to read, on a phone with no console. Restarting the process "fixed" it,
-     * which is exactly what makes it a trap rather than a bug somebody finds.
-     *
-     * One mechanism for both, so they cannot drift apart again. It also costs no
-     * synchronous I/O in the handler, which was the real point of caching: this
-     * process carries every relay tunnel, and `serveStatic` stats and streams
-     * asynchronously.
-     *
-     * `/v1` and `/health` are excluded explicitly. They reach here only when they
-     * name nothing — a typo, or a route from a newer client — and answering that
-     * with 200 and a page of HTML would turn "this endpoint does not exist" into
-     * a JSON parse error somewhere much further away.
-     *
-     * So are paths that look like an asset. A stale `index.html` in a phone's
-     * cache asks for a hashed chunk that a rebuild has removed; answering that
-     * with a page of HTML makes the browser report a MIME type error instead of
-     * the 404 that would tell it to reload.
-     */
-    const serveIndex = serveStatic<AppEnv>({ root: webRoot, path: "index.html" });
-
-    app.get("*", async (c) => {
-      const path = c.req.path;
-      if (path === "/health" || path === "/v1" || path.startsWith("/v1/")) {
-        return jsonError(c, 404, "not_found", "no such endpoint");
-      }
-      /*
-       * The whole `/assets/` namespace, not only the paths that look like files.
-       *
-       * That directory belongs to the bundle: `serveStatic` has already answered
-       * everything really in it, so reaching here under that prefix means the
-       * file is gone — and a client-side route never lives there (they are `/`,
-       * `/new`, `/new/:machine`, `/m/:machine/s/:session` and `/settings`).
-       *
-       * `looksLikeAsset` alone let an extensionless `/assets/foo` through to a
-       * page of HTML at 200, which the cache middleware above then stamped
-       * immutable for a year. Refusing the prefix outright is the honest answer
-       * to "that chunk is not here" and removes the case rather than handling it.
-       */
-      if (path.startsWith("/assets/") || looksLikeAsset(path)) {
-        return jsonError(c, 404, "not_found", "no such endpoint");
-      }
-      // `serveStatic` answers with the file or calls `next` — and its `next` here
-      // is a no-op, so "it returned nothing" means there is no `index.html` behind
-      // an otherwise present web root. That stays a JSON 404 rather than becoming
-      // a confusing blank page, which is what the old `indexHtml === null` arm did.
-      const served = await serveIndex(c, async () => {});
-      return served ?? jsonError(c, 404, "not_found", "no such endpoint");
     });
   }
 
@@ -6971,10 +7073,11 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * **Every unmatched path answers in this service's own envelope, whatever the
    * method.**
    *
-   * The `/v1/` arm above is inside `app.get("*")` and inside the `webRoot`
-   * branch, so it covered exactly one method on one deployment shape. Everything
-   * else — a `PUT` or `DELETE` to a path this build does not serve, or any
-   * method at all when no web root is configured — fell through to Hono's
+   * The `/v1/` arm it replaced was inside an `app.get("*")` that only existed
+   * when an app bundle was served, so it covered exactly one method on one
+   * deployment shape — and that shape no longer exists at all. Everything else —
+   * a `PUT` or `DELETE` to a path this build does not serve, or any
+   * method at all — fell through to Hono's
    * default plain-text `404 Not Found`, against `docs/API.md`'s *every non-2xx
    * answers one envelope* and its *read the code, never the status*.
    *
@@ -7057,23 +7160,6 @@ function adminMachineProjection(
     owner: ownerFor(id),
     lastSeenAt: lastSeen(id),
   };
-}
-
-/**
- * A request for a file, rather than for a client-side route.
- *
- * `serveStatic` runs first and answers anything that exists, so reaching the SPA
- * fallback with an extension means the file is *gone* — the usual cause being a
- * phone holding a cached `index.html` that references a hashed chunk a rebuild
- * replaced. Serving HTML there produces a MIME type error in the console; a 404
- * tells the browser what actually happened.
- *
- * The last path segment, because a client-side route may well contain a dot
- * (`/sessions/some.host`) while an asset's dot is in its filename.
- */
-function looksLikeAsset(path: string): boolean {
-  const last = path.slice(path.lastIndexOf("/") + 1);
-  return /\.[a-zA-Z0-9]{1,8}$/.test(last);
 }
 
 /**

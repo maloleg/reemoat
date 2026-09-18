@@ -62,6 +62,26 @@ function check(name: string, got: unknown, want: unknown): void {
   process.stdout.write(`  FAIL  ${name}\n        got  ${JSON.stringify(got)}\n        want ${JSON.stringify(want)}\n`);
 }
 
+/**
+ * A property that holds, with the measurement beside it.
+ *
+ * `daemoncheck`, `relaycheck` and `webcheck` all grew one of these and this file
+ * had not: every assertion here whose subject is really a *bound* — "the census
+ * saw more than nothing", "both lists were non-empty" — had to be written as an
+ * equality against `true`, which then says `ok` and nothing else. The detail
+ * string is what keeps a non-vacuity report readable: "17 commands, 4 of them
+ * declared with arguments" says something `ok` on its own does not, and it is the
+ * half a reader needs when the question is whether the check still bites.
+ */
+function report(name: string, ok: boolean, detail: string): void {
+  if (ok) {
+    process.stdout.write(`  ok    ${name}  (${detail})\n`);
+    return;
+  }
+  failures += 1;
+  process.stdout.write(`  FAIL  ${name}  (${detail})\n`);
+}
+
 function read(rel: string): string {
   return readFileSync(join(ROOT, rel), "utf8");
 }
@@ -78,6 +98,36 @@ function json(rel: string): Record<string, unknown> {
  */
 function capture(text: string, re: RegExp): string | null {
   return re.exec(text)?.[1] ?? null;
+}
+
+/**
+ * One function's body, cut between two anchors, or the empty string.
+ *
+ * ⚠ **`source.slice(source.indexOf(a), source.indexOf(b))` widens silently when
+ * the *closing* anchor moves, and the `length > 0` floor beside every such slice
+ * cannot see it.** A missing `indexOf` answers `-1`, and `String.slice` reads a
+ * negative end as *counting from the end* — so the slice does not empty, it runs
+ * to one character short of the file. Measured on the three call sites in this
+ * file on 2026-09-17: `writeStored` 4078 → 32958 characters, `keyFallback`
+ * 222 → 25776, `setServerBody` 465 → 7057 — every one of them with its floor
+ * still printing `ok`.
+ *
+ * What that costs is the assertion, not the floor. Every positive line over such
+ * a slice — "a device key is written through that one writer", "adopting a server
+ * gives up the previous one's sign-in" — goes on matching, from **some other
+ * function's body**, and says `ok` about a claim nothing checked any more. That is
+ * the failure this repository keeps finding: an assertion that cannot fail.
+ *
+ * So both anchors have to be present and in order, and anything else is the empty
+ * string, which is what the floors were written to catch. The opening anchor was
+ * already covered — `slice(-1, b)` is empty — and this makes the pair symmetric
+ * rather than accidentally half-safe.
+ */
+function between(source: string, from: string, to: string): string {
+  const start = source.indexOf(from);
+  const end = source.indexOf(to);
+  if (start < 0 || end < 0 || end <= start) return "";
+  return source.slice(start, end);
 }
 
 /**
@@ -114,6 +164,51 @@ function flat(rust: string): string {
     .replace(/ ?\. ?/g, ".")
     .replace(/\( /g, "(")
     .replace(/,? \)/g, ")");
+}
+
+/**
+ * The JSON names a serde-derived struct body actually answers to.
+ *
+ * ⚠ **Walked line by line rather than matched as one pattern, and that walk is the
+ * whole thing being compared.** A field's JSON name is the `serde(rename = "…")`
+ * on the line above it where there is one and its own Rust spelling where there is
+ * not — so a single regex that got the lookbehind subtly wrong would answer a
+ * *superset* of the real names and pass for ever, which is the one failure a
+ * census of this kind cannot survive.
+ *
+ * `pub` is optional because both shapes are read through here: `Stored` in
+ * `local.rs` is private to its module and every payload struct that crosses the
+ * bridge is `pub`. One reader rather than one per caller, because this loop was
+ * already written down twice — and the second copy was added by extracting the
+ * first, with a comment saying so, which is exactly how a third would arrive.
+ */
+function rustJsonKeys(body: string): string[] {
+  const keys: string[] = [];
+  let pending: string | null = null;
+  for (const line of body.split("\n")) {
+    const rename = /serde\(rename = "(\w+)"\)/.exec(line);
+    if (rename !== null) {
+      pending = rename[1] ?? null;
+      continue;
+    }
+    const field = /^\s{4}(?:pub )?(\w+): /.exec(line);
+    if (field === null) continue;
+    keys.push(pending ?? field[1] ?? "");
+    pending = null;
+  }
+  return keys.sort();
+}
+
+/**
+ * The property names a TypeScript interface body declares, optional ones included.
+ *
+ * Anchored at exactly two spaces, which is what keeps a docblock out of the
+ * answer: a continuation line is `   * …` — three spaces then an asterisk — so the
+ * `\w` after the indent never matches, and `{@link DaemonState.machineId}` inside
+ * one cannot be read as a field.
+ */
+function tsInterfaceKeys(body: string): string[] {
+  return [...body.matchAll(/^\s{2}(\w+)[?]?:/gm)].map((m) => m[1] ?? "").sort();
 }
 
 const NATIVE = "packages/native";
@@ -216,8 +311,10 @@ check("OS file drops still reach the webview", main["dragDropEnabled"], false);
 /*
  * What makes `packages/web` need **zero** `@tauri-apps/*` npm packages: this
  * global is the whole bridge surface, read through a hand-written interface in
- * `packages/web/src/native.ts` exactly as `telegram.ts` reads
- * `window.TelegramWebviewProxy`. Asserted from both sides, because either alone
+ * `packages/web/src/native.ts`. The idiom is inherited rather than invented — the
+ * deleted `telegram.ts` read `window.TelegramWebviewProxy` through exactly that
+ * shape, and it went out of the tree with the mini-app host it served, so this is
+ * the last place the pattern is described. Asserted from both sides, because either alone
  * would pass while the other broke — a dependency added to the web manifest ships
  * a native-only module inside the bundle the control plane's image serves.
  */
@@ -429,26 +526,12 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
   const stored = capture(rs, /struct Stored \{([\s\S]*?)\n\}/);
   check("and the shell's side of it", stored !== null, true);
   /*
-   * Walked line by line rather than matched as one pattern: a field's JSON name is
-   * the `rename` on the line above it when there is one and its own name when there
-   * is not, and that "when there is one" is the whole thing being compared. A
-   * single regex that got the lookbehind subtly wrong would answer a *superset* and
-   * pass for ever.
+   * `rustJsonKeys` is that walk, and its docblock carries the argument for why it
+   * is a walk: a field's JSON name is the `rename` on the line above it when there
+   * is one and its own name when there is not, and a single regex that got the
+   * lookbehind subtly wrong would answer a *superset* and pass for ever.
    */
-  const readJsonKeys: string[] = [];
-  let pending: string | null = null;
-  for (const line of (stored ?? "").split("\n")) {
-    const rename = /serde\(rename = "(\w+)"\)/.exec(line);
-    if (rename !== null) {
-      pending = rename[1] ?? null;
-      continue;
-    }
-    const field = /^\s{4}(\w+): /.exec(line);
-    if (field === null) continue;
-    readJsonKeys.push(pending ?? field[1] ?? "");
-    pending = null;
-  }
-  readJsonKeys.sort();
+  const readJsonKeys = rustJsonKeys(stored ?? "");
 
   check("both sides were found to have fields", [writtenKeys.length > 0, readJsonKeys.length > 0], [true, true]);
   check("and the daemon writes exactly what the shell reads", writtenKeys, readJsonKeys);
@@ -478,8 +561,9 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
  * this class in so many words: *"A field renamed on one side is not a compile
  * error anywhere… Nobody would find it."*
  *
- * The reader is the one above, extracted: a field's JSON name is the `rename` on
- * the line before it where there is one and its own name where there is not.
+ * The reader is `rustJsonKeys`, shared with the pair above: a field's JSON name is
+ * the `rename` on the line before it where there is one and its own name where
+ * there is not.
  * ------------------------------------------------------------------ */
 
 {
@@ -487,24 +571,11 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
 
   const declared = capture(ts, /export interface NativeBoot \{([\s\S]*?)\n\}/);
   check("the page's side of the boot payload was readable", declared !== null, true);
-  const pageKeys = [...(declared ?? "").matchAll(/^\s{2}(\w+)[?]?:/gm)].map((m) => m[1] ?? "").sort();
+  const pageKeys = tsInterfaceKeys(declared ?? "");
 
   const boot = capture(commandsRs, /pub struct Boot \{([\s\S]*?)\n\}/);
   check("and the shell's side of it", boot !== null, true);
-  const hostKeys: string[] = [];
-  let pending: string | null = null;
-  for (const line of (boot ?? "").split("\n")) {
-    const rename = /serde\(rename = "(\w+)"\)/.exec(line);
-    if (rename !== null) {
-      pending = rename[1] ?? null;
-      continue;
-    }
-    const field = /^\s{4}pub (\w+): /.exec(line);
-    if (field === null) continue;
-    hostKeys.push(pending ?? field[1] ?? "");
-    pending = null;
-  }
-  hostKeys.sort();
+  const hostKeys = rustJsonKeys(boot ?? "");
 
   check("both sides were found to have fields", [pageKeys.length > 0, hostKeys.length > 0], [true, true]);
   check("and the shell sends exactly what the page declares", hostKeys, pageKeys);
@@ -548,10 +619,178 @@ process.stdout.write("\nthe announcement, from both sides of it\n");
   check("the strip had something to remove", bootDecl.length > bootCode.length, true);
 }
 
+/* ------------------------------------------------------------------ *
+ * The other three payloads, which had no census at all
+ *
+ * ⚠ **`Boot` is not the only struct that crosses this bridge by hand-written
+ * `serde(rename)`, and it was the only one anybody was watching.** The block above
+ * states the failure in full — a camelCase field that forgets its own `rename`
+ * serializes under its Rust spelling, the page reads `undefined` for ever, and
+ * `tsc`, `cargo`, `cargo test`, `webcheck` and the command census are all green.
+ * Nothing about that argument is specific to `Boot`. Three more payloads are shaped
+ * exactly the same way and were reaching the page on trust:
+ *
+ *   - `DeviceKey` (`device.rs`) — `publicKey` and `atRest`. Drop either `rename`
+ *     and `hostDeviceKeyReset` answers an object with the right *shape* and the
+ *     wrong *keys*: `fresh.publicKey` is `undefined`, `boot.devicePublicKey` is
+ *     overwritten with it, and the Devices screen shows a re-key that appears to
+ *     have worked while the app now holds no public half to register. That is the
+ *     `wrong_device` loop `e2ee.md` describes, arriving from the inside.
+ *   - `DaemonState` (`daemon.rs`) — `machineId` and `exitCode`. The setup screen
+ *     polls this once a second; `exitCode` is the *structured* half of "why did it
+ *     stop", and its docblock says in so many words that it is the reason no arm
+ *     in the store reads the log. A dropped `rename` makes `3` (the control plane
+ *     refused the code) and `4` (it could not be reached) both read as `null`,
+ *     which is the arm for "signalled, or we did not start it" — so the one screen
+ *     that could offer a fresh code offers nothing.
+ *   - `CpAnswer` (`proxy.rs`) — `statusText`. `answerToResponse` passes it to
+ *     `new Response`, and `undefined` there is not an error: it becomes the empty
+ *     string, so every control-plane error in the native build quietly loses its
+ *     reason phrase.
+ *
+ * ⚠ **The page's side of `DeviceKey` is an inline return type, not an interface**,
+ * which is why this reads `hostDeviceKeyReset`'s signature rather than a named
+ * declaration. That is worth saying out loud rather than working around silently:
+ * the two-field object is written twice inside `native.ts` itself — once on the
+ * return type and once on the `invoke<…>` — and neither is a type this file could
+ * have found by name.
+ * ------------------------------------------------------------------ */
+
+{
+  const nativeTs = read("packages/web/src/native.ts");
+  const deviceRs = read(`${TAURI_DIR}/src/device.rs`);
+  const daemonRsRaw = read(`${TAURI_DIR}/src/daemon.rs`);
+  const proxyRs = read(`${TAURI_DIR}/src/proxy.rs`);
+
+  const payloads = [
+    {
+      what: "the device key",
+      source: deviceRs,
+      struct: "DeviceKey",
+      // The one inline page-side type here. `[^}]*` is safe because the object has
+      // no nested braces; a nested one would stop matching rather than answer a
+      // truncated list, which is the direction a broken pattern has to fail in.
+      page: () =>
+        [
+          ...(capture(nativeTs, /export async function hostDeviceKeyReset\(\): Promise<\{([^}]*)\}>/) ?? "").matchAll(
+            /(\w+):/g,
+          ),
+        ]
+          .map((m) => m[1] ?? "")
+          .sort(),
+    },
+    {
+      what: "the daemon's state",
+      source: daemonRsRaw,
+      struct: "DaemonState",
+      page: () => tsInterfaceKeys(capture(nativeTs, /export interface DaemonState \{([\s\S]*?)\n\}/) ?? ""),
+    },
+    {
+      what: "a control-plane answer",
+      source: proxyRs,
+      struct: "CpAnswer",
+      // Not exported: the bridge answers it and `answerToResponse` consumes it in
+      // the same module, so the pattern may not require an `export`.
+      page: () => tsInterfaceKeys(capture(nativeTs, /\binterface CpAnswer \{([\s\S]*?)\n\}/) ?? ""),
+    },
+  ] as const;
+
+  for (const payload of payloads) {
+    const body = capture(payload.source, new RegExp(`pub struct ${payload.struct} \\{([\\s\\S]*?)\\n\\}`));
+    check(`${payload.what}: the shell's side of the payload was readable`, body !== null, true);
+    const hostKeys = rustJsonKeys(body ?? "");
+    const pageKeys = payload.page();
+
+    report(
+      `${payload.what}: both sides were found to have fields`,
+      hostKeys.length > 0 && pageKeys.length > 0,
+      `${hostKeys.length} in ${payload.struct}, ${pageKeys.length} in native.ts`,
+    );
+    check(`${payload.what}: the shell sends exactly what the page declares`, hostKeys, pageKeys);
+
+    /*
+     * The same negative control `Boot` carries, and for the same reason: the
+     * comparison above rests entirely on `rustJsonKeys` reading renames rather
+     * than assuming them. Each of these three has at least one camelCase field
+     * that exists **only** because of a `rename`, so a reader that silently
+     * answered the page's spellings would still pass the equality and fail here.
+     */
+    const renames = [...(body ?? "").matchAll(/serde\(rename = "(\w+)"\)/g)].map((m) => m[1] ?? "");
+    report(
+      `${payload.what}: the reader is reading renames rather than assuming them`,
+      renames.length > 0 && renames.every((name) => hostKeys.includes(name)) && hostKeys.some((k) => /[A-Z]/.test(k)),
+      renames.length === 0 ? "no rename in the struct at all" : `${renames.length}: ${renames.join(", ")}`,
+    );
+
+    /*
+     * And that `rename_all` is still absent, which is the premise the whole census
+     * rests on — with the derive included in the capture, since the attribute would
+     * sit above `pub struct` rather than in the body, and with comments stripped
+     * first because two of these three carry prose that names the attribute.
+     */
+    const decl =
+      capture(payload.source, new RegExp(`((?:#\\[[^\\]]*\\]\\s*)*pub struct ${payload.struct} \\{[\\s\\S]*?\\n\\})`)) ?? "";
+    const code = decl
+      .split("\n")
+      .filter((line) => !/^\s*\/\//.test(line))
+      .join("\n");
+    check(`${payload.what}: and each field still needs its own rename`, /#\[serde\([^)]*rename_all/.test(code), false);
+    /*
+     * The one thing the loop cannot state generically: the derive has to be there
+     * at all. A struct that stopped deriving `Serialize` would keep every `rename`
+     * attribute, keep passing every line above, and cross no bridge.
+     */
+    check(`${payload.what}: and the struct is still serialized`, /derive\([^)]*Serialize/.test(decl), true);
+  }
+}
+
 process.stdout.write("\nthe commands, declared against registered\n");
 
 const libRs = read(`${TAURI_DIR}/src/lib.rs`);
-const declared = [...commandsRs.matchAll(/#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)/g)]
+
+/**
+ * The attribute, in **both** its forms.
+ *
+ * ⚠ **`#[tauri::command]` takes arguments, and a pattern matching only the bare
+ * literal drops every command that uses them — silently, in the direction that
+ * reads as passing.** `commands.rs` says it in its own header: the bare form runs
+ * the body on the main thread, the one the webview paints on, and
+ * `#[tauri::command(async)]` runs it on the async runtime instead. **Most of this
+ * surface carries the argument form** — anything that waits on a socket, on a disk
+ * flush, on a platform panel or on a child process — and the moment the first of
+ * them was changed, the census below stopped seeing it.
+ *
+ * ⚠ **The count is deliberately not restated here.** `commands.rs`'s own header
+ * gives the reason — "a count restated in a comment is exactly the kind of claim
+ * `docs/DECISIONS.md` records this repository learning not to keep" — and it has
+ * been wrong twice in that file and once in this sentence, which read *four* while
+ * ten commands used the argument form. The `report` at the bottom of this section
+ * prints the live pair instead: how many commands there are, and how many of them
+ * are declared with arguments.
+ *
+ * What is worth naming is the **counter-example**, because it is the reason this
+ * can never be shortened into a census of `async fn`: `host_cp` is an `async fn`
+ * under a **bare** attribute, and the macro gives it the same treatment without
+ * being asked. The attribute is the fact here; the signature is not. (That
+ * sentence named `host_cp` as one of the four for a while, which is the same class
+ * of error as the count.)
+ *
+ * What that costs is both directions at once. "Every command the Rust declares is
+ * registered" goes on saying `ok` over a list short of the truth by however many
+ * commands use the argument form, so a command declared and never registered is no
+ * longer caught; and the stray sweep at the bottom — whose whole job is to notice
+ * a door opened in another file —
+ * cannot see an `(async)` one there either. Neither failure has a symptom: the app
+ * builds, the command works, and the check that was supposed to be watching the
+ * surface is watching part of it.
+ *
+ * So the argument list is optional in the pattern, and the source is written once
+ * and spliced into both readers rather than typed twice — a second copy is how
+ * this became two patterns that had to be fixed separately in the first place.
+ */
+const COMMAND_ATTR = String.raw`#\[tauri::command(?:\([^)]*\))?\]`;
+
+const declared = [...commandsRs.matchAll(new RegExp(`${COMMAND_ATTR}\\s*(?:pub\\s+)?(?:async\\s+)?fn\\s+(\\w+)`, "g"))]
   .map((m) => m[1])
   .filter((n): n is string => n !== undefined)
   .sort();
@@ -579,9 +818,39 @@ check("and every command registered is declared", registered.filter((c) => !decl
 const strayCommands: string[] = [];
 for (const file of readdirSync(join(ROOT, TAURI_DIR, "src"))) {
   if (file === "commands.rs" || !file.endsWith(".rs")) continue;
-  if (/#\[tauri::command\]/.test(readFileSync(join(ROOT, TAURI_DIR, "src", file), "utf8"))) strayCommands.push(file);
+  if (new RegExp(COMMAND_ATTR).test(readFileSync(join(ROOT, TAURI_DIR, "src", file), "utf8"))) strayCommands.push(file);
 }
 check("and every command lives in commands.rs", strayCommands, []);
+
+/*
+ * ⚠ **And the non-vacuity report for the widening itself.**
+ *
+ * The three lines above are only stronger than the bare literal while some command
+ * actually uses the argument form. If the last `(async)` were taken off, the
+ * optional group would stop being exercised, nothing here would go red, and the
+ * next command declared with arguments would drop out of the census exactly as the
+ * argument-form ones did — with the same absence of a symptom. Counting both
+ * spellings separately is what makes that visible: the census has to be *larger*
+ * than the bare count, not merely non-empty.
+ *
+ * ⚠ **Comments stripped before counting, and this is the file where that matters
+ * most.** `commands.rs` opens by explaining the difference between the two forms
+ * and quotes both of them in its own header; a later docblock quotes
+ * `#[tauri::command(async)]` again as a standing TODO. Counted raw, the arguments
+ * total came out at six against four real ones when this was written, and twelve
+ * against ten when it was last re-measured (2026-09-17) — so a report whose whole
+ * job is to say how much of the surface is exercised would have been reporting the
+ * prose about the surface. The measurement is dated because the *gap* is the
+ * subject rather than either number, and it widens as the file grows.
+ */
+const commandsCode = commandsRs.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/[^\n]*$/gm, "");
+const bareAttrs = (commandsCode.match(/#\[tauri::command\]/g) ?? []).length;
+const argAttrs = (commandsCode.match(/#\[tauri::command\([^)]*\)\]/g) ?? []).length;
+report(
+  "the census reaches the argument form of the attribute, not only the bare one",
+  argAttrs > 0 && declared.length > bareAttrs,
+  `${declared.length} commands, ${argAttrs} of them declared with arguments`,
+);
 
 /* ------------------------------------------------------------------ *
  * Versions: the two this package does not add
@@ -941,6 +1210,78 @@ const withEsbuild = [...stage.matchAll(/esbuild:\s*"(@esbuild\/[a-z0-9-]+)"/g)].
 check("more than one platform is described", triples.length > 1, true);
 check("and every one of them names an esbuild binary", withEsbuild.length, triples.length);
 /*
+ * ⚠ **The workspace package the payload would otherwise ship without, and three
+ * lines are the whole of it.**
+ *
+ * `@reemoat/protocol` holds the Noise handshake the daemon speaks to an app. It is
+ * a pnpm *workspace* package, so in this checkout `node_modules/@reemoat/protocol`
+ * is a link into `packages/protocol` — and the bundler copies no symlink, which is
+ * why `build-daemon.mjs` writes a real directory instead. Nothing asserted that it
+ * did, and the failure that leaves is the worst shape a packaging bug comes in:
+ * take the three lines out and `typecheck`, every driver, `pnpm native:stage` and
+ * `cargo build` all still succeed, while the **shipped app's daemon dies at its
+ * first start** on `Cannot find module '@reemoat/protocol'`. It is a *static*
+ * import on the entry path — `scripts/daemon.ts` imports `ensureMachineKey` from
+ * `src/machinekey.ts`, which imports the package at load — so the process is gone
+ * before it has listened on anything, and there is no green-versus-red anywhere
+ * between the edit and a person's machine.
+ *
+ * Only the manifest and the sources are copied, deliberately: copying the package
+ * whole would follow its own `node_modules`, every entry of which is a pnpm link,
+ * and `dereference` would turn each into a full copy of a tree the payload root
+ * already has. So both halves are named, because a payload with the manifest and
+ * no `src` resolves the package and then fails on its entry point instead.
+ */
+check(
+  "the payload carries the protocol package as a real directory",
+  /join\(stageDir, "node_modules", "@reemoat", "protocol"\)/.test(stage),
+  true,
+);
+check(
+  "and copies its manifest",
+  /cpSync\(join\(repoRoot, "packages", "protocol", "package\.json"\), join\(protocol, "package\.json"\)\)/.test(stage),
+  true,
+);
+check(
+  "and its sources, dereferenced",
+  /cpSync\(join\(repoRoot, "packages", "protocol", "src"\), join\(protocol, "src"\), \{\s*recursive: true,\s*dereference: true,\s*\}\)/.test(
+    stage,
+  ),
+  true,
+);
+/*
+ * And the non-vacuity half, which is the part that decides whether the three
+ * assertions above are worth anything. They pin a copy; what makes the copy
+ * load-bearing is that the daemon's own entry point reaches the package at import
+ * time. Read off `src/` rather than assumed, because the day nothing there imports
+ * it the copy is dead weight and these lines should be deleted rather than kept
+ * green — and the day the *first* import lands in a file the payload does not carry,
+ * the count is what says so.
+ */
+/*
+ * ⚠ **Value imports only.** The first spelling of this counted
+ * `/["']@reemoat\/protocol["']/` over raw source, which matched
+ * `src/relay/tunnel.ts`'s `import type { StaticKey }` — erased by TypeScript and
+ * requiring nothing at runtime — and `src/relay/protocol.ts`'s *comment* naming
+ * the package. Two of the four matches were not imports at all, so the report
+ * would have stayed green in the one world it exists to rule out: every
+ * remaining reference erased and the payload copy genuinely dead weight.
+ */
+const importsProtocolAtLoad = (source: string): boolean =>
+  source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "")
+    .split("\n")
+    .some((line) => /["']@reemoat\/protocol["']/.test(line) && !/^\s*(?:import|export)\s+type\b/.test(line));
+const protocolImporters = readdirSync(join(ROOT, "src"), { recursive: true, encoding: "utf8" })
+  .filter((rel) => rel.endsWith(".ts"))
+  .filter((rel) => importsProtocolAtLoad(readFileSync(join(ROOT, "src", rel), "utf8")));
+report(
+  "and the daemon really needs it: src/ imports it at load",
+  protocolImporters.length > 0 && importsProtocolAtLoad(read("scripts/daemon.ts")),
+  `${protocolImporters.length} value importer(s) under src/: ${protocolImporters.sort().join(", ")}`,
+);
+/*
  * **The runtime binary is a build input and never a tracked file.** 122 MB, and
  * the one staged artifact that cannot live under `target/` — `externalBin`
  * resolves relative to `src-tauri`, not to the cargo profile directory.
@@ -1139,6 +1480,86 @@ for (const file of [
 }
 check("and no file in this repository sets one", setters, []);
 
+/* ── the private key in a file, and the mode it is created at ─────────────── */
+
+/**
+ * ⚠ **The device key's file fallback is a private key in plaintext, and what
+ * bounds it is a mode set at `open` time.**
+ *
+ * `read_device_key_fallback`'s own docblock is blunt about why the file exists at
+ * all — a Linux box with no D-Bus session or no unlocked collection accepts a
+ * keyring write and keeps nothing, and the alternative to a file is an
+ * installation that regenerates its static on every launch and spends a device
+ * slot each time. So the file is the lesser failure, and the mode is the entire
+ * difference between it and a bad one.
+ *
+ * `write_stored` is the single writer for all three of `server.json`'s subjects —
+ * the origin, the device ids and the device keys — and it used to be `fs::write`.
+ * That is wrong in three ways the docblock above it records at length, and the one
+ * this pins is the first: `fs::write` creates at `0666 & !umask`, which is `0644`
+ * under the default, on precisely the machines where "world-readable" has somebody
+ * in it to read. Three docblocks and `.claude/rules/e2ee.md` said `0600` while no
+ * line of code anywhere did.
+ *
+ * ⚠ **Asserted here although `cargo test` covers it, and the reason is which job
+ * each runs in.** `config.rs`'s own tests do check the resulting mode — but they
+ * need a Rust toolchain, so they live in the `native` job while this driver is in
+ * `check` and deliberately runs no cargo. That is `flat`'s standing hazard at the
+ * top of this file: the two can disagree indefinitely and either can be made green
+ * on its own. A regression back to `fs::write` would leave both this assertion and
+ * that test red, which is what makes it a regression rather than a discussion.
+ */
+const writeStored = between(configRs, "fn write_stored(", "pub fn read_device(");
+check("the writer behind the fallback was found to read", writeStored.length > 0, true);
+/*
+ * The mode at **creation**, which is the half that closes the window in which the
+ * bytes exist at the umask's mode — `write_private` records that ordering bug, and
+ * a `set_permissions` after the fact is a fix with a race in it.
+ */
+check("the file is created with an explicit 0600", /options\.mode\(0o600\);/.test(writeStored), true);
+check("and through OpenOptions rather than fs::write", /fs::OpenOptions::new\(\)/.test(writeStored), true);
+check("and fs::write appears nowhere in it", /fs::write\(/.test(writeStored), false);
+/*
+ * And again on the open handle, which is what makes it exactly `0600` rather than
+ * `0600 & !umask`: a umask carrying owner bits leaves `0400` at `0277` and nothing
+ * readable at all at `0677`, and a key file this same user cannot read back on the
+ * next launch is the regenerate-every-launch failure the file exists to prevent.
+ */
+check(
+  "and narrowed again on the handle, against a umask with owner bits",
+  /file\.set_permissions\(fs::Permissions::from_mode\(0o600\)\)/.test(writeStored),
+  true,
+);
+/*
+ * The mode on the **directory** is set on every write rather than only where
+ * `create_dir_all` made one, because it left `0755` on every machine so far — the
+ * same upgrade argument the rename below carries for the file.
+ */
+check(
+  "and the directory is narrowed on every write",
+  /fs::set_permissions\(dir, fs::Permissions::from_mode\(0o700\)\)/.test(writeStored),
+  true,
+);
+/*
+ * ⚠ **And it is a fresh inode, not the one that is already there.** A `server.json`
+ * an earlier build created at `0644` keeps that mode for ever through any writer
+ * that opens the existing file, so a fix that set a mode only at creation would
+ * leave every installation in the field world-readable while passing every test
+ * that starts from an empty directory. The rename is what narrows them.
+ */
+check("and the narrowed file replaces the old inode by rename", /fs::rename\(&tmp, &target\)/.test(writeStored), true);
+
+/*
+ * That the *device key* really goes through that writer, which is the link the two
+ * halves hang on: a `write_device_key_fallback` that grew a writer of its own
+ * would leave every assertion above green over a key file nothing narrows.
+ */
+const keyFallback = between(configRs, "pub fn write_device_key_fallback(", "pub fn erase_device_key_fallback(");
+check("the fallback writer was found to read", keyFallback.length > 0, true);
+check("a device key is written through that one writer", /write_stored\(dir, &stored\)/.test(keyFallback), true);
+check("and never by a writer of its own", /fs::(write|OpenOptions|File)/.test(keyFallback), false);
+
+
 /* ── what adopting a server gives up ─────────────────────────────────────── */
 
 /**
@@ -1154,10 +1575,7 @@ check("and no file in this repository sets one", setters, []);
  * against the account's limit on the way back. `cp-devices.md` is the argument.
  */
 const setServer = flat(read(`${TAURI_DIR}/src/commands.rs`));
-const setServerBody = setServer.slice(
-  setServer.indexOf("pub fn host_set_server"),
-  setServer.indexOf("pub fn host_credential_set"),
-);
+const setServerBody = between(setServer, "pub fn host_set_server", "pub fn host_credential_set");
 check("the sweep can see host_set_server at all", setServerBody.length > 0, true);
 check("adopting a server gives up the previous one's sign-in", /credential::erase\(&previous\)/.test(setServerBody), true);
 check("and never the device recorded for it", /erase_device/.test(setServerBody), false);
@@ -1343,8 +1761,23 @@ check("and it asks the one route below the auth gate", /GET \/health/.test(probe
  * starts the daemon it shipped with. Nothing else in this repository can see the
  * absence of a callback: `cargo` compiles either way and no driver runs the app.
  */
-check("the shell handles its own exit", /RunEvent::Exit/.test(libRs), true);
-check("and stops the daemon it started there", /supervisor\.stop\(\)/.test(libRs), true);
+/*
+ * ⚠ **Read with the comments taken out, and the reason is this assertion's own
+ * history.** `/RunEvent::Exit/.test(libRs)` was green on the docblock four lines
+ * above the code — the paragraph you have just read names `RunEvent::Exit`, so the
+ * check passed whether or not the callback existed. That is the failure the
+ * paragraph itself describes, arriving in the thing meant to catch it, and the
+ * realistic regression walks straight through it: somebody "corrects" the hook to
+ * `ExitRequested` or a window-close handler, keeps `supervisor.stop()`, and both
+ * assertions stay green while every quit orphans a daemon.
+ *
+ * `daemonSrc` above already strips for exactly this; `libRs` is stripped here
+ * rather than at its `read` because other assertions in this file are *about* the
+ * comment layer, and `flat()` must not run over prose.
+ */
+const libCode = libRs.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+check("the shell handles its own exit", /matches!\(event, tauri::RunEvent::Exit\)/.test(flat(libCode)), true);
+check("and stops the daemon it started there", /supervisor\.stop\(\)/.test(libCode), true);
 /*
  * Bounded, because it runs on the way out of the main loop: an unbounded wait
  * hands the daemon's 25-second shutdown budget to the quit gesture.

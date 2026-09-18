@@ -20,10 +20,10 @@ The rules, in full:
    `main` moves past you while you work, rebase and bump above it again.
 2. **`main` holds the released version.** Pushing to `main` is what makes a
    version current; the branch it came from is what proposed it.
-3. **All six sites move together, in one commit.** They are listed under *Cutting
-   a release* below. A partial bump is worse than none, because the six disagree
+3. **All seven sites move together, in one commit.** They are listed under *Cutting
+   a release* below. A partial bump is worse than none, because the seven disagree
    and every consumer of the version reads a different answer.
-4. **The `CHANGELOG.md` heading is one of the six.** A version with no notes is
+4. **The `CHANGELOG.md` heading is one of the seven.** A version with no notes is
    not a version — `deploy/ci-release.sh` refuses to publish an empty section, so
    writing the entry is part of bumping rather than a step after it.
 5. **Versions only ever go up**, compared as number triples rather than as
@@ -32,7 +32,7 @@ The rules, in full:
 6. **A tag is a separate act from a push, and only a tag publishes.** Nothing is
    released, tagged or deployed by pushing to any branch, `main` included.
 
-⚠ **None of this is enforced, and the gap is precise.** `pincheck` asserts the six
+⚠ **None of this is enforced, and the gap is precise.** `pincheck` asserts the seven
 sites agree *with each other* — it captures the root manifest's version and
 compares the rest to that. There is no external reference anywhere in it: no git
 tag, no previous commit, no diff. So a **partial** bump goes red immediately, and
@@ -57,18 +57,19 @@ A release is a tag push. Everything before that is by hand and in this order,
 because the tag is what triggers the publish and the publish refuses a tag the
 tree disagrees with:
 
-1. Set the new version in **all six places**: `package.json`,
-   `packages/web/package.json`, `packages/control-plane/package.json`, the
-   `VERSION` literal in `packages/control-plane/src/app.ts`, `DAEMON_VERSION` in
-   `src/version.ts`, and a new dated heading in `CHANGELOG.md` with the
-   `## [Unreleased]` content moved under it.
-2. `pnpm pincheck` — this is what tells you whether you got five of them. The
-   sixth, `app.ts`'s `VERSION`, is asserted by `relaycheck` instead, against the
+1. Set the new version in **all seven places**: `package.json`,
+   `packages/web/package.json`, `packages/control-plane/package.json`,
+   `packages/protocol/package.json`, the `VERSION` literal in
+   `packages/control-plane/src/app.ts`, `DAEMON_VERSION` in `src/version.ts`, and
+   a new dated heading in `CHANGELOG.md` with the `## [Unreleased]` content moved
+   under it.
+2. `pnpm pincheck` — this is what tells you whether you got six of them. The
+   seventh, `app.ts`'s `VERSION`, is asserted by `relaycheck` instead, against the
    served `GET /v1/instance` response rather than against the file; `pincheck`
    prints a note saying so. Both are in `pnpm check`, so a missed one goes red
    before CI ever sees it.
    ⚠ What neither tells you is whether the version was bumped **at all** —
-   every assertion compares the six sites to each other, never to a tag or to the
+   every assertion compares the seven sites to each other, never to a tag or to the
    previous commit. Forgetting the bump entirely is green everywhere.
 3. Commit, push, wait for `check` to go green on that commit.
 4. `git tag v<version> && git push origin v<version>`.
@@ -87,7 +88,7 @@ publishes an offer naming a version whose source nobody can fetch.
 Not a version question, and deliberately not here: `packages/native` carries two
 `version` fields and **neither is a release site** — `tauri.conf.json` names a
 *path* to the root manifest and `Cargo.toml` is pinned inert at `0.0.0`, both
-asserted by `pnpm nativecheck`. So the six above stay six and a native build needs
+asserted by `pnpm nativecheck`. So the seven above stay seven and a native build needs
 no line in step 1.
 
 What a *signed* build needs is entirely environment — an Apple Developer ID

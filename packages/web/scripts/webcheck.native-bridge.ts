@@ -26,9 +26,10 @@ import { stripComments } from "./webcheck.source.js";
  *
  * **The arms are reachable in one process, and that is a property of the design
  * rather than a trick.** `inNativeShell()` reads the injected global on *every*
- * call — `telegram.ts`'s `proxy()` idiom — so installing it mid-run flips the arm
- * without re-importing anything. What is decided at import time and stays decided
- * is only the hydration state, which is driven through its own exported function.
+ * call rather than latching it at import time, so installing it mid-run flips the
+ * arm without re-importing anything. What is decided at import time and stays
+ * decided is only the hydration state, which is driven through its own exported
+ * function.
  * ------------------------------------------------------------------ */
 
 process.stdout.write("\nthe native bridge, and the browser arm it must not disturb\n");
@@ -597,10 +598,12 @@ process.stdout.write("\na refusal about a credential that is no longer held\n");
 }
 
 /**
- * The platform sentence is total, and only one of its arms names an OS.
+ * The platform sentence is total and only one of its arms names an OS — and the
+ * platform *name*, which is a different rule living in the same file: a mapping
+ * for the three this app knows, and a **passthrough** for everything else.
  */
 {
-  const { hostPlatform, localNetworkDetail } = await import("../src/platform.js");
+  const { hostPlatform, localNetworkDetail, platformName } = await import("../src/platform.js");
   const all = ["macos", "windows", "linux", "other"] as const;
 
   check("every platform is narrowed to itself", all.map((p) => hostPlatform(p)), [...all]);
@@ -611,6 +614,60 @@ process.stdout.write("\na refusal about a credential that is no longer held\n");
     hostPlatform(undefined),
     hostPlatform(""),
   ], ["other", "other", "other", "other", "other"]);
+
+  /*
+   * ⚠ **The row that read `macos · in use`, and what was missing is a
+   * *behavioural* assertion.** `platformName`'s `never` arm is pinned off disk
+   * below and both of its siblings in this file are swept over every arm — but
+   * nothing ever asserted that `macos` draws **macOS**, so the defect it fixes is
+   * one character from returning with every other assertion here green.
+   *
+   * Stated as **pairs**, and split from the passthrough table below, because the
+   * two ways this regresses fail on opposite halves: an identity function passes
+   * every passthrough row and fails all three of these, and a function that
+   * invented a word for the unknown case passes all three of these and fails every
+   * passthrough row. Neither table alone is a control for the other's mutant.
+   */
+  check(
+    "the three platforms this app knows are drawn as their own names",
+    (["macos", "windows", "linux"] as const).map((p) => [p, platformName(p)]),
+    [
+      ["macos", "macOS"],
+      ["windows", "Windows"],
+      ["linux", "Linux"],
+    ],
+  );
+
+  /*
+   * ⚠ **And everything else is answered *raw*, which is a decision rather than a
+   * fallback.** `std::env::consts::OS` also says `freebsd`, `ios` and `android`,
+   * and the argument is in `platformName`'s own docblock: a row reading "Other"
+   * tells somebody less about their own computer than the lower-case name it
+   * actually reported. Over several inputs, because a single one is satisfied by
+   * any function that happens to echo that one string. `""` is deliberately not
+   * among them — the control plane refuses a registration whose platform clamps to
+   * nothing, so pinning it here would be asserting a state that cannot arrive.
+   */
+  check(
+    "and every platform it does not know is handed back as it was reported",
+    ["freebsd", "ios", "android", "solaris"].map((raw) => platformName(raw)),
+    ["freebsd", "ios", "android", "solaris"],
+  );
+
+  /*
+   * ⚠ **The behavioural half of "the two vocabularies never cross".** The
+   * structural half — neither module importing the other — is asserted at the foot
+   * of this block, and it is silent about the edit that actually breaks this: a
+   * `case "darwin"` added to `hostPlatform` out of helpfulness. Node's words belong
+   * to a *daemon* and `ui/agentCard.ts`'s `osName` is what reads them; arriving
+   * here they are an unknown platform like any other and must come back unchanged
+   * rather than be quietly translated into this client's vocabulary.
+   */
+  check(
+    "a daemon's vocabulary is not understood here, it is passed through",
+    ["darwin", "win32"].map((raw) => platformName(raw)),
+    ["darwin", "win32"],
+  );
 
   const said = all.map((p) => localNetworkDetail(p));
   check("every platform gets a sentence", said.filter((s) => s.length > 20).length, said.length);
@@ -635,7 +692,36 @@ process.stdout.write("\na refusal about a credential that is no longer held\n");
    * shipped exactly that for four releases.
    */
   const platformSrc = readFileSync(new URL("../src/platform.ts", import.meta.url), "utf8");
-  check("a fifth platform is a compile error rather than a blank sentence", /const exhaustive: never = platform;/.test(platformSrc), true);
+  /*
+   * ⚠ **Comment-stripped, and it was the one read in this block that was not.**
+   * Every other source this block reaches — `agentCard.ts`, `store.ts`,
+   * `DevicesSection.tsx`, `enrollment.ts` — goes through `stripComments` for the
+   * standing reason that this codebase deliberately restates code facts in prose.
+   * These three assertions are about a `never` arm, and both real arms sit inside
+   * a `default: {` block carrying its own comment arguing for them, so the prose
+   * and the code are a line apart here rather than a file apart.
+   *
+   * The counts agree today, which is exactly what makes raw source a trap.
+   * Measured on the real file: paste `const exhaustive: never = platform;` into
+   * `platformName`'s docblock and the raw count goes to 3 while the stripped count
+   * stays at 2 — so over raw source a sentence answers for an implementation that
+   * may already be gone. Stripped once and shared, so the three reads below cannot
+   * disagree about which bytes they are reading.
+   */
+  const platformCode = stripComments(platformSrc);
+  /*
+   * ⚠ **Counted, not tested.** A single `.test()` stopped pinning its subject the
+   * moment `platformName` added a second switch: either arm satisfied it, so
+   * deleting the one in `localNetworkDetail` — the function this was written for —
+   * left the check green. Both switches over `HostPlatform` must carry it, and a
+   * third has to raise this number rather than ride the other two.
+   */
+  const exhaustiveArms = (platformCode.match(/const exhaustive: never = platform;/g) ?? []).length;
+  check("both switches over HostPlatform end in a never arm", exhaustiveArms, 2);
+  for (const fn of ["localNetworkDetail", "platformName"]) {
+    const body = new RegExp(`export function ${fn}\\([^)]*\\)[^{]*\\{([\\s\\S]*?)\\n\\}`).exec(platformCode)?.[1] ?? "";
+    check(`a fifth platform is a compile error in ${fn} rather than a blank sentence`, /const exhaustive: never = platform;/.test(body), true);
+  }
 
   /*
    * ⚠ **The two platform vocabularies never cross.** `hostPlatform` takes Rust's
@@ -647,7 +733,35 @@ process.stdout.write("\na refusal about a credential that is no longer held\n");
    */
   const agentCard = stripComments(readFileSync(new URL("../src/ui/agentCard.ts", import.meta.url), "utf8"));
   check("the daemon's platform reader knows nothing of the client's", /from "\.\.\/platform"/.test(agentCard), false);
-  check("and the client's knows nothing of the daemon's", /agentCard/.test(stripComments(platformSrc)), false);
+  check("and the client's knows nothing of the daemon's", /agentCard/.test(platformCode), false);
   const storeSrc = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
   check("the one caller asks the host rather than the wire", /hostPlatform\(this\.snapshot\.host\?\.platform\)/.test(storeSrc), true);
+
+  /*
+   * ⚠ **And `platformName`'s one caller actually calls it.** Everything above is
+   * about a function; nothing held the *screen* to using it, and the defect was a
+   * devices row reading `macos · in use` — the raw field drawn straight, beside a
+   * separator, on the one line somebody reads to identify their own computer. Off
+   * disk, because a JSX expression swapped from `platformName(row.platform)` to
+   * `row.platform` compiles, renders, and is wrong only in the word it prints.
+   *
+   * Comments stripped, this file's own standing rule: the region around that line
+   * carries JSX docblocks, and one of them naming either spelling would answer for
+   * the code.
+   */
+  const devicesSrc = stripComments(
+    readFileSync(new URL("../src/ui/settings/DevicesSection.tsx", import.meta.url), "utf8"),
+  );
+  check("the devices row draws the platform through it", /\{platformName\(row\.platform\)\}/.test(devicesSrc), true);
+  check("and never draws the raw field beside a separator", /\{row\.platform\}/.test(devicesSrc), false);
+  /*
+   * The negative above is an **absence**, so it owes the same proof of life every
+   * other absence in this file carries: a regex that matched nothing because it was
+   * mistyped reads exactly like a screen that is correct.
+   */
+  report(
+    "and that absence is a real search rather than a typo",
+    /\{row\.platform\}/.test("<span>{row.platform}</span>"),
+    "the pattern matches a raw draw when there is one",
+  );
 }

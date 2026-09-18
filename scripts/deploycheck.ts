@@ -2363,15 +2363,20 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     // screen would offer somebody else's contract as a toggle.
     "REEMOAT_CP_LEGAL_DOCUMENTS",
     /*
-     * The two that decide what this process *serves* rather than what it says.
-     * Neither can be a row for a reason the others do not have: both are read once,
-     * at app construction, and Hono cannot unregister a route — so a database-owned
+     * The one that decides what this process *serves* rather than what it says.
+     * It cannot be a row for a reason the others do not have: it is read once, at
+     * app construction, and Hono cannot unregister a route — so a database-owned
      * value and the behaviour would disagree until a restart, which is a switch
-     * that lies. `REEMOAT_CP_INSTALL` was documented in **no** example file in the
-     * tree until the deployment modes were written down, which is precisely the
-     * failure this loop exists to catch and could not, because nothing named it.
+     * that lies. It was documented in **no** example file in the tree until the
+     * deployment modes were written down, which is precisely the failure this loop
+     * exists to catch and could not, because nothing named it.
+     *
+     * ⚠ **`REEMOAT_CP_WEB` was the other one and is deleted.** It named a built
+     * copy of the *app* for a checkout to serve; a browser holds no device key and
+     * therefore cannot open an encrypted channel to a daemon, so what it could load
+     * it could not use. The gate is served unconditionally and there is no variable
+     * for it.
      */
-    "REEMOAT_CP_WEB",
     "REEMOAT_CP_INSTALL",
   ]) {
     check(
@@ -2388,68 +2393,52 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     );
   }
   /*
-   * **The two switches spell "off" and "the default" the same way, and nothing but
-   * this says so.**
+   * **One switch, and the trap it was given is worth keeping written down.**
    *
-   * They are the only pair in this service where a value is *either* a boolean
-   * *or* a path, and that shape has one trap: an affirmative spelling read as a
-   * path resolves to a directory named `1`, which does not exist, and the service
-   * then answers a permanent 404 indistinguishable from a trimmed image.
-   * `REEMOAT_CP_INSTALL` was given the three-and-three and `REEMOAT_CP_WEB` was
-   * not — and the comment sitting beside the fix *named* the other variable as
-   * carrying the same trap, for two releases, while it stayed open. A paragraph
-   * that knows about a defect is not a check.
+   * ⚠ **This compared *two* switches, and the other one is deleted.**
+   * `REEMOAT_CP_WEB` and `REEMOAT_CP_INSTALL` were the only pair in this service
+   * where a value is *either* a boolean *or* a path, and that shape has one trap:
+   * an affirmative spelling read as a path resolves to a directory named `1`,
+   * which does not exist, and the service then answers a permanent 404
+   * indistinguishable from a trimmed image. `REEMOAT_CP_INSTALL` was given the
+   * three-and-three and the other was not — and the comment sitting beside the fix
+   * *named* the other variable as carrying the same trap, for two releases, while
+   * it stayed open. A paragraph that knows about a defect is not a check.
+   *
+   * With one variable left there is nothing to compare it against, so what is
+   * asserted is the rule itself: the three spellings of *off* and the three of
+   * *the default*, read off the source. That is what a fourth spelling arriving on
+   * a **next** variable of this shape would be measured against, which is the way
+   * this goes wrong again.
    *
    * Read off the source by regex because nothing can import `main.ts`: it is a
-   * process entry with side effects at module load, which is also why the fix
-   * itself is otherwise unasserted. What this fails on is a third variable of this
-   * shape arriving with a fourth spelling, which is the way the next one goes
-   * wrong.
-   *
-   * ⚠ **The two no longer agree, and the asymmetry is now the thing asserted.**
-   * `REEMOAT_CP_WEB` defaults to **off** since the image stopped carrying a web
-   * bundle: with nothing built in, there is no "the default" for an affirmative
-   * spelling to name, so `1`/`true`/`yes` would resolve to a path called `1` —
-   * exactly the permanent silent 404 this pair was written to close. It is
-   * recognised and *answered with a sentence* instead, which is why the constant
-   * is named `webMeaningless` rather than `webDefault`: a reader who greps for
-   * the old name finds nothing and has to read why.
-   *
-   * `REEMOAT_CP_INSTALL` is untouched — `deploy/bootstrap.sh` really is still in
-   * the image, so it really does still have a default to mean. Holding the two to
-   * each other now would force one of them to lie.
+   * process entry with side effects at module load, which is also why the rule is
+   * otherwise unasserted.
    */
   {
     const mainTs = readFileSync(join(repoRoot, "packages/control-plane/src/main.ts"), "utf8");
-    const spellings = (name: string, sense: "Off" | "Default" | "Meaningless"): string[] => {
+    const spellings = (name: string, sense: "Off" | "Default"): string[] => {
       const found = new RegExp(`const ${name}${sense} =([^;]+);`).exec(mainTs)?.[1] ?? "";
       return [...found.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").sort();
     };
-    check("the web switch spells off three ways", spellings("web", "Off"), ["0", "false", "no"]);
-    check("and the installer switch spells it the same three", spellings("install", "Off"), ["0", "false", "no"]);
+    check("the installer switch spells off three ways", spellings("install", "Off"), ["0", "false", "no"]);
     check(
-      "the web switch still recognises the three affirmatives, so it can answer them",
-      spellings("web", "Meaningless"),
-      ["1", "true", "yes"],
-    );
-    // And there is no `webDefault` any more, which is what says the arm was
-    // removed rather than renamed around a check that kept passing.
-    check("and names no default of its own", /const webDefault\b/.test(mainTs), false);
-    /*
-     * The half that makes "off by default" a property rather than a comment: with
-     * the variable unset, `webOff` must hold. A regex, because the alternative is
-     * importing a module that starts a server.
-     */
-    check(
-      "an unset value is off",
-      /const webOff = webEnv\.length === 0 \|\|/.test(mainTs),
-      true,
-    );
-    check(
-      "and the installer switch still has a default to mean",
+      "and still has a default for an affirmative to mean",
       spellings("install", "Default"),
       ["1", "true", "yes"],
     );
+    /*
+     * And the deletion, asserted as an absence so it cannot come back quietly: a
+     * variable naming an app bundle is a browser reaching a daemon it has no key
+     * for, which is the whole of what this release removed.
+     */
+    /*
+     * ⚠ **The *read*, not the name.** Two docblocks in that file still say
+     * `REEMOAT_CP_WEB` — they are where the deletion is argued, which is exactly
+     * where this repository puts a reason — so matching the string would fail on
+     * the explanation. What must not come back is a process reading it.
+     */
+    check("and nothing reads a variable naming a web bundle", /process\.env\["REEMOAT_CP_WEB"\]/.test(mainTs), false);
   }
 
   /*

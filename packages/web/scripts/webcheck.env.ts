@@ -114,3 +114,55 @@ export function finish(): void {
   process.stdout.write(failures === 0 ? `\nall green${tail}\n\n` : `\n${failures} FAILED${tail}\n\n`);
   process.exit(failures === 0 ? 0 : 1);
 }
+
+/* ------------------------------------------------------------------ *
+ * A relay arm that answers, without a daemon behind it
+ * ------------------------------------------------------------------ */
+
+/**
+ * A {@link ChannelFactory} that sends over `fetch`, for the checks that are about
+ * *routing* rather than about encryption.
+ *
+ * ⚠ **This is not a second transport and no build can select it.** It exists
+ * because several rules in `machine.ts` need a relay arm that answers and have
+ * nothing to do with cryptography — which arm a stale `wrong_machine` falls back
+ * to, that a `no_tunnel` drops the route belief, that a `token_expired` retries
+ * once, that an over-limit machine draws the right sentence. Driving those through
+ * a real channel would mean standing up a relay, a tunnel, a daemon, a device key
+ * and a `Noise_IK` responder in order to assert a fallback, which is the shape of
+ * check nobody writes. The real channel is driven against a real responder in
+ * `webcheck.e2ee.ts`, which is where that question belongs.
+ *
+ * It speaks `fetch` deliberately, so every module that already stubs
+ * `globalThis.fetch` keeps working with the stub it has.
+ */
+export const fetchChannel = ((options: { relayUrl: string }) => ({
+  async request(wanted: {
+    method: string;
+    path: string;
+    headers?: Record<string, string>;
+    body?: Uint8Array | null;
+  }): Promise<{ status: number; statusText: string; headers: Record<string, string>; body: Uint8Array }> {
+    const response = await fetch(new URL(wanted.path, options.relayUrl), {
+      method: wanted.method,
+      headers: wanted.headers ?? {},
+      ...(wanted.body === null || wanted.body === undefined ? {} : { body: wanted.body as Uint8Array<ArrayBuffer> }),
+    });
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, name) => {
+      headers[name.toLowerCase()] = value;
+    });
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+      body: new Uint8Array(await response.arrayBuffer()),
+    };
+  },
+  openSocket(path: string): unknown {
+    const url = new URL(path, options.relayUrl);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return new WebSocket(url.toString());
+  },
+  dispose(): void {},
+})) as never;

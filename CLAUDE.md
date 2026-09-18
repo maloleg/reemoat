@@ -44,24 +44,31 @@ carries no gate screen** — it links out to the control plane's own, so there i
 sign-up form in the fleet rather than two; `GateCard` is the one shared box and
 `webcheck` walks both import closures to hold that line. The
 Authority serves the second at **nine addresses** and the app at none — a closed
-list rather than an SPA fallback, so the product is not in the image to be served.
-`REEMOAT_CP_WEB` names a built app for a checkout. Q4.118, `docs/AUTHORITY.md`.
+list rather than an SPA fallback, so the product is not in the image to be served
+— and **there is no variable that would serve it**: a browser holds no device key,
+so it could load the app and reach no machine at all. Q4.118, Q1.649,
+`docs/AUTHORITY.md`.
 
-**No test framework.** `typecheck`, `authcheck`, `daemoncheck`, `relaycheck`,
-`webcheck`, `nativecheck`, `pincheck`, `deploycheck`, `docscheck`, `imagecheck` and
-`harness` are the whole automated safety net, and they are drivers rather than unit
-tests on purpose. Nine run offline in one process with no fleet, no agent and no
-deploy — `docscheck` is the one whose subject is prose: it
+**No test framework.** `typecheck`, `protocolcheck`, `authcheck`, `daemoncheck`,
+`relaycheck`, `webcheck`, `nativecheck`, `pincheck`, `deploycheck`, `docscheck`,
+`imagecheck` and `harness` are the whole automated safety net, and they are drivers
+rather than unit tests on purpose. Ten run offline in one process with no fleet, no
+agent and no deploy — `docscheck` is the one whose subject is prose: it
 holds this file to a budget, because the last time it was cut nothing checked
-the result and it was larger six days later. `nativecheck` is the newest and its
+the result and it was larger six days later. `nativecheck`'s
 subject is a *shell configuration*, which is the one thing no other driver can see:
 `typecheck` compiles no Rust, `webcheck` is scoped to `packages/web`, and the
 `cargo` build that would catch the rest is a separate job.
+`protocolcheck` is the newest and the only one whose subject is a specification
+**somebody else wrote** — the Noise handshake, driven byte-for-byte against the
+published cross-implementation vectors in both roles, because an implementation that
+only ever talks to itself round-trips perfectly while interoperating with nothing,
+and would go on doing so through a nonce written the wrong way round.
 `harness` drives a real agent and needs a login CI cannot hold. `imagecheck`
 builds and starts a container, so it is a separate CI job — and it earns that:
 the control plane reaches into the repository root for a file list written down
 **twice**, in `.dockerignore` and in `deploy/docker/Dockerfile`'s COPY lines, and
-an import missing from either passes `typecheck` and all eight other drivers while
+an import missing from either passes `typecheck` and all nine other drivers while
 breaking only the image. Measured while adding `src/http.ts`: missing from
 `.dockerignore` it fails at COPY with `"/src/http.ts": not found` (the build
 context never carried it), and missing from the Dockerfile it fails later with
@@ -69,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 961 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 966 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -82,6 +89,11 @@ Deploying is a *separate* act from checking, and nothing does it on a push.
 
 ```bash
 pnpm typecheck                       # tsc --noEmit, both packages
+pnpm protocolcheck                   # packages/protocol: the Noise handshake against the published
+                                     #   cross-implementation vectors, in both roles, with the ephemerals
+                                     #   pinned — plus the two things the specification says nothing about,
+                                     #   the reserved top of the nonce range and this repository's own frame
+                                     #   table. The only driver whose subject somebody else wrote
 pnpm authcheck                       # token verification and enrollment
 pnpm daemoncheck                     # the daemon's HTTP surface and durable state: routes,
                                      #   the v6 migration, the login pty, the WS, subagent lineage,
@@ -190,15 +202,12 @@ pnpm webcheck                        # packages/web: the cursor, rotation, repla
                                      #   a question says how many of its answers you may pick —
                                      #   a box or a circle, with the role claimed only where a
                                      #   button keeps it, on both halves of one form.
-                                     #   Newest again, and both are about a fact this app was
+                                     #   Newest again, and it is about a fact this app was
                                      #   asserting against itself: that a plan card offers the
                                      #   two grants and *which* two it drops, by name, so
-                                     #   dropping a third cannot pass as "still two buttons";
-                                     #   and that Telegram is asked where its own chrome is
-                                     #   rather than told, driven as the sequence that actually
-                                     #   happens — latch the launch version, wipe the fragment
-                                     #   the way a navigation does, then ask. Both drivers were
-                                     #   green for months over code no phone could reach.
+                                     #   dropping a third cannot pass as "still two buttons".
+                                     #   That driver was green for months over code nothing
+                                     #   could reach.
                                      #   Newest: devices — the three shapes a pasted mailed link may
                                      #   take and everything it refuses locally rather than sending,
                                      #   that signing out **keeps** the device while a retirement
@@ -220,7 +229,7 @@ pnpm nativecheck                     # packages/native: the Boot payload's keys 
                                      #   depend on. Offline, and deliberately **no cargo**
 pnpm pincheck                        # every place a version is written down. The agents':
                                      #   three copies each, and the adapters actually installed.
-                                     #   And five of this release's six — the root and both
+                                     #   And six of this release's seven — the root and all three
                                      #   manifests, `src/version.ts` and the CHANGELOG's newest
                                      #   dated heading; `app.ts`'s VERSION is relaycheck's, off the
                                      #   served response. **None of them says a bump happened** —
@@ -259,8 +268,9 @@ pnpm cp                              # the control plane + relay in one process 
                                      #   REEMOAT_CP_RELAY_MODE=embedded is the default and is what this is;
                                      #   the deployed shape is two containers, see compose.sh below
 pnpm web                             # the web UI in dev; Vite proxies /v1 to the control plane
-pnpm web:build                       # → packages/web/dist, the whole app. `pnpm cp` serves it only
-                                     #   when REEMOAT_CP_WEB names that path; the image never carries it
+pnpm web:build                       # → packages/web/dist, the whole app — for `pnpm native:build` to
+                                     #   compile into the binary. Nothing serves it over HTTP: the control
+                                     #   plane has no switch for one and the image never carried it
 pnpm --dir packages/web build:gate   # → packages/web/dist-gate, the nine addresses a browser may reach.
                                      #   This one IS in the image and is served with no switch: /confirm,
                                      #   /reset and /verify are opened by a mail client and have nowhere
@@ -287,6 +297,19 @@ State lives in one SQLite file (`REEMOAT_DB`, default `~/.reemoat/reemoat.db`)
 and each session gets its own git worktree under `~/.reemoat/worktrees/…`. A
 daemon restart leaves every session it did not stop on purpose `interrupted` and
 puts an agent back on each by itself — see `.claude/rules/daemon-sessions.md`.
+
+**Traffic to a remote daemon is end-to-end encrypted and there is no other
+mode.** The app and the daemon run `Noise_IK` between themselves; the relay
+authorizes the connection and then carries bytes it holds no key for. The app's
+static is a **device key** in the OS keyring, the daemon's is a **machine key** it
+announces on its dial, and every capability names the device it was minted for —
+so one stolen off the wire is worth nothing elsewhere. `RELAY_PROTOCOL_MIN_VERSION`
+was raised past every build that spoke plaintext, which is a deliberate flag day:
+a daemon that has not been updated stops dialling in until `deploy/deploy.sh` runs
+on its host. `.claude/rules/e2ee.md` is the area; Q7.37 and Q7.143 are the
+argument. ⚠ It removes the **relay** from the trusted path and defends against
+nothing else — the Authority still mints every capability and still ships the
+client.
 
 **The daemon's config is env only** (`.env.example`; the client's
 `REEMOAT_URL`/`REEMOAT_MACHINE` are printed by `pnpm client` with their live
@@ -438,7 +461,6 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `ask-card.md` | `packages/web/src/ui/AskCard.tsx`, `PermissionCard.tsx`, `ElicitationCard.tsx`, `packages/web/src/permission.ts`, `ask.ts`, `elicitation.ts` | The one card for "the agent is waiting on you" · where it sits and what it may cover · which plan-mode requests are curated and which are drawn as sent · what may be picked, how many, and why nothing you typed is ever erased |
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
 | `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |
-| `telegram-mini-app.md` | `packages/web/src/telegram.ts`, `main.tsx`, `index.css` | Why the bridge is hand-written and must stay so · what a `navigate` destroys and what is latched against it · the one control Telegram draws · the three places its chrome can be, and why only Telegram knows |
 | `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server's origin · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
@@ -448,7 +470,8 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `agent-strip.md` | `packages/web/src/agentStrip.ts`, `agentPick.ts`, `ui/NewSession.tsx`, `ui/settings/MachineAgentsSection.tsx` | Which agents the New session row offers and in what order · what a stored position may name and what it may never be validated against · why hiding is not a refusal · reordering with no library · why a cut row has to look cut |
 | `agent-catalogue.md` | `packages/web/src/openrouter.ts`, `agents.ts`, `ui/AgentBuilder.tsx`, `src/acp/systems.ts` | The three places a model's name can come from, and which one the browser fetches · the one system whose two spellings are the same models · what the reader drops and why greying it would be worse · what has been tried in a heading and taken back out, twice |
 | `deployment.md` | `deploy/`, `.github/workflows/` | Two deployments and three services · what a restart costs and what decides one · every rule about writing a value into an env file |
-| `compatibility.md` | `src/version.ts`, `src/relay/protocol.ts`, `packages/control-plane/src/store.ts`, `schema.sql`, `packages/web/src/wire.ts` | What ships with what, and why the web client riding the control plane's image decides the rest · negotiated against announced · which way an unknown value must fail · how to make a breaking change without a flag day · what is still one |
+| `compatibility.md` | `src/version.ts`, `src/relay/protocol.ts`, `packages/control-plane/src/store.ts`, `schema.sql`, `packages/web/src/wire.ts`, `packages/protocol/src/frames.ts` | What ships with what, and why a client nobody can push decides the rest · negotiated against announced · which way an unknown value must fail · which side ships first, and the one rule that produces both orders · how to make a breaking change without a flag day · what is still one |
+| `e2ee.md` | `packages/protocol/`, `src/e2ee.ts`, `machinekey.ts`, `packages/web/src/e2ee.ts`, `packages/control-plane/src/machinekeys.ts`, `packages/native/src-tauri/src/device.rs` | What the relay can read and what it cannot · which static key each end holds, where it is kept and who may touch it · why the capability may not ride the handshake · what a tag failure may not do, and the one refusal that cannot say why · what the device binding proves, and the two paths it deliberately does not reach |
 
 **Keeping this file small is `docscheck`'s job, not a preference.** It fails the
 build past a ceiling this file deliberately does not restate — the number lives in
@@ -499,9 +522,7 @@ orphaned by the function it used to describe, or a second copy of a measurement
 Deferred work, open decisions and the inventory of what is asserted are group
 **Q7** of `docs/DECISIONS.md` ("Open questions and deliberate non-goals"). The
 short version of what is knowingly not built: no sandbox (the seam is
-`SessionRuntime`), no end-to-end
-encryption through the relay (the seam is `reemoat-enc: none` on the CONNECT
-handshake), no fleet rollout, no access log on the control plane, and
+`SessionRuntime`), no fleet rollout, no access log on the control plane, and
 no `@file` mentions, and **a background task's end is on the wire for one agent
 only** — claude reports it behind a declared capability, which is what stops the
 sweep releasing an agent mid-build; the other three still say nothing, and so does

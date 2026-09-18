@@ -180,12 +180,12 @@ have to enter. These are the rules a change here must not break:
   anywhere in this app, and the icon beside the search box is a live `Dropdown` on
   `setFilter`. Revert it to a placeholder and `groups.ts`'s initialiser and
   `webcheck`'s assertion go back to `"all"` in the same commit. Q3.212.
-- **Inside Telegram the client's own control follows the screen.** `upFrom`
-  answers where up goes, and `null` at the root — which is what draws ✕ Close
-  there and ‹ Back elsewhere, Telegram having **one** control. One rule for two
-  affordances, so its arrow cannot disagree with ours. Everything else about that
-  webview — the bridge, the launch fragment a `navigate` destroys, and where the
-  chrome actually is — is `telegram-mini-app.md`. Q3.443.
+- **`upFrom` answers where up goes, and `null` at the root.** It is one rule
+  rather than a `switch` per screen because a host webview drew a *second* leading
+  control over ours and two that disagree is worse than one. That host was the
+  Telegram mini app and it is **gone** (Q1.649), rule file and all; the shape is
+  what outlived it — one pure function, read in `App` for `LegalScreen` and for a
+  sheet's ◀, so the two cannot drift. Q3.443.
 - **There is no back button.** Every leading control goes to a fixed destination
   from the URL, never a history — `useUnder` for a ✕, `upFrom` for a ◀ — which is
   why one may be *drawn* as `ChevronLeft` without being one. None may become
@@ -387,8 +387,7 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ui/ProfileMenu.tsx` | Who you are signed in as, and the two things you can do about it. The sidebar's footer, and the only copy of the name in the chrome |
 | `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: the scroll is inside `SessionBrowser` so the account row can sit at the bottom and its popover can open upward without being clipped |
 | `packages/web/src/ui/SessionBrowser.tsx` | The whole left column: logo, machine tabs, the waiting floor, the chat search, Pinned above the selected machine's folders, orphans, the footer. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
-| `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, read by Telegram's arrow). Its own module because `router.ts` reads `window.location` in its module body |
-| `packages/web/src/telegram.ts` | The mini-app bridge, hand-written: the injected `TelegramWebviewProxy` only, no SDK, and **no iframe transport** while `frame-ancestors 'none'` stands |
+| `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, what a ◀ goes to). Its own module because `router.ts` reads `window.location` in its module body |
 | `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — used from the header and every list row, plus `RenameField` |
 | `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the supervisor's ring for the daemon *this app started on this computer*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |

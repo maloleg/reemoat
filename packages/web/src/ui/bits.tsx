@@ -613,11 +613,27 @@ export function Badge({
  *
  * This used to name which of two paths a machine was reached on, because "direct
  * stays primary" was a claim worth making visible. There is one path now, so what
- * is left is the four ways it can fail — and they are genuinely different things
- * to do about: a daemon that is not dialling in, a token this client could not
- * mint, a machine nobody enrolled, and a control plane that is itself down.
+ * is left is the ways it can fail — and the property this table is held to is the
+ * one that survives every addition: **every member of `OfflineReason` has an
+ * entry here, and each entry names a different thing to do about it.** The type
+ * is the census, `Record<NonNullable<OfflineReason>, string>` is what makes a new
+ * member a compile error rather than a blank badge, and `webcheck` sweeps
+ * `Object.keys` over this object so that a member which is merely *spelled* is
+ * not mistaken for one that says something.
+ *
+ * ⚠ **No count and no list in this sentence, and that is a correction rather than
+ * a style.** It first said "the four ways it can fail" while the table held
+ * seven. The repair replaced the number with an enumeration — "a daemon that is
+ * not dialling in, a token this client could not mint, a machine nobody enrolled,
+ * a control plane that is itself down, and the two key states below" — which was
+ * stale again one entry later, naming six of eight and silently dropping
+ * `over_limit` and `owner_disabled`. Both failures are the same failure: a
+ * restatement of the table's contents sitting above the table has to be re-read
+ * on every addition, and nothing fails when it is not. `docs/DECISIONS.md`'s
+ * entry count is asserted rather than written down for this reason; a number — or
+ * a list — in prose is the one kind of claim nothing checks.
  */
-const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
+export const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   no_route: "unreachable",
   no_token: "no token",
   not_enrolled: "not enrolled",
@@ -628,6 +644,63 @@ const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   // either, which is what this table is for.
   over_limit: "over the machine limit",
   owner_disabled: "its owner is disabled",
+  /*
+   * The one entry that is not about the network, and it has to read as an
+   * instruction rather than as a fault. Everything else in this table is a state
+   * somebody waits out; this one is a daemon that has never announced the key an
+   * encrypted channel is opened to, and it is cleared by updating that machine —
+   * on the next dial, with no re-enrollment.
+   */
+  no_machine_key: "needs a newer daemon",
+  /*
+   * ⚠ **The twin of the line above, pointed at this computer instead — and the
+   * only entry in this table whose subject is not the machine the row names.**
+   * The daemon is fine and the tunnel is up; what is missing is the device key
+   * *this installation* is supposed to hold, so every machine on the account
+   * draws this sentence at once and none of them is at fault. It says *this
+   * device* for that reason, and carrying its own subject is the whole of what a
+   * substituted phrase can do about the repetition: the sentence is drawn per
+   * machine row and by {@link NotReachable} on four screens, and a phrase naming
+   * the row it sits on would read as an accusation against a machine that is
+   * working.
+   *
+   * It is an instruction for `no_machine_key`'s reason, and a sharper one: the
+   * state it replaces read "no token", which sends somebody to look at a sign-in
+   * that is working.
+   *
+   * ⚠ **And it read "sign in again on this device", which named an act that
+   * cannot terminate.** A sign-in re-sends the key this shell already holds —
+   * `POST /v1/login` carries `boot.devicePublicKey`, exactly as `registerDevice`
+   * does — and the Authority's `readDeviceInput` nulls a `publicKey` it cannot
+   * parse while **keeping** the registration, so the row goes on reporting
+   * `hasKey: false` and the same refused bytes arrive again on every attempt.
+   * What leaves the state is a *new* key, which only the shell can make: the
+   * Re-key control `DevicesSection` draws on the row wearing the `no key` badge.
+   *
+   * ⚠ **This is never drawn in a browser, and the paragraph here used to concede
+   * that it was** — *"a tab holds no keyring, so it finds the screen and no
+   * control on it"* — and then argue the dead end was worth it. There is no dead
+   * end to trade against: two independent guards each close it on their own.
+   *
+   * `POST /v1/tokens` raises `device_key_required` only where `caller.deviceId
+   * !== null`, and a browser sign-in carries no device at all — `cp.ts`'s
+   * `describeDevice()` answers `null` outside the shell, so `POST /v1/login`
+   * sends none and no session is ever bound to a row. A tab is therefore minted
+   * an *unbound* capability rather than refused, and `machine.ts` keys this
+   * reason on that one code and nothing else. The page-side miss does not arrive
+   * either: `e2ee.ts`'s `dial()` throws a plain `Error` for a missing static,
+   * which `probe` swallows, so a browser's permanent state is `no_route`.
+   * (Reachable only by moving a shell's device-bound session token into a tab's
+   * storage by hand — the shell reads its credential from the boot payload and
+   * never from `localStorage`, and no screen in this app offers the paste.)
+   *
+   * So the only *client* that ever draws it — on any of the screens named above —
+   * is a shell whose own row is keyless, which is exactly where `DevicesSection`
+   * draws the Re-key control this sentence sends somebody to. That is what lets
+   * one entry serve, in the one table whose rule is that each entry names a
+   * different thing to do.
+   */
+  no_device_key: "re-key this device under Settings → Devices",
 };
 
 /**

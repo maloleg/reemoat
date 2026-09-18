@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 140 | `###` |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 353 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 60 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 112 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 61 | `###` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 113 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 142 | `###` |
-| | | **961** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 143 | `###` |
+| | | **966** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 961 rather than the 496
+dividers. So the count is over **both** depths, and it says 966 rather than the 500
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3766,9 +3766,11 @@ and a streamed body is Chromium-only, and a Rust client has no progress events.
 an `invoke` cannot be aborted. `isTransportFailure` is a **negation** — anything
 that is not an `ApiError` — so a second definition of "the request was never
 answered" eventually disagrees, and the two ways it can disagree are *every subway
-tunnel signs the fleet out* and *nobody is ever signed out*. And `reemoat-enc` is a
-per-stream seam: a daemon leg in Rust would give an encrypted stream two
-decryptors.
+tunnel signs the fleet out* and *nobody is ever signed out*. And the Noise
+handshake runs in the page: a daemon leg in Rust would give an encrypted stream two
+decryptors. ⚠ The device *key* is the one part that does live in Rust, and it does
+not contradict this — `host_device_dh` answers a shared secret rather than a key,
+so the page drives the handshake while holding none of the static.
 
 **Rejected.** Adding a CORS layer to the control plane — it would put a header on
 the one service that has never needed one, to serve a client that does not need it
@@ -3901,6 +3903,23 @@ later *without another schema redesign*, and `migrate()` is exactly that
 guarantee — so the column buys nothing today and costs something real: a column
 nothing writes reads as *these rows are key-attested*, which is an unenforced
 security claim sitting in the table per-device revocation is argued from.
+
+**⚠ Amended: the column exists now, and the rejection's own reason is the
+specification it was built to.** Phase 5 added `devices.public_key`, and what
+makes it right today is precisely what made it wrong then: it is written — by
+`registerDevice`, from the key the shell generated — and the claim is *enforced*,
+by the daemon, offline. A capability names the device's key in RFC 7800 `cnf.jkt`;
+the `Noise_IK` handshake proves the caller holds the matching private half; the
+daemon compares the two and refuses `wrong_device` otherwise. So "these rows are
+key-attested" stopped being an unenforced security claim and became a checked one,
+which is the only condition under which this entry ever agreed to the column.
+
+**And the framing that kept everything else above true.** The key is
+**authentication, not authorization**. A grant is still `(user_id, machine_id)`,
+still full access to the machine; `relay/authorize.ts` still reads no device row
+and must not learn to. What the key adds sits one layer down and changes nothing
+this entry decided: which devices exist, what a grant covers, and who may reach
+what are all exactly as they were. Q1.648 is where the binding itself is argued.
 
 **Rejected: a `last_seen_at` column.** It needs a writer and both available
 writers are failures this package already carries intervals to avoid —
@@ -4102,6 +4121,117 @@ the handshake, and mail waiting to go out. Each is about reachability or is this
 service's own.
 
 **Status.** Current. `.claude/rules/authority.md` is the rule.
+
+### Q1.648 — What the device key binds, and what it deliberately does not
+
+**Question.** A capability is a signed bearer token: anybody holding the string
+can spend it until it expires. Phase 5 required that one stolen off the wire or
+out of a log be worth nothing. What should the binding be, and where should it be
+checked?
+
+**Decision. The capability names the device's X25519 public key in RFC 7800
+`cnf.jkt`, and the daemon compares that to the key the `Noise_IK` handshake just
+authenticated.** Both sides of the comparison are local: the key is inside the
+signed capability, and the handshake proved possession on this connection. No
+lookup, no fetch, no revocation list.
+
+**Why that shape and not a lookup.** `auth-and-tokens.md` states that the daemon
+makes exactly one control-plane request, ever, and that *"what must never appear
+is code that reads something it needs from the control plane"*. A binding checked
+by asking the Authority which key a device holds is exactly that code. Putting the
+key **inside the capability** is what keeps the rule literally true and what keeps
+an Authority outage from stopping a session that is already running.
+
+**Authentication, not authorization, and that distinction is load-bearing.** A
+grant is still `(user_id, machine_id)` and still full access. `relay/authorize.ts`
+reads no device row. Four documents said so — `cp-devices.md`, `docs/AUTHORITY.md`,
+`SECURITY.md` and Q1.642 — and none of them had to change, because the key decides
+*whether this caller is who the capability says*, never *what they may reach*.
+Getting this backwards would have meant per-device grants, which is a feature
+nobody asked for and a migration for every existing row.
+
+**The anti-downgrade rule, which is the half that is easy to miss.** A channel
+that authenticated a key refuses a capability carrying **no** `cnf` at all
+(`unbound_capability`), rather than falling back to bearer semantics. Without it
+the binding is advisory: a caller simply asks for an unbound capability and the
+whole mechanism is optional. ⚠ And `parseClaims` returns `null` for a `cnf` that
+is *present but malformed*, rather than treating it as absent — the same rule one
+layer down.
+
+**Why the channel decides and not a configuration.** A verifier *option* for
+"require a device binding" was written and taken back out the same day — named
+here without a backtick because it never shipped and a citation to it would grep
+to nothing. It made the binding something an operator could be wrong about, and a
+daemon with it off would have accepted bearer capabilities while every document
+said otherwise. `daemoncheck` went red across every route, which was the design
+error surfacing rather than a fixture problem. The **channel** decides instead: a
+channel that authenticated a key insists the capability names it, and a request
+with no channel is loopback — which is the trade `relay.md` already states and
+bounds.
+
+**What it does not defend against.** The Authority mints capabilities and holds
+the signing key, so it can name any device key it likes. This closes theft of a
+serialized capability, not a hostile issuer.
+
+**Status.** Current. `src/auth.ts` holds the check; Q7.37 is the phase.
+
+
+### Q1.649 — Deleting the browser branch of the app
+
+**Question.** Phase 5 made remote access depend on a device key in the operating
+system's keyring: a client with none cannot open an encrypted channel to a daemon,
+and there is no other way in. A browser has none. So what is left of the app's
+browser build — the Telegram mini app, the `REEMOAT_CP_WEB` bundle, the arms that
+exist only outside the native shell — and should it be kept?
+
+**Decision. Deleted, and the reason is not tidiness.** A browser loading this app
+can reach **no machine at all**. It draws a machine list, a session list from
+nothing, and opens none of them. Serving that is worse than serving nothing:
+"unreachable" is at least a sentence somebody can act on, while a product that
+loads and then fails on the first tap is a support conversation.
+
+**What went:**
+
+- **`telegram.ts` and the mini app.** Seven exports, the `[data-telegram]` CSS
+  rules, the `<html>` marker `main.tsx` wrote, setTelegramBack's effect in
+  `App.tsx`, the rule file, and the Telegram section of the privacy policy — a
+  policy that describes behaviour the product no longer has is a false statement
+  about data, which is the one document where that costs something real.
+- **`REEMOAT_CP_WEB`**, and with it the control plane's static mount for the app,
+  its SPA fallback, and the asset-shape refusal that lived in it. `main.ts` reads
+  no environment value for a web root and `deploycheck` asserts the absence of the
+  *read* rather than of the name — two docblocks still say it, because that is
+  where the deletion is argued.
+
+**What stayed, and each was checked rather than assumed:**
+
+- **`cp.ts`'s browser storage arm and `LEGACY_STORAGE`.** The **gate** signs
+  people in — `Gate.tsx` calls `store.adoptSession`, which calls `cp.setSession` —
+  and the gate is a browser bundle. So the browser arm is live, and the two
+  pre-rename keys it sweeps are still what is sitting in somebody's tab.
+  `noUnusedLocals` would have made a dormant constant a typecheck failure, which
+  is how this was settled rather than argued.
+- **`platform.ts`**, which is not a browser branch: it answers what kind of device
+  this is, and the shell needs that too.
+- **`localRoute.ts`**, which has no `inNativeShell()` of its own — `localDaemon()`
+  answers `null` outside the shell and always did, so there was no arm to remove.
+- **`upFrom`**, whose only *caller* was Telegram's back button and whose only
+  remaining reader is `LegalScreen`. Its table of assertions was re-homed rather
+  than deleted with the caller that used to justify it: a pure function with one
+  live reader and no coverage is how the next edit to it goes unnoticed.
+
+**What is genuinely given up.** The control plane can no longer serve the app to a
+browser for a demo or a checkout, and `pnpm web` in dev is what replaces that.
+`pnpm web:build` still exists, because `pnpm native:build` compiles its output into
+the binary — the bundle is still built, it is simply never served over HTTP.
+
+⚠ **The security property does not depend on this deletion**, which is why it is
+recorded as a separate decision rather than as part of Q7.37. `deviceStaticKey()`
+answers `null` outside the shell, so a browser was already refused and already said
+so. What this removes is dead weight and a false promise, not a hole.
+
+**Status.** Current. Q7.37 is the phase this follows from.
+
 
 ## Session lifecycle, questions and attachments
 
@@ -20486,7 +20616,7 @@ costs the markdown in the rare clamped case and never the state — the same sen
 #### Q3.596 — The mini app drew ✕ Close at every depth, and the back button had never once been asked for
 
 **Question.** Q3.443 built the Telegram back button: `upFrom` answers where up goes,
-`null` at the root, and `setTelegramBack` posts `web_app_setup_back_button` — one
+`null` at the root, and setTelegramBack posts `web_app_setup_back_button` — one
 control, so hiding it is what draws ✕ Close. Reported from a phone months later:
 *"в ТМА при переходе в диалог все еще кнопка закрыть… иначе юзеру каждый раз
 приходится перезаходить в тма"*. `upFrom` returns `"/"` for a conversation, the
@@ -20498,8 +20628,8 @@ version was read out of it on every call. `router.ts`'s `navigate` calls
 `history.pushState(state, "", path)` with a path-only URL, which replaces the
 **whole** URL — proven against the same WHATWG parser the browser uses:
 `new URL("/m/x/s/y", "https://cp/#tgWebAppVersion=8.0")` is `https://cp/m/x/s/y`.
-So `telegramVersion()` answered `null` from the first tap onward, `versionAtLeast`
-read that as *too old* by its own deliberate fail-closed rule, and `setTelegramBack`
+So `telegramVersion()` answered `null` from the first tap onward, versionAtLeast
+read that as *too old* by its own deliberate fail-closed rule, and setTelegramBack
 returned before posting anything.
 
 **The one call that survived was the one that hides the control.** At the root
@@ -20507,18 +20637,18 @@ returned before posting anything.
 `is_visible: false` — so the app successfully asked Telegram for ✕ Close, once, and
 then never spoke again.
 
-**The fix is a latch, at the one moment that means launch.** `telegramReady` runs
+**The fix is a latch, at the one moment that means launch.** telegramReady runs
 from `main.tsx`'s module body, before `createRoot` and therefore before any effect
 can navigate. It is mirrored into `sessionStorage` because a *reload* loses the
 fragment too — this app assigns `window.location.href = "/"` on sign-out and offers
 the same from the error boundary. Telegram's own SDK does exactly this and their
 docs say why: *"If the application uses hash routing, it may lose the initial hash
-after some time."* Only the **version** is kept, never `tgWebAppData` — that is a
+after some time."* Only the **version** is kept, never tgWebAppData — that is a
 signed credential naming a Telegram account, this app has never read it, and a copy
 in `sessionStorage` would be one this origin stores for no reason.
 
 ⚠ **`webcheck` was green over it for the whole time, and the reason generalises.**
-The driver writes `location.hash` immediately before each `setTelegramBack` call, so
+The driver writes `location.hash` immediately before each setTelegramBack call, so
 the read always succeeded — the one condition the real app never satisfies. The
 assertion now drives the actual sequence: latch at launch, wipe the fragment the way
 a navigation does, then ask. Reverting the fix fails it twice.
@@ -20528,7 +20658,18 @@ a navigation does, then ask. Reverting the fix fails it twice.
 injected (`data-telegram` is stamped off the same test, and the header inset it
 controls was visibly applied in the screenshot).
 
-**Status.** Active
+⚠ **Superseded by deletion: there is no mini app any more.** Phase 5 made remote
+access native-only — a browser holds no device key, so it cannot open an encrypted
+channel to a daemon and says so — and a Telegram mini app is a browser. So
+`telegram.ts` and every symbol this entry names with it are gone, which is why the
+ones above are no longer written as code. What survives is `upFrom`, because
+`LegalScreen` reads it for a different reason, and the sequence this entry is
+*about* — latch at launch, then ask — outlived its subject as a shape: a value read
+out of a launch fragment on every call is a value that stops existing after the
+first navigation.
+
+**Status.** Superseded (Q1.649). The defect and its measurement are kept because
+the shape recurs; the code is deleted.
 
 #### Q3.597 — 52px of empty screen under a header bar that had already reserved its own space
 
@@ -20558,8 +20699,8 @@ it had. `0.5rem` leads the `max()` so an answer of `0` falls back to the ordinar
 `.pt-safe` floor rather than to nothing.
 
 **The two numbers are added, and that is the one thing here read from documents
-rather than measured.** `safeAreaInset` is the space to avoid at the top of the
-*screen*; `contentSafeAreaInset` the space to avoid at the top of the *content
+rather than measured.** safeAreaInset is the space to avoid at the top of the
+*screen*; contentSafeAreaInset the space to avoid at the top of the *content
 area*, i.e. of what the first leaves. Nested, therefore additive — and Telegram's
 SDK writes four CSS properties per object and combines nothing, so every page doing
 this adds them. **It is the direction to be wrong in**: over-adding costs a band of
@@ -20569,7 +20710,7 @@ mode settles it; in the ordinary presentation both are 0, which is the reported 
 
 **Q3.443's rule survives verbatim at the line it was about.** That line is still a
 `max()` and still never an addition to `env()`. The one addition is between
-Telegram's own two numbers, in `telegramInsets`, where both are in scope and neither
+Telegram's own two numbers, in telegramInsets, where both are in scope and neither
 is a literal.
 
 **The bottom edge had the same defect and nobody reported it**, because nothing under
@@ -20585,10 +20726,20 @@ specificity — `Composer.tsx` records the same trap and names the casualties.
 
 **And `telegram.ts` got a rule file.** It was globbed by none, so the knowledge above
 arrived in no session that opened it, which is how two of these shipped twice.
-`telegram-mini-app.md` holds it; `web-shell.md`, at 25 characters of headroom, keeps
+`telegram-mini-app.md` held it; `web-shell.md`, at 25 characters of headroom, kept
 one sentence and a pointer.
 
-**Status.** Active
+⚠ **Superseded by deletion.** The mini app is gone (Q1.649), and with it
+`telegram.ts`, its rule file and the `[data-telegram]` rules this entry is about —
+which is why the two inset accessors it names are no longer written as code. Three
+things in here are **not** about Telegram and survive: `.pt-safe`/`.pb-safe` are
+still unlayered and still beat a layered Tailwind utility regardless of specificity;
+`max()` is still never an addition at that line; and the general lesson — that a
+platform flag says *which platform*, never *how that platform is presenting you* —
+is the one this entry exists for.
+
+**Status.** Superseded (Q1.649). The CSS trap and the three-states lesson are kept;
+the code is deleted.
 
 #### Q3.598 — Three documents that had to be readable with no account
 
@@ -20704,9 +20855,9 @@ at interactive content inside a `<label>` does not activate the labelled control
 so the links do not tick the box on the way past.
 
 **Measured, and unverifiable without a phone:** whether a same-origin `_blank`
-survives Telegram's webview. The idiom is already exercised there off-origin by
-`MarketEntry` and `AgentsPanel`, and `inTelegram` is the seam if it turns out not
-to be.
+survives Telegram's webview. ⚠ **Moot since Q1.649** — there is no mini app, so the
+question has no environment left to be asked in and the seam this named is deleted
+with it. The `target="_blank"` idiom stands on its own reasons and is unchanged.
 
 **Status.** Current
 
@@ -23162,18 +23313,20 @@ rather than a correctness one, and `Gate` is heavily asserted.
 A route guard over the whole bundle would have given the smaller diff and none of
 the property.
 
-**`REEMOAT_CP_WEB` inverts and keeps one meaning: serve the app too.** Unset,
-`0`, `false`, `no` — no app. A path — the app from there, which is a checkout or a
-mounted directory. ⚠ **`1`/`true`/`yes` name nothing now**: with no app bundle in
-the image there is no built-in default for them to mean, and read as a path they
-resolve to `<cwd>/1` — the permanent silent 404 Q1.641 closed, wearing the
-opposite clothes. They are recognised only so they can be answered with a sentence
-at startup, and the constant is `webMeaningless` rather than `webDefault` so a
-reader grepping the old name finds nothing and has to read why. `deploycheck`
-therefore asserts this predicate and `REEMOAT_CP_INSTALL`'s **disagree**, where it
-used to assert they agreed: `deploy/bootstrap.sh` really is in the image, so that
-one really does still have a default, and holding the two to each other now would
-force one of them to lie.
+**`REEMOAT_CP_WEB` inverted and kept one meaning: serve the app too.** Unset, `0`,
+`false`, `no` — no app. A path — the app from there, which is a checkout or a
+mounted directory. `1`/`true`/`yes` named nothing once the image stopped carrying a
+bundle, and were recognised only so they could be answered with a sentence at
+startup rather than resolving to `<cwd>/1` and 404ing for ever — the trap Q1.641
+closed, wearing the opposite clothes.
+
+⚠ **Superseded by deletion (Q1.649): the variable is gone and so is the constant
+it turned on.** A browser holds no device key, so it cannot open an encrypted
+channel to a daemon — it could load the app and reach no machine at all, which is
+worse than not offering it. The two spellings named above are no longer written as
+code, because there is no code. `REEMOAT_CP_INSTALL` is the only variable of that
+shape left, and `deploycheck` reads its three-and-three off `main.ts` rather than
+comparing it against a second.
 
 **What `CP_IMAGE_INPUTS` does.** It keeps the whole `^packages/web/` prefix,
 because the gate is built from `packages/web/src` plus `gate.html`,
@@ -23313,6 +23466,63 @@ because of a value one form re-enters is the worse failure.
 `a_compiled_default_is_an_address` is vacuous here and loud in a fork, because
 `option_env!` is evaluated in that fork's own build: a typo fails their
 `cargo test` rather than shipping as no default at all.
+
+### Q4.122 — A crypto package four readers compile, in a repository with no build step
+
+**Question.** The app and the daemon have to agree byte-for-byte about a
+cryptographic protocol. `wire.ts` is a **hand mirror** of the daemon's event
+vocabulary and says so, which is right for a union whose drift costs an
+`undefined` on a screen. What does it cost for a handshake?
+
+**Decision. A workspace package, `packages/protocol`, consumed as source by four
+readers at once.** A mirrored interface that drifts costs a wrong word; a
+mirrored *cryptographic protocol* that drifts costs a session that either stops
+working or, far worse, quietly agrees on something weaker at one end. That is not
+a thing to keep two copies of.
+
+**The four readers, and what each demanded.** `tsx` and the root `tsconfig.json`
+are `NodeNext`, so relative imports carry `.js`. The root `tsc --noEmit` picks the
+package up through `include: ["packages/*/src/**/*.ts"]`. `packages/web` compiles
+with `moduleResolution: "bundler"`, which accepts those same `.js` specifiers.
+Vite resolves the workspace symlink through `exports`. So `package.json` points
+`types` and `exports` at `./src/index.ts` directly and there is no build step,
+which is the repository's own rule rather than a shortcut.
+
+**⚠ `types: []` in the web config is what decides the byte type.** With
+`@types/node` present, `setInterval` returns `NodeJS.Timeout` and `process`
+becomes a global in code that ships to a phone — so the web package excludes node
+types on purpose, and therefore **`packages/protocol` may not mention `Buffer`**.
+Every byte string in it is a `Uint8Array`. That is a real adjustment for the
+daemon side, which reaches for `Buffer` everywhere else, and it is the kind of
+thing that compiles on one side and fails on the other if it is not decided up
+front.
+
+**⚠ A consumer must not import `@noble/*` itself.** pnpm's strict layout means a
+dependency of this package is not resolvable from a package that merely depends on
+*it* — the same shape as the `jose` gotcha `token.ts` records — so reaching past
+this module for a primitive fails at run time rather than at the typecheck.
+`publicFromSecret` and `randomSecretKey` are exported for exactly this reason.
+Measured: `scripts/protocolcheck.ts` could not resolve `@noble/curves` until they
+were.
+
+**And the control plane does not import it.** `relaycheck` pins that
+`packages/control-plane/src/**` reaches the repository root for exactly five
+files, and the same five are what the Dockerfile COPYs into the runtime stage. The
+relay needs only the `reemoat-enc` *value*, which lives in
+`src/relay/protocol.ts` — already on that list. So the image carries no crypto,
+which is the honest shape for a process that holds no key.
+
+**The one packaging trap, found by reading rather than by a red build.**
+`packages/native/scripts/build-daemon.mjs` copies source trees and writes a
+`package.json` whose dependency versions come from the root manifest — so
+`@reemoat/protocol` would have been pinned to `0.9.0` for npm to fetch from a
+registry it is not on, and a `file:` specifier writes a symlink the payload's own
+symlink audit refuses. It is filtered out of the version map and copied into
+`node_modules/@reemoat/protocol` as a real directory instead, with `@noble/*`
+declared at the root so npm installs them flat.
+
+**Status.** Current. Q7.37 is the phase; `pnpm protocolcheck` is the driver.
+
 
 ## Invariants — rules that were defects first
 
@@ -25587,6 +25797,69 @@ every run re-downloads, nothing is red — so `nativecheck` reads both off disk.
 That is the `.dockerignore`/Dockerfile hazard `CLAUDE.md` already names, at a
 smaller scale and with the same treatment.
 
+#### Q5.118 — The invariants of an encrypted channel
+
+**Question.** Phase 5 put a cryptographic protocol between the app and the daemon
+and made the relay a carrier. Which of the rules it rests on are the ones that
+would be quietly broken by a reasonable-looking change?
+
+**Seven, and each was a decision before it was a rule.**
+
+**The capability rides the first *transport* message, never the handshake
+payload.** `Noise_IK`'s first message is encrypted to a static key alone: no
+forward secrecy, and nothing stops an eavesdropper replaying it verbatim. A
+capability in it would be replayable off the wire for its whole lifetime. After
+`ee`/`se` both ephemerals are fresh. ⚠ This is **not** enforced in
+`packages/protocol/src/noise.ts`, deliberately — that file implements the
+specification, which allows a payload in every handshake message, and the
+published vectors carry one in all four. Refusing it there would mean refusing the
+vectors. The rule belongs to the layer that decides what to send.
+
+**A tag failure ends the session and sends nothing.** There is no resynchronise
+and there must not be: a `CipherState` whose nonce has diverged fails every later
+frame, so "skip it and carry on" is a session that never works again while
+appearing to try. Both ends take this view. The refusal is a closed stream rather
+than a message, because below a failed handshake there is no key to send a message
+under — an asymmetry worth naming, since every other refusal in this codebase can
+say why.
+
+**`RESPONSE_END` and `FAILED` are different frames.** The natural shape is one
+"the stream ended" frame, and with one frame a daemon whose upstream died mid-body
+is indistinguishable from one that finished — so the app resolves a short body as
+if it were the answer. Two frames make *complete* and *gave up* different bytes.
+This is Q6.103 surviving the rewrite. ⚠ And the delivery of it is part of the
+rule: `fail()` must `end()` the stream rather than `destroy()` it, or the frame is
+written and thrown away — which turns a `502 truncated` back into a transport
+failure the client retries for ever. That was a real defect, found by the driver
+and not by reading.
+
+**The session pins its own capability onto every inner request.** The channel
+proved which device is calling and the capability presented at `HELLO` was checked
+against it; letting a request carry a *different* credential would mean the
+binding held for the handshake and not for the traffic. It also retires `?token=`
+on the last hop, because Node makes that request and can set a header.
+
+**The relay names the mode and understands neither.** `RelayTunnel.open` takes
+`encryption` with **no default**, so there is no spelling of that call that
+produces an unencrypted stream. It used to write `"none"` itself, which made the
+carrier the party that chose — and a carrier that can choose can choose the weaker
+one.
+
+**The daemon authenticates the machine by being able to answer at all.** There is
+no name to check and no certificate: `IK`'s second message is sealed under a key
+mixed from `ee` and `se`, so producing one requires the private half of the static
+the initiator started with. Reaching `split()` *is* the check, which is why there
+is no comparison to read in the client and why its absence is worth a paragraph.
+
+**No second timer against Q5.24.** The three-party rule — the daemon closes 4401
+past `exp + leeway`, the relay authorizes at open and never tears a live stream
+down, the client rotates at `exp − 60s` — is unchanged. The pool's reuse margin
+decides only whether an **idle** connection is handed out again; nothing tears a
+live one down on a clock.
+
+**Status.** Current. `.claude/rules/e2ee.md` is the area.
+
+
 ## Measured behaviour of the agents and the tools
 
 ### Q6.1 — Why did `session_started` land in the log *after* the first `prompt` event?
@@ -27599,8 +27872,13 @@ single implementation for exactly this: `clientFileIo`, `login`, `git` and
 `launch` are the four places a confining runtime has to answer differently, and
 each already has a comment saying so.
 
-**Why not yet.** Reserved in the same voice as the relay's `reemoat-enc: none` —
-the seam exists, no confinement was written.
+**Why not yet.** The seam exists; no confinement was written. ⚠ **This used to
+read *"reserved in the same voice as the relay's `reemoat-enc: none`"*, and that
+comparison has been spent** — Q7.37 shipped, the mode is gone, and the sentence
+now points at something that is not reserved any more. The voice it meant is
+still the right one and is worth naming without a cross-reference: an interface
+with one implementation, where every place a second one would have to answer
+differently already says so in a comment.
 
 **What it would take.** Filling in an implementation rather than reopening a
 design. Nothing about the rest of the daemon would change: paths stay host-side,
@@ -27640,18 +27918,41 @@ to say "this session may not push" that is not simply "do not run an agent".
 
 ### Q7.37 — Is traffic through the relay end-to-end encrypted?
 
-**Position.** No — the relay terminates TLS and sees plaintext today. The
-capability is reserved rather than built.
+**Position.** Yes, and it is the only mode. The relay carries bytes it holds no
+key for; the app and the daemon run `Noise_IK_25519_ChaChaPoly_BLAKE2s` between
+themselves.
 
-**Why not yet.** No crypto was written, deliberately.
+**What the seam bought.** This entry read *"No — the relay terminates TLS and
+sees plaintext today"* for as long as the relay has existed, and what it reserved
+was one header: `reemoat-enc` on the CONNECT handshake, negotiated per stream,
+with an unrecognised value a *stream* error rather than a tunnel-level one. That
+turned out to be exactly the right size of reservation. Adding the mode was a new
+value at one call site and a 501 for anything else; no protocol break, no flag
+day *for the seam itself*. The flag day that was taken is a different one and is
+recorded below.
 
-**What it would take.** The seam is the CONNECT handshake: `reemoat-enc: none`
-is negotiated per stream, and an unrecognised value is a *stream* error (501 on
-that one CONNECT) rather than a tunnel-level one, so an old daemon meeting a new
-relay loses one request instead of going offline. Adding a mode later is another
-header, not a protocol break.
+**What is built.** `packages/protocol` holds the handshake, written to the Noise
+specification (revision 34) and driven byte-for-byte against the published
+cross-implementation vectors in both roles by `pnpm protocolcheck`. The
+initiator's static is the app's **device key**, whose private half lives in the
+operating system's keyring and is used from Rust — `host_device_dh` answers a
+shared secret and the page never holds the key. The responder's static is the
+**machine key**, generated by the daemon on first start and announced on its
+tunnel dial. `src/e2ee.ts` terminates the session on the daemon and serves
+loopback with Node's own HTTP and WebSocket clients; `packages/web/src/e2ee.ts`
+is the initiator and the connection pool; `handleChannel` in
+`packages/control-plane/src/relay/proxy.ts` is the splice.
 
-**Status.** Not built.
+**What it does not buy, stated plainly.** E2EE removes the **relay** from the
+trusted payload path. It does **not** defend against a malicious Authority: that
+service mints every capability and holds `signing_keys.private_pem`, so it can
+issue one naming a device key of its own choosing. It does not make the operator
+untrusted — they still ship the client. What it does is make a compromised
+*carrier* worthless, and make a capability stolen off the wire or out of a log
+useless from any device but the one it was minted for.
+
+**Status.** Built. Q7.143 carries the flag day, Q1.648 the device binding,
+Q4.122 the packaging, and Q5.118 the invariants.
 
 ### Q7.38 — Is a relayed stream's authorization re-checked while it is open?
 
@@ -31759,10 +32060,26 @@ every launch. So `CREDENTIAL` is still a set of one, `read`/`write` still carry 
 `String`, there is still no `list`, and the seam this entry reserved is still
 reserved for the device **key**, which has none of those properties.
 
-**Status.** Amended 2026-09-15 — the "no device id" half is superseded by Q1.643.
-The `SecretStore` seam and its two interface refusals are current. `docs/NATIVE.md` carries what turning on signed
-updates would take, including the one step that has to happen before a first public
-build.
+⚠ **And the seam it reserved for a device *key* is spent, in the shape this entry
+specified.** There is an X25519 static per installation now, and it honours all
+three properties written above: it does **not** pass through `read`/`write`, which
+is why those still carry a `String`; `device.rs` holds it and exposes
+`host_device_dh`, which is *"a `sign(key, bytes)` that never returns one"* with a
+Diffie-Hellman where the signature would be; and there is still no `list`.
+
+One correction to the future shape this entry imagined, worth recording because it
+was stated as achievable and is not: **it is not backed by the Secure Enclave, and
+it cannot be.** The Enclave holds P-256 keys only, so no non-extractable X25519
+exists on that platform. What the arrangement still buys is real and narrower than
+"the key cannot be extracted": the **page** cannot read it, an `invoke` returns a
+shared secret rather than a key, and the store has no verb that would enumerate
+one. A process running as this uid can still reach the keyring, exactly as it can
+reach `reemoat.db`. Q1.648 and `.claude/rules/e2ee.md` carry the rest.
+
+**Status.** Amended 2026-09-15 — the "no device id" half is superseded by Q1.643;
+the device-key seam is spent (Q7.37). The `SecretStore` interface refusals are
+current. `docs/NATIVE.md` carries what turning on signed updates would take,
+including the one step that has to happen before a first public build.
 
 
 ### Q7.137 — Whether the native client should reach a local daemon directly
@@ -32095,6 +32412,52 @@ on `SESSION_SCOPED_ENV`'s list.
 
 **Status.** Fixed. The empty `unknown` Keychain item on an affected machine is
 inert but stays until deleted by hand.
+### Q7.143 — The flag day that was taken on purpose, and what it cost
+
+**Question.** `compatibility.md` describes a four-step rollout whose whole point
+is that a protocol bump is never a flag day: ship a relay speaking `1..2`, let
+daemons move to 2 whenever their owners get to it, raise the floor only once
+nothing is left below it. Phase 5 raised `RELAY_PROTOCOL_MIN_VERSION` to 2 in the
+same commit that introduced v2. Why break the rule the range exists for?
+
+**Decision. Because the range cannot span this change.** v2 *is* the version on
+which a stream is always encrypted. A v1 daemon and a v2 relay cannot both be
+right about what the bytes on a stream mean, because v1's answer is "plaintext
+HTTP". Keeping the floor at 1 would mean keeping a relay that still carries
+plaintext — which is the thing being removed — for as long as one machine in the
+fleet had not been touched.
+
+**What it costs, plainly.** A daemon that has not been updated stops dialling in.
+It is refused with a `426` naming what to do, its machine draws as offline, and it
+comes back the moment somebody runs `deploy/deploy.sh` on that host. Nothing in
+the fleet updates itself; that script is the whole mechanism.
+
+**Three things were given up with the plaintext path, and each is named rather
+than discovered later:**
+
+- **`pnpm client` loses its relay arm.** Opening a channel needs a device key and
+  a capability bound to it with `cnf.jkt`; `REEMOAT_TOKEN` is a long-lived bearer
+  capability with no `cnf`, which is exactly what the binding makes worthless.
+  The CLI refuses with a sentence naming the remedy — the app for a remote
+  machine, `REEMOAT_URL` for a local one — rather than degrading. Adding a
+  plaintext path back for one CLI would put the fleet's traffic in the clear again
+  for whoever holds a token.
+- **The relay's CORS surface is gone**, and `CORS_ALLOW_METHODS` had its only
+  relay-side driver there. A WebSocket handshake is not preflighted, so there is
+  no browser question left for that process to answer. `src/cors.ts` is still the
+  daemon's and `daemoncheck` still drives it.
+- **`x-forwarded-for` no longer reaches a daemon.** It cost nothing: nothing under
+  `src/` reads it, and the Authority's throttle reads its own on its own listener.
+
+**Rejected: a transition mode.** A relay speaking both, gated on a header, was the
+obvious middle — and it is a downgrade oracle by construction. Whatever chooses
+the mode is a thing an attacker or a misconfiguration can choose *for* you, which
+is the whole reason `STREAM_ENCRYPTION_NONE` was deleted as a constant rather than
+left unused: with the string gone there is nothing to set.
+
+**Status.** Current. Q7.37 is the phase; `.claude/rules/compatibility.md` carries
+the rollout this deliberately did not take.
+
 ### Q7.142 — What is still not decided about the server address
 
 **No relay field, and it is refused by construction rather than deferred.** The

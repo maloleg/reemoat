@@ -22,10 +22,10 @@ this app supervises cannot replace the code running in it. Everything here is a
 fact about a webview under a custom scheme rather than a decision of ours, and each
 one was measured before it was written down.
 
-`telegram-mini-app.md` is the sibling to read first. It is the same shape of
-problem — somebody else's webview, a hand-written bridge, no vendor SDK — and
-`native.ts` is deliberately written to `telegram.ts`'s pattern rather than to
-Tauri's examples.
+`native.ts` is deliberately written to the pattern the Telegram mini app's bridge
+used — somebody else's webview, hand-written, no vendor SDK — rather than to
+Tauri's examples. That sibling is **gone** (Q1.649), rule file and all; the
+pattern is what it left behind.
 
 ## Commands
 
@@ -64,8 +64,10 @@ which is sufficient:
   second place deciding what a transport failure is will eventually disagree, and
   the two ways it can disagree are "every subway tunnel signs the fleet out" and
   "nobody is ever signed out".
-- `reemoat-enc: none` is a per-stream seam. If the daemon leg ever moved to Rust,
-  an encrypted stream would have two decryptors.
+- **The Noise handshake runs in the page**, and moving the daemon leg to Rust would
+  give an encrypted stream two decryptors. The device key does *not* — the private
+  half stays in the keyring and `host_device_dh` answers a shared secret, so the
+  page holds a DH oracle scoped to itself and never the key.
 
 `nativecheck` asserts the control plane does **not** appear in the shell's
 `connect-src`: if it does, the split has quietly stopped being one.
@@ -141,12 +143,12 @@ through `adoptHydratedCredential` after awaiting `hostReady`;
 before it lands.
 
 ⚠ **Not an `await` gate in `main.tsx`.** That moves `installWakeDetection()` and
-the Telegram launch sequence into an async body, and
-`webcheck.navigation-and-telegram.ts` pins `/telegramReady\(\);\s*watchTelegramInsets\(\);/`
-off disk because `telegram-mini-app.md` calls that ordering *"the whole of whether
-this works"*. **`main.tsx` is untouched by the native shell**, and that is a
-property: unlike Telegram there is no chrome to configure and no readiness to
-announce, so the bridge installs itself from its own module body.
+`store.bootstrap()` out of the module body and into an async one. The Telegram
+launch sequence was the other thing such a gate would have moved, and a driver
+pinned its ordering off disk for exactly that reason; the mini app is **gone**
+(Q1.649) and this rule outlived it. **`main.tsx` is untouched by the native
+shell**, and that is a property: there is no chrome to configure and no readiness
+to announce, so the bridge installs itself from its own module body.
 
 ⚠ **Not Tauri's `initialization_script`.** It is fixed at window creation, so the
 reload in `store.signOut()` would re-inject the credential `clearSession()` had just
@@ -301,10 +303,9 @@ gate arm actually drew was the two screens `SignIn` created client-side.
 
 Both are **anchors** now, at `controlPlaneOrigin()` — **absolute** (a relative
 href answers `null` from `openableHref`, so the interceptor never fires and the
-webview quietly redraws the sign-in screen) and **`target="_blank"`** (this bundle
-also runs inside Telegram, where `<authority>/register` is the *same* origin, so a
-plain anchor destroys the launch fragment `telegram.ts` latches against). Q3.606
-carries both at length.
+webview quietly redraws the sign-in screen) and **`target="_blank"`** (a plain
+anchor is a real navigation, which in a browser throws away whatever was typed on
+the sign-in form behind it). Q3.606 carries both at length.
 
 `ui/gate/GateCard.tsx` stays in the app bundle and is the **named exception**:
 `ForcedPasswordChange` renders one. So the rule is *no gate screen*, not *nothing

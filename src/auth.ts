@@ -70,7 +70,32 @@ export interface Principal {
   expiresAt: number | null;
   /** `jti`, for the audit trail. `null` under the shared secret. */
   tokenId: string | null;
+  /**
+   * Which installation the capability named, for the audit trail only.
+   *
+   * **Advisory, never a decision**, exactly as the `dev` claim it comes from is.
+   * The binding that decides anything is `cnf`, checked below against the channel;
+   * this is the value a log line can carry so a refusal names a device somebody
+   * can go and look at.
+   */
+  deviceId: string | null;
   via: "shared_secret" | "signed";
+}
+
+/**
+ * What the transport underneath this request proved about who is calling.
+ *
+ * An argument rather than something ambient, because the binding is a fact about
+ * **the channel** and not about the token: the same capability presented over a
+ * different channel is a different answer, and a verifier that read this from the
+ * environment would be unable to say so.
+ *
+ * `peerKeyThumbprint` is the RFC 7638 thumbprint of the static key the Noise
+ * handshake authenticated, or `null` where the request did not arrive over one —
+ * loopback on this machine, or the shared secret.
+ */
+export interface ChannelIdentity {
+  peerKeyThumbprint: string | null;
 }
 
 export type AuthFailureCode =
@@ -83,6 +108,18 @@ export type AuthFailureCode =
   | "unknown_key"
   | "wrong_issuer"
   | "wrong_machine"
+  /**
+   * The capability named no key, so nothing can be bound to it.
+   *
+   * A **different remedy** from `wrong_device`, which is why it is a different
+   * code: this one means the control plane that minted it is older than this
+   * daemon, or this installation has never registered a key. Folding the two
+   * picks one sentence and is wrong about half the failures — which is the
+   * argument `device_revoked` and `session_revoked` already make one service over.
+   */
+  | "unbound_capability"
+  /** The capability is bound to a key this channel did not prove it holds. */
+  | "wrong_device"
   | "token_expired"
   | "token_not_yet_valid";
 
@@ -107,8 +144,35 @@ export interface TokenVerifier {
    * paths can be driven from `scripts/` without touching the system clock.
    * There are no tests in this repo; this is what testable means here.
    */
-  verify(token: string | null, now?: number): VerifyResult;
+  verify(token: string | null, now?: number, channel?: ChannelIdentity): VerifyResult;
 }
+
+/**
+ * A request that arrived over nothing that authenticated a key.
+ *
+ * Loopback on this machine, and the shared secret. Named rather than written as
+ * `{ peerKeyThumbprint: null }`, so a driver exercising the unbound path says
+ * *no channel* in the same words the type does.
+ *
+ * ⚠ **A spelling, not a fence**, and this docblock claimed the opposite for a
+ * release: that the places with genuinely no channel were greppable and a new
+ * one could not be added by accident. Both halves are false, and by the same
+ * line — `verify`'s `channel` parameter *defaults* to this constant on both
+ * verifiers, at `src/auth.ts`'s two `verify` signatures. No *call site* in
+ * `src/` names it; the one production site that has no channel is `server.ts`'s
+ * auth gate, `verifier.verify(readCredential(c))`, which reaches it through that
+ * default, and so would a second one. The only references that spell it are in
+ * `scripts/authcheck.ts`.
+ *
+ * What is true is that the gate is *entitled* to omit it, because every request
+ * reaching it arrived over loopback: either a client on this machine, or the
+ * inner request `serveSecureSession` re-issues once it has already checked the
+ * capability against the key the Noise handshake authenticated. The binding is
+ * made a layer up, and `.claude/rules/e2ee.md` bounds what a capability spent
+ * over loopback is worth. Making the original claim true means dropping the
+ * default on both verifiers and passing this at that one call site.
+ */
+export const NO_CHANNEL: ChannelIdentity = { peerKeyThumbprint: null };
 
 /* ------------------------------------------------------------------ *
  * Shared secret — the original behaviour, unchanged
@@ -142,6 +206,9 @@ export class SharedSecretVerifier implements TokenVerifier {
         machineId: null,
         expiresAt: null,
         tokenId: null,
+        // No capability, so nothing names a device. This mode has no control
+        // plane at all, which is the same reason `machineId` is null beside it.
+        deviceId: null,
         via: "shared_secret",
       },
     };
@@ -213,7 +280,7 @@ export class SignedTokenVerifier implements TokenVerifier {
     return this.keys.size;
   }
 
-  verify(token: string | null, now: number = Date.now()): VerifyResult {
+  verify(token: string | null, now = Date.now(), channel: ChannelIdentity = NO_CHANNEL): VerifyResult {
     if (token === null || token.length === 0) {
       return { ok: false, code: "missing_token", message: "missing bearer token" };
     }
@@ -255,6 +322,61 @@ export class SignedTokenVerifier implements TokenVerifier {
       return { ok: false, code: "wrong_machine", message: "token was issued for a different machine" };
     }
 
+    /*
+     * The capability is for the caller this channel authenticated, and nobody else.
+     *
+     * ⚠ **This is the first thing in this file that asks who is calling.** `sub`
+     * has always been carried and never checked — a grant is full access to this
+     * machine and stays that way, so this is *authentication*, not authorization:
+     * it grants nothing a grant would not and refuses nothing a grant would allow.
+     * What it removes is the bearer property. A capability lifted out of a log, a
+     * proxy or a `?token=` query string is worth nothing to whoever lifted it,
+     * because they cannot produce the key it names.
+     *
+     * **Both checks are local**, which is what keeps *"the daemon makes exactly one
+     * control-plane request, ever"* literally true: the key travels inside the
+     * signed capability and the peer key came off the handshake, so there is
+     * nothing to look up and nothing to fetch.
+     *
+     * Placed **after** `aud`, because `aud` is the fleet-wide property and must
+     * stay the first question asked about a capability's addressee; and **before**
+     * the clock, because the clock codes carry `skewMs` and sending somebody to
+     * fix a clock over a capability that was never for this device is a wrong
+     * answer that costs an afternoon.
+     *
+     * ⚠ **The channel decides whether to ask, and that is not a weaker rule than
+     * a switch — it is the only one that is not a lie.** A configuration flag was
+     * written here first and taken back out: it made the binding a thing an
+     * operator could be wrong about, and a daemon with it off would have gone on
+     * accepting capabilities from anywhere while every document said otherwise.
+     *
+     * So: **a channel that authenticated a key insists the capability names that
+     * key.** Every remote request arrives over one, because after this phase there
+     * is no other way in. A request with no channel came over loopback on this
+     * machine, where the operating system has already established that the caller
+     * is the uid that owns this daemon's database, its signing keys and every
+     * transcript — a stronger statement than a key rather than a weaker one, and
+     * the trade `.claude/rules/relay.md` already states to the person who owns the
+     * machine rather than burying here.
+     */
+    if (channel.peerKeyThumbprint !== null) {
+      const bound = claims.cnf?.jkt;
+      if (bound === undefined) {
+        return {
+          ok: false,
+          code: "unbound_capability",
+          message: "this capability names no device key, so nothing can be bound to it",
+        };
+      }
+      if (bound !== channel.peerKeyThumbprint) {
+        return {
+          ok: false,
+          code: "wrong_device",
+          message: "this capability was issued to a different device",
+        };
+      }
+    }
+
     const nbfMs = claims.nbf * 1000;
     const expMs = claims.exp * 1000;
 
@@ -281,6 +403,7 @@ export class SignedTokenVerifier implements TokenVerifier {
         machineId: claims.aud,
         expiresAt: expMs,
         tokenId: claims.jti,
+        deviceId: claims.dev ?? null,
         via: "signed",
       },
     };
@@ -318,7 +441,7 @@ export class CompositeVerifier implements TokenVerifier {
     private readonly shared: SharedSecretVerifier,
   ) {}
 
-  verify(token: string | null, now: number = Date.now()): VerifyResult {
+  verify(token: string | null, now: number = Date.now(), channel: ChannelIdentity = NO_CHANNEL): VerifyResult {
     if (token === null || token.length === 0) {
       return { ok: false, code: "missing_token", message: "missing bearer token" };
     }
@@ -326,7 +449,11 @@ export class CompositeVerifier implements TokenVerifier {
     // dots would otherwise be reported with a signature error, and a signed
     // token that failed for a real reason would be retried as a secret and come
     // back as the wrong failure entirely.
-    return looksLikeSignedToken(token) ? this.signed.verify(token, now) : this.shared.verify(token);
+    //
+    // ⚠ **The shape test is also what stops a capability being downgraded into a
+    // shared secret.** A signed token goes to the signed verifier and is held to
+    // the device binding; it can never fall through to the arm that has none.
+    return looksLikeSignedToken(token) ? this.signed.verify(token, now, channel) : this.shared.verify(token);
   }
 }
 

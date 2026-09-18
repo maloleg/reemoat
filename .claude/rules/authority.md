@@ -88,18 +88,18 @@ this service has for a forgotten password — so a variable that could disable t
 would be a variable that breaks account recovery. `main.ts` resolves the directory
 and nothing reads an environment value for it.
 
-`REEMOAT_CP_WEB` is **off by default** and names a built copy of the **app**,
-which a checkout or a mounted directory can have and the image cannot. The Reemoat
-app compiles `packages/web` into its own binary and never downloads one.
+⚠ **There is no variable that serves the app, and `REEMOAT_CP_WEB` is deleted.**
+It named a built copy for a checkout or a mounted directory to serve. A browser
+holds no device key, so it cannot open an encrypted channel to a daemon — it could
+load the app and reach no machine at all, which is worse than not offering it.
+The Reemoat app compiles `packages/web` into its own binary and never downloads
+one. The gate is the only bundle, and it is served with no switch.
 
-⚠ **`REEMOAT_CP_WEB=1` names nothing now and is answered with a sentence.** While
-a bundle was inside the image the affirmative spellings meant "the built-in
-default"; with it gone they would be a path called `1` — the same permanent silent
-404 the old trap produced, wearing the opposite clothes. The constant is
-`webMeaningless` rather than `webDefault` so a reader who greps for the old name
-finds nothing and has to read why, and `deploycheck` asserts the asymmetry with
-`REEMOAT_CP_INSTALL`, which still *has* a default because `deploy/bootstrap.sh`
-really is in the image.
+`REEMOAT_CP_INSTALL` is the one variable of that shape left — *either* a boolean
+*or* a path — and `deploycheck` reads its three spellings of **off** and three of
+**the default** off `main.ts`. It has a default to mean because
+`deploy/bootstrap.sh` really is in the image; the deleted one did not, which is
+why `=1` resolved to a directory called `1` and 404ed for ever.
 
 ⚠ **`mail.public_url` must name whatever serves the gate.** Every confirmation,
 reset, verify and invitation link is built from it and opened by a *mail client*,

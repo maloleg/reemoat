@@ -552,12 +552,30 @@ export async function login(name: string, password: string): Promise<Me> {
  * uses when this app buys a machine — because that is the word somebody will
  * recognise in a list of three.
  */
-function describeDevice(): { id?: string; name: string; platform: string } | null {
+function describeDevice(): { id?: string; name: string; platform: string; publicKey?: string } | null {
   const boot = nativeBoot();
   if (!inNativeShell() || boot === null) return null;
   const name = boot.hostName ?? "This computer";
   const held = currentDevice();
-  return held === null ? { name, platform: boot.platform } : { id: held, name, platform: boot.platform };
+  /*
+   * ⚠ **The key travels with the registration, and it is what makes a capability
+   * more than a bearer token.** The control plane names it in everything it mints
+   * for this installation, and the daemon compares that name against the key the
+   * encrypted handshake authenticated — so a capability copied off this device is
+   * worth nothing to whoever copied it.
+   *
+   * Omitted rather than sent as `null` where the shell has none, which is a real
+   * state on a machine no credential store would answer for. The route keeps the
+   * registration and says the installation has no key; minting is what refuses,
+   * with a code naming the remedy.
+   */
+  const key = boot.devicePublicKey ?? undefined;
+  return {
+    ...(held === null ? {} : { id: held }),
+    name,
+    platform: boot.platform,
+    ...(key === undefined ? {} : { publicKey: key }),
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -579,7 +597,10 @@ function describeDevice(): { id?: string; name: string; platform: string } | nul
 export async function registerDevice(): Promise<string | null> {
   const device = describeDevice();
   if (device === null) return null;
-  const body = await cpFetch<{ id: string }>("/v1/me/devices", { method: "POST", body: JSON.stringify(device) });
+  const body = await cpFetch<{ id: string; hasKey?: boolean }>("/v1/me/devices", {
+    method: "POST",
+    body: JSON.stringify(device),
+  });
   rememberDevice(body.id);
   return body.id;
 }

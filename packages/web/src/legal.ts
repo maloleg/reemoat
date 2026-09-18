@@ -147,11 +147,28 @@ export function legalTitle(doc: LegalDoc): string {
 }
 
 /**
- * What the control that leaves a document is called.
+ * What the control that leaves a document is called, **in the app**.
  *
  * Named after where it goes rather than "Back", which is `Header`'s rule: there
  * is no history here, only a fixed destination, and a signed-in reader is not
  * going to a sign-in screen.
+ *
+ * ⚠ **Both answers name screens that exist only in the app bundle, and that
+ * stopped being the whole world.** `packages/web` builds twice off two entry
+ * points, and the second bundle — the gate, which the control plane serves —
+ * draws these documents too: it is where a mail client lands and where the
+ * sign-up form's consent box links to. It carries no sign-in form (`Gate`
+ * renders `SignIn` on one branch, `/verify` with no session) and no machine
+ * list, so on that surface this function has no true answer and returned a
+ * confident wrong one — "Back to sign in" over a control that went to the
+ * handoff, at the foot of a document somebody had been linked to.
+ *
+ * It is left answering for the app rather than grown a third arm, because a
+ * boolean cannot carry three roots and the third one is not a property of the
+ * reader: it is a property of **which bundle is running**, which this module
+ * cannot see. `LegalScreen` takes an `upLabel` for that caller, and `GateApp`
+ * hands it `HANDOFF_LABEL` — the same words its own footers use, so the one
+ * destination on that origin has one name.
  */
 export function legalUpLabel(signedIn: boolean): string {
   return signedIn ? "Back to your machines" : "Back to sign in";

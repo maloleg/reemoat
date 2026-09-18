@@ -332,7 +332,18 @@ function fetchRuntime() {
  */
 function entryVersions() {
   const manifest = readJson(join(repoRoot, "package.json"));
-  const names = [...Object.keys(manifest.dependencies ?? {}), ...EXTRA_DEV_DEPS];
+  /*
+   * ⚠ **A workspace package is skipped here and copied by {@link copySource}
+   * instead.** `node_modules/@reemoat/protocol` is a link into this repository, so
+   * the loop below would read its version and pin `"@reemoat/protocol": "0.9.0"`
+   * into the payload manifest — a package the registry has never heard of, and
+   * npm fails on it. `file:` is not the way out either: npm satisfies a `file:`
+   * dependency with a symlink, and the audit at the end of this script refuses
+   * every symlink in the payload because the bundler cannot copy one.
+   */
+  const names = [...Object.keys(manifest.dependencies ?? {}), ...EXTRA_DEV_DEPS].filter(
+    (name) => !name.startsWith("@reemoat/"),
+  );
   const pinned = {};
   for (const name of names) {
     const installed = join(repoRoot, "node_modules", name, "package.json");
@@ -423,6 +434,34 @@ function copySource(runtime) {
    * it by the same relative rule as every other shim.
    */
   cpSync(join(runtime, "lib", "node_modules", "npm"), join(stageDir, "node_modules", "npm"), {
+    recursive: true,
+    dereference: true,
+  });
+
+  /*
+   * The workspace package, as a **real directory** rather than a link.
+   *
+   * `@reemoat/protocol` holds the Noise handshake the daemon speaks to an app, and
+   * it is source-only like everything else here — the payload runs under `tsx`,
+   * which transpiles a `.ts` entry out of `node_modules` exactly as it does one out
+   * of `src/`. Measured, because the two are not obviously the same: a bundler that
+   * skipped `node_modules` for speed would have failed here and nowhere else.
+   *
+   * It lands after {@link installDependencies} on purpose — npm owns
+   * `node_modules` until it has finished, and a directory written before it would
+   * be pruned. `@noble/*` are declared on the repository's own manifest as well as
+   * on this package's, so npm installs them flat at the payload root and Node
+   * finds them by walking up from here; `pincheck` holds the two declarations to
+   * one version.
+   *
+   * Only the manifest and the sources. Copying the package whole would follow its
+   * `node_modules` — every entry of which is a pnpm link — and `dereference` would
+   * turn each into a full copy of a tree the payload root already has.
+   */
+  const protocol = join(stageDir, "node_modules", "@reemoat", "protocol");
+  mkdirSync(protocol, { recursive: true });
+  cpSync(join(repoRoot, "packages", "protocol", "package.json"), join(protocol, "package.json"));
+  cpSync(join(repoRoot, "packages", "protocol", "src"), join(protocol, "src"), {
     recursive: true,
     dereference: true,
   });

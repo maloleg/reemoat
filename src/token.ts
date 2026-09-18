@@ -1,4 +1,4 @@
-import { createPublicKey, sign, verify, type KeyObject } from "node:crypto";
+import { createHash, createPublicKey, sign, verify, type KeyObject } from "node:crypto";
 
 /**
  * The token wire format, and the only place that encodes or decodes one.
@@ -57,6 +57,33 @@ export interface TokenClaims {
   nbf: number;
   exp: number;
   scp: string[];
+  /**
+   * Which key the holder of this capability must be able to prove it has.
+   *
+   * RFC 7800's confirmation claim, with `jkt` as its RFC 7638 thumbprint member —
+   * the registered slot for exactly this, chosen over an invented name so the
+   * token goes on reading normally in a debugger, which is this file's stated
+   * posture.
+   *
+   * ⚠ **This is what stops a capability being a bearer token.** The daemon
+   * compares it against the static key the encrypted handshake authenticated, so a
+   * copy taken out of a log, a proxy or a query string cannot be used from
+   * anywhere else. Optional on the type because a control plane older than this
+   * mints without it and the *daemon* decides what to do about that — a missing
+   * claim has to be a refusal somebody can read, not a parse failure.
+   */
+  cnf?: { jkt: string };
+  /**
+   * Which installation this was minted for.
+   *
+   * **Advisory, never a decision** — the same voice as `reemoat-sub` on the relay
+   * handshake, and for the same reason. Nothing may branch on it: the binding is
+   * `cnf`, which is cryptographic, and a second identifier that looks like one
+   * would eventually be read as if it were. What it is for is a refusal that can
+   * say *which* device, which is the difference between a mystery and a fixable
+   * problem.
+   */
+  dev?: string;
 }
 
 export type DecodeFailure =
@@ -213,7 +240,40 @@ export function parseClaims(payloadJson: string): TokenClaims | null {
   if (!isFiniteNumber(iat) || !isFiniteNumber(nbf) || !isFiniteNumber(exp)) return null;
   if (!Array.isArray(scp) || !scp.every((entry) => typeof entry === "string")) return null;
 
-  return { iss, sub, aud, jti, iat, nbf, exp, scp: scp as string[] };
+  /*
+   * ⚠ **A `cnf` that is present and malformed is a refusal, never an absence.**
+   *
+   * That single line is what stops the downgrade. Absent means *this Authority is
+   * older than this daemon*, and a daemon that requires the binding refuses it
+   * with a code naming the remedy. If a malformed one read as absent, anybody able
+   * to alter a claim could turn a device-bound capability into an unbound one and
+   * the binding would be advisory — which is the shape of every protocol
+   * downgrade there has ever been.
+   */
+  const cnf = fields["cnf"];
+  let confirmation: { jkt: string } | undefined;
+  if (cnf !== undefined) {
+    if (typeof cnf !== "object" || cnf === null || Array.isArray(cnf)) return null;
+    const jkt = (cnf as Record<string, unknown>)["jkt"];
+    if (typeof jkt !== "string" || jkt.length === 0) return null;
+    confirmation = { jkt };
+  }
+
+  const dev = fields["dev"];
+  if (dev !== undefined && (typeof dev !== "string" || dev.length === 0)) return null;
+
+  return {
+    iss,
+    sub,
+    aud,
+    jti,
+    iat,
+    nbf,
+    exp,
+    scp: scp as string[],
+    ...(confirmation === undefined ? {} : { cnf: confirmation }),
+    ...(dev === undefined ? {} : { dev: dev as string }),
+  };
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -264,6 +324,73 @@ export function jwkToPublicKey(jwk: unknown): KeyObject | null {
     // Malformed `x` — the key is unusable and the caller will refuse the token.
     return null;
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * X25519, and the one name a key is known by
+ *
+ * These live here, beside the Ed25519 helpers, for a reason that is structural
+ * rather than tidy: `packages/control-plane` may reach the repository root for
+ * exactly five files, and this is one of them. The Authority names a device key
+ * when it mints a capability, the daemon names the same key when it checks one
+ * against the handshake, and a *second* implementation of the naming is a second
+ * thing that can disagree about one fact — which is `keyIdFor`'s whole argument
+ * one package over. Putting it anywhere else would mean widening a ratchet that
+ * exists to stay narrow.
+ * ------------------------------------------------------------------ */
+
+/** An X25519 public key as it travels. The same shape, a different curve. */
+export interface X25519PublicJwk {
+  kty: "OKP";
+  crv: "X25519";
+  x: string;
+}
+
+/** 32 raw bytes, base64url, as the JWK an X25519 key is named by. */
+export function x25519Jwk(raw: Uint8Array): X25519PublicJwk {
+  return { kty: "OKP", crv: "X25519", x: Buffer.from(raw).toString("base64url") };
+}
+
+/**
+ * The raw bytes behind an X25519 JWK, or `null` for anything else.
+ *
+ * Strict in the same three ways `jwkToPublicKey` is, and strict about the
+ * **length** as well, which that one can leave to `createPublicKey`: nothing here
+ * hands the value to a library that would refuse a short key, so this is the only
+ * place a 31-byte "public key" can be turned away.
+ */
+export function x25519FromJwk(jwk: unknown): Buffer | null {
+  if (typeof jwk !== "object" || jwk === null || Array.isArray(jwk)) return null;
+  const fields = jwk as Record<string, unknown>;
+  if (fields["kty"] !== "OKP" || fields["crv"] !== "X25519") return null;
+  const x = fields["x"];
+  if (typeof x !== "string" || x.length === 0) return null;
+  const raw = b64uDecode(x);
+  if (raw === null || raw.length !== X25519_PUBLIC_BYTES) return null;
+  return raw;
+}
+
+/** X25519 public keys are 32 bytes, always. */
+export const X25519_PUBLIC_BYTES = 32;
+
+/**
+ * The name a public key is known by: its RFC 7638 thumbprint, base64url.
+ *
+ * **Not truncated**, unlike `keyIdFor` one package over. That one is naming a
+ * row and twelve characters is plenty; this one is a *commitment* — it is what a
+ * capability says the caller's key is, and what the daemon compares the
+ * handshake's peer key against. Shortening a commitment is how two different keys
+ * come to have one name.
+ *
+ * RFC 7638 is a fixed recipe rather than a choice: the required members of the
+ * key type, in lexicographic order, as JSON with no whitespace, hashed with
+ * SHA-256. For an OKP key that is exactly `crv`, `kty`, `x` — which is why this
+ * is written as a literal rather than assembled from the object. An object
+ * spread would take whatever order the fields happen to be in.
+ */
+export function jwkThumbprint(jwk: X25519PublicJwk): string {
+  const canonical = `{"crv":"${jwk.crv}","kty":"${jwk.kty}","x":"${jwk.x}"}`;
+  return createHash("sha256").update(canonical, "utf8").digest("base64url");
 }
 
 /** A token is recognisable by shape before anything is decoded. */

@@ -11,7 +11,7 @@ import { AIR_ASYNC_TASKS_CAPABILITY, AIR_CLIENT_CAPABILITY } from "../src/acp/as
  *
  * **Five subjects, and each widening was deliberate rather than incidental.** This
  * file began as the driver for the agent adapters — three copies each — and it now
- * also holds this project's own version, which has six copies of which five are
+ * also holds this project's own version, which has seven copies of which six are
  * read here; the plugin API and the one plugin this repository ships; a *list*
  * rather than a number — the platform packages `pnpm install` is told to leave
  * out; and — the newest — the API-key ceiling, written once on each side of the
@@ -111,16 +111,26 @@ import { AIR_ASYNC_TASKS_CAPABILITY, AIR_CLIENT_CAPABILITY } from "../src/acp/as
  * produced. And it is here rather than in a driver of its own because it is this
  * file's question with a list where the number was.
  *
- * **The release half, and why six copies rather than one.** This project's
- * version is in the root `package.json`, in both workspace manifests, in a literal
+ * **The release half, and why seven copies rather than one.** This project's
+ * version is in the root `package.json`, in **all three** workspace manifests —
+ * `packages/web`, `packages/control-plane` and `packages/protocol` — in a literal
  * in `packages/control-plane/src/app.ts`, in `src/version.ts`'s `DAEMON_VERSION`,
  * and as the newest dated heading in `CHANGELOG.md`. The `app.ts` literal is a deliberate second copy — a service
  * whose point is having no runtime failure paths does not read a file to learn its
- * own name — and the two workspace manifests were asserted by nothing at all. What
+ * own name — and the workspace manifests were asserted by nothing at all. What
  * makes drift here worse than untidy is that the literal is served as the AGPL
  * section 13 source offer: ship a release without moving it and the offer names a
  * version whose source nobody can fetch, which is a licence failure that looks
  * like compliance.
+ *
+ * ⚠ **`packages/protocol` is the newest of the three and was read by nothing, and
+ * it is the one workspace manifest that gets *shipped*.** `build-daemon.mjs` copies
+ * that file verbatim into `node_modules/@reemoat/protocol` inside the app's daemon
+ * payload, so its `version` is what a person's own machine reports for the package
+ * holding the Noise handshake. A stale number there is a fleet inventory that
+ * disagrees with itself about which build is speaking which protocol — the same
+ * failure `DAEMON_VERSION` exists to prevent, one package down and with nothing
+ * watching it.
  *
  * The offer's *other* half is checked here too and was checked nowhere before:
  * `SOURCE_URL` against the repository this workspace says it is. `app.ts` tells a
@@ -144,6 +154,25 @@ function check(name: string, got: unknown, want: unknown): void {
   }
   failures += 1;
   process.stdout.write(`  FAIL  ${name}\n        got  ${JSON.stringify(got)}\n        want ${JSON.stringify(want)}\n`);
+}
+
+/**
+ * A property that holds, with the measurement beside it.
+ *
+ * The other drivers grew one of these; this file had only `check`, so an assertion
+ * whose real subject is *"both of these lists were found at all"* had to be written
+ * as an equality against `true` and then said nothing but `ok`. That matters here
+ * more than elsewhere: every comparison in this file is between two lists read out
+ * of two files by pattern, and the way one of them fails is by silently becoming
+ * empty — at which point a set comparison passes for the worst possible reason.
+ */
+function report(name: string, ok: boolean, detail: string): void {
+  if (ok) {
+    process.stdout.write(`  ok    ${name}  (${detail})\n`);
+    return;
+  }
+  failures += 1;
+  process.stdout.write(`  FAIL  ${name}  (${detail})\n`);
 }
 
 function read(rel: string): string {
@@ -630,7 +659,26 @@ check(
 );
 
 /*
- * And the daemon's own literal, the sixth and the newest.
+ * The third workspace manifest, which this file read for the first time only after
+ * `@reemoat/protocol` had already shipped a release carrying its own number.
+ *
+ * ⚠ **It is the one manifest that leaves the repository.** `build-daemon.mjs`
+ * copies `packages/protocol/package.json` into the daemon payload inside the
+ * bundled app — whole, rather than through npm — so whatever is written here is
+ * what a person's own installation reports for the package that holds the Noise
+ * handshake. Every other copy of this number is read by something in this
+ * repository; this one is read on somebody else's machine.
+ */
+const protocolPkg = read("packages/protocol/package.json");
+check(
+  "@reemoat/protocol names the version the workspace is at",
+  capture(protocolPkg, VERSION_IN_MANIFEST),
+  rootVersion,
+);
+
+/*
+ * And the daemon's own literal, which was the newest of these until
+ * `@reemoat/protocol` arrived above it.
  *
  * It exists so a machine can say what it is running: the relay records it off the
  * tunnel handshake and `cpctl admin fleet` reads it back. A fleet inventory that
@@ -741,6 +789,108 @@ check(
 );
 process.stdout.write("  note  the native shell's version fields are checked by nativecheck; neither is a release site\n");
 
+
+// ------------------------------------------ the crypto, declared on two manifests
+
+process.stdout.write("\nthe crypto primitives, declared twice so the payload resolves them\n");
+
+/**
+ * ⚠ **`build-daemon.mjs` claims this file holds these two declarations to one
+ * version, and `grep -c noble scripts/pincheck.ts` answered zero.**
+ *
+ * The comment there is not decoration — it is the reason the root manifest
+ * declares `@noble/ciphers`, `@noble/curves` and `@noble/hashes` **although
+ * nothing under `src/` imports any of them**. They arrive only through
+ * `@reemoat/protocol`, and inside the app's daemon payload they arrive only
+ * through the root.
+ *
+ * Two lines of `build-daemon.mjs` are why. `entryVersions()` takes the payload's
+ * dependency *names* from the root manifest and skips every `@reemoat/` one, so
+ * `@reemoat/protocol` contributes nothing to what npm is asked to install; and the
+ * directory that package is copied into is written **after** `installDependencies`
+ * has finished, because npm owns `node_modules` until then and anything placed
+ * earlier is pruned. Nothing ever installs the protocol package's own
+ * `dependencies` into the payload. The root declaration is the only thing that
+ * puts a `@noble` package where the payload can find it, and Node reaches it by
+ * walking up from `node_modules/@reemoat/protocol`.
+ *
+ * That makes the two lists load-bearing in both directions, and the failures are
+ * different shapes:
+ *
+ *   - **A package `@reemoat/protocol` declares and the root does not** is one npm
+ *     never installs. The shipped app's daemon dies at its first start on `Cannot
+ *     find module '@noble/…'`, which is the same class of failure `nativecheck`
+ *     now pins the payload copy itself against, arriving by a different door.
+ *   - **A package the root declares and the protocol does not** is a root
+ *     dependency nothing in this repository imports, which reads as protection and
+ *     is a pin on nothing — `pnpm-workspace.yaml`'s stale-exclusion argument, one
+ *     manifest over.
+ *   - **The same package at two versions is the quiet one, and the mechanism makes
+ *     it quieter still.** `entryVersions()` pins each name to the version *actually
+ *     installed at the repository root* rather than to the string the manifest
+ *     declares — so a disagreement never surfaces as a resolution error anywhere.
+ *     The payload simply ships the root's build while `packages/protocol/src` was
+ *     written against the other, and two builds of a cipher library disagreeing is
+ *     a handshake that fails to decrypt with nothing in any log to say why, under
+ *     `e2ee.md`'s rule that a failed handshake has no key to send a refusal under.
+ */
+const NOBLE_ENTRY = /"(@noble\/[a-z-]+)":\s*"([^"]+)"/g;
+const nobleFrom = (manifest: string): Map<string, string> =>
+  new Map([...manifest.matchAll(NOBLE_ENTRY)].map((m) => [m[1] ?? "", m[2] ?? ""]));
+
+const rootNoble = nobleFrom(packageJson);
+const protocolNoble = nobleFrom(protocolPkg);
+
+/*
+ * The non-vacuity half, and it is the whole reason this is a `report`. Every
+ * comparison below is between two lists read by pattern, and the way a pattern
+ * fails is by matching nothing — at which point the set equality passes, the
+ * version comparison passes, and the check is green over two empty maps.
+ */
+report(
+  "both manifests were found to declare @noble packages",
+  rootNoble.size > 0 && protocolNoble.size > 0,
+  `${rootNoble.size} on the root manifest, ${protocolNoble.size} on @reemoat/protocol`,
+);
+check(
+  "the two manifests name the same @noble packages",
+  [...rootNoble.keys()].sort(),
+  [...protocolNoble.keys()].sort(),
+);
+check(
+  "and every one of them is pinned to one version across both",
+  [...rootNoble]
+    .filter(([name, version]) => protocolNoble.get(name) !== version)
+    .map(([name, version]) => `${name}: ${version} on the root, ${protocolNoble.get(name) ?? "absent"} on @reemoat/protocol`)
+    .sort(),
+  [],
+);
+/*
+ * And exactly, on both sides, which is what turns "one version" into a fact about
+ * the tree rather than about a range. `^2.4.0` written twice is two declarations
+ * that agree and still resolve to different builds on two machines — and the
+ * payload is built on one machine and run on another, which is precisely the gap a
+ * caret leaves open.
+ */
+check(
+  "and pinned exactly rather than by range",
+  [...rootNoble, ...protocolNoble]
+    .filter(([, version]) => !/^\d+\.\d+\.\d+$/.test(version))
+    .map(([name, version]) => `${name} ${version}`)
+    .sort(),
+  [],
+);
+/*
+ * And that the claim in `build-daemon.mjs` still points at something. It is the
+ * only place the argument above is written down beside the code that depends on
+ * it, so a rewording that drops it leaves these assertions standing with no reader
+ * able to learn why they exist — which is how the gap this section closes opened.
+ */
+check(
+  "and the staging script still says where that rule lives",
+  /`pincheck` holds the two declarations/.test(read("packages/native/scripts/build-daemon.mjs")),
+  true,
+);
 
 process.stdout.write("\nthe API-key ceiling, on both sides of the wire\n");
 

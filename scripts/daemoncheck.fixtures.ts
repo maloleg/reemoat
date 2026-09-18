@@ -153,7 +153,7 @@ const identity = {
 export const now = Date.now();
 const iat = Math.floor(now / 1000);
 
-export function tokenWith(sub: string, scp: Scope[]): string {
+export function tokenWith(sub: string, scp: Scope[], cnf?: { jkt: string }): string {
   const claims: TokenClaims = {
     iss: "reemoat-cp",
     sub,
@@ -163,8 +163,21 @@ export function tokenWith(sub: string, scp: Scope[]): string {
     nbf: iat,
     exp: iat + 300,
     scp,
+    ...(cnf === undefined ? {} : { cnf }),
   };
   return signToken(claims, kid, privateKey);
+}
+
+/**
+ * A capability bound to one device key, for driving an encrypted session.
+ *
+ * Separate from `tokenWith` above rather than a parameter on every call site,
+ * because only the encrypted path has a channel to bind to — every route driven
+ * with `app.request` has none, which is the loopback case and is why those
+ * capabilities carry no `cnf` at all.
+ */
+export function boundToken(sub: string, thumbprint: string): string {
+  return tokenWith(sub, ["session:read", "session:write", "machine:admin"], { jkt: thumbprint });
 }
 
 export function tokenFor(sub: string): string {

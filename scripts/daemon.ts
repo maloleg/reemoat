@@ -34,6 +34,8 @@ import {
 } from "../src/registry.js";
 import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
 import { createApp } from "../src/server.js";
+import { localStaticKey } from "@reemoat/protocol";
+import { ensureMachineKey } from "../src/machinekey.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
 import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
@@ -277,6 +279,22 @@ try {
   );
   process.exit(2);
 }
+
+/*
+ * The X25519 static this machine answers on, generated on first start and kept
+ * for ever after.
+ *
+ * Here rather than inside `openStores` for the reason every other startup fact is
+ * here: nothing in `src/` prints, and this is the line an operator compares by eye
+ * against what `cpctl admin fleet` shows for the same machine. It is the only
+ * check anybody has on the pin, and it is offered as a **display rather than an
+ * enforcement** — saying otherwise would be claiming a property nothing holds.
+ *
+ * Before the server serves and before the tunnel dials, because the dial
+ * announces it.
+ */
+const machineKey = ensureMachineKey(stores.machineKeys);
+console.log(`machine key: ${machineKey.kth}`);
 
 /*
  * The reverse of the enrollment check further down, and it has to read the store
@@ -1074,6 +1092,17 @@ function startRelayTunnel(local: { host: string; port: number }): void {
     // the report names the build a launch would get; the daily update above
     // clears that cache but does not redial — see `AGENT_CLIS_HEADER`.
     agentClis: () => announcedAgentClis(runtime),
+    // The static an app authenticates this machine by. Read once here rather than
+    // per dial: unlike the CLI inventory beside it, this does not move under a
+    // running daemon. See `ensureMachineKey`.
+    machineKey: machineKey.publicKey,
+    // The private half, for terminating an encrypted stream. It never leaves this
+    // process — the relay carries ciphertext it cannot read, and this is the only
+    // thing that can open it.
+    staticKey: localStaticKey(new Uint8Array(Buffer.from(machineKey.privateKey, "base64url"))),
+    // Every relayed request is checked here, against the key the handshake
+    // authenticated, exactly as it is checked at the HTTP gate.
+    verifier,
     // Nothing in src/ prints; this is where the words come out.
     onEvent: (kind, detail) => {
       if (kind === "connected") console.log(`relay: tunnel up (${detail})`);
@@ -1296,7 +1325,25 @@ async function buildVerifier(): Promise<AuthSetup> {
     }
     console.log(`enrolling with ${controlPlane}…`);
     try {
-      const result = await enroll({ controlPlane, code });
+      /*
+       * ⚠ **`machineKey` is what makes the re-pin reachable at all, and without it
+       * the whole recovery story is inert.**
+       *
+       * `machinekeys.ts` argues trust-on-first-use on the grounds that
+       * "re-enrollment is the way back" from a pinned key that no longer matches,
+       * and `setMachineKey` calls itself "the one place a pin is replaced ... the
+       * rotation story". Both were true of the route and false of the fleet: the
+       * control plane reads `body["machineKey"]` and this — the only `enroll()`
+       * call site in the tree — posted `{ code }` alone, so `announcedKey` was
+       * always `null` and `setMachineKey` never ran in production. A daemon that
+       * lost `~/.reemoat/reemoat.db` generated a new key, was refused at every dial
+       * with 409 for ever, and no `cpctl` verb could clear the pin.
+       *
+       * `ensureMachineKey` runs at the top of this file, so the key exists before
+       * anything here can enroll with it. The ordering is the load-bearing half:
+       * announcing a key generated *after* enrollment would pin the wrong one.
+       */
+      const result = await enroll({ controlPlane, code, machineKey: machineKey.publicKey });
       identity = {
         machineId: result.machineId,
         issuer: result.issuer,

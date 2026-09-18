@@ -696,18 +696,25 @@ process.stdout.write("\nwhere a row says it works\n");
 }
 
 /* ------------------------------------------------------------------ *
- * Telegram, whose chrome sits over this app's own
+ * The way up, out of a pop-up
  *
- * The mini app draws ✕ Close until the page asks for a back button and ‹ Back
- * once it has — so "Close on the list, Back inside" is one function answering
- * `null` at the root. Everything asserted here is pure; the transport is not
- * reachable offline and is a no-op without it.
+ * ⚠ **This section used to be `what Telegram's own control does`, and the
+ * control it was about is deleted.** Telegram drew ✕ Close until a mini app asked
+ * for a back button and ‹ Back once it had, so `upFrom` answering `null` at the
+ * root was what kept "Close on the list, Back inside" true — and that was the
+ * only thing exercising the function.
+ *
+ * `upFrom` survives the deletion because its readers were never Telegram's: `App`
+ * computes it twice — for `LegalScreen`'s `up`, which is how somebody gets back
+ * out of the terms, and for the pop-up's own ◀. So the table is kept and re-homed
+ * rather than deleted with the caller that used to justify it — a pure function
+ * whose coverage left with a deleted caller is how the next edit to it goes
+ * unnoticed.
  * ------------------------------------------------------------------ */
 
-process.stdout.write("\nwhat Telegram's own control does\n");
+process.stdout.write("\nthe way up, out of a pop-up\n");
 {
   const { upFrom } = await import("../src/nav.js");
-  const { versionAtLeast, inTelegram } = await import("../src/telegram.js");
 
   const home = { name: "home" } as never;
   const gate = { name: "gate", screen: "register" } as never;
@@ -719,17 +726,21 @@ process.stdout.write("\nwhat Telegram's own control does\n");
   const oneSystem = { name: "settings", section: "machines", machineId: "m", system: "moonshot", signin: null } as never;
 
   /*
-   * **`null` is the answer, not the absence of one.** Telegram has one control:
-   * hiding the back button is precisely how ✕ Close appears. So the session list
-   * closing the app is this returning `null`.
+   * **`null` is the answer, not the absence of one.**
+   *
+   * ⚠ That used to be a statement about Telegram: the mini app had one control, so
+   * hiding the back button was precisely how ✕ Close appeared, and the session list
+   * closing the app *was* this returning `null`. The mini app is deleted (Q1.649)
+   * and the distinction survives it — `LegalScreen` draws a way out only where
+   * there is one to draw.
    */
-  check("the session list has nowhere up, which is what draws Close", upFrom(home, "/"), null);
+  check("the session list has nowhere up, so no way out is drawn", upFrom(home, "/"), null);
   check("and so does a signed-out screen", upFrom(gate, "/"), null);
 
   check("a conversation goes back to the list", upFrom(session, "/"), "/");
-  // Never `history.back()`: on a cold deep link there is one entry, and in a mini
-  // app leaving the app *is* closing it — from a conversation, which is the thing
-  // this exists to stop.
+  // Never `history.back()`: on a cold deep link there is one entry, so Back leaves
+  // the app altogether rather than returning to the list — which is the thing this
+  // exists to stop. `Header.tsx` gives that argument at length.
   check("from a deep link too, not into history", upFrom(session, "/m/m_1/s/s_1"), "/");
 
   /*
@@ -756,224 +767,4 @@ process.stdout.write("\nwhat Telegram's own control does\n");
   check("the settings index leaves the sheet", upFrom(index, "/m/m_1/s/s_1"), "/m/m_1/s/s_1");
   check("onto home when it was opened cold", upFrom(index, "/"), "/");
   check("and so does the new-session sheet", upFrom({ name: "new", machineId: null, cwd: null } as never, "/m/m_1/s/s_1"), "/m/m_1/s/s_1");
-
-  /*
-   * **Segment-wise on integers**, which a string compare gets backwards at
-   * exactly the version that matters: `6.10` is above `6.9`, and the back
-   * button's gate is `6.1`.
-   */
-  check("6.1 is the gate and meets itself", versionAtLeast("6.1", "6.1"), true);
-  check("6.0 is too old", versionAtLeast("6.0", "6.1"), false);
-  check("6.10 is newer than 6.9, which a string compare denies", versionAtLeast("6.10", "6.9"), true);
-  check("7 clears a 6.x gate on one segment", versionAtLeast("7", "6.1"), true);
-  check("and 6 does not clear 6.1", versionAtLeast("6", "6.1"), false);
-  /*
-   * **Unparseable counts as too old**, and the direction is deliberate: refusing
-   * the control leaves the client drawing Close, while asking an old client for a
-   * back button is a request it answers by doing nothing — a page that believes
-   * it has a control nobody can see.
-   */
-  check("a version that will not parse is too old", versionAtLeast("banana", "6.1"), false);
-  check("and so is no version at all", versionAtLeast(null, "6.1"), false);
-
-  // Nothing runs outside Telegram: the test is the injected transport, not a
-  // pasted hash, and the driver has no such thing.
-  check("none of this is live in an ordinary browser", inTelegram(), false);
-
-  /*
-   * **The bridge itself, driven.** Telegram's transport is a function it injects,
-   * so a stub of it is the real contract rather than a mock of one — what goes
-   * over it is a string this module built, and it is asserted verbatim.
-   *
-   * The stub is installed and removed inside this block: the `window` up top is
-   * shared by every other check in this file, and a page that stays "in Telegram"
-   * after this would change what modules imported later believe.
-   */
-  {
-    const { setTelegramBack, telegramVersion } = await import("../src/telegram.js");
-    const w = (globalThis as Record<string, unknown>)["window"] as Record<string, unknown>;
-    const sent: string[] = [];
-    w["TelegramWebviewProxy"] = { postEvent: (t: string, d: string) => void sent.push(`${t} ${d}`) };
-    (w["location"] as Record<string, unknown>)["hash"] = "#tgWebAppVersion=6.9&tgWebAppPlatform=ios";
-
-    check("the launch hash carries the version", telegramVersion(), "6.9");
-
-    let pressed = 0;
-    setTelegramBack(() => void (pressed += 1));
-    check("asking for a back button posts one event", sent, ['web_app_setup_back_button {"is_visible":true}']);
-
-    // The half that draws ✕ Close: one control, and hiding it is how the other
-    // appears.
-    sent.length = 0;
-    setTelegramBack(null);
-    check("and dropping it hides the same one", sent, ['web_app_setup_back_button {"is_visible":false}']);
-
-    /*
-     * Telegram delivers by **calling into the page**, so something has to define
-     * the function it calls. Under `script-src 'self'` their SDK can never load,
-     * which is what makes owning this global safe — see the module's docblock.
-     */
-    const view = (w["Telegram"] as { WebView: { receiveEvent: (t: string) => void } }).WebView;
-    setTelegramBack(() => void (pressed += 1));
-    view.receiveEvent("back_button_pressed");
-    check("a press reaches the handler", pressed, 1);
-    // An event we do not know must pass through untouched rather than count.
-    view.receiveEvent("theme_changed");
-    check("and nothing else does", pressed, 1);
-
-    /*
-     * **One screen, one handler.** Replaced rather than accumulated: a stack of
-     * stale closures is how a press navigates to where you were three screens
-     * ago.
-     */
-    let second = 0;
-    setTelegramBack(() => void (second += 1));
-    view.receiveEvent("back_button_pressed");
-    check("the newest screen owns the press", [pressed, second], [1, 1]);
-
-    // A client too old for the feature is asked for nothing at all, rather than
-    // asked and silently ignored.
-    sent.length = 0;
-    (w["location"] as Record<string, unknown>)["hash"] = "#tgWebAppVersion=6.0";
-    setTelegramBack(() => {});
-    check("an old client is asked for nothing", sent, []);
-
-    /*
-     * ⭐ **The launch parameters do not survive a navigation, and the back button
-     * has to.**
-     *
-     * `router.ts`'s `navigate` pushes a path with no fragment, which replaces the
-     * whole URL — so by the time anybody opens a conversation there is no
-     * `tgWebAppVersion` left to read. Reading it inside `setTelegramBack` therefore
-     * answered `null` everywhere but the first screen, the version gate called that
-     * "too old", and Telegram was never asked: **✕ Close at every depth**, reported
-     * from a phone. The old assertions could not see it because every one of them
-     * writes the hash immediately before the call.
-     *
-     * So this drives the real sequence — latch at launch, wipe the fragment the way
-     * a navigation does, then ask — and it is the *only* block here that calls
-     * `telegramReady`. That is why it is last: the latch is module state, and a
-     * later check reading the live fragment would be reading this one's leftovers.
-     */
-    const { telegramReady } = await import("../src/telegram.js");
-    sent.length = 0;
-    (w["location"] as Record<string, unknown>)["hash"] = "#tgWebAppVersion=8.0&tgWebAppPlatform=android";
-    telegramReady();
-    check("launch says the page is up", sent, ["web_app_ready {}"]);
-
-    sent.length = 0;
-    (w["location"] as Record<string, unknown>)["hash"] = "";
-    setTelegramBack(() => {});
-    check(
-      "and a conversation opened after the fragment is gone still asks for Back",
-      sent,
-      ['web_app_setup_back_button {"is_visible":true}'],
-    );
-    check("the live fragment now says nothing", telegramVersion(), null);
-
-    /*
-     * And the pairing survives it: hiding is still how ✕ Close comes back, which is
-     * the half a latch could plausibly have broken by making the gate sticky in
-     * only one direction.
-     */
-    sent.length = 0;
-    setTelegramBack(null);
-    check("and the list still asks for Close", sent, ['web_app_setup_back_button {"is_visible":false}']);
-
-    delete w["TelegramWebviewProxy"];
-    delete w["Telegram"];
-    (w["location"] as Record<string, unknown>)["hash"] = "";
-    check("and the stub leaves nothing behind", inTelegram(), false);
-  }
-
-  /*
-   * ⭐ **How much room Telegram's own chrome needs, which only Telegram knows.**
-   *
-   * `env(safe-area-inset-*)` reads 0 inside a mini-app webview whatever the device
-   * (Telegram-iOS #1377), so the `max()` in `index.css` had one live term and it
-   * was a 3.25rem literal — right for the state it was measured in, where the
-   * client floats its chrome *over* the page, and 52px of empty band in the
-   * ordinary one, where the client draws a header bar above the webview and
-   * overlaps nothing. Both were reported from a phone, five weeks apart.
-   *
-   * The pure half is here; the `null` is the load-bearing part of it.
-   */
-  {
-    const { telegramInsets } = await import("../src/telegram.js");
-    check("with neither answer there is no number", telegramInsets(null, null), null);
-    /*
-     * The two are **added**, and it is the one thing in this file measured from
-     * Telegram's documents rather than from a device: `safeAreaInset` is the space
-     * to avoid at the top of the *screen*, `contentSafeAreaInset` the space to
-     * avoid at the top of the *content area* — i.e. of what the first leaves. The
-     * SDK writes four properties per object and combines nothing, so every page
-     * doing this adds them. See `telegramInsets` for why over-adding is the
-     * direction to be wrong in.
-     */
-    check(
-      "the device inset and the chrome inside it are added",
-      telegramInsets({ top: 59, bottom: 34 }, { top: 46, bottom: 0 }),
-      { top: 105, bottom: 34 },
-    );
-    /*
-     * The ordinary presentation, and the case that was reported: Telegram reserves
-     * its own header above the webview, so it overlaps nothing and says so. Zero
-     * has to survive as zero all the way to the stylesheet — a `??` that read it as
-     * "unanswered" would put the 3.25rem back and this whole exercise buys nothing.
-     */
-    check("a client that overlaps nothing says so, and 0 is an answer", telegramInsets({ top: 0, bottom: 0 }, { top: 0, bottom: 0 }), { top: 0, bottom: 0 });
-    check("one answer alone is still an answer", telegramInsets({ top: 12, bottom: 0 }, null), { top: 12, bottom: 0 });
-  }
-
-  const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
-  /*
-   * The 3.25rem is now the **fallback's value** rather than a floor under the
-   * answer, which is what bounds the change to clients that actually reply: a
-   * client too old to be asked keeps exactly the header it had. Asserted as the
-   * custom property rather than inside the `max()`, because that is the difference.
-   */
-  check("the measured overlay clearance is the pre-8.0 fallback", /:root\[data-telegram\] \{[\s\S]{0,600}--tg-chrome-top: 3\.25rem;/.test(css), true);
-  check("and the header spends what Telegram reported", /:root\[data-telegram\] \.pt-safe \{\s*padding-top: max\(0\.5rem, var\(--tg-chrome-top\), env\(safe-area-inset-top\)\);/.test(css), true);
-  /*
-   * ⚠ **The bottom edge had the same defect and nobody reported it**, because
-   * nothing under the approve buttons *looks* wrong — it is simply 12px where the
-   * home indicator wanted 34. Same measurement, same fix, and the fallback is 0 so
-   * a client that cannot answer keeps today's screen exactly.
-   */
-  check("and the approve row spends it too", /:root\[data-telegram\] \.pb-safe \{\s*padding-bottom: max\(0\.75rem, var\(--tg-chrome-bottom\), env\(safe-area-inset-bottom\)\);/.test(css), true);
-  check("with a bottom fallback that changes nothing", /--tg-chrome-bottom: 0px;/.test(css), true);
-  // Still a `max()` at this line and still never an addition — Q3.443's rule is
-  // untouched. The one addition is between Telegram's own two numbers, above.
-  check("the ordinary floors are unscoped and unchanged", /\.pt-safe \{\s*padding-top: max\(0\.5rem, env\(safe-area-inset-top\)\);/.test(css), true);
-
-  const entry = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
-  // `dataset["telegram"]` is the DOM spelling of the `[data-telegram]` the CSS
-  // selects on; asserting the attribute string would pass on the comment.
-  check("the marker is only written when the bridge is there", /if \(inTelegram\(\)\) \{[\s\S]{0,200}dataset\["telegram"\]/.test(entry), true);
-  /*
-   * ⚠ **Order, and it is the whole of whether this works.** `watchTelegramInsets`
-   * gates on the launch version, and `telegramReady` is what latches it — asked
-   * first, the gate reads a fragment `router.ts` has not taken away *yet*, which is
-   * true today and is exactly the coincidence the back button used to rest on.
-   */
-  check(
-    "and the insets are asked for after the version is latched",
-    /telegramReady\(\);\s*watchTelegramInsets\(\);/.test(entry),
-    true,
-  );
-  const bridge = readFileSync(new URL("../src/telegram.ts", import.meta.url), "utf8");
-  /*
-   * ⚠ The iframe transport is deliberately absent: the control plane sends
-   * `frame-ancestors 'none'`, so Telegram Desktop and Web cannot load this page
-   * and the arm would be unreachable. Adding it is the second half of letting
-   * Telegram frame a document whose purpose is approving shell commands.
-   */
-  // Comments stripped, because the docblock *names* the absent transport and the
-  // reason for it — which is the point of writing it down, and would otherwise
-  // make this assertion fail on its own explanation.
-  const bridgeCode = bridge.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-  check("no iframe transport, per the CSP", /window\.parent\.postMessage/.test(bridgeCode), false);
-  check("and no script from anywhere else", /telegram\.org|<script/.test(bridgeCode), false);
-  // The transport it *does* use is the one Telegram injects into its own webview.
-  check("only the injected proxy", /TelegramWebviewProxy/.test(bridgeCode), true);
 }

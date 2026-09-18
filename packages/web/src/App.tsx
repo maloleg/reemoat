@@ -3,7 +3,6 @@ import { clearRevokedKeyNotice, peekRevokedKeyNotice } from "./account";
 import { legalPublishable } from "./legal";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
 import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
-import { setTelegramBack } from "./telegram";
 import { sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
 import { ChooseServer } from "./ui/ChooseServer";
@@ -121,34 +120,16 @@ export function App(): ReactNode {
   // `under`'s and is unchanged. See `Location.origin` in `router.ts`.
   const origin = useOrigin();
   /*
-   * Telegram's own control, kept in step with the screen.
+   * The way *up* from a pop-up, computed once above every early return.
    *
-   * It draws **✕ Close** until a mini app asks for a back button and **‹ Back**
-   * once it has — so "Close on the list, Back inside a conversation" is
-   * `upFrom(...)` answering `null` at the root and a destination everywhere else.
-   * The same function the app's own leading control could be built from, because
-   * two back affordances that disagree is worse than one.
-   *
-   * An effect rather than a render-time call: this posts a message to another
-   * process, which is not something a render React may discard is allowed to do.
-   * Keyed on the destination string, so it fires when the *answer* changes rather
-   * than on every re-render — and `navigate` is stable.
-   *
-   * ⚠ **Above every early return in this component, and that is not style.** It
-   * sat below them at first, so a render that took the gate, the sign-out or the
-   * forced-password-change arm ran one hook fewer than the render before it —
-   * `Minified React error #310`, an error boundary, and the whole screen gone.
-   * Caught in a browser rather than by `typecheck`, which cannot see it. Every
-   * hook here belongs above line one of the branching.
+   * ⚠ **Above the branching, and that is not style.** It sat below at first, so a
+   * render that took the sign-out or the forced-password-change arm ran one hook
+   * fewer than the render before it — `Minified React error #310`, an error
+   * boundary, and the whole screen gone. Caught in a browser rather than by
+   * `typecheck`, which cannot see it. Every hook here belongs above line one of
+   * the branching, and `upFrom` is read by `LegalScreen` below.
    */
   const up = upFrom(route, under, origin);
-  useEffect(() => {
-    setTelegramBack(up === null ? null : () => navigate(up, true));
-    // Deliberately no teardown. There is one back button and one page; hiding it
-    // on unmount would be hiding it when the app is going away anyway, and a
-    // cleanup racing the next screen's effect is how it ends up hidden on a
-    // screen that wanted it.
-  }, [up]);
 
   /*
    * **The tab says how many sessions are waiting, and it is the only thing this

@@ -24,11 +24,21 @@ Several agents at once, each in its own git worktree. Close the lid, drop to LTE
 kill the tab: the daemon is the source of truth, and the agent never notices you
 left.
 
-The **desktop app** is the primary client. It carries its own copy of the
-interface, so the server it supervises cannot replace the code running in it, and
-it reaches a daemon on the same computer over loopback rather than out to the relay
-and back. The web UI is the same app in a browser and is optional: an instance can
-serve the API and the relay and no public interface at all.
+The **desktop app** is the client, and the only one. It carries its own copy of
+the interface, so the server it supervises cannot replace the code running in it,
+and it reaches a daemon on the same computer over loopback rather than out to the
+relay and back.
+
+Everything else it reaches is **end-to-end encrypted between the app and that
+machine** — the relay forwards bytes it holds no key for. That is also why there is
+no version of this in a browser: the handshake is keyed on a device key the app
+keeps in the operating system's credential store, and a tab holds none, so it could
+load the interface and reach no machine at all.
+
+What an instance does serve to a browser is the **gate** — sign-up, the mailed
+confirmation, reset and verify screens, the legal documents, and the page that
+hands you the app. Those flows begin in a mail client and have nowhere else to
+land. Every other address answers the same error envelope the API does.
 
 ## Install
 
@@ -89,16 +99,18 @@ Three pieces, and you can run all of them yourself.
   your machine, as you. A plugin can add a fifth — any ACP program, and any
   inference endpoint to point one at — and it lands in the same lists.
 - **The control plane** issues identity and relays every request. It holds the
-  accounts, the machines and the grants, and it signs the short-lived tokens the
-  browser uses. It runs in a container, on a box of its own.
-- **The web UI** supervises the fleet from a phone. One screen, shaped around one
-  question: *does anything anywhere need me?*
+  accounts, the machines and the grants, and it signs the short-lived capabilities
+  the app spends. It runs in a container, on a box of its own.
+- **The app** supervises the fleet. One screen, shaped around one question: *does
+  anything anywhere need me?*
 
-And one shell around that UI rather than a fourth piece: **the native app**
-(`packages/native`, a Tauri window) is the same bundle, embedded in a binary, so the
-server it supervises serves it no JavaScript and cannot replace any. It asks which
-control plane to connect to, then signs in through the same routes the browser uses
-and keeps the session in the operating system's credential store.
+The app is not a page the control plane serves. It is a native binary
+(`packages/native`, a Tauri window around `packages/web`) with the whole interface
+compiled into it, so the server it supervises serves it no JavaScript and cannot
+replace any. It asks which control plane to connect to, signs in through the same
+routes the gate does, keeps the session in the operating system's credential store,
+and holds the device key that lets it open an encrypted channel to a machine — which
+is the one thing a browser could not do, and the reason there is no browser version.
 `docs/NATIVE.md` has the prerequisites and what is not built.
 
 ```
@@ -108,8 +120,8 @@ and keeps the session in the operating system's credential store.
                        ┌──────────────────────┐
   ┌──────────────┐     │    control plane     │   accounts, machines, grants
   │              ├────►│                      │   mints a short-lived token
-  │    web UI    │◄────┤  /v1/*               │   whose `aud` is one machine
-  │  on a phone  │     └──────────────────────┘
+  │   the app    │◄────┤  /v1/*               │   whose `aud` is one machine
+  │ on a desktop │     └──────────────────────┘
   │              │                                ┌─────────────────────────┐
   │  now holds   │     ┌──────────────────────┐   │  daemon   m_ab12        │
   │  a token     │     │        relay         │   │                         │
@@ -134,7 +146,7 @@ and keeps the session in the operating system's credential store.
 | `docs/PLUGINS.md` | Writing a plugin: the manifest, the host API, the drawing vocabulary, and what a plugin is trusted with |
 | `docs/NATIVE.md` | The native app: building it, the prerequisites per platform, what signing and notarization would take, and what is deliberately not built |
 | `docs/RELEASING.md` | Where the version is written down, when it moves, and what a tag does that a push does not |
-| `docs/DECISIONS.md` | **Why** any of it is that way. 961 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
+| `docs/DECISIONS.md` | **Why** any of it is that way. 966 entries, question → decision, with the measurement behind each and the alternatives that were tried and taken back out |
 | `deploy/README.md` | The deployment surface in full |
 | `deploy/RELAYS.md` | Running more than one relay, and the order of operations |
 | `CHANGELOG.md` | What changed in each release, and what a 0.x minor is allowed to break |

@@ -54,10 +54,12 @@ set +a
 UV_THREADPOOL_SIZE=${UV_THREADPOOL_SIZE:-64}
 export UV_THREADPOOL_SIZE
 
-# The working directory `pnpm cp` would use. It matters for exactly one setting:
-# a relative REEMOAT_CP_WEB is resolved against the current directory. The web
-# root's *default* is resolved from the source file's own URL instead, so the
-# built UI is found either way.
+# The working directory `pnpm cp` would use.
+#
+# It used to matter for one setting — a relative REEMOAT_CP_WEB was resolved
+# against it — and that variable is deleted. What it still buys is that this runs
+# the same way the package's own `cp` script does, and that every relative path a
+# future setting takes has one obvious base.
 cd "$REPO_ROOT/packages/control-plane"
 
 # Its own tsx: this is a separate workspace package with its own node_modules.

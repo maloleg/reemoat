@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { check, report, sleep } from "./webcheck.env.js";
+import { check, fetchChannel, report, sleep } from "./webcheck.env.js";
 import {
   attachWithin,
   attaches,
@@ -286,6 +286,13 @@ process.stdout.write("\na machine that moved to another relay\n");
   const json = (body: unknown, status = 200): Response =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+  /*
+   * A machine that has announced a key. `probeRoute` refuses the relay arm
+   * outright without one, so every mint fixture has to carry it — which is the
+   * "no silent downgrade" rule showing up as a fixture change rather than as a
+   * comment.
+   */
+  const MACHINE_KEY = "A".repeat(43);
   /** What the control plane would answer for this machine right now. */
   let routedTo = "https://r1.example";
   /** Which relay is actually holding the tunnel. The other one answers 503. */
@@ -304,7 +311,7 @@ process.stdout.write("\na machine that moved to another relay\n");
         token: `jws-${mints.length}`,
         expiresAt: now + 300_000,
         serverTime: now,
-        machine: { relayUrl: routedTo, relayOnline: true },
+        machine: { relayUrl: routedTo, relayOnline: true, key: MACHINE_KEY },
       });
     }
     daemonCalls.push(url);
@@ -327,6 +334,10 @@ process.stdout.write("\na machine that moved to another relay\n");
       scopes: [],
     } as never,
     () => {},
+    // The relay arm has to *answer* for a relay move to be visible at all, and
+    // what this section is about is the sequence — mint, probe, answer, re-probe
+    // — rather than what the bytes on it look like. See `fetchChannel`.
+    fetchChannel,
   );
 
   const settled = await connection.resolveRoute();

@@ -23,8 +23,9 @@ Adding them to `GateScreen` instead is cheaper by every count and breaks four
 written things: `gate.ts` defines that family as the screens reached *before there
 is a credential*; `depthOf`'s gate arm argues those screens are "the sign-in form
 with different fields"; `GateCard` is `max-w-sm`, a **form** measure, where a
-document wants `COLUMN`; and `BackToSignIn` replaces always, justified by a token
-a document does not carry. Q3.598.
+document wants `COLUMN`; and `ToHandoff` (named `BackToSignIn` until this branch,
+when the gate's exits stopped naming a screen this bundle does not contain)
+replaces always, justified by a token a document does not carry. Q3.598.
 
 **Four switches are compile-enforced** (`depthOf`, `sheetKind`, `sheetTitle`,
 `screenOf`) and **three sites take a new arm in silence**: `isSheet` is an `||`
@@ -32,10 +33,9 @@ chain, `isOverlayPath` a list of literals, `sheetUpLabel` an early return. The
 case table in `webcheck.plugin-reach-and-mirror.ts` is the only thing covering
 those three — a new route arm belongs in it.
 
-⚠ **`upFrom` must answer a path and never `null`.** `App` hands that value to
-`setTelegramBack`, and `null` draws **✕ Close** — a document opened from the
-sign-up form inside the mini app would have no way back that was not closing the
-app.
+⚠ **`upFrom` must answer a path and never `null`.** `LegalScreen` draws its way
+out only when `up !== null`, so a document opened from the sign-up form would have
+no way back to it at all — which is why `GateApp` hands it a literal `/app`.
 
 ⚠ **`parseLegalDoc` and `parseGateScreen` must stay disjoint, and `parse` asks the
 gate first.** A document named `register` would lose, silently, to the one screen

@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -123,7 +123,27 @@ export function writeAnnounce(announce: LocalAnnounce, home: string = homedir())
  * A crash leaves the file behind and that costs one refused connection on the
  * next probe, which is why nothing depends on this running — it is tidiness, not
  * a guarantee.
+ *
+ * ⚠ **`unlinkSync` rather than `rmSync(force)`, and the reason is prose rather
+ * than behaviour.** For a regular path this uid wrote the two are the same call:
+ * `force` suppresses `ENOENT` and nothing else, which is exactly what the catch
+ * below does. What differs is what the word costs elsewhere. Six load-bearing
+ * comments argue containment from there being **one** `rmSync` in this codebase
+ * — `worktree.ts:497`, `paths.ts:33` and `:50`, `uploads.ts:1068`,
+ * `plugins/host.ts:1473` and `.claude/rules/files-paths-git.md:88` — and
+ * `paths.ts`'s guard is *stated* as the guard on that one call site, so a second
+ * `rmSync` anywhere in `src/` silently converts all six into claims that read as
+ * true and are not. This one deletes, by name, a file it wrote itself into a
+ * `0700` directory; it is not the recursive delete over a path somebody else
+ * chose that the guard exists for, and it must not be spelled like one.
  */
 export function removeAnnounce(home: string = homedir()): void {
-  rmSync(announcePath(home), { force: true });
+  try {
+    unlinkSync(announcePath(home));
+  } catch (error) {
+    // Already gone is the ordinary case — a daemon that never got as far as
+    // announcing, or a second shutdown path arriving after the first. Anything
+    // else is rethrown, because that is what `force: true` did.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }

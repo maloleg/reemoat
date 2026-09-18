@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -2104,17 +2104,31 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
    * starts a second installer over whatever this one is still writing.
    */
   const stall = join(sandbox, "agents-stall.sh");
-  writeFileSync(stall, "#!/bin/sh\nsleep 30 &\necho \"grandchild=$!\"\nsleep 30\n");
+  /*
+   * ⚠ **The pid goes to a file, not to stdout.** Reading it back out of
+   * `cut.detail` raced the 300 ms deadline: `runScript` appends the child's
+   * output only `text.length > 0` (`src/agentupdate.ts`'s `close` handler), so a
+   * run killed before the pipe was drained carried no `grandchild=` at all and
+   * the parse fell back to `0` — which then made `alive(0)` answer **true**,
+   * because POSIX `kill(0, sig)` addresses *the caller's own process group*. That
+   * pair failed roughly one run in four with `[false, true]`, and a flaky driver
+   * in a tree whose whole safety net is drivers is worse than an absent one.
+   * `printf` into a file is written before the first `sleep` and survives the kill.
+   */
+  const pidFile = join(sandbox, "grandchild.pid");
+  writeFileSync(stall, `#!/bin/sh\nsleep 30 &\nprintf %s "$!" > ${pidFile}\nsleep 30\n`);
   chmodSync(stall, 0o755);
   const before = Date.now();
   const cut = await runScript(stall, [], 300);
-  // Named, because the detail also carries "timed out after 0 min" and a bare
-  // number would read the deadline as the pid.
-  const grandchild = Number.parseInt(/grandchild=(\d+)/.exec(cut.detail ?? "")?.[1] ?? "0", 10);
+  const grandchild = Number.parseInt(existsSync(pidFile) ? readFileSync(pidFile, "utf8").trim() : "0", 10);
   check("the deadline ends the run", [cut.ok, cut.detail?.includes("timed out")], [false, true]);
   check("within the deadline rather than the installer's own patience", Date.now() - before < 5000, true);
   await new Promise((r) => setTimeout(r, 50));
+  // Guarded, because `process.kill(0, 0)` signals this process's own group and
+  // always succeeds — the exact accident that made the old parse failure read as
+  // a surviving grandchild.
   const alive = (pid: number): boolean => {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
       process.kill(pid, 0);
       return true;
@@ -2122,7 +2136,8 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
       return false;
     }
   };
-  check("and reaches the grandchild the script left behind", [grandchild > 0, alive(grandchild)], [true, false]);
+  check("the script's grandchild was recorded at all", grandchild > 0, true);
+  check("and the deadline reaches it", alive(grandchild), false);
 
   await runs.shutdown();
 }

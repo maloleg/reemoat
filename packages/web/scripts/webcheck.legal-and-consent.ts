@@ -81,9 +81,9 @@ process.stdout.write("\nthe three documents, and the box that points at them\n")
   check("and no panel head names it", sheetTitle(asRoute as never), null);
   /*
    * ⚠ **The way out is a destination and never `null`.** `App` hands this value
-   * straight to `setTelegramBack`, which draws **✕ Close** on `null` — so a
-   * document opened from the sign-up form inside the mini app would have no way
-   * back to it that was not closing the app.
+   * straight to `LegalScreen`'s `up`, which draws its control only where there is
+   * somewhere for it to go — so a document opened from the sign-up form would have
+   * no way back to it at all.
    */
   check("the way out of a document is the root", upFrom(asRoute as never, "/", null), "/");
   check("and never nothing", upFrom(asRoute as never, "/", null) !== null, true);

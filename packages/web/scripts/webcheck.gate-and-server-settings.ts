@@ -15,7 +15,7 @@ import { check, report } from "./webcheck.env.js";
  * of those is a package rather than a file and is not followed — the question is
  * about this tree.
  */
-function closure(entry: string): Set<string> {
+function closure(entry: string, valuesOnly = false): Set<string> {
   const root = new URL("../src/", import.meta.url);
   const resolve = (from: string, spec: string): string | null => {
     if (!spec.startsWith(".")) return null;
@@ -43,6 +43,20 @@ function closure(entry: string): Set<string> {
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/\/\/[^\n]*/g, "");
     for (const match of code.matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)) {
+      /*
+       * ⚠ **`valuesOnly` skips what TypeScript erases.** `verbatimModuleSyntax`
+       * is on, so an `import type` emits nothing and cannot put a byte in a
+       * bundle — but it is still a `from "…"` and this regex still matches it.
+       * Measured: `ui/bits.tsx` type-imports `OfflineReason`/`Reach` from
+       * `machine.ts`, which value-imports `e2ee.ts`, so the gate's *graph* reaches
+       * the whole transport chain while its *bundle* contains none of it. Asking
+       * the broad question about bytes answered two files that are not there.
+       */
+      if (valuesOnly) {
+        const upto = code.slice(0, match.index);
+        const line = code.slice(upto.lastIndexOf("\n") + 1);
+        if (/^\s*(?:import|export)\s+type\b/.test(line)) continue;
+      }
       const next = resolve(file, match[1] ?? "");
       if (next !== null) queue.push(next);
     }
@@ -711,6 +725,67 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
    * two fails first, one of them says *where*.
    */
   check("App.tsx imports no gate screen", /ui\/gate\/Gate/.test(app), false);
+
+  /*
+   * ⚠ **And the gate reaches no transport module, which is a size property with
+   * a security-shaped reason and nothing measured it until it had regressed.**
+   *
+   * Measured 2026-09-17: the gate's entry chunk had reached 335,745 bytes
+   * (106.31 kB gzipped by Vite's report) from 266 kB two days earlier, and
+   * `Noise_IK_25519_ChaChaPoly_BLAKE2s` was greppable inside the shipped file.
+   * One import edge did it — `gate-main.tsx → store.ts → machine.ts → e2ee.ts →
+   * @reemoat/protocol` — worth about 70.5 kB, 21% of the chunk, on nine addresses
+   * that are a registration form, four mailed-link screens opened by a mail
+   * client (typically on mobile data), three legal documents and a handoff page.
+   * **A browser holds no device key and `dist-gate` has no session view, so not
+   * one of those pages can open a channel.** Cutting the edge took it to 232,490
+   * bytes / 72.91 kB gzipped.
+   *
+   * This is asserted over the import graph rather than over the built artifact on
+   * purpose: the graph is readable offline with no build step, which is what every
+   * other driver here is, and `webcheck` runs in one process with no `dist`.
+   *
+   * ⚠ **The second half is what `signInAuth.ts` rests on.** Its docblock argues
+   * that `provideSignInAuth`'s last-writer-wins needs no arbitration because the
+   * two stores are never in one bundle — so exactly one provider call is ever
+   * evaluated in a program. That is a claim about these two closures and nothing
+   * else, and for a while it was a claim with no check under it.
+   */
+  const TRANSPORT = ["e2ee.ts", "machine.ts", "stream.ts", "daemon.ts", "store.ts"];
+  const gateValues = closure("gate-main.tsx", true);
+  const appValues = closure("main.tsx", true);
+  check(
+    "the gate bundle reaches no transport module",
+    TRANSPORT.filter((f) => gateValues.has(f)).sort(),
+    [],
+  );
+  // The non-vacuity control: the APP must reach all of them, or the list above is
+  // five names that no longer resolve to anything and the check is free.
+  check(
+    "while the app bundle reaches every one of them",
+    TRANSPORT.filter((f) => appValues.has(f)).sort(),
+    [...TRANSPORT].sort(),
+  );
+  /*
+   * And the second control, which is what says the `valuesOnly` walk is a walk
+   * rather than an empty set: the gate's value graph is most of its graph, and
+   * the difference between the two is exactly the erased edges named above.
+   */
+  report(
+    "the value-only walk still found a bundle",
+    gateValues.size > 20 && gateValues.size < gateClosure.size,
+    `${gateValues.size} value modules of ${gateClosure.size} in the graph`,
+  );
+  check(
+    "each bundle links exactly one store, and never both",
+    [
+      appValues.has("store.ts"),
+      appValues.has("gateStore.ts"),
+      gateValues.has("gateStore.ts"),
+      gateValues.has("store.ts"),
+    ],
+    [true, false, true, false],
+  );
 
   /* ---- the server screen, as an editing screen ---- */
 
@@ -1448,10 +1523,10 @@ process.stdout.write("\nserver settings, and how stuck somebody is\n");
    * they leave for the control plane's own. Three properties, each a real
    * failure — absolute rather than root-relative, or `openableHref` answers
    * `null`, the shell's interceptor never fires and the webview quietly redraws
-   * this screen; `target="_blank"`, or the same-origin navigation inside Telegram
-   * destroys the launch fragment `telegram.ts` latches against and lands on a
-   * bundle with no Telegram wiring; and `controlPlaneOrigin()` rather than
-   * `location.origin`, which under the shell is `tauri://localhost`.
+   * this screen; `target="_blank"`, or the click is a real navigation and a browser
+   * leaves this document for the gate, losing whatever was already typed into the
+   * form behind it; and `controlPlaneOrigin()` rather than `location.origin`, which
+   * under the shell is `tauri://localhost`.
    */
   /*
    * Comments stripped for these, and the `${LINK}` count above deliberately not:

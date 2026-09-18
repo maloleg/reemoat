@@ -42,24 +42,46 @@ export function LegalScreen({
   doc,
   up,
   signedIn,
+  upLabel,
 }: {
   doc: LegalDoc;
-  /** Where the way out goes. `App` computes it once and Telegram's own back
-   *  control is given the same value, so the two cannot disagree. */
+  /** Where the way out goes, and never `null` from either caller — `App`
+   *  computes it with `upFrom`, `GateApp` hands `HANDOFF_PATH` — because the
+   *  footer draws its control only when this is a path, and `null` draws no way
+   *  out. */
   up: string | null;
+  /**
+   * Which of the **app's** two roots the way out goes back to. Read only where
+   * `upLabel` is absent, which is every caller inside the app.
+   */
   signedIn: boolean;
+  /**
+   * ⚠ **What the way out is called, where the answer is not one of the app's
+   * two.** `legalUpLabel` chooses between "Back to your machines" and "Back to
+   * sign in", and both name screens that exist in **this** bundle. The gate is a
+   * second bundle with a second root: it carries no sign-in form and no machine
+   * list, so on `GateApp`'s copy of this screen the label said one thing and the
+   * control went to another — at the foot of a document somebody was linked to
+   * from the sign-up consent box, which is the one control that page has.
+   *
+   * A boolean cannot answer for three roots, so the caller outside the app hands
+   * its own label over instead of being described to a function that cannot know
+   * about it. `signedIn` keeps its meaning and its two answers for everybody
+   * else, and `webcheck` keeps asserting both of them.
+   */
+  upLabel?: string;
 }): ReactNode {
   const text = legalDocument(doc);
   const others = LEGAL_DOCS.filter((other) => other !== doc);
   return (
-    /* `pt-safe`/`pb-safe` on the shell rather than on the column: inside Telegram
-       the chrome floats ✕ Close and ⌄ ⋯ **over** the page, so without this the
-       document's own `<h1>` sits under the pill and the way out sits under the
-       home indicator. `nav.ts`'s `upFrom` wires this screen for the mini app by
-       name, so it is reached from there by design; `Header.tsx` states the rule and
-       this screen draws no header of its own to inherit it from. Here and not one
-       element down because the column states the body size, and `webcheck` reads
-       that class string whole. */
+    /* `pt-safe`/`pb-safe` on the shell rather than on the column: without this the
+       document's own `<h1>` sits under the notch and the way out sits under the
+       home indicator. The chrome that first made that visible was Telegram's, which
+       is gone — but the insets are the phone's own, and `GateApp` draws this screen
+       in the bundle a mail client opens, so it is reached on a phone by design.
+       `Header.tsx` states the rule and this screen draws no header of its own to
+       inherit it from. Here and not one element down because the column states the
+       body size, and `webcheck` reads that class string whole. */
     <div className="pt-safe pb-safe min-h-full">
       <div className={`${COLUMN} px-4 py-8 text-sm`}>
         <h1 className="text-xl font-semibold">{legalTitle(doc)}</h1>
@@ -106,7 +128,7 @@ export function LegalScreen({
               onClick={() => navigate(up, true)}
               className="tap mt-3 block text-xs text-muted hover:text-fg"
             >
-              {legalUpLabel(signedIn)}
+              {upLabel ?? legalUpLabel(signedIn)}
             </button>
           )}
         </footer>

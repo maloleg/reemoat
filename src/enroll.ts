@@ -16,6 +16,12 @@ import { describeError } from "./http.js";
  * The consequence, stated where it will be read: rotating the control plane's
  * signing key requires re-enrolling every daemon. The key set is plural so old
  * and new can be trusted at once while that happens.
+ *
+ * What travels *up* is the code and, since machines began holding a static of
+ * their own, the public half of that key — see {@link EnrollOptions.machineKey}.
+ * It rides this request rather than a second one for the reason there is only
+ * ever one: redeeming a code is already the act that says *this machine is
+ * starting again*, so it is also where the key the Authority pins is replaced.
  */
 
 export type EnrollErrorCode =
@@ -135,6 +141,37 @@ export interface EnrollResult {
 export interface EnrollOptions {
   controlPlane: string;
   code: string;
+  /**
+   * The public half of this machine's X25519 static, base64url, when it has one.
+   *
+   * **Optional here and load-bearing for the fleet.** The other way this key
+   * reaches the control plane is the tunnel dial, which pins it *trust on first
+   * use* — and a machine row already holding a different key refuses the dial
+   * with a 409 rather than adopting the new one. The recovery the Authority
+   * documents for that refusal is re-enrollment, and this field is the whole of
+   * it: redeeming a code already retires the machine's tunnel credential, so it
+   * is the one moment that means *this machine is starting again*, and the
+   * enrollment route replaces the pin outright when a key arrives beside the
+   * code.
+   *
+   * ⚠ **Nothing sent one until this existed, and the failure was silent and
+   * permanent.** The route read `machineKey` off the body and this client posted
+   * `{ code }` alone, so the replace path was unreachable: a host whose local
+   * database was lost — a restored backup, a wiped `~/.reemoat` — re-enrolled
+   * against the same machine row, generated a fresh key at its next start,
+   * announced it, and was refused on every dial for ever, retrying on its
+   * backoff while the app drew the machine as not connected. The only remedies
+   * left were hand-editing the control plane's SQLite or abandoning the machine
+   * id with its grants and its history.
+   *
+   * Omitted from the body rather than sent empty by a caller that has none, for
+   * the reason the dial omits its header: a daemon that predates this and one
+   * with nothing to say are the same silence on the wire. A control plane older
+   * than this ignores the field, and one that cannot read it refuses it to
+   * `null` rather than refusing the enrollment — so neither direction is a flag
+   * day.
+   */
+  machineKey?: string;
   /** Startup is not allowed to hang on a control plane that accepts and stalls. */
   timeoutMs?: number;
 }
@@ -159,13 +196,25 @@ export async function enroll(options: EnrollOptions): Promise<EnrollResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_ENROLL_TIMEOUT_MS;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  /*
+   * The code, and the key this machine answers on when it has one.
+   *
+   * Built as an object rather than inlined so the field can be *absent* instead
+   * of `null`: the body a daemon older than machine keys sent was exactly
+   * `{ code }`, and keeping that shape when there is nothing to announce is what
+   * makes this additive in both directions rather than a new dialect.
+   */
+  const machineKey = options.machineKey?.trim() ?? "";
+  const payload: Record<string, unknown> = { code: options.code.trim() };
+  if (machineKey.length > 0) payload["machineKey"] = machineKey;
+
   let body: unknown;
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code: options.code.trim() }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     // Inside the timeout, not after it. `fetch` resolves as soon as the headers

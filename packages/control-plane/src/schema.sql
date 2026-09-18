@@ -262,15 +262,16 @@ CREATE TABLE IF NOT EXISTS user_session_origins (
 -- this service on the next request, and does nothing to a machine token already
 -- minted for its remaining ~300s. `SECURITY.md` carries the window.
 --
--- **No `public_key` column, and its absence is the design rather than an
--- oversight.** A device key is the next phase's; adding the column now would put
--- an unenforced claim — *these rows are key-attested* — in the very table
--- per-device revocation is argued from, while nothing signs anything. `migrate()`
--- in `store.ts` is what makes adding it later a one-line change instead of a
--- schema redesign, which is the only property that had to be preserved.
+-- **`public_key` was refused here once, and the reason expired rather than being
+-- overruled.** A device key was the next phase's, and declaring the column while
+-- nothing signed anything would have put an unenforced claim — *these rows are
+-- key-attested* — in the very table per-device revocation is argued from. The
+-- property that had to be preserved was that adding it later stayed a one-line
+-- change instead of a schema redesign, and it did. It is declared below now that
+-- something both writes it and checks it; the ⚠ on the column says what checks.
 --
--- **No `last_seen_at` column either**, and this one is a measurement rather than a
--- preference. It would need a writer, and both available writers are failures this
+-- **No `last_seen_at` column**, and unlike the key above, this one is a
+-- measurement rather than a preference. It would need a writer, and both available writers are failures this
 -- package has already paid for: per-request is the fsync-per-request that
 -- `user_sessions.last_seen_at` and `api_keys.last_used_at` both carry intervals to
 -- avoid, and writing it only at registration makes "last seen" a date that never
@@ -293,7 +294,42 @@ CREATE TABLE IF NOT EXISTS devices (
   name       TEXT    NOT NULL,
   platform   TEXT    NOT NULL,
   created_at INTEGER NOT NULL,
-  revoked_at INTEGER
+  revoked_at INTEGER,
+  -- The installation's X25519 public key, base64url, and when it was last set.
+  --
+  -- ⚠ **Declared here *and* added by `store.ts`'s migrate(), and the usual reason
+  -- for that pairing is the wrong one here.** Everywhere else in this file it
+  -- means *a column written here would be invisible to every database that
+  -- already exists* — true of `users` and `machines`, which have been on disk
+  -- since the first release. It is false of this table: `devices` is created by
+  -- the `CREATE TABLE IF NOT EXISTS` above **in the same release these columns
+  -- landed in**, so no shipped database has the table at all, and a fresh file
+  -- gets all of it in one statement rather than a `CREATE` followed by two
+  -- `ALTER`s on every open.
+  --
+  -- The `ALTER`s stay for the narrower case that does exist: a **branch build**
+  -- that created `devices` before the key columns were written, which is every
+  -- dev-stand database on the branch this landed on. They cost nothing now that
+  -- the `CREATE` declares them — `migrate()` reads `PRAGMA table_info(devices)`
+  -- first and skips a column it finds — and deleting them would strand exactly
+  -- those files, since `CREATE TABLE IF NOT EXISTS` does not add a column to a
+  -- table that is already there.
+  --
+  -- ⚠ **A column that once read as an unenforced claim, and no longer does.** It
+  -- was refused when this table was built, with the reason that *a column nothing
+  -- writes reads as "these rows are key-attested", which is a security claim
+  -- sitting in the table per-device revocation is argued from*. It is written now
+  -- and, more to the point, it is **enforced**: the key is named in every
+  -- capability minted for this installation, and the daemon compares that name
+  -- against the key the encrypted handshake actually authenticated. A row
+  -- carrying a key an installation does not hold cannot connect, so the column is
+  -- attested by use rather than by anybody's assertion.
+  --
+  -- NULL for every row that predates this and for every API-key caller, which is
+  -- why neither is NOT NULL. A capability cannot be minted without one — the
+  -- refusal is `device_key_required`, and it names the remedy.
+  public_key TEXT,
+  key_set_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id, created_at);
@@ -365,6 +401,24 @@ CREATE TABLE IF NOT EXISTS machines (
   -- daemon never asks us anything. That bound is the token lifetime and nothing
   -- else, and it is the accepted price of a daemon that survives our outage.
   revoked_at  INTEGER
+  -- `machine_key` and `machine_key_set_at` are added by `store.ts`'s migrate():
+  -- a column here would be invisible to every database that already exists. They
+  -- hold the X25519 static the daemon announced on its dial, base64url, and when
+  -- it was first recorded.
+  --
+  -- **Pinned on first announcement, and a later disagreement is refused rather
+  -- than adopted.** An app is told this key by us and authenticates the machine
+  -- by it, so silently taking a new one would make the whole check decorative:
+  -- whoever could change the row could stand in the middle. NULL means a machine
+  -- that has not dialled since it learned to announce one, which is every machine
+  -- enrolled before this existed and is why nothing here is NOT NULL.
+  --
+  -- ⚠ **The relay writes this, and that is the honest limit of what it proves.**
+  -- The write happens on the dial, authenticated by the tunnel key, so the
+  -- announcement is exactly as trustworthy as "I am this machine" — but a relay
+  -- process that had been taken over could pin a key it holds on a machine that
+  -- has never pinned one. Enrollment has no such gap, because the API process
+  -- records it there against a single-use code. `SECURITY.md` carries the window.
 );
 
 -- The admin lists all sort by creation. Indexed rather than sorted in memory,

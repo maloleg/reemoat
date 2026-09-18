@@ -142,20 +142,25 @@ relay's rows are cleared by its replacement at boot. Q4.35.
 - **The relay routes by the verified `aud` claim, not by the URL.** Q5.8.
 - **Authorization happens before a stream is opened, never after.** A refused
   request must not increment `requestsProxied`. Q5.9.
-- **The relay's own metadata never enters the proxied request.** `reemoat-*`
-  headers ride the CONNECT handshake and stop at the daemon's tunnel code; a
-  client-supplied copy is stripped in `forwardHeaders`. Q5.10.
+- **The relay's own metadata never enters a request, and this is structural now
+  rather than a strip.** `reemoat-*` headers ride the CONNECT handshake and stop at
+  the daemon's tunnel code. There is no proxied request for one to enter:
+  `forwardHeaders` is deleted with the plaintext path, and a client's bytes are
+  ciphertext the relay cannot open let alone edit. Q5.10, Q7.143.
 - **An upgrade socket gets an `error` listener before anything else.** Node
   removes its own `socketOnError` *before* emitting `upgrade`, so the raw socket
-  starts with zero listeners. It is the first statement of `handleUpgrade`, before
+  starts with zero listeners. It is the first statement of `handleChannel`, before
   `authorize`, because the refusal paths write to that socket too; `main.ts`
   carries an `uncaughtException` backstop. Q5.11.
 - **A request target the HTTP parser accepts and the WHATWG URL parser rejects is
-  answered, not held.** `readToken` returns `null` rather than letting `new URL`
-  throw, landing on `401 missing_token` with `pathOf` logging `(unparseable)`. It
-  runs **first** on both `handleRequest` and `handleUpgrade`, before `authorize`,
-  so this is reachable with no credential at all; `relaycheck` drives it on a raw
-  `node:net` socket, `fetch` and `ws` both normalizing the target away. Q1.46.
+  answered, not held.** An unguarded `new URL` throw escaped the `'request'` emit
+  before anything wrote a response or destroyed the socket — one leaked fd per
+  unauthenticated line, against the only ingress this system has. `listener.ts`'s
+  own `pathOf` catches it and answers `"/"`, which now lands on the retired
+  plaintext handler and its `426` **before reading anything at all** — a stronger
+  guarantee than the `401 missing_token` it replaced, which had to run `readToken`
+  on the way to its refusal. `relaycheck` drives it on a raw `node:net` socket,
+  `fetch` and `ws` both normalizing the target away. Q1.46, Q7.143.
 - **The relay logs a path, never a URL** — the credential arrives as `?token=`,
   and a *refusal* path leaks a cryptographically intact one. `pathOf` exists for
   this. Q5.12.
@@ -241,12 +246,12 @@ relay's rows are cleared by its replacement at boot. Q4.35.
 | `packages/web/src/machine.ts` | One machine's token and reachability. `forgetRoute` drops the belief that it is up, never on an HTTP status. Also `missingRowReason` |
 | `packages/web/src/stream.ts` | One session's socket: rotation before expiry, the close-code table, the cursor |
 | `packages/control-plane/src/relay/main.ts` | The relay's entry point, the second deployment of this package. Mints no signing key, bootstraps nobody, sends no mail, does not wait for the API |
-| `packages/control-plane/src/relay/listener.ts` | The dispatcher both entry points share: the tunnel path, `/__relay/health` — emphatically **not** `/health`, that being the daemon's on the far side of a tunnel — and everything else to the proxy |
+| `packages/control-plane/src/relay/listener.ts` | The dispatcher both entry points share: the tunnel path, `/__relay/channel`, `/__relay/health` — emphatically **not** `/health`, that being the daemon's on the far side of a tunnel — and everything else to a refusal. `RELAY_CHANNEL_PATH` is declared here and mirrored in `packages/web/src/e2ee.ts`, with both drivers comparing the literals |
 | `packages/control-plane/src/relay/presence.ts` | The only writable part of a tunnel, including which relay holds it (`relay_id`, read by `relayFor`). Its heartbeat predicate is load-bearing: a flush may write a row only if it is already this relay's *or* describes a tunnel no older, because `stats()` does not test `isClosed`. Plus `dbRelayView` |
 | `packages/control-plane/src/relay/authorize.ts` | May this caller reach this machine. Verify, then read `aud`, then check live user/machine/grant rows |
 | `packages/control-plane/src/relay/registry.ts` | Which machines hold a tunnel, and how to open a stream down one. The authority; it mirrors transitions into `presence.ts` and never waits on one. `RelayView.relayFor` answers only "me or nobody" |
 | `packages/control-plane/src/relay/tunnel-endpoint.ts` | Where daemons dial in. Authenticates *before* the WS handshake completes |
-| `packages/control-plane/src/relay/proxy.ts` | The browser-facing half: authorize, then let Node's own HTTP client serialize onto a CONNECT stream |
+| `packages/control-plane/src/relay/proxy.ts` | The app-facing half: authorize, then splice a WebSocket to a CONNECT stream as **raw bytes**. It parses nothing — `handleRequest` and `handleUpgrade` are `426` refusals now, and the HTTP client, the 101 replay, `forwardHeaders` and the CORS preflight are deleted with the plaintext path. `.claude/rules/e2ee.md` |
 | `scripts/relaycheck.ts` | Offline driver: framing, flow control, authorization ordering, CORS preflight, a WebSocket through the tunnel |
 
 ## Bounds

@@ -25,6 +25,41 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Changed
+
+- **Traffic to a remote daemon is end-to-end encrypted, and there is no other
+  mode.** The app and the daemon run `Noise_IK_25519_ChaChaPoly_BLAKE2s` between
+  themselves: the app's static is a per-installation **device key** kept in the
+  operating system's keyring and used from Rust, the daemon's is a **machine key**
+  it generates on first start and announces on its tunnel dial. The relay
+  authorizes the connection and then carries bytes it holds no key for — prompts,
+  diffs, file contents and terminal output are ciphertext to it. Every capability
+  names the device it was minted for, so one stolen off the wire or out of a log is
+  worth nothing from anywhere else.
+- **The relay's plaintext proxy is deleted.** It used to serialize each request
+  onto the tunnel with Node's own HTTP client and copy the answer back, which meant
+  it held the plaintext of everything in the fleet. Both handlers are refusals now.
+- **This is a flag day, taken deliberately.** `RELAY_PROTOCOL_MIN_VERSION` is 2, so
+  a daemon that has not been updated stops dialling in and is refused with a `426`
+  naming what to do. Its machine draws as offline until `deploy/deploy.sh` runs on
+  that host. No range can span "plaintext HTTP" and "ciphertext", which is what the
+  version range normally exists to avoid.
+
+### Removed
+
+- **The browser branch of the app.** A browser holds no device key, so it cannot
+  open an encrypted channel to a daemon — it could load the client and reach no
+  machine at all. Gone with it: the Telegram mini app, and `REEMOAT_CP_WEB`, which
+  named a built copy of the app for the control plane to serve. The **gate** —
+  sign-up, the mailed-link screens, the legal documents and the handoff page — is
+  unaffected and still served to a browser, because every one of those flows begins
+  in a mail client and has nowhere else to land.
+- **`pnpm client` can no longer reach a machine through the relay.** Opening a
+  channel needs a device key and a capability bound to it; `REEMOAT_TOKEN` is a
+  long-lived bearer capability with no binding, which is exactly what the binding
+  makes worthless. It refuses with a sentence naming the remedy — the app for a
+  remote machine, `REEMOAT_URL` for a daemon on this computer.
+
 ### Added
 
 - **Reemoat runs as a native macOS application.** `packages/native` is a Tauri 2
@@ -38,14 +73,25 @@ it — so a citation here would be the one kind nothing checks.
   would take, and what is deliberately not built.
 - **The same bundle, not a second copy.** There is one `packages/web` and no
   `@tauri-apps` dependency anywhere in it: the shell injects one function and the
-  app reads it through a hand-written bridge, the way it already reads Telegram's.
+  app reads it through a hand-written bridge.
   Every screen, every retry rule, the WebSocket, the cursor and the upload progress
   are the code the browser client runs. One leg differs — `/v1/*` goes through the
   host process, because the control plane mounts no CORS and adding one to serve a
   client that does not need it would be the wrong repair.
-- `pnpm nativecheck`, a ninth offline driver, and a `native` CI job for the parts
-  that need a Rust toolchain. Nothing about the native app builds, signs or
-  publishes on a push.
+- `pnpm nativecheck`, and a `native` CI job for the parts that need a Rust
+  toolchain. Nothing about the native app builds, signs or publishes on a push.
+- **`pnpm protocolcheck`, and it is the only driver here whose subject somebody
+  else wrote.** Every other check asserts a decision this repository made; this one
+  asserts that our handshake produces the bytes the Noise Protocol Framework says it
+  should, driven against the published cross-implementation vectors in both roles
+  with the ephemerals pinned. An implementation that only ever talks to itself
+  round-trips perfectly while interoperating with nothing, and would go on doing so
+  through a nonce written big-endian or a protocol name hashed where it should have
+  been padded — none of which a self-test can see. It also covers the two things the
+  specification leaves to us: the reserved top of the nonce range, where the guard
+  was `>` and had to be `>=`, and this repository's own frame table. With it and
+  `nativecheck`, the drivers that run offline in one process go from eight to
+  **ten**.
 - **The app reaches a daemon on the same computer without going out to the relay
   and back.** A daemon that has been enrolled writes where it is listening into
   `~/.reemoat/daemon.json` when it starts — its machine id, a loopback address and
@@ -65,15 +111,150 @@ it — so a citation here would be the one kind nothing checks.
 
   Nothing above the transport changed. The same session API answers on both paths,
   no screen knows which one replied, and a browser cannot take the local one.
-- **An instance can serve the API and the relay and no web interface at all.**
-  `REEMOAT_CP_WEB=0` was always there and is now a documented deployment mode with
-  a driver behind it: every `/v1` route, `/health`, `/install.sh`, the relay and the
-  tunnel behave identically, and a browser at `/` gets the error envelope every
-  other refusal answers in rather than a page. `docs/API.md` has the table and
-  `deploy/README.md` has the operator's version. The app carries its own copy of
-  the interface, so a fleet whose clients are all native needs no public UI.
+- **An instance serves the API, the relay and the gate, and no app interface at
+  all** — now the only shape rather than a documented option. Every `/v1` route,
+  `/health`, `/install.sh`, the relay and the tunnel behave as they always did, and
+  an address outside the gate's nine gets the error envelope every other refusal
+  answers in rather than a page. `docs/API.md` has the table and `deploy/README.md`
+  has the operator's version.
 
 ### Fixed
+
+- **A security assertion had gone quiet over exactly the commands it guards.**
+  `webcheck.devices.ts` swept `#[tauri::command]` bodies by matching that literal
+  including its closing bracket, so the twelve commands that gained `(async)` fell
+  out of it — among them every one that touches a device key. The check that the
+  browser-facing page cannot obtain the X25519 private key was being evaluated over
+  seven commands that were never going to touch it. Its floor, `> 5` against an
+  actual 7, could not notice: a skipped body does not lower a count, it fails to
+  raise it. The pattern takes both spellings now and the floor is replaced by a
+  **census** — bodies differenced against attribute occurrences — so a third
+  spelling is a red build rather than a silent gap, plus a named list of the
+  device-key commands that goes red naming whichever went missing. The same sweep
+  also found three source slices whose `indexOf` end anchor, when absent, made
+  `String.slice` read `-1` as counting from the end: the slice did not empty, it
+  ran to one character short of the file, so `writeStored` was 4,078 characters
+  becoming 32,958 with its own length floor still printing `ok`.
+
+- **An unreadable `server.json` was still overwritten, and the comment above it
+  said otherwise.** The quarantine added for a corrupt config ran only on the
+  *parse* branch; a file that exists and cannot be read — a permission, an I/O
+  error, a damaged volume — answered `Default` and the next write renamed a fresh
+  empty config over it. On a keyring-less host that is the only copy of the device
+  private key. A write that cannot preserve what is already there now refuses
+  before creating anything, and the refusal names the path.
+
+- **A remote transcript stalled for good on a large session, and nothing logged
+  it.** `StreamConnection.flush` cut its outbound batch on `estimateBytes`, which
+  charges `String.length` — UTF-16 units of the *unescaped* string — while the wire
+  carries `JSON.stringify` as UTF-8. `MAX_SOCKET_MESSAGE_BYTES` (1 MiB) is enforced
+  by the receiver and nothing enforced it at the sender, so a batch charged under
+  the 512 KiB ceiling could be several times that: measured 3,026,371 bytes for 21
+  events of escape-heavy text, which is what a coding CLI's stderr is made of (one
+  charged unit escapes to `\u001b`, six bytes). The far end refused the message,
+  the channel failed, and the app reconnected with its cursor unchanged onto the
+  same batch — for ever. `flush` now encodes each event once and cuts on
+  `Buffer.byteLength`, keeping the unconditional first event so a single oversized
+  event is still sent alone rather than wedging the queue. Held by two new
+  `daemoncheck` sections driven on the *direct* path, because over a channel the
+  overflow is answered by `fail()`, which ends the stream — so one frame crosses
+  either way and no count taken at the peer could tell a refusal from health.
+
+- **A control frame too large to send wedged the attach before it started.** The
+  batch ceiling above is about a transcript stalling partway; `hello` is the first
+  frame of every attach and carries the session snapshot, so a frame over the
+  reassembler's bound means the transcript never starts and the reconnect rebuilds
+  the same frame. It is now fitted by a two-rung ladder — blobs emptied, then the
+  pending lists halved, each rung re-measured on real UTF-8 bytes — and a frame
+  neither rung can shrink is still **sent**, because a `hello` that never arrives
+  is the stall rather than the cure. `fitSnapshotFrame` is exported for the driver
+  and for nothing else: every rung is reached only by a snapshot no offline fixture
+  can assemble, and measured, deleting the function outright left every driver in
+  this repository green.
+
+- **The sign-up bundle shipped a Noise implementation it is structurally incapable
+  of using.** One import edge — `gate-main.tsx → store.ts → machine.ts → e2ee.ts →
+  `@reemoat/protocol`` — put the handshake, the cipher state and the frame codec on
+  all nine gate addresses: a registration form, four mailed-link screens a mail
+  client opens (typically on mobile data), three legal documents and the handoff
+  page. A browser holds no device key and `dist-gate` has no session view, so not
+  one of those pages can open a channel. It had grown from 266 kB to 335,745 bytes
+  (106.31 kB gzipped) in two days with nothing measuring it. The gate reads a
+  narrower `gateStore` now, and `ui/SignIn.tsx` — the one shared box that also has
+  to *act* — reaches its store through `signInAuth.ts` rather than naming either:
+  232,490 bytes, 72.91 kB gzipped, with no Noise string and no ed25519 constant in
+  any emitted asset. `webcheck` walks the **value** import graph from each entry and
+  refuses a transport module in the gate's; it has to be the value graph, because
+  `ui/bits.tsx` type-imports `OfflineReason` from `machine.ts` and
+  `verbatimModuleSyntax` erases that, so the broad walk reported a chain the bundle
+  does not contain.
+
+- **A refused encrypted session went on acting on the peer's next frame.**
+  `fail()` guarded on `closed`, which it deliberately does not set — it leaves the
+  session up long enough for the `FAILED` frame to flush — and `consume`'s loop
+  guard read the same flag. So every frame already pulled out of the same TCP chunk
+  was still decrypted and dispatched after the refusal. Measured: a `REQUEST_BODY`
+  the daemon refused, followed in the same chunk by an `OPEN`, upgraded a real
+  WebSocket on a session the daemon had just refused to carry.
+
+- **A daemon that answered before reading a body tore down the app's session.**
+  `REQUEST_BODY`/`REQUEST_END` were the only frame arms that never consulted
+  `carrying`, so a peer could write into a finished request's orphaned
+  `ClientRequest` — which on a keep-alive socket whose server has already answered
+  is what a pipelined request is made of. Closing that by refusing the frame broke
+  an ordinary client instead: the app's send loop exits on a failure or a close and
+  `RESPONSE_END` is neither, so `uploads.ts`'s per-session cap, its rate check and
+  any 401/404/405 on a `body: true` request left the app writing frames into a
+  connection whose `carrying` had already gone back to `"none"`. Reachable by
+  uploading one attachment past the cap with a body over 65518 bytes. A late body
+  frame is dropped now, the way a `MESSAGE` that raced the daemon's own `CLOSE`
+  already was, and the handle is `destroy()`ed at the end of the response so there
+  is nothing writable left for the bytes to be smuggled onto. A body frame on a
+  connection carrying a *socket* is still refused.
+
+- **A cancelled upload went on encrypting the whole remaining file and ran its
+  progress bar to 100%.** `close()` deliberately does not set `failure`, and
+  `failure` was the send loop's only exit, so an aborted or timed-out request kept
+  iterating — `drain()` returns at once once closed, so it ran flat out, sealing
+  every remaining 65518-byte chunk with ChaCha20-Poly1305. On the phone this client
+  is shaped around.
+
+- **The app→daemon socket direction had no backpressure, and it defeated the
+  ceiling that was already there.** On the direct path a stalled client raises
+  `bufferedAmount` past `SOCKET_HIGH_WATER` and `MAX_QUEUE_BYTES` eventually
+  collapses the socket; on the encrypted path the loopback `ws` client drains
+  greedily, so that ceiling never fired and the bytes piled up in the relay
+  Duplex's unbounded buffer instead, inside the process that owns the machine's
+  live agents.
+
+- **A request whose answer came back before its body ended leaked a loopback
+  socket for two minutes.** `response.on("end")` released the handle, putting it
+  beyond `destroy()`'s reach with nothing else coming to collect it — one orphan
+  per 404, 401, 405 or early 413 on a `body: true` request, on a connection the
+  app's pool had already been told was idle.
+
+- **Two daemons starting at once could mint two machine keys, which is a permanent
+  409.** `claimDaemonLock` was a non-transactional read-then-write, and the
+  `ON CONFLICT DO NOTHING` that looked like it absorbed the race could not: the
+  conflict key hashes the *freshly generated* key, so two racers produce two keys,
+  two thumbprints and no conflict. `active()` orders by `created_at DESC`, so the
+  next start announced the later key, disagreed with what the Authority had pinned,
+  and was refused at every dial — repairable only by `cpctl admin clearkey`. The
+  claim is a compare-and-swap now, and a partial unique index over
+  `retired_at IS NULL` is what lets the loser learn it lost and adopt the winner's
+  row. The index is created by `migrate()` rather than by `schema.sql`, after a
+  repair, because databases holding two live rows exist and a `CREATE UNIQUE INDEX`
+  at schema load would stop those daemons from ever starting.
+
+- **The device key could still be lost whole on a crash, and a corrupt config was
+  destroyed rather than kept.** The temporary file was `sync_all`ed and renamed, but
+  the parent directory never was, so the new directory entry was not durable — on a
+  keyring-less host that is the only copy of the X25519 private key, and the
+  installation comes back as a first run. An unparseable `server.json` answered
+  `Default` and was silently overwritten by the next write; it is moved aside first
+  now, and a field another build wrote survives a read-modify-write instead of being
+  dropped. Read-modify-write is serialized, so adding `(async)` to a config command
+  — which the module's own docblock encourages — cannot lose the key.
 
 - `packages/web`'s three "add a machine" screens built their install command out of
   the page's own origin. In a browser that is the control plane and is right; under
@@ -87,11 +268,59 @@ it — so a citation here would be the one kind nothing checks.
   window holding the sign-in: the one thing bundling the interface exists to make
   impossible. Those two are development-build only now, and every navigation the
   client itself makes is asserted to be a path rather than an address.
-- `REEMOAT_CP_WEB=1` served a directory called `1`, and every page then answered a
-  404 indistinguishable from an image built without the interface. `1`, `true` and
-  `yes` mean the default now, matching `REEMOAT_CP_INSTALL`, whose own comment had
-  named this variable as carrying the same trap for two releases. `REEMOAT_CP_INSTALL`
-  is also documented for the first time — it appeared in no example file anywhere.
+- `REEMOAT_CP_INSTALL` is documented for the first time — it appeared in no example
+  file anywhere. It is also the only variable left whose value is *either* a boolean
+  *or* a path: the other one answered `=1` with a directory called `1`, ENOENT, and
+  a 404 indistinguishable from an image built without the interface, and it is
+  deleted rather than fixed.
+- **The device key's fallback file was world-readable, and two docblocks plus
+  `.claude/rules/e2ee.md` said it was not.** Where the operating system's keyring will not hold a key —
+  a shared Linux host, a session with no unlocked collection — the native shell
+  keeps the X25519 private key in `server.json` instead, and that file was written
+  with `fs::write`, which creates at `0644` under the usual umask and, on a file
+  that already exists, keeps whatever mode it already had. So the protection was
+  described in three places and implemented in none, on precisely the machines that
+  have somebody else logged into them. It is written through a temporary file
+  created with `OpenOptions::mode(0o600)` and renamed over the target now: the mode
+  at creation closes the window in which the bytes exist at the umask's, and the
+  rename is what narrows installations that already exist — a fix that only set a
+  mode at creation would have looked green in a test starting from an empty
+  directory while leaving every machine in the field as it was. The same write also
+  stops truncating in place, which on those hosts could lose the only copy of the
+  key, the server origin and the device id in one act. `cargo test` asserts the
+  mode, the upgrade path and the directory's `0700`.
+- **The documentation described the release before this one.** `README.md`'s
+  overview — the first screen anybody reads — still offered the web UI as an
+  optional second client, which this release deletes; `docs/API.md` still pointed
+  HTTP clients at the plaintext relay proxy, which now answers `426` to every
+  request, and still credited `pnpm client` with driving routes whose relay arm went
+  with it. Both are rewritten around what is actually there: the app, the encrypted
+  channel at `/__relay/channel`, and the gate as the whole of what a browser
+  reaches. `POST /v1/tokens` gains the two things a client cannot open a channel
+  without — `machine.key` and the `409 device_key_required` refusal — neither of
+  which was written down anywhere a caller would look.
+- **The rules table had thirty rows for thirty-one rule files, and the missing one
+  was `e2ee.md`.** A rule arrives when a file matching its globs is opened, so the
+  table is not an index of them — but it is how anyone deciding what to read finds
+  out an area has a rule at all, and the area it was silent about was the newest and
+  the most security-critical. `.claude/rules/compatibility.md` is rewritten around
+  the fact that replaced its premise: the client used to ship inside the control
+  plane's image, so skew ran one way and a weekly deploy retired the oldest clients
+  in the fleet by itself. Nobody can push a client any more. It also now records an
+  open question rather than answering it — `packages/protocol/src/frames.ts` is
+  spoken between two independently shipped artifacts, carries no version between
+  them (the suite string on the CONNECT is written by the relay, which speaks none
+  of that protocol), and treats an unknown frame as fatal at both ends.
+- **`.claude/rules/e2ee.md` credited a check to the wrong driver, in the direction
+  that gets a check deleted.** `RELAY_CHANNEL_PATH` is a literal in the relay and a
+  second literal in the app — they cannot be one import — and a client dialling a
+  path the relay does not serve is a fleet where no machine is reachable. Three
+  docblocks said `relaycheck` compares them. It does not: it imports the relay's own
+  constant and never opens the app's file, so every path it dials is one constant
+  agreeing with itself. `packages/web/scripts/webcheck.e2ee.ts` is the only
+  comparison there has ever been, and the rule says so now — the danger was never
+  the missing check, it was that believing in a second one makes the first read as
+  redundancy.
 
 ## [0.9.0] - 2026-09-14
 
