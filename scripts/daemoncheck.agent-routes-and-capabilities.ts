@@ -1218,3 +1218,123 @@ process.stdout.write("\nwhat each harness says it can be pointed at\n");
     [503, "model_unavailable"],
   );
 }
+
+/* ------------------------------------------------------------------ *
+ * Where a claude session's opening mode comes from
+ *
+ * ⚠ **This daemon sends no mode, and the whole point of the read is to be able
+ * to say so.** Somebody asked whether the daemon was switching sessions to
+ * `Bypass permissions`; it is not — `session/new` carries `cwd`, `mcpServers`
+ * and ultracode's `_meta` and nothing else — and the adapter reads
+ * `permissions.defaultMode` out of the user's own settings. Before this there
+ * was no screen that could have answered them.
+ *
+ * Driven against a real directory rather than a stub, because the two things
+ * that can go wrong are both about files: reading a path this daemon did not
+ * create (which is why it goes through `probeText`'s deadline), and answering
+ * something other than `null` for a shape nobody meant.
+ * ------------------------------------------------------------------ */
+process.stdout.write("\nwhere a claude session's opening mode comes from\n");
+{
+  const { claudeSettingsMode } = await import("../src/acp/agents.js");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+
+  const homeWith = (name: string, contents: string | null): string => {
+    const home = join(sandbox, "settings", name);
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    if (contents !== null) writeFileSync(join(home, ".claude", "settings.json"), contents, "utf8");
+    return home;
+  };
+
+  const set = await claudeSettingsMode({
+    homeDir: homeWith("set", JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } })),
+  });
+  check("a mode the settings file names is reported", set?.value, "bypassPermissions");
+  check("beside the file it came from, so the sentence can name it", set?.file.endsWith("/.claude/settings.json"), true);
+
+  /*
+   * ⚠ **The string as written, never normalised.** The adapter's own alias table
+   * maps `bypass` → `bypassPermissions` and `manual` → `default`, and merges
+   * project settings over the user's. Reimplementing either here would be a second
+   * copy of somebody else's precedence rule, drifting the moment they change it —
+   * so this reports one file and one string and claims nothing about the outcome.
+   */
+  check(
+    "an alias is reported as written rather than resolved on the adapter's behalf",
+    (await claudeSettingsMode({ homeDir: homeWith("alias", JSON.stringify({ permissions: { defaultMode: "bypass" } })) }))?.value,
+    "bypass",
+  );
+
+  /*
+   * Every shape that means "nothing here explains anything" answers `null`, and
+   * they are one answer on purpose: a screen that distinguished "no file" from
+   * "malformed file" would be reporting on somebody's editor rather than on their
+   * agent. The oversized case is the one with teeth — the path is not one this
+   * daemon created, so "as big as it happens to be" is not a bound.
+   */
+  const nothings: [string, string | null][] = [
+    ["no file at all", null],
+    ["a file that is not JSON", "{not json"],
+    ["JSON that is not an object", "[]"],
+    ["an object with no permissions", JSON.stringify({ model: "opus" })],
+    ["permissions with no defaultMode", JSON.stringify({ permissions: { allow: ["Bash"] } })],
+    ["a defaultMode that is not a string", JSON.stringify({ permissions: { defaultMode: 3 } })],
+    ["a defaultMode that is only whitespace", JSON.stringify({ permissions: { defaultMode: "   " } })],
+    ["a file past the byte bound", `{"permissions":{"defaultMode":"plan"},"pad":"${"x".repeat(300_000)}"}`],
+  ];
+  for (const [what, contents] of nothings) {
+    check(`${what} reports nothing`, await claudeSettingsMode({ homeDir: homeWith(what.replace(/\W+/g, "-"), contents) }), null);
+  }
+
+  // A value long enough to be a paste rather than a mode is clipped rather than
+  // put on screen whole — the same rule every other string off a file follows here.
+  const long = await claudeSettingsMode({
+    homeDir: homeWith("long", JSON.stringify({ permissions: { defaultMode: "m".repeat(400) } })),
+  });
+  check("and a value too long to be a mode is clipped", [long?.value.length, long?.value.endsWith("…")], [65, true]);
+
+  /*
+   * ⚠ **And every route that answers an availability row says the same thing,
+   * which is a census rather than a drive because the failure was a *missing*
+   * spread.**
+   *
+   * `GET /agents` and `POST /agent-auth/:agent/recheck` both answer the row a
+   * client redraws its agents screen from, and the client *replaces* the held row
+   * with the recheck's copy. `settingsMode` was added to the first alone, so one
+   * tap on *Check again* for the claude row erased the provenance line until a
+   * full re-read — repeating, field for field, the mistake the recheck route's own
+   * docblock records about `login`: it is spread by hand, *"so a third route
+   * answering an agent row has to spread it too"*.
+   *
+   * Driving it would need a real `availability()`, i.e. a CLI spawn per harness,
+   * which is the one thing this offline driver may not do. So what is asserted is
+   * that neither handler builds the row by hand any more: one helper, two callers,
+   * and a third field cannot go missing from one of them.
+   */
+  const { readFileSync } = await import("node:fs");
+  const serverSrc = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  check(
+    "the agent row's extra fields are built in one place",
+    (serverSrc.match(/const agentRowExtras = async/g) ?? []).length,
+    1,
+  );
+  check(
+    "and both routes that answer one go through it",
+    (serverSrc.match(/await agentRowExtras\(\)/g) ?? []).length,
+    2,
+  );
+  /*
+   * The negative that keeps it a rule. `loginSupportOf` survives at exactly two
+   * call sites — inside the helper, and on `GET /agent-auth`, whose row is a
+   * *credentials* row with its own shape and deliberately carries no
+   * `settingsMode`. A third would be somebody hand-building an availability row
+   * again, which is the defect itself.
+   */
+  check(
+    "and neither of them spreads login by hand",
+    (serverSrc.match(/login: loginSupportOf\(/g) ?? []).length,
+    2,
+  );
+}

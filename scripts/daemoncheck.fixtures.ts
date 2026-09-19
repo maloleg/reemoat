@@ -233,6 +233,10 @@ export function rowFor(
     // Nobody chose, which is what every row on disk says until somebody does.
     ultracode: null,
     customAgent: null,
+    // Nothing remembered: this row's agent never ran in this process, so there is
+    // no state it was offering. The same value every row written before the column
+    // carries.
+    agentState: null,
   };
 }
 

@@ -151,6 +151,24 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- session that is meant to change after creation.
   ultracode        INTEGER,
 
+  -- What the agent was offering when it went: the config and the command list, as
+  -- one JSON blob. NULL for a session that never started an agent and for one that
+  -- is not coming back, which are the same honest value — there is nothing to
+  -- remember.
+  --
+  -- The one copy of agent state that outlives the process that learned it. The
+  -- argument is at `AgentStateMemory` in src/events.ts and the write gate is
+  -- `revivableByPrompt` in src/registry.ts; what makes it safe is that a wake
+  -- replays it through `Session.restoreConfig`, which drops anything the returning
+  -- agent no longer offers.
+  --
+  -- Nullable with no DEFAULT on `resume_gave_up`'s grounds, and in the DO UPDATE
+  -- clause on `ultracode`'s: it is a fact about the session that is meant to change
+  -- after creation. `SCHEMA_VERSION` does not move — a nullable column an older
+  -- daemon never selects is invisible to it, so a rollback keeps working, and such
+  -- a daemon simply draws the strip the way it did before.
+  agent_state_json TEXT,
+
   -- The SessionWorkspace record. The denormalized columns beside it exist so
   -- "which worktrees do I own" is one query rather than N blob parses.
   workspace_json   TEXT    NOT NULL,

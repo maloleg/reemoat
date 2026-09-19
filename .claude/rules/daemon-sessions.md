@@ -50,10 +50,11 @@ deletable; and **a message is the only way back**, an exclusion rather than an
 omission, `canResume` being satisfied by both its clauses. It draws as an ordinary `idle`
 session and says nothing — explicitly, since the fallthrough says `ended` — but
 **Stop stays offered**: `stop()` memoises, so without an override a person
-pressing it got `200` and no change. Its **controls and its `/` menu stay live** —
-parking is the one stop keeping `agentConfigState` *and* `agentCommands`, so a tap
-is *recorded* and applied by `doResume`, never a wake, and no empty command menu
-gives it away. Q2.224, Q2.228.
+pressing it got `200` and no change. Its **controls and its `/` menu stay live**, so
+a tap is *recorded* and applied by `doResume`, never a wake. ⚠ **And not only a
+parked one**: `revivableByPrompt` gates the keeping, the tap and
+`agent_state_json`, so every such stop keeps both across a restart. Q2.224,
+Q2.229.
 
 **The rule is `autoResumable`, a `switch` over `ExitReason` with no `default`
 arm**, so adding a reason is a compile error rather than a silent `false`:

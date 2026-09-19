@@ -3,13 +3,14 @@ import { PassThrough } from "node:stream";
 import { AgentUnavailableError, type AgentId, type AgentLaunchConfig } from "../src/acp/agents.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
 import {
+  EXIT_REASON_MEMBERS,
   MemoryEventStore,
   type ExitReason,
   type PersistedSession,
   type SessionExit,
   type SessionStore,
 } from "../src/events.js";
-import { SessionRegistry, autoResumable, resumeBackoffMs, MAX_IDLE_RELEASE_MINUTES, SessionLimitError, stoppedWithBackgroundWork, clearedWithBackgroundWork } from "../src/registry.js";
+import { SessionRegistry, autoResumable, revivableByPrompt, reduceAgentState, resumeBackoffMs, MAX_IDLE_RELEASE_MINUTES, SessionLimitError, stoppedWithBackgroundWork, clearedWithBackgroundWork } from "../src/registry.js";
 import {
   MAX_ASYNC_TASK_ID_CHARS,
   MAX_ASYNC_TASK_NAME_CHARS,
@@ -113,6 +114,37 @@ process.stdout.write("\nwhich sessions the daemon brings back\n");
    */
   check("a released agent is not brought back by a boot pass", boot("parked"), false);
   check("and comes back when somebody types", typed("parked"), true);
+
+  /*
+   * ⚠ **The second reader of this table, and it is asserted as the *same* answer
+   * rather than as a list of its own.**
+   *
+   * `revivableByPrompt` is what `doStop` clears the agent's controls on, what
+   * `configIsDeferred` accepts a tap on, and what `persistedRow` writes
+   * `agent_state_json` for. Written as its own reason set it would be a fourth
+   * copy of this switch, free to drift by exactly one member — and the member it
+   * would drift by is the one nobody would notice, since a session whose controls
+   * are wrongly kept looks fine until a tap on it is refused.
+   *
+   * So the property is equality over the whole union, and the union is read off
+   * `EXIT_REASON_MEMBERS` rather than typed out: a new reason lands in this sweep without
+   * anybody adding a line.
+   */
+  check(
+    "and every reason a prompt revives is exactly the set that keeps its controls",
+    (Object.keys(EXIT_REASON_MEMBERS) as ExitReason[]).filter((reason) => revivableByPrompt(reason, "a_1")).sort(),
+    (Object.keys(EXIT_REASON_MEMBERS) as ExitReason[]).filter((reason) => typed(reason)).sort(),
+  );
+  check(
+    "which is four of them and not the three that never had a conversation",
+    (Object.keys(EXIT_REASON_MEMBERS) as ExitReason[]).filter((reason) => !revivableByPrompt(reason, "a_1")).sort(),
+    ["agent_kill_failed", "start_failed", "start_timeout"],
+  );
+  check(
+    "and none of them without an agent session id to return to",
+    (Object.keys(EXIT_REASON_MEMBERS) as ExitReason[]).some((reason) => revivableByPrompt(reason, null)),
+    false,
+  );
 
   // the reason says.
   check(
@@ -290,6 +322,17 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
      * nothing could reach them.
      */
     advertisesTasks?: boolean | "old" | "unnamed";
+    /**
+     * Fired while the agent is handling `session/set_config_option`, before it
+     * answers.
+     *
+     * The one window nothing else here can reach: strictly **after** `onStarted`
+     * has published and assigned `session`, and strictly **inside**
+     * `restoreConfig`'s replay. A tap landing there passes every guard that reads
+     * the exit or the session and is then overwritten by a snapshot captured
+     * before it, which is a silent `ok`.
+     */
+    onConfigSet?: () => void;
   }): Rig => {
     let launched = 0;
     let opened = 0;
@@ -410,6 +453,7 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
               case acp.methods.agent.session.setConfigOption: {
                 const params = message["params"] as Record<string, any>;
                 configSets.push({ id: String(params["configId"]), value: params["value"] });
+                options.onConfigSet?.();
                 // Answered with the whole list, the way both adapters do, so the
                 // daemon's own listener folds the new value in rather than the
                 // driver asserting against a state nothing published.
@@ -2339,7 +2383,8 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
    * here is that they survived, and the rest is meaningless without it.
    */
   {
-    const rig = rigWith({ resume: true, config: true });
+    let armConfigSet: (() => void) | null = null;
+    const rig = rigWith({ resume: true, config: true, onConfigSet: () => armConfigSet?.() });
     const store = storeOf([interruptedRow("s_cfg", "daemon_restarted", "a_cfg")]);
     const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
     own.restore({ reapOrphans: false });
@@ -2382,18 +2427,65 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     check("and so is an option it never had", missing?.kind, "unknown_option");
 
     // And now the half that makes the recording mean anything.
+    /*
+     * ⚠ **A tap landing *inside* the wake, which is the one window the guards
+     * above do not describe and which this widening opened.**
+     *
+     * `doResume` captures `wantedConfig`, lets `onStarted` publish the fresh
+     * agent's own controls, and only then replays the capture through
+     * `restoreConfig`. A tap arriving in that last step finds `exitRecord` cleared
+     * by `armForStart` (so `configIsDeferred` is false), not terminal, and a live
+     * `session` — so it reached the agent, answered `ok`, and was then overwritten
+     * by a snapshot captured before it: 200, chip moves, nothing happens. That is
+     * verbatim the failure the `clearing`/`restarting` guard was written for,
+     * reached through the door `revivableByPrompt` opened — `doStop` emptied the
+     * config for every non-parked reason before, so the replay had nothing to
+     * replay and the window did not exist.
+     *
+     * `resuming` is the third member of {@link replacingConfig} and this is what
+     * asserts it. Collected into an array rather than a variable so "the hook
+     * never fired" is a distinguishable answer: without the guard the answer is
+     * `ok`, and with the hook unarmed it is the sentinel — an assertion that
+     * passes because nothing ran is the shape this block exists to refuse.
+     */
+    const midWake: string[] = [];
+    armConfigSet = () => {
+      void cfg?.setMode("plan").then((r) => void midWake.push(r.kind));
+      void cfg?.setConfigOption("model", "opus").then((r) => void midWake.push(r.kind));
+    };
     await cfg?.resume();
+    armConfigSet = null;
     check("the wake sends the choice to the fresh agent", rig.configSets(), [{ id: "model", value: "sonnet" }]);
     check("which is live again on the chosen model", [cfg?.status, cfg?.snapshot().agentConfig?.options[0]?.value], ["idle", "sonnet"]);
+    /*
+     * ⚠ **Both methods, because the guard was hand-written in each and only one of
+     * them was ever raced.** `setMode` had an assertion in
+     * `daemoncheck.after-the-turn-and-config.ts`; `setConfigOption` had none, so
+     * reverting its half left every driver in this repository green.
+     */
+    check(
+      "a tap arriving inside the wake is refused rather than silently overwritten",
+      midWake.length === 0 ? ["<the hook never fired>"] : [...midWake].sort(),
+      ["busy", "busy"],
+    );
+    // And the replay landed on what it was replaying, not on what the tap asked for.
+    check("and the wake put back what it captured", cfg?.snapshot().agentConfig?.options[0]?.value, "sonnet");
 
     await own.shutdown();
   }
 
   /*
-   * And the negative that keeps the arm narrow: a session somebody *stopped* is
-   * not a session whose settings are pending. Its controls went with its agent —
-   * `doStop` clears them for every reason but `parked` — so there is nothing to
-   * tap and the refusal is the ordinary one.
+   * ⚠ **And the arm is no longer narrow to parking, which reverses what this block
+   * asserted.** It read: a session somebody *stopped* is not a session whose
+   * settings are pending, its controls went with its agent, and a tap is the
+   * ordinary refusal.
+   *
+   * Every clause of that was about the word rather than the fact. `stopped` is a
+   * reason a **message** revives — the composer is unconditional and typing into a
+   * stopped conversation starts it again — so its controls describe exactly what
+   * parking's do: the conversation that is coming back. {@link revivableByPrompt}
+   * is the one gate now, and what it leaves refusing is the three that never had a
+   * conversation at all, driven immediately below.
    */
   {
     const rig = rigWith({ resume: true, config: true });
@@ -2403,9 +2495,176 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     await own.autoResume({ ...options, concurrency: 1 });
     const off = own.get("s_off");
     await off?.stop("stopped");
-    check("a stopped session keeps no controls", off?.snapshot().agentConfig?.options ?? [], []);
+    check("a stopped session keeps its controls, like a parked one", (off?.snapshot().agentConfig?.options ?? []).length > 0, true);
     const set = await off?.setConfigOption("model", "sonnet");
+    check("and a choice on one is deferred, not refused", set?.kind, "ok");
+    check("the chip moves at once, because the setting will be in force next run", off?.snapshot().agentConfig?.options[0]?.value, "sonnet");
+
+    await own.shutdown();
+  }
+
+  /*
+   * ⚠ **What survives the process that learned it, and the measurement that
+   * forced it.**
+   *
+   * `doStop` keeping the controls was only ever true for as long as the daemon
+   * ran. Measured 2026-09-19 against the live daemon on this machine: all five
+   * parked rows answered `GET /sessions/:id/commands` with `revision 0, count 0`
+   * and carried no options at all — so every one of them drew three `—` chips
+   * under *"The agent is not offering this control at the moment"* and an empty
+   * `/` menu, **permanently**, because nothing publishes again until somebody
+   * types. With the prod hosts updating at 04:00 and 05:00 UTC that is the state
+   * of every overnight conversation, fleet-wide, every morning.
+   *
+   * So the keeping is written to `agent_state_json` and adopted back. Driven end
+   * to end rather than asserted at either end: one registry writes the row, a
+   * second one restores from the same store, which is the boundary the bug lives
+   * at and the only shape that could have caught it.
+   */
+  {
+    const seed = interruptedRow("s_keep", "daemon_restarted", "a_keep");
+    const rows = new Map<string, PersistedSession>([[seed.id, seed]]);
+    const recording: SessionStore = {
+      put: (row) => void rows.set(row.id, row),
+      list: () => [...rows.values()],
+      remove: (id) => void rows.delete(id),
+    };
+
+    const rig = rigWith({ resume: true, config: true });
+    const first = new SessionRegistry(new MemoryEventStore(), recording, undefined, rig.runtime);
+    first.restore({ reapOrphans: false });
+    await first.autoResume({ ...options, concurrency: 1 });
+    const live = first.get("s_keep");
+    check("the agent is live and publishing controls", (live?.snapshot().agentConfig?.options ?? []).length > 0, true);
+    await live?.stop("parked");
+    await first.shutdown();
+
+    const written = rows.get("s_keep");
+    check("a parked row writes what its agent was offering", written?.agentState?.config.options[0]?.id, "model");
+    check("and the row still reads as parked", written?.exit?.reason, "parked");
+
+    /*
+     * The second process. `restore` spawns nothing — a parked row is `false` at
+     * boot, which is the whole reason parking pays for itself — so what is
+     * asserted here is a session with no agent and its controls back anyway.
+     */
+    const second = new SessionRegistry(new MemoryEventStore(), recording, undefined, rigWith({ resume: true, config: true }).runtime);
+    second.restore({ reapOrphans: false });
+    const back = second.get("s_keep");
+    check("a restarted daemon brings a parked session's controls back", back?.snapshot().agentConfig?.options[0]?.id, "model");
+    check("without starting anything", back?.status, "parked");
+    /*
+     * ⚠ **The revision, which is the half that would have been silent.**
+     * `commandsPlan` in `packages/web/src/store.ts` reads `0` as *"this daemon has
+     * nothing"* and drops the fetch — so a restored list left at revision 0 would
+     * sit on the daemon with the `/` menu still empty, which is the exact symptom
+     * this whole entry exists to end.
+     */
+    check("at a revision a client will actually fetch", (back?.commandsRevision ?? 0) > 0, true);
+    const tapped = await back?.setConfigOption("model", "sonnet");
+    check("and a tap on them is recorded rather than refused", tapped?.kind, "ok");
+    await second.shutdown();
+  }
+
+  /*
+   * And the row that must not be adopted, checked on the way *in* rather than only
+   * on the way out. The column outlives the build that wrote it: a row stored
+   * under one reason and relabelled under another by an older daemon would come
+   * back describing a conversation nobody can reach, so `ManagedSession.restore`
+   * asks {@link revivableByPrompt} a second time over the exit it actually has.
+   */
+  {
+    const seed = interruptedRow("s_refused", "daemon_restarted", "a_refused");
+    const store = storeOf([
+      {
+        ...seed,
+        exit: { reason: "start_failed", at: now, detail: null, agentHandle: null, agentConfirmedDead: true },
+        agentState: {
+          config: { modes: null, options: [{ id: "model", name: "Model", description: null, category: "model", kind: "select", value: "opus", choices: [{ value: "opus", name: "Opus", description: null, group: null }] }] },
+          commands: { commands: [{ name: "compact", description: "Compact", hint: null }], dropped: 0 },
+        },
+      },
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rigWith({ resume: true }).runtime);
+    own.restore({ reapOrphans: false });
+    const refused = own.get("s_refused");
+    check("a row nothing can revive is not adopted, whatever it stored", refused?.snapshot().agentConfig?.options ?? [], []);
+    check("nor is its command list", refused?.agentCommands, { commands: [], dropped: 0 });
+    await own.shutdown();
+  }
+
+  /*
+   * The bound, as a pure rule.
+   *
+   * ⚠ **Refused whole rather than clipped, and that is the decision.** Clipping a
+   * choice list would leave `setConfigOption` validating against a shorter list
+   * than the agent published, so a value somebody really can choose would answer
+   * `invalid_value` — a control that lies rather than one that is absent. What is
+   * asserted is therefore both halves: that a real list survives, and that an
+   * oversized one answers `null` rather than a shorter list.
+   */
+  {
+    const choice = (n: number) => ({ value: `m${n}`, name: `Model ${n}`, description: `a sentence about model ${n}`, group: null });
+    const optionOf = (count: number) => ({
+      id: "model",
+      name: "Model",
+      description: null,
+      category: "model" as const,
+      kind: "select" as const,
+      value: "m0",
+      choices: Array.from({ length: count }, (_, n) => choice(n)),
+    });
+    const none = { commands: [], dropped: 0 };
+    const ordinary = reduceAgentState({ modes: null, options: [optionOf(362)] }, none);
+    check("the largest list any agent here publishes is kept", ordinary?.config.options[0]?.choices.length, 362);
+    check(
+      "with the prose dropped from every choice but the selected one",
+      ordinary?.config.options[0]?.choices.map((c) => c.description === null),
+      [false, ...Array.from({ length: 361 }, () => true)],
+    );
+    check("and one past the bound is not kept at all, rather than kept short", reduceAgentState({ modes: null, options: [optionOf(4000)] }, none), null);
+    /*
+     * ⚠ **And nothing to remember is `null` rather than a small object saying so.**
+     * Found by running it: every session already terminal when this shipped has an
+     * empty pair, and storing that meant `ManagedSession.restore` adopted an empty
+     * memory and seeded `commandsRevisionValue` to 1 — telling the client to fetch
+     * a list with nothing in it, which is strictly worse than the `0` that meant
+     * "this daemon has nothing". Eight rows on the first boot after the change.
+     */
+    check("a pair with nothing in it is not remembered at all", reduceAgentState({ modes: null, options: [] }, none), null);
+    check("nor is one with only a mode and no options", reduceAgentState({ modes: { current: "plan", available: [] }, options: [] }, none), null);
+    check("but a command list with no options is", reduceAgentState({ modes: null, options: [] }, { commands: [{ name: "context", description: "", hint: null }], dropped: 0 })?.commands.commands.length, 1);
+  }
+
+  /*
+   * The negative that keeps it a gate rather than a blanket.
+   *
+   * `start_failed` is one of the three `autoResumable` refuses on **both**
+   * triggers: there was never a conversation, so there is nothing a remembered
+   * control could be about and `—` is the honest reading. A tap is the ordinary
+   * refusal, and the command list is withdrawn at a *bumped* revision — a change
+   * marker, not a count, so a client holding revision 1 is told to drop its menu
+   * rather than left comparing 1 to 1.
+   */
+  {
+    const rig = rigWith({ resume: true, config: true });
+    const store = storeOf([interruptedRow("s_dead", "daemon_restarted", "a_dead")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const dead = own.get("s_dead");
+    await dead?.stop("start_failed");
+    check("a stop nothing can revive keeps no controls", dead?.snapshot().agentConfig?.options ?? [], []);
+    const set = await dead?.setConfigOption("model", "sonnet");
     check("and a choice on one is refused, not deferred", set?.kind, "terminal");
+    /*
+     * The command list travels through the same one `if` and is asserted where a
+     * rig actually publishes one — `daemoncheck.agent-output-and-uploads`, which
+     * drives three commands and then a `stopped`. Asserting it here as well would
+     * read as a second property and be worth nothing: this rig publishes none, so
+     * `sameCommands` sees no change, the revision correctly does not move, and the
+     * check would pass over a gate it never reached.
+     */
 
     await own.shutdown();
   }

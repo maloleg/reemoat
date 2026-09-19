@@ -339,9 +339,16 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
    * folder name is the size of the session name", which is a hierarchy failure
    * rather than a font one.
    *
-   * `text-2xs` is the floor for a path, and these four are every place one is
-   * drawn. Two carry the size themselves; two inherit a line that is already
+   * `text-2xs` is the floor for a path, and these **five** are every place one is
+   * drawn. Two carry the size themselves; three inherit a line that is already
    * `text-2xs`, so those are asserted on the line rather than on the span.
+   *
+   * ⚠ **It said four, and the fifth shipped past it** — the agents screen's
+   * provenance line, which interpolated an absolute `settings.json` path straight
+   * into a sans sentence. A count in prose is not a census: nothing here derives
+   * the list, so a new path is caught only by somebody reading this paragraph.
+   * That is the standing limitation of this block and is why each entry is a pair
+   * rather than a single `.test`.
    */
   const read = (rel: string): string =>
     stripComments(readFileSync(new URL(rel, WEB_SRC), "utf8"));
@@ -420,6 +427,33 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
       /className="min-w-0 flex-1 truncate text-2xs text-muted" title=\{into\}/.test(read("ui/ImportCode.tsx")),
     ],
     [true, true],
+  );
+
+  /*
+   * ⚠ **The fifth, and it is three runs on one line rather than one.** The agents
+   * screen says where a claude session's opening mode came from, and the sentence
+   * carries a settings **key**, the **value** written against it and a **path** —
+   * three of the four things `web-typography.md`'s mono list names, in what was a
+   * single sans template string. Asserted as the same pair the two above are, plus
+   * that the path goes through `paths.ts` rather than being interpolated raw:
+   * `shortPath` and not `displayCwd`, because this file sits under no browse root
+   * and this screen fetches none.
+   */
+  check(
+    "the agents screen's provenance line is mono where it quotes the machine, on a text-2xs line",
+    [
+      /<span className="font-mono">permissions\.defaultMode<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
+      /<span className="font-mono">\{settingsMode\.value\}<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
+      /<span className="font-mono">\{shortPath\(settingsMode\.file\)\}<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
+      /className="mt-2 text-2xs text-muted wrap-anywhere" title=\{settingsMode\.file\}/.test(read("ui/settings/MachineAgentsSection.tsx")),
+    ],
+    [true, true, true, true],
+  );
+  // The negative that makes the three above a rule: no raw path left in the prose.
+  check(
+    "and the file is never interpolated into the sentence raw",
+    /from \$\{settingsMode\.file\}/.test(read("ui/settings/MachineAgentsSection.tsx")),
+    false,
   );
 }
 

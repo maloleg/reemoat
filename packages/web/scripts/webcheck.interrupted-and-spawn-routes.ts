@@ -1104,6 +1104,26 @@ process.stdout.write("\nthe routes that spawn a process\n");
   );
   check("and not one of them leaves the composer with no controls at all", empties, []);
   /*
+   * ⚠ **And the property the daemon now leans its whole parking fix on: what the
+   * daemon publishes decides whether the strip is live, and the status decides
+   * nothing.**
+   *
+   * `doStop` keeps `agentConfigState` for every stop a message would undo
+   * (`revivableByPrompt` in `src/registry.ts`) and `agent_state_json` carries it
+   * across a restart — so a `parked`, `stopped`, `exited` or `interrupted`
+   * session now arrives with real options on it, and must draw them tappable.
+   * That works today only because `drawnControls`' first branch never looks at
+   * `status`, which is a property nothing asserted: every `stale` check in this
+   * file drives the *empty*-live branch, where the status is exactly what decides.
+   * Re-narrow that branch to `hasLiveAgent` and every one of them stays green
+   * while the composer goes faint on four statuses at once.
+   */
+  check(
+    "a non-empty config is never stale, whatever the session's status says",
+    daemonStatuses.filter((status) => HELD_SHAPES.some((held) => drawnFrom(status, ["mode"], held).stale)),
+    [],
+  );
+  /*
    * The sequence that is the bug, walked end to end: a restart is a live frame,
    * then an emptied `interrupted` one, then an emptied `starting` one. The strip
    * must draw the same controls at every step.

@@ -2,6 +2,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { probeText } from "../stall.js";
 
 /**
  * The harnesses this repository ships, pins and measures.
@@ -1043,4 +1044,71 @@ function unknownHarness(id: string, machine: HarnessCatalogue | null): string {
     default:
       return `This agent came from the ${plugin} plugin, which is no longer installed on this machine.`;
   }
+}
+
+/**
+ * Where a claude session's opening permission mode comes from, when it comes from
+ * anywhere at all.
+ *
+ * ⚠ **This daemon sends no mode, and that is the whole reason this exists.**
+ * `session/new` carries `cwd`, `mcpServers` and — for ultracode only — `_meta`;
+ * nothing here has ever named a mode. So a session that opens in `Bypass
+ * permissions` opened that way because the *adapter* read
+ * `permissions.defaultMode` out of the user's own Claude settings, and the screen
+ * that lists agents is the only place that can say so. Reported after a person
+ * asked whether the daemon was switching it: it was not, and there was nothing on
+ * screen that could have answered them.
+ *
+ * ⚠ **The user-level file only, and the value exactly as written.** The adapter
+ * merges project settings over these and normalises through an alias table of its
+ * own (`bypass` → `bypassPermissions`, `manual` → `default`); replicating either
+ * would be a second implementation of somebody else's precedence rule, drifting
+ * the moment they change it. So this reports one file and one string and makes no
+ * claim about what the session will actually open in — the sentence on screen
+ * names the file, and the mode chip names the truth once an agent is running.
+ *
+ * `null` for absent, unreadable, oversized, not an object, or nothing set: every
+ * one of them means "nothing here explains anything", which is the ordinary case
+ * and needs no distinguishing.
+ */
+export async function claudeSettingsMode(options: { homeDir?: string } = {}): Promise<ClaudeSettingsMode | null> {
+  const file = join(options.homeDir ?? homedir(), ".claude", "settings.json");
+  const text = await probeText(file, MAX_CLAUDE_SETTINGS_BYTES);
+  if (text === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Somebody's hand-edited file mid-save. Nothing to report is the honest answer.
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const permissions = (parsed as { permissions?: unknown }).permissions;
+  if (typeof permissions !== "object" || permissions === null) return null;
+  const mode = (permissions as { defaultMode?: unknown }).defaultMode;
+  if (typeof mode !== "string" || mode.trim().length === 0) return null;
+  return { value: clipSettingsValue(mode.trim()), file };
+}
+
+/** What {@link claudeSettingsMode} found, or `null`. */
+export interface ClaudeSettingsMode {
+  /** The string as written, clipped. Never normalised — see the docblock. */
+  value: string;
+  /** The file it was read from, so the sentence on screen can name it. */
+  file: string;
+}
+
+/**
+ * How much of somebody's settings file this daemon will read to find one string.
+ *
+ * A settings file is a few kilobytes; this is far above anything measured and far
+ * below a size worth holding in memory on an HTTP handler. The point is that the
+ * path is **not one this daemon created**, so "as big as it happens to be" is not
+ * a bound — the same rule `MAX_AGENT_COMMANDS` states about a list an agent sends.
+ */
+const MAX_CLAUDE_SETTINGS_BYTES = 256 * 1024;
+
+/** A mode id is short; a file that says otherwise is not describing a mode. */
+function clipSettingsValue(value: string): string {
+  return value.length <= 64 ? value : `${value.slice(0, 64)}…`;
 }

@@ -12,7 +12,7 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { WSContext } from "hono/ws";
 import type { WebSocket as RawWebSocket } from "ws";
-import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
+import { AgentUnavailableError, claudeSettingsMode, type AgentId } from "./acp/agents.js";
 import {
   hostable,
   routedModelNaming,
@@ -1220,14 +1220,44 @@ export function createApp(options: ServerOptions): AppBundle {
     };
   };
 
-  app.get("/agents", read, async (c) =>
-    c.json({
+  /**
+   * The fields an agent row carries that `availability()` does not, added in one
+   * place because there are now two routes that answer one.
+   *
+   * ⚠ **This exists because the second field repeated the first field's mistake.**
+   * `POST /agent-auth/:agent/recheck`'s own docblock already says it: `login` is
+   * built here and spread on by hand, *"so a third route answering an agent row
+   * has to spread it too"*. `settingsMode` was added to `GET /agents` alone, and
+   * the client replaces the whole row from the recheck answer — so one tap on
+   * *Check again* for the claude row erased the provenance line until a full
+   * re-read. A helper rather than a second hand-written spread, so the next field
+   * cannot make it three.
+   *
+   * ⚠ **Read once per answer, and only for claude.** `~/.claude/settings.json` is
+   * on the home directory, so it goes through `probeText`'s deadline rather than a
+   * `readFile` that could hold a route open for as long as a sleeping mount does;
+   * and it is claude's file, so asking it per agent would be three pointless
+   * probes. See {@link claudeSettingsMode} for why the daemon reports it at all:
+   * it sends no mode, so nothing else on any screen can explain a session that
+   * opened in one.
+   */
+  const agentRowExtras = async (): Promise<(agent: { id: AgentId }) => Record<string, unknown>> => {
+    const settingsMode = await claudeSettingsMode();
+    return (agent) => ({
+      login: loginSupportOf(agent.id),
+      ...(agent.id === "claude" && settingsMode !== null ? { settingsMode } : {}),
+    });
+  };
+
+  app.get("/agents", read, async (c) => {
+    const extras = await agentRowExtras();
+    return c.json({
       agents: (await registry.sessionRuntime.availability()).map((agent) => ({
         ...agent,
-        login: loginSupportOf(agent.id),
+        ...extras(agent),
       })),
-    }),
-  );
+    });
+  });
 
   /* ---------------------------------------------------------------- *
    * Systems, and the agents assembled out of them
@@ -2467,11 +2497,12 @@ export function createApp(options: ServerOptions): AppBundle {
      * sentence above would then have been false of the very first field a reader
      * of this response looks at.
      */
+    // Through `agentRowExtras` rather than spreading `login` by hand, which is what
+    // let `settingsMode` go missing here — see that helper's ⚠.
+    const extras = await agentRowExtras();
     return c.json({
       agent,
-      ...(found === null
-        ? { rechecked: false }
-        : { rechecked: true, info: { ...found, login: loginSupportOf(found.id) } }),
+      ...(found === null ? { rechecked: false } : { rechecked: true, info: { ...found, ...extras(found) } }),
     });
   });
 

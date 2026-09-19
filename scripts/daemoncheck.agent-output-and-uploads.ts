@@ -647,14 +647,28 @@ process.stdout.write("\nwhat the agent says, and what survives\n");
   await registry.stop(managed.id).catch(() => {});
 
   /*
-   * The agent is gone, so the commands are — and the revision is *bumped* rather
-   * than reset. It is a change marker, not a count: zeroing it would leave a
-   * client holding revision 1 comparing 1 to 1 and keeping a menu whose agent no
-   * longer exists.
+   * ⚠ **The agent is gone and the commands are not, and this reverses what this
+   * block asserted for four releases.**
+   *
+   * `stopped` is a reason a message revives — `autoResumable`'s `prompt` column —
+   * so `doStop` keeps the list on {@link revivableByPrompt}'s gate, for the reason
+   * it already kept a parked one: the conversation is coming back to the same
+   * commands. What withdrawing cost was measured rather than argued: every parked
+   * row on this machine answered `revision 0, count 0`, so the `/` menu was empty
+   * and `composerPlaceholder` had rewritten itself from `Type / for commands` to
+   * `Message…` under the cursor of somebody who had touched nothing.
+   *
+   * The revision therefore does **not** move either: nothing changed, and a bump
+   * with no change is what `sameCommands` exists to prevent one door over.
    */
-  check("stopping the agent withdraws its commands", managed.agentCommands, { commands: [], dropped: 0 });
-  check("and moves the revision forward rather than back to zero", managed.commandsRevision, beforeStop + 1);
-  check("which a client sees as a change, not as the daemon falling behind", managed.snapshot().commandsRevision > 0, true);
+  check("stopping an agent that can come back keeps its commands", managed.agentCommands.commands.length, 3);
+  check("and does not move the revision, because nothing changed", managed.commandsRevision, beforeStop);
+  check("which a client sees as a list still worth fetching", managed.snapshot().commandsRevision > 0, true);
+
+  // The other side of the gate — a stop nothing can revive, which still withdraws
+  // and still bumps — is driven in `daemoncheck.restart-and-resume`, where a rig
+  // can stand up a second session. Both halves are asserted; they are asserted in
+  // the file that can reach them.
 }
 
 /* ------------------------------------------------------------------ *

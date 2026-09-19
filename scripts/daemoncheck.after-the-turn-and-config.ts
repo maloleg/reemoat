@@ -909,10 +909,24 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     duringRestore[1] ?? "<the hook never fired>",
     "normal",
   );
+  /*
+   * ⚠ **The empty window is gone, and that is the point of the change rather than
+   * a side effect of it.** This read `["<none>", "0"]` — the frames between
+   * `doStop` clearing the controls and `onStarted` refilling them, over which a
+   * client drew its own faint memory. `config_changed` is a reason a message
+   * revives, so `doStop` keeps the controls now ({@link revivableByPrompt}) and
+   * `snapshotConfigSource` serves the held set through the whole restart: the strip
+   * reads as though nothing happened to it, which is exactly what that getter was
+   * written to achieve and what it could only do for part of the window before.
+   *
+   * What replaced the `409` the old emptiness was protecting against is the `busy`
+   * guard, moved **above** the deferred arm in `setConfigOption` and `setMode` —
+   * asserted three checks down, where a mode chosen mid-restart is refused.
+   */
   check(
-    "the window with no agent still reports none, so a client draws its own memory",
+    "the window with no agent no longer reports none: the strip does not blink",
     duringStop.slice(0, 2),
-    ["<none>", "0"],
+    ["acceptEdits", "2"],
   );
   check("which is the state it is drawn over", duringStop[2] ?? "<the hook never fired>", "starting");
   /*

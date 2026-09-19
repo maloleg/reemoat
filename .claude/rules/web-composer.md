@@ -91,7 +91,7 @@ safe baseline it looked like. What carries the refusal at these tones is
 *flatness*: a live chip is two-tone, a refused one uniformly faint with no hover
 and no press fill. It also fades — `.tap` transitions `color` and not `opacity` —
 and restores the `disabled` dims / `locked` does not distinction. `stale` is the
-composer's resting appearance on every restart.
+resting appearance of a session nothing revives.
 
 **Send is a circle holding an arrow, and it is one of two exceptions to the radius
 rule.** `IconButton`'s `shape` prop, declared in `bits.tsx` beside the rule it
@@ -192,9 +192,8 @@ that growth is still vertical-only. Q3.561, Q3.563.
 `composerPlaceholder`'s idle line is `Type / for commands` and nothing else — the one
 affordance nothing else advertises, and no "message" in front of it because an empty
 box already reads as somewhere to write. It falls back to `Message…` where
-`buildCommands` returns nothing: an agent that is away publishes no commands and no
-`agentConfig` for the synthesized controls, and a hint for a key that does nothing
-is worse than none. **All six are sentence-cased**, asserted over every
+`buildCommands` returns nothing — now only a session nothing revives — and a hint
+for a key that does nothing is worse than none. **All six are sentence-cased**, asserted over every
 state; a register split was argued and withdrawn. Q3.562, Q3.593.
 
 **`Composer` outlives a session switch, so every write that follows an `await` is
@@ -348,12 +347,15 @@ which is exactly what a reload leaves. ⚠ **Only the *selected* choice is kept*
 `chipValue` names a value through its choice, so dropping it draws
 `openai/gpt-5` instead of `GPT-5`, and keeping the rest is 362 models a session.
 Nothing read back is ever sent — a memory is `stale`, so `Select` is `disabled`
-over it — which is what makes storing a possibly-stale value safe here and unsafe
-on the daemon. It is cleared on sign-out, and it restores the *reading* only: a
-daemon restart still brings the agent back on its own defaults.
+over it — which is what makes storing a possibly-stale value safe here. ⚠ **It is
+no longer unsafe on the daemon either, and this memory is the fallback rather than
+the ordinary case**: `doStop` keeps the controls and commands for every stop a
+message would undo and `agent_state_json` carries them across a restart, so such a
+session arrives with real options and `drawnControls` takes its **first** branch —
+live, tappable, and never reading `status`. Cleared on sign-out; the *reading* only.
 
 The daemon drops
-`agentConfig` with the agent, so `holdConfig` in `store.ts` keeps the last set a
+`agentConfig` with an agent nothing revives, so `holdConfig` in `store.ts` keeps the last set a
 **running** agent published, `drawnControls` chooses between the live answer and
 that memory, and `stale` makes the memory readable but not tappable. The live agent
 always wins **including when it publishes nothing**: `hasLiveAgent` tells an agent

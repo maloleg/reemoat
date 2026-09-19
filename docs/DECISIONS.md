@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 88 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 365 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 61 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 113 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 143 | `###` |
-| | | **978** | |
+| | | **980** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 978 rather than the 500
+dividers. So the count is over **both** depths, and it says 980 rather than the 502
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -7612,6 +7612,170 @@ because `AIR_EXTENSION_VERSION` is module-private and there is nothing to compar
 constants against.
 
 **Status.** Fixed, 2026-09-11.
+
+### Q2.229 — Parking is invisible for thirty minutes, and then a deploy gives it away
+
+**Question.** Q2.224 shipped parking on the promise that a released session *"draws
+as an ordinary `idle` session and says nothing"*, and `doStop` keeps
+`agentConfigState` and `agentCommandsState` for `parked` alone so the controls and
+the `/` menu stay live. Both are true of the process that parked it. Neither is true
+of the next one: those two fields are in memory, `ManagedSession` deliberately
+restores no config from disk, and a parked row therefore comes back with nothing.
+
+**Measured, 2026-09-19**, on the development machine, read-only against the running
+daemon. Five parked rows, two claude and three opencode. Every one of them answered
+`GET /sessions/:id/commands` with `revision 0, dropped 0, count 0`, and carried
+`agentConfig.options: []` on its snapshot. A freshly created claude session on the
+same daemon answered `revision 1, dropped 0, count 111` with `context` among them,
+four options — `mode`, `model`, `effort`, `fast` — and five modes including
+`bypassPermissions`. So the two states are not a matter of degree: a parked session
+is one deploy away from a composer with three `—` chips under *"The agent is not
+offering this control at the moment"* and a `/` menu with nothing in it, and it
+stays there, because nothing publishes again until somebody types. The prod hosts
+update at 04:00 and 05:00 UTC, which makes that the state of every overnight
+conversation, fleet-wide, every morning.
+
+It also answers a question that was filed separately: **`/context` was reported as
+"not published as a command"**, and it is published. The 111-command list has it,
+and driving that list through the client's own `buildCommands`/`filterCommands`
+ranks it **first** for the query `context` and shows it for `c`, `co`, `con`. What
+the reporter had was a session whose agent was away. One defect, two symptoms.
+
+**Decision.** Keep them, on a wider gate, and write them down.
+
+`revivableByPrompt` — `autoResumable`'s `prompt` column, asked one step earlier
+because `doStop` has the reason before there is an `exitRecord` to read it from — is
+the single gate on three things now: what `doStop` keeps, what `configIsDeferred`
+accepts a tap on, and what `persistedRow` writes to the new nullable
+`sessions.agent_state_json`. **A call into that function and never a second
+`switch`**, which is what keeps *"adding an `ExitReason` is a compile error"* true in
+one place; `daemoncheck` asserts set equality between the two over the whole union
+rather than listing the members, so a new reason lands in the sweep with nobody
+adding a line.
+
+That widens the keeping from `parked` to `parked`, `stopped`, `agent_exited`,
+`agent_signed_out`, `daemon_shutdown`, `daemon_restarted` and `config_changed`, and
+leaves `start_failed`, `start_timeout` and `agent_kill_failed` clearing as before —
+where `—` is the honest reading, because there was never a conversation for a
+control to be about. The argument was never about the word: a conversation that
+comes back on a message is one whose controls still describe something.
+
+**What makes a stale copy honest is that nothing in it reaches an agent unchecked.**
+A wake replays it through `Session.restoreConfig`, whose two withdrawal guards skip
+any option or mode the returning agent no longer offers — which is precisely the
+risk `agentConfigState`'s docblock named as the reason not to restore from disk,
+answered rather than accepted. The worst case is a control that takes a tap and then
+quietly does not come back, which is the bound parking already had within one
+daemon life.
+
+**Four things that are easy to get wrong here, and what each cost.**
+
+  - **`commandsRevisionValue` seeds to 1, not 0.** `commandsPlan` in
+    `packages/web/src/store.ts` reads `0` or `undefined` as *"this daemon has
+    nothing"* and drops the fetch, so a restored list left at 0 would sit on the
+    daemon with the `/` menu still empty — the exact symptom, with the fix in place.
+  - **The raw `agentConfigState`, never `snapshot().agentConfig`.** That one is
+    composed through `withUltracode`, which rewrites the effort value to a choice no
+    agent ever published, and `dedupeAliasChoices`, which moves the model selection
+    off its placeholder. Replaying either sends the agent something it never said —
+    the same ⚠ `restartAgent` already carries about its own capture.
+  - **Refused whole past `MAX_AGENT_STATE_BYTES`, never clipped.** A clipped choice
+    list leaves `setConfigOption` validating against fewer rows than the agent
+    published, so a value somebody really can choose answers `invalid_value`: a
+    control that lies rather than one that is absent. 64 KiB, twice the measured
+    worst case — opencode's 362 models reduce to ~33 KB once the prose is dropped
+    from every unselected choice — and doubled resident rather than merely on disk,
+    because the blob rides `SqliteSessionStore.put`'s dirty-check key.
+  - **The `busy` guard moved above the deferred arm.** `restartAgent` reaches its
+    process boundary through `stop("config_changed")`, a reason a prompt revives, so
+    from the moment it stops `configIsDeferred` answers `true`. Recorded there, a
+    choice would be written into `agentConfigState` and then silently overwritten by
+    the `restoreConfig` already putting back a snapshot captured before the tap:
+    200, the chip moves, nothing happens. `clearing || restarting` is tested first
+    in both `setConfigOption` and `setMode` now, because in both windows the config
+    is about to be replaced wholesale and there is nothing a recording could be
+    recorded against.
+
+**What the client changed: nothing.** `drawnControls`' first branch is
+`live.length > 0` and it returns `stale: false`, so a session arriving with options
+is already drawn live and tappable whatever its status — which is why the daemon's
+two sets were made one set rather than a flag being added to the wire. That property
+was asserted nowhere: every `stale` check in `webcheck` drives the *empty* branch,
+where the status is exactly what decides, so re-narrowing the first branch to
+`hasLiveAgent` would have left all of them green while the composer went faint on
+four statuses at once. It is pinned by name now.
+
+⚠ **One documented invariant is reversed and one window closes.**
+`agentConfigState`'s *"deliberately not restored from disk"* now carries an
+exception, stated at the field; and `snapshotConfigSource`'s *"the empty window is
+left empty on purpose"* describes a window that no longer opens, since the restart
+keeps its controls throughout. The gate below it stays: `armForStart` empties the
+field on the way *in* to a spawn, so *"no live agent yet: report that rather than a
+memory"* has more than one way of being true.
+
+⚠ **That last sentence was wrong, and it was the gate's only surviving
+justification.** `armForStart` assigns `exitRecord`, `parkedAtSignOut`,
+`stopRequested`, `stopping`, `startAbandoned`, `startPromise` and `session` —
+seven fields, and `agentConfigState` is not one of them. What the gate is worth is
+narrower and still real: `held` is the *restart*'s captured config, and serving it
+over a set `doStop` really did empty would report a memory where the rule is "no
+live agent yet". `doStop` empties it for the three `revivableByPrompt` refuses, so
+the clause still has a state to answer for. Corrected at the docblock 2026-09-19,
+in the review that also found Q2.230.
+
+**Status.** Fixed, 2026-09-19.
+
+### Q2.230 — A wake now replays a mode, and one of the two callers was nobody
+
+**Question.** Q2.229 made `doStop` keep `agentConfigState` for every stop a message
+undoes and wrote it to `agent_state_json`, so `doResume`'s `wantedConfig` — empty
+on all but a parked wake before — is now a real option list on essentially every
+resume, and `Session.restoreConfig` replays it. Two things follow that nobody
+decided: a tap landing *inside* that replay, and the boot pass running it with
+nobody present.
+
+**What was measured.** Both reproduced, 2026-09-19.
+
+- **The tap.** `restoreConfig` runs *after* `onStarted` has published, so a
+  `setConfigOption` or `setMode` arriving in that window finds `exitRecord` cleared
+  by `armForStart` (hence `configIsDeferred` false), a live `session`, and neither
+  `clearing` nor `restarting` — a wake sets neither. It reaches the agent, answers
+  `ok`, and is then overwritten by the snapshot captured before it: 200, the chip
+  moves, nothing happens. That is verbatim the failure `restarting` was written
+  for, reached through the door Q2.229 opened. It was invisible because the *end
+  state* is identical either way — the assertion that the wake put back what it
+  captured passes with and without the bug.
+- **The boot pass.** `shutdown` stops every live session with `stop("daemon_shutdown")`,
+  which `revivableByPrompt` accepts, so the config is kept, persisted and adopted;
+  `autoResumable(…, "boot")` is `true` for that reason, so the pass resumes the
+  session and `restoreConfig` re-applies the remembered mode with nobody watching.
+  On the prod hosts that is 04:00 and 05:00 UTC.
+
+**Decision.** The tap is a defect and is fixed: `replacingConfig` names all three
+windows — `clearing`, `restarting`, and `resuming` — and both methods test it
+instead of writing two flags out by hand. The set was the thing that drifted, and
+only `setMode` had ever been raced, so reverting `setConfigOption`'s half left every
+driver in this repository green; `daemoncheck.restart-and-resume.ts` races both
+inside a real wake now, through a rig hook that fires on the restore's own RPC.
+
+The boot replay **stays**, on the owner's word. Restoring what somebody chose is the
+whole of what Q2.229 bought, and a boot pass is not a new decision — it is the same
+conversation coming back. What makes it bounded rather than a grant is
+`restoreConfig`'s two withdrawal guards: a mode the returning agent no longer
+publishes is skipped, which is what claude does with `bypassPermissions` under root.
+Recorded here rather than left as a side effect, because *"the daemon re-applies a
+permission mode at 4am"* is a sentence somebody should have written down before it
+was true.
+
+**Alternatives.** Skipping the mode on the `boot` trigger and replaying it only on a
+prompt was offered and declined: it splits one restore into two behaviours keyed on
+who asked, and the thing it protects against — a session left in a permissive mode
+coming back in it — is a session the person put there. Refusing to restore a
+full-access mode at all was declined for the same reason and a sharper one: it would
+silently drop a choice somebody made by name, which is the failure Q3's plan-card
+work is about from the other side.
+
+**Status.** Fixed (the tap) and decided (the boot replay), 2026-09-19.
 
 
 ## The web client

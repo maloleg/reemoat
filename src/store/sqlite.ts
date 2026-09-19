@@ -22,6 +22,7 @@ import {
   isPersistedGiveUp,
   truncateEvent,
   type AgentHandle,
+  type AgentStateMemory,
   type ExitReason,
   type EventStore,
   type EventStoreStats,
@@ -584,6 +585,13 @@ function migrate(db: DatabaseSync): void {
   // what its sessions come back as. Nullable and never selected by an older
   // daemon, so `SCHEMA_VERSION` does not move — `resume_gave_up`'s reason.
   if (!hasSession("custom_agent")) db.exec("ALTER TABLE sessions ADD COLUMN custom_agent TEXT");
+
+  // What the agent was offering when it went — see the column in `schema.sql` and
+  // `AgentStateMemory` in `events.ts`. Nullable on `resume_gave_up`'s grounds: NULL
+  // is the honest value for every row that predates the column, and it is also the
+  // value that means "nothing to remember", which is what every one of them has.
+  // `SCHEMA_VERSION` does not move, for `resume_gave_up`'s reason above.
+  if (!hasSession("agent_state_json")) db.exec("ALTER TABLE sessions ADD COLUMN agent_state_json TEXT");
 
 
   // The relay fields on `identity`. NULL means "this daemon enrolled with a
@@ -1415,13 +1423,13 @@ export class SqliteSessionStore implements SessionStore {
          id, agent, created_at, updated_at, agent_session_id, agent_pid, status, exit_json,
          container_id, agent_pgid, container_started_at,
          turn_counter, last_event_at, perm_seq, perm_salt, resume_gave_up, last_seq, dropped, title, pinned, rank,
-         ultracode, custom_agent,
+         ultracode, custom_agent, agent_state_json,
          workspace_json, workspace_mode, workspace_root, workspace_branch, workspace_base
        ) VALUES (
          :id, :agent, :created_at, :updated_at, :agent_session_id, :agent_pid, :status, :exit_json,
          :container_id, :agent_pgid, :container_started_at,
          :turn_counter, :last_event_at, :perm_seq, :perm_salt, :resume_gave_up, :last_seq, :dropped, :title, :pinned, :rank,
-         :ultracode, :custom_agent,
+         :ultracode, :custom_agent, :agent_state_json,
          :workspace_json, :workspace_mode, :workspace_root, :workspace_branch, :workspace_base
        )
        ON CONFLICT(id) DO UPDATE SET
@@ -1430,6 +1438,7 @@ export class SqliteSessionStore implements SessionStore {
          pinned           = excluded.pinned,
          rank             = excluded.rank,
          ultracode        = excluded.ultracode,
+         agent_state_json = excluded.agent_state_json,
          agent_session_id = excluded.agent_session_id,
          agent_pid        = excluded.agent_pid,
          container_id     = excluded.container_id,
@@ -2058,6 +2067,10 @@ function toParams(row: PersistedSession): Record<string, string | number | null>
     // rewrite. Editing the preset changes what it resumes as; it cannot change
     // which preset it was.
     custom_agent: row.customAgent,
+    // One blob rather than two columns, because the two halves are written and
+    // read together and neither is queried on. NULL is the state — nothing to
+    // remember — rather than a missing value, so no `?? ""`.
+    agent_state_json: row.agentState === null ? null : JSON.stringify(row.agentState),
     workspace_json: JSON.stringify(row.workspace),
     workspace_mode: row.workspace.mode,
     workspace_root: row.workspace.root,
@@ -2236,6 +2249,130 @@ function normalizeExit(value: unknown): SessionExit | null {
   return exit;
 }
 
+/**
+ * The remembered agent state, or `null` for anything this build cannot read.
+ *
+ * ⚠ **Its own `try`, inside a function that already has one, and that is the
+ * whole point.** `fromRow`'s catch drops the *session*, which is the right answer
+ * for a workspace it cannot parse and the wrong one for this: a blob that is
+ * unreadable costs a faint strip, not somebody's conversation. Every failure here
+ * answers `null`, which is the value every row written before the column has and
+ * which every reader already handles.
+ *
+ * ⚠ **Validated to the depth the declared type claims, and the containers alone
+ * were not enough.** It read *"shape-checked rather than deep-validated ... what
+ * the checks buy is that a half-written blob cannot put an `options` that is not
+ * an array in front of `restoreConfig`"* — and a half-written blob fails
+ * `JSON.parse` anyway, so the residual case was precisely the element-level one
+ * that went unchecked. What it cost is out of all proportion to the faint strip
+ * this function's first paragraph promises: `typeof modes === "object"` accepts
+ * `{current: "plan"}` with no `available`, `ManagedSession.restore` adopts it, and
+ * `snapshotConfig`'s `config.modes.available.map` then throws inside `snapshot()`
+ * — which `GET /sessions` maps over **every** session with no per-row guard, so
+ * one bad row 500s the listing for the whole machine, and which `touchSafe`
+ * swallows in its own `catch`, so that session silently stops persisting and stops
+ * fanning out to every watcher, permanently, with nothing logged.
+ *
+ * Only this daemon writes this column, so the reachable writers are a hand-edited
+ * file and a rollback — and the rollback is a **documented** path here, since
+ * `SCHEMA_VERSION` deliberately does not move for this column and an older daemon
+ * preserves the blob through every row it rewrites. That is what makes "only we
+ * write it" too weak an argument to rest a route on.
+ *
+ * Every failure is still `null`, which is the value every row written before the
+ * column has and which every reader already handles — so a blob this build cannot
+ * vouch for costs the faint strip it was always meant to cost.
+ */
+function toAgentState(value: unknown): AgentStateMemory | null {
+  if (value == null) return null;
+  try {
+    const parsed: unknown = JSON.parse(String(value));
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const { config, commands } = parsed as { config?: unknown; commands?: unknown };
+    if (typeof config !== "object" || config === null) return null;
+    if (typeof commands !== "object" || commands === null) return null;
+    const { options, modes } = config as { options?: unknown; modes?: unknown };
+    const { commands: list, dropped } = commands as { commands?: unknown; dropped?: unknown };
+    if (!Array.isArray(options) || !Array.isArray(list)) return null;
+    if (!isAgentModes(modes)) return null;
+    if (!options.every(isAgentConfigOption)) return null;
+    if (!list.every(isAgentCommand)) return null;
+    /*
+     * `dropped` is a count and a count that is not a number is not one. `Number`
+     * answers `NaN` for a string nobody meant, and `NaN` rides the snapshot out to
+     * `JSON.stringify`, which writes it as `null` — a third state on a field the
+     * client's reader declares as `number`.
+     */
+    const cut = Number(dropped ?? 0);
+    return {
+      config: {
+        modes: modes ?? null,
+        options: options as AgentStateMemory["config"]["options"],
+      },
+      commands: {
+        commands: list as AgentStateMemory["commands"]["commands"],
+        dropped: Number.isFinite(cut) ? cut : 0,
+      },
+    };
+  } catch {
+    // Unreadable JSON. See the docblock: a faint strip, never a lost session.
+    return null;
+  }
+}
+
+/**
+ * `null`, or the mode block with both halves the declared type promises.
+ *
+ * ⚠ **Absent reads as `null` rather than as a refusal**, which is
+ * `compatibility.md` rule 2 on the axis that actually bites here: `JSON.stringify`
+ * omits an `undefined` key entirely, so a future build that makes `modes` optional
+ * would have every stored blob come back without it — and discarding the whole
+ * memory over that would take the option list and the command list with it. `null`
+ * is the documented value for *"this agent publishes no modes"* and every reader
+ * already draws it.
+ */
+function isAgentModes(value: unknown): value is AgentStateMemory["config"]["modes"] {
+  if (value == null) return true;
+  if (typeof value !== "object" || Array.isArray(value)) return false;
+  const { current, available } = value as { current?: unknown; available?: unknown };
+  if (typeof current !== "string") return false;
+  if (!Array.isArray(available)) return false;
+  return available.every((mode) => {
+    if (typeof mode !== "object" || mode === null) return false;
+    const { id, name } = mode as { id?: unknown; name?: unknown };
+    return typeof id === "string" && typeof name === "string";
+  });
+}
+
+/**
+ * One control, to the depth something downstream dereferences it.
+ *
+ * `choices` is the load-bearing one — `clipChoices` reads `.length` and
+ * `reduceAgentState` `.map`s it on the way back out, so a control carrying
+ * anything else is the row that throws. `value` is checked because it is what a
+ * tap sends and what `chipValue` compares against; the prose fields are not,
+ * because nothing derefs them past drawing.
+ */
+function isAgentConfigOption(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const { id, kind, value: current, choices } = value as Record<string, unknown>;
+  if (typeof id !== "string") return false;
+  if (kind !== "select" && kind !== "boolean") return false;
+  if (typeof current !== "string" && typeof current !== "boolean") return false;
+  if (!Array.isArray(choices)) return false;
+  return choices.every((choice) => {
+    if (typeof choice !== "object" || choice === null) return false;
+    const { value: choiceValue, name } = choice as { value?: unknown; name?: unknown };
+    return typeof choiceValue === "string" && typeof name === "string";
+  });
+}
+
+/** One command. `name` is what the `/` menu matches on and what is sent. */
+function isAgentCommand(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  return typeof (value as { name?: unknown }).name === "string";
+}
+
 function fromRow(row: Record<string, unknown>): PersistedSession | null {
   try {
     const workspace = JSON.parse(String(row["workspace_json"])) as SessionWorkspace;
@@ -2305,6 +2442,7 @@ function fromRow(row: Record<string, unknown>): PersistedSession | null {
       ultracode: row["ultracode"] == null ? null : Number(row["ultracode"]) !== 0,
       // `== null` covers both NULL and a column an older file does not have.
       customAgent: row["custom_agent"] == null ? null : String(row["custom_agent"]),
+      agentState: toAgentState(row["agent_state_json"]),
     };
   } catch {
     return null;

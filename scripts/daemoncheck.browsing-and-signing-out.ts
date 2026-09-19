@@ -698,11 +698,23 @@ process.stdout.write("\nsigning out, as a state of the machine\n");
     check("which refuses nothing, unlike its neighbours", /logout_unsupported/.test(again), false);
     /*
      * ⚠ **And it answers the same row shape the listings do.** `availability()`
-     * carries no `login` object — that is spread on by hand at the two listings —
-     * so a third route answering an agent row drops the one field whose absence
-     * makes every reader fall to *cannot check*.
+     * carries no `login` object and no `settingsMode` — so a route answering an
+     * agent row without them drops the field whose absence makes every reader fall
+     * to *cannot check*, and the one that explains where a session's opening mode
+     * came from.
+     *
+     * ⚠ **This used to read `/loginSupportOf\(found\.id\)/`, and it was pinning the
+     * mechanism rather than the property — which is why it stayed green while the
+     * defect it describes happened anyway.** `settingsMode` was added to
+     * `GET /agents` alone; this handler still spread `login` by hand, so it
+     * satisfied the regex and answered a row one field short, and the client
+     * *replaces* the held row from this response. Both are built by
+     * `agentRowExtras` now, and what is asserted is that this handler uses it —
+     * with the count of its callers, and of the hand-written spreads that are
+     * left, asserted in `daemoncheck.agent-routes-and-capabilities.ts`.
      */
-    check("and it answers the row with the field availability() does not carry", /loginSupportOf\(found\.id\)/.test(again), true);
+    check("and it answers the row through the one place those fields are built", /\.\.\.extras\(found\)/.test(again), true);
+    check("rather than spreading them by hand", /loginSupportOf\(found\.id\)/.test(again), false);
 
     /*
      * ⚠ **And the second press costs no worktree**, which is the half of

@@ -15,6 +15,7 @@ import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { daemonRead } from "../../machine";
 import { MACHINE_GONE } from "../../plugins";
+import { shortPath } from "../../paths";
 import { agentEditPath, agentFromHarnessPath, agentPath, navigate } from "../../router";
 import { settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
@@ -643,6 +644,13 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * operand somebody has to remember to add to.
    */
   const failure = writeFailure ?? readFailure;
+  /*
+   * Read off the listing rather than fetched again: `GET /agents` already carries
+   * it, and only ever on the claude row — see `AgentInfo.settingsMode`. `?? null`
+   * so an older daemon, which sends no such field, reads as the ordinary case
+   * rather than as `undefined` in a `!==` test.
+   */
+  const settingsMode = listing?.agents.find((one) => one.id === "claude")?.settingsMode ?? null;
   // Ten words with the dash, the caveat cap (review D10): the fact, and the one
   // remedy. "This machine's" went — the screen is the machine's.
   const statusText =
@@ -806,6 +814,51 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
       >
         {statusText}
       </p>
+      {/*
+       * ⚠ **Where a claude session's opening mode comes from, and it is a
+       * *section* line rather than a row's.** The subline inside a row is one line
+       * by construction — two kinds of row with different line counts is a list
+       * whose rows are different heights, and a drag measures one and applies it to
+       * all — and this is not a fault about a row anyway. It is a fact about this
+       * machine's Claude configuration, which is what this screen is.
+       *
+       * Drawn only when something is actually set. The daemon sends no mode at
+       * `session/new`, so with nothing here the honest number of sentences is zero:
+       * a line reading "nothing is configured" would be this screen explaining a
+       * mechanism nobody asked about. It exists because somebody asked whether the
+       * daemon was switching sessions to `Bypass permissions` — it is not, and
+       * before this there was no screen that could have said so.
+       *
+       * It names the file and quotes the value rather than predicting the mode:
+       * the adapter merges project settings over this one and normalises through
+       * aliases of its own, and the composer's mode chip is what says what a
+       * running session is really in.
+       *
+       * ⚠ **Three mono runs in a sans sentence, and it shipped as one sans
+       * string.** `web-typography.md` claims `ui/settings/*` and its rule is *"a
+       * machine-written string a person may retype or compare character by
+       * character is drawn in mono"* — a settings **key**, the **value** written
+       * against it and a **path** are three of the four things that list names.
+       * The line inherits `text-2xs` rather than stating a size, which is the
+       * sanctioned case for a mono run whose sans line is already at the 12px
+       * floor: the import sheet's footer and the session header's subtitle are the
+       * other two.
+       *
+       * ⚠ **And the path goes through `paths.ts`, never interpolated raw** — the
+       * same rule, and the same reason `ImportCode`'s footer gives at its own
+       * call site. `shortPath` rather than `displayCwd` because this file is not
+       * under a browse root and this screen fetches none: it is a home-relative
+       * path, so `…/.claude/settings.json` is the honest short form and the whole
+       * of it rides `title`. Mono is also what retires the quotation marks the
+       * value used to carry — the family is what says "this is a literal".
+       */}
+      {settingsMode !== null && (
+        <p className="mt-2 text-2xs text-muted wrap-anywhere" title={settingsMode.file}>
+          New claude sessions follow <span className="font-mono">permissions.defaultMode</span> —{" "}
+          <span className="font-mono">{settingsMode.value}</span> — from{" "}
+          <span className="font-mono">{shortPath(settingsMode.file)}</span>.
+        </p>
+      )}
       {/*
        * ⚠ **The one remedy that is not already on screen** — `AgentBuilder`'s
        * argument, one pop-up over. A refused write is re-run by doing the thing

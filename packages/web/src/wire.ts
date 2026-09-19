@@ -1789,10 +1789,14 @@ export function needsHuman(session: SessionSnapshot): boolean {
  * this repository's own commonest defect — a partition losing a case through a
  * new field rather than through a bad predicate — so it is recorded here as well
  * as repaired. `webcheck.elicitation-and-links.ts`'s "the predicates are a
- * partition" asserts `waitingCount(session) < humanRequests(session).length` now,
- * and its matrix carries a row whose `reduced` is larger than its arrays:
- * equality fails on that row, which is what makes the clause an assertion rather
- * than a formality.
+ * partition" **refuses** `waitingCount(session) < humanRequests(session).length`
+ * now — that expression is a clause of the `matrix.filter` that collects broken
+ * rows, so what is asserted is its negation: the count may never be *fewer* than
+ * the rows there are to draw. (Written the other way round here for one release,
+ * which is a docblock quoting a driver's failure predicate as its property.) Its
+ * matrix carries a row whose `reduced` is larger than its arrays, and a separate
+ * positive check pins that row's pair outright, which is what makes the clause an
+ * assertion rather than a formality.
  */
 export function waitingCount(session: SessionSnapshot): number {
   const permissions = Math.max(session.pendingPermissions.length, session.reduced?.pendingPermissions ?? 0);
@@ -1941,6 +1945,21 @@ export interface DaemonHealth {
 export interface AgentInfo {
   id: AgentId;
   displayName: string;
+  /**
+   * What the user's own Claude settings say a session should open in, and the file
+   * that says it — `null`/absent for the ordinary case, where nothing does.
+   *
+   * ⚠ **A provenance line, never a claim about the session.** This daemon sends no
+   * mode at `session/new`: the adapter reads `permissions.defaultMode` itself,
+   * merges project settings over it and normalises through an alias table of its
+   * own. So `value` is the string as written and the screen names the file rather
+   * than predicting an outcome — the mode chip is what says what a running session
+   * is actually in. It exists because somebody asked whether the daemon was
+   * switching sessions to `Bypass permissions`, and no screen could answer them.
+   *
+   * Only ever present on `claude`, and absent on an older daemon.
+   */
+  settingsMode?: ClaudeSettingsMode | null;
   available: boolean;
   /** The install or auth instruction when unavailable. Render it. */
   hint: string | null;
@@ -2021,6 +2040,23 @@ export interface AgentInfo {
    * it, and what a refusal names when the plugin is switched off.
    */
   contributedBy?: { pluginId: string; pluginName: string };
+}
+
+/**
+ * Where a claude session's opening permission mode came from.
+ *
+ * ⚠ **Mirrored from `ClaudeSettingsMode` in `src/acp/agents.ts`; named as the
+ * daemon names it, or the hand-mirror sweep never compares it.** It was written
+ * here first as an anonymous inline object, which the sweep is blind to twice
+ * over: it iterates `export interface` declarations, and `src/acp/agents.ts` was
+ * not among the files it reads. Both halves are fixed — the name here, the file
+ * there — because either alone still buys nothing.
+ */
+export interface ClaudeSettingsMode {
+  /** The string as written, clipped. Never normalised — see the daemon's docblock. */
+  value: string;
+  /** The file it was read from, so the sentence on screen can name it. */
+  file: string;
 }
 
 /** One environment variable an agent reads a pasted credential from. */

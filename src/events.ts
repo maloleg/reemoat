@@ -1037,7 +1037,7 @@ export function keepsItsConversation(
  * deleted on the rollback that `deploy/deploy.sh --ref` advertises as the way
  * back. A reason this build cannot name is one it may not act on.
  */
-const EXIT_REASON_MEMBERS: Record<ExitReason, true> = {
+export const EXIT_REASON_MEMBERS: Record<ExitReason, true> = {
   stopped: true,
   agent_exited: true,
   start_failed: true,
@@ -1355,6 +1355,46 @@ export interface PersistedSession {
    * cover both.
    */
   rank: number | null;
+  /**
+   * What the agent was offering when it went, or `null` where there is nothing to
+   * remember — a session that never started one, or one that is not coming back.
+   *
+   * See {@link AgentStateMemory} for why this is stored where `agentConfigState`
+   * is not, and `revivableByPrompt` in `registry.ts` for which stops write it.
+   */
+  agentState: AgentStateMemory | null;
+}
+
+/**
+ * What a session's agent was offering when it went, kept for a session a message
+ * would bring back.
+ *
+ * ⚠ **This is the one copy of agent state that outlives the process that learned
+ * it, and it exists because the alternative was visible.** `agentConfigState` and
+ * `agentCommandsState` describe a *process*, which is why `ManagedSession` refuses
+ * to restore either from disk — see the field. But `doStop` already keeps both for
+ * a stop the conversation returns from, on the argument that the options still
+ * describe what that conversation *is*; and that argument does not stop being true
+ * because the daemon restarted in between. Measured 2026-09-19 on this machine:
+ * every one of five parked rows answered `GET /sessions/:id/commands` with
+ * `revision 0, count 0`, so every one of them drew three `—` chips and an empty
+ * `/` menu — permanently, because nothing publishes again until somebody types.
+ *
+ * What makes it honest rather than a stale claim is that nothing here reaches an
+ * agent unchecked: a wake replays it through `Session.restoreConfig`, whose two
+ * withdrawal guards skip any option or mode the returning agent no longer offers.
+ * So the worst case is a control that accepts a tap and then quietly does not come
+ * back, which is the bound parking already had within one daemon life.
+ *
+ * Reduced rather than verbatim — see `reduceAgentState` in `registry.ts` — because
+ * opencode publishes 362 models and this blob rides the store's dirty-check key as
+ * well as the disk.
+ */
+export interface AgentStateMemory {
+  /** The raw `agentConfigState`, never the composed `snapshot().agentConfig`. */
+  config: AgentConfig;
+  /** The raw `agentCommandsState`, so the `/` menu is not empty on the way back. */
+  commands: AgentCommands;
 }
 
 export interface SessionStore {

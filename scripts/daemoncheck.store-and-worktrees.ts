@@ -67,6 +67,25 @@ import {
  * writes with one bundle and reads with a second.
  */
 process.stdout.write("\nthe database, across a restart\n");
+
+const badState: [string, string][] = [
+  ["notobject", "[]"],
+  ["nullconfig", '{"config":null,"commands":{"commands":[],"dropped":0}}'],
+  ["nullcommands", '{"config":{"modes":null,"options":[]},"commands":null}'],
+  ["optionsnotarray", '{"config":{"modes":null,"options":{}},"commands":{"commands":[],"dropped":0}}'],
+  ["listnotarray", '{"config":{"modes":null,"options":[]},"commands":{"commands":{},"dropped":0}}'],
+  // The one that reached `snapshot()`: an object, so `typeof` passed, with no
+  // `available` for `config.modes.available.map` to walk.
+  ["modesnoavailable", '{"config":{"modes":{"current":"plan"},"options":[]},"commands":{"commands":[],"dropped":0}}'],
+  ["modesnotobject", '{"config":{"modes":3,"options":[]},"commands":{"commands":[],"dropped":0}}'],
+  ["optionnull", '{"config":{"modes":null,"options":[null]},"commands":{"commands":[],"dropped":0}}'],
+  // `choices` is what `clipChoices` reads `.length` off and `reduceAgentState`
+  // `.map`s on the way back out.
+  ["optionnochoices", '{"config":{"modes":null,"options":[{"id":"model","kind":"select","value":"opus"}]},"commands":{"commands":[],"dropped":0}}'],
+  ["choicenotobject", '{"config":{"modes":null,"options":[{"id":"model","kind":"select","value":"opus","choices":[7]}]},"commands":{"commands":[],"dropped":0}}'],
+  ["commandnoname", '{"config":{"modes":null,"options":[]},"commands":{"commands":[{}],"dropped":0}}'],
+];
+
 {
   const dbPath = join(sandbox, "store", "reemoat.db");
   const old = now - 30 * 24 * 60 * 60 * 1000;
@@ -106,6 +125,71 @@ process.stdout.write("\nthe database, across a restart\n");
         "('ca_future2', 'also', 'claude', 'bedrock-direct', 'x', 1)",
     );
     first.db.exec("INSERT INTO system_credentials (system, secret, updated_at) VALUES ('gemini', 's', 1)");
+    /*
+     * ⚠ **The one copy of agent state that outlives the process that learned it.**
+     *
+     * Its own rows for the same reason the one below has one: what is being driven
+     * is a *column*, and a dropped or mangled row would otherwise fail an
+     * assertion about a title. The pair is the whole rule — one blob comes back,
+     * and one that cannot be read comes back as `null` **without taking the
+     * session with it**, which is the half that matters: `fromRow`'s own catch
+     * drops the whole row, and applying it here would cost somebody a conversation
+     * to save a faint strip.
+     */
+    first.sessions.put({
+      ...persisted("s_remembered"),
+      agentState: {
+        config: {
+          modes: { current: "plan", available: [{ id: "plan", name: "Plan", description: null }] },
+          options: [
+            {
+              id: "model",
+              name: "Model",
+              description: null,
+              category: "model",
+              kind: "select",
+              value: "opus",
+              choices: [{ value: "opus", name: "Opus", description: "the selected one keeps its prose", group: null }],
+            },
+          ],
+        },
+        commands: { commands: [{ name: "context", description: "Show current context usage", hint: null }], dropped: 0 },
+      },
+    });
+    first.sessions.put(persisted("s_unreadable"));
+    first.db.exec("UPDATE sessions SET agent_state_json = '{not json' WHERE id = 's_unreadable'");
+    /*
+     * ⚠ **The blobs that *parse*, which is the half the containers-only check
+     * waved through and the half with the teeth.** A half-written file fails
+     * `JSON.parse` and was already covered by the row above; what was not is a
+     * well-formed object whose *elements* are wrong — `modes` missing `available`
+     * is the measured one. Adopted, it throws inside `snapshot()`, which
+     * `GET /sessions` maps over every session with no per-row guard (one bad row
+     * 500s the listing for the whole machine) and which `touchSafe` swallows in
+     * its own catch (that session silently stops persisting and stops fanning
+     * out, for ever, with nothing logged).
+     *
+     * A row each, and the second assertion on every one of them is that the
+     * *session* came back — the whole contract of `toAgentState`'s inner `try` is
+     * that a blob it cannot vouch for costs a faint strip and never a
+     * conversation.
+     */
+    for (const [name, blob] of badState) {
+      first.sessions.put(persisted(`s_bad_${name}`));
+      first.db.exec(`UPDATE sessions SET agent_state_json = '${blob}' WHERE id = 's_bad_${name}'`);
+    }
+    /*
+     * And the one that must *survive*: `modes` absent entirely. `JSON.stringify`
+     * omits an `undefined` key, so a build that ever makes the field optional has
+     * every stored blob arrive this way — and discarding the record over it would
+     * take the option list and the command list with it. `compatibility.md` rule
+     * 2: degrade to today's behaviour, which is `modes: null`.
+     */
+    first.sessions.put(persisted("s_nomodes"));
+    first.db.exec(
+      `UPDATE sessions SET agent_state_json = '{"config":{"options":[]},"commands":{"commands":[{"name":"context","description":"","hint":null}],"dropped":0}}' WHERE id = 's_nomodes'`,
+    );
+
     // A row of its own rather than rewriting one of the fixtures above: those
     // are the controls for the title, the pin and the sweep, and a dropped row
     // would make three unrelated assertions fail for a reason none of them names.
@@ -165,7 +249,19 @@ process.stdout.write("\nthe database, across a restart\n");
    * it rather than casting. The three rows beside it are the positive control — a
    * reader that dropped everything would pass a check written the other way round.
    */
-  check("a session written by one daemon is there for the next", rows.map((r) => r.id).sort(), ["s_named", "s_plain", "s_routed"]);
+  check(
+    "a session written by one daemon is there for the next",
+    rows.map((r) => r.id).sort(),
+    [
+      ...badState.map(([name]) => `s_bad_${name}`),
+      "s_named",
+      "s_nomodes",
+      "s_plain",
+      "s_remembered",
+      "s_routed",
+      "s_unreadable",
+    ].sort(),
+  );
   check(
     "a session naming an agent this build does not have is dropped, not cast",
     rows.some((r) => r.id === "s_future"),
@@ -304,6 +400,50 @@ process.stdout.write("\nthe database, across a restart\n");
   // actually about.
   check("a title survives the restart", named?.title, "Fix the reconnect");
   check("and so does a pin", named?.pinned, true);
+  /*
+   * And so do the agent's own controls, for the one class of session that keeps
+   * them. Measured 2026-09-19: every parked row on this machine answered
+   * `revision 0, count 0` after a deploy, so the strip drew `—` and the `/` menu
+   * was empty — permanently, since nothing publishes again until somebody types.
+   */
+  {
+    const remembered = rows.find((row) => row.id === "s_remembered");
+    check("the agent's controls survive the restart", remembered?.agentState?.config.options[0]?.value, "opus");
+    check("and the mode with them", remembered?.agentState?.config.modes?.current, "plan");
+    check("and the command list, which is what the `/` menu is", remembered?.agentState?.commands.commands[0]?.name, "context");
+    /*
+     * ⚠ **The unreadable half, and the half of *that* which is the actual rule.**
+     * `fromRow`'s own catch drops the whole row; reaching it here would cost
+     * somebody a conversation to save a faint strip, so `toAgentState` has a
+     * `try` of its own and answers `null`.
+     */
+    const unreadable = rows.find((row) => row.id === "s_unreadable");
+    // ⚠ Not `?? "<sentinel>"`, which `null` itself would trip — the value under
+    // test *is* `null`, so the row's presence is asserted separately below.
+    check("a blob this build cannot read is forgotten", unreadable?.agentState, null);
+    check("and the session it belongs to is not", unreadable?.id, "s_unreadable");
+    /*
+     * ⚠ **Both halves per row, and the second is the one that matters.** A guard
+     * that answered `null` by *throwing* would satisfy the first assertion here
+     * and lose the session to `fromRow`'s catch, which is the exact trade
+     * `toAgentState`'s inner `try` exists to refuse.
+     */
+    const kept = badState.map(([name]) => rows.find((row) => row.id === `s_bad_${name}`));
+    check(
+      "a blob that parses but is not the declared shape is forgotten, every kind of it",
+      kept.map((row) => row?.agentState ?? "<forgotten>"),
+      badState.map(() => "<forgotten>"),
+    );
+    check(
+      "and not one of them cost its session",
+      kept.map((row) => row?.id ?? "<lost>"),
+      badState.map(([name]) => `s_bad_${name}`),
+    );
+    // The other direction, so the sweep above is a gate rather than a blanket.
+    const noModes = rows.find((row) => row.id === "s_nomodes");
+    check("a blob with no modes at all degrades to null rather than being dropped", noModes?.agentState?.config.modes, null);
+    check("keeping everything beside it", noModes?.agentState?.commands.commands[0]?.name, "context");
+  }
   /*
    * A position outlives the process, and it outlives it as a **fraction**. The
    * column is REAL because a drop between two adjacent milliseconds has to land

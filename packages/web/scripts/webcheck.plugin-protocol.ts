@@ -201,11 +201,19 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
       new URL("../../../src/acp/asynctasks.ts", import.meta.url),
       "utf8",
     );
+    /*
+     * ⚠ **`src/acp/agents.ts`, added for the same reason `asynctasks.ts` was.**
+     * `ClaudeSettingsMode` is declared there and mirrored in `wire.ts`; a file not
+     * in this list falls through the `continue` below however correctly its
+     * interface is named on both sides, which is the failure the paragraph above
+     * measured at 52-against-54.
+     */
+    const agentsSrc = readFileSync(new URL("../../../src/acp/agents.ts", import.meta.url), "utf8");
     const mirrored = [...new Set([...clientSrc.matchAll(/export interface (\w+)/g)].map((one) => one[1] ?? ""))];
     const behind: string[] = [];
     let compared = 0;
     for (const name of mirrored) {
-      const theirs = [registrySrc, eventsSrc, daemonSrc, systemsSrc, askSrc, asyncTasksSrc]
+      const theirs = [registrySrc, eventsSrc, daemonSrc, systemsSrc, askSrc, asyncTasksSrc, agentsSrc]
         .map((src) => fieldsOf(src, name))
         .find((one) => one !== null);
       if (theirs === undefined || theirs === null) continue;
@@ -392,8 +400,13 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
      * healthier every release. The sibling driver in the catalogue service hit the
      * sharper version of it in the same week — its corpus tripled against an
      * unmoved floor, which would have passed with an entire check group removed.
+     *
+     * 52 → 56 when `src/acp/agents.ts` joined the list above, which is the third
+     * raise and the second owed to a *file* rather than to a new interface: the
+     * corpus is bounded by what this sweep reads, so adding a source is the one
+     * change that moves it without anybody writing an interface.
      */
-    report("there are mirrored interfaces to compare at all", compared >= 52, `${compared} interfaces`);
+    report("there are mirrored interfaces to compare at all", compared >= 56, `${compared} interfaces`);
     check("and the session snapshot is one of them", fieldsOf(registrySrc, "SessionSnapshot") !== null, true);
     check("no interface this client mirrors knows less than the daemon's own", behind, []);
 
