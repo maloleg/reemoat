@@ -414,6 +414,15 @@ jobs:
   # staging in the `native` job cannot happen here. That this job passes with
   # nothing staged is itself the assertion that the overlay works.
   #
+  # ⚠ **But the *frontend* is not optional, and the first run of this job is how
+  # that was learned.** `lib.rs` calls `tauri::generate_context!`, which embeds
+  # `frontendDist` at **compile** time — so `packages/web/dist` has to exist even
+  # for a client build that carries no daemon payload, and a checkout without it
+  # fails inside the proc macro with *"this path doesn't exist"* rather than
+  # anywhere that names the frontend. It passed on the author's machine only
+  # because a `dist/` was lying there from an earlier build, which is the whole
+  # reason a CI leg is worth more than a local run.
+  #
   # ⚠ **This is a compile gate, not a bundle leg, and it deliberately carries no
   # `target: android` matrix entry.** `deploycheck` greps this file for that key
   # to decide whether a platform may join `RELEASE_APP_TARGETS` — and what
@@ -471,6 +480,18 @@ jobs:
             echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang"
             echo "AR_aarch64_linux_android=$bin/llvm-ar"
           } >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `generate_context!` reads this directory at compile time; see above.
+      - run: pnpm web:build
 
       - name: cargo clippy (aarch64-linux-android)
         run: >
