@@ -470,8 +470,16 @@ jobs:
           set -euo pipefail
           ndk=${ANDROID_NDK_LATEST_HOME:?the runner image carries no Android NDK}
           bin=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
-          [ -x "$bin/aarch64-linux-android24-clang" ] || {
-            echo "no aarch64-linux-android24-clang under $bin" >&2
+          # ⚠ **The compiler is *run*, not looked for.** The `…24-clang` beside
+          # it is a four-line shell wrapper around `clang`, so a truncated or
+          # half-restored NDK still has the wrapper and answers `-x` — measured
+          # on this workflow's second run, where a cached NDK produced
+          # `bin/clang: No such file or directory` from inside the wrapper and
+          # the existence check had already passed. `--version` is the cheapest
+          # thing that fails when the toolchain is not actually there.
+          "$bin/aarch64-linux-android24-clang" --version >/dev/null 2>&1 || {
+            echo "the Android toolchain under $bin does not run" >&2
+            "$bin/aarch64-linux-android24-clang" --version >&2 || true
             ls "$bin" | head -40 >&2
             exit 1
           }
@@ -560,11 +568,22 @@ jobs:
 
       # The NDK by version rather than "whatever the image has", because the
       # clang triple below embeds the API level and the runner image moves.
+      # ⚠ **`local-cache: false`, and the second run of this job is why.** With
+      # the cache on, a restored NDK was missing `toolchains/llvm/prebuilt/
+      # linux-x86_64/bin/clang` itself while keeping the wrapper script that
+      # calls it, so the build failed inside a compiler that looked installed.
+      # A fresh download costs about a minute and is the whole of the fix.
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
           ndk-version: r27c
-          local-cache: true
+          local-cache: false
+
+      - name: the NDK actually runs
+        run: |
+          set -euo pipefail
+          clang="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          "$clang" --version
 
       - run: pnpm install --frozen-lockfile
 
