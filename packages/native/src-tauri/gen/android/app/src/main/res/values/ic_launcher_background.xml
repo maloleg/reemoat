@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher badge, and it is the app's own dark one rather than white.
+
+  ⚠ **Hand-edited, and `tauri icon` overwrites this file** — it writes `#fff`
+  here, which is the second half of the measurement below. `nativecheck`
+  asserts the colour against this file's comment-stripped code, because the
+  paragraph below quotes it too.
+
+  ⚠ Two separate things were wrong and each produced the same symptom.
+  `tauri android init` copies the raster mipmaps and **not**
+  `mipmap-anydpi-v26/ic_launcher.xml`, so there was no adaptive icon at all and
+  Android masked the legacy PNG into a circle. And the background this project's
+  own `tauri icon` run wrote is `#fff`, so restoring the adaptive icon alone would
+  have drawn the same white disc by a different route.
+
+  `#1c1a16` is the colour `packages/web/public/favicon.svg` already knocks the
+  mark out of — `index.html` calls it "a dark rounded badge" — so the launcher
+  and the browser tab are now one identity rather than two.
+-->
+<resources>
+  <color name="ic_launcher_background">#1c1a16</color>
+</resources>

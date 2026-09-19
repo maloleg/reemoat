@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -164,6 +165,89 @@ function flat(rust: string): string {
     .replace(/ ?\. ?/g, ".")
     .replace(/\( /g, "(")
     .replace(/,? \)/g, ")");
+}
+
+/**
+ * Rust with its comment layer taken out, which is what an assertion about Rust
+ * *code* has to read.
+ *
+ * ⚠ **The comment layer here is the specification, so it quotes the code**, and
+ * every assertion in this file that searches a `.rs` for a pattern is therefore
+ * searching the prose about that pattern too. Five call sites already strip
+ * before matching and each records the same discovery locally: `bootCode`, where
+ * the docblock explaining why there is no `rename_all` names the attribute;
+ * `daemonSrc`, where *"never with a POSIX literal"* sits beside the literal;
+ * `configCode`; `deviceCode`; and `libCode`, where `/RunEvent::Exit/.test(libRs)`
+ * was green on the paragraph four lines above the callback and would have stayed
+ * green with the callback deleted.
+ *
+ * ⚠ **The loud direction is a false red; the quiet one is a false green.** A
+ * pattern satisfied by the prose passes whether or not the code is there — and a
+ * block-commented attribute reads exactly like a live one, which is the shape a
+ * tripwire dies in.
+ *
+ * One reader rather than a sixth copy, for `rustJsonKeys`'s reason: the second
+ * copy of that loop arrived by extracting the first, with a comment saying so,
+ * which is exactly how a third would.
+ *
+ * `//` is anchored at the start of a line — `stageCode`'s form rather than
+ * `configCode`'s, because the unanchored one also eats the `https:` and its two
+ * slashes inside a string literal: harmless in `config.rs`, not harmless in
+ * general. The block strip is the unanchored one those five already use, so
+ * folding them into this later cannot change a result.
+ */
+function rustCode(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+}
+
+/**
+ * Kotlin with its comments taken out — the activity and the Gradle script are
+ * both Kotlin.
+ *
+ * ⚠ **The block strip is anchored at the start of a line, and that is a
+ * measurement rather than caution.** The debug block of
+ * `gen/android/app/build.gradle.kts` carries four `jniLibs.keepDebugSymbols`
+ * globs, each of them the string *star slash ABI slash star dot so*. Spelled out
+ * in words because the sequence cannot be written inside a block comment at all,
+ * which is the same fact from the other side: each of those string literals
+ * contains a **slash followed by a star** (in `arm64-v8a` and its slash) and
+ * begins with a **star followed by a slash**. {@link rustCode}'s unanchored strip
+ * opens a comment at the first of those and closes it at the *next* glob's
+ * leading pair, eating everything between. Measured on this checkout: the
+ * `x86_64` line vanishes from the result and two others are spliced together —
+ * in the one file every Gradle assertion below is about.
+ *
+ * Every block comment in both Kotlin files begins its own line, so the anchor
+ * costs nothing here and the only thing it stops matching is a string.
+ *
+ * `//` is anchored for {@link rustCode}'s reason.
+ */
+function kotlinCode(source: string): string {
+  return source
+    .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, "")
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+}
+
+/**
+ * XML with its comments taken out, and the Android resources are where the
+ * prose-quotes-the-code hazard is at its sharpest in this tree.
+ *
+ * `res/xml/data_extraction_rules.xml` opens by explaining what it is for, and the
+ * explanation **quotes `allowBackup="false"`** — the attribute an assertion below
+ * searches `AndroidManifest.xml` for. Two files apart today, and one copy-paste
+ * from being one file. `AndroidManifest.xml` carries comments of its own.
+ *
+ * An XML comment cannot nest and may not contain a double hyphen, so a
+ * non-greedy run to the first close is the whole of the rule.
+ */
+function xmlCode(source: string): string {
+  return source.replace(/<!--[\s\S]*?-->/g, "");
 }
 
 /**
@@ -987,12 +1071,41 @@ check("this package holds no TypeScript, so no config has to claim it", strayTs,
  * `.json` fingerprint in there into its symbol corpus, which is assertion 4 of
  * that driver switched off in the direction that reads as passing.
  */
-const docscheckSrc = read("scripts/docscheck.ts");
-const skipDir = capture(docscheckSrc, /const SKIP_DIR = \/\^\(([^)]+)\)\$\//);
+/*
+ * ⚠ **Read off the comment-stripped source, and that is not caution.** The
+ * paragraph `docscheck` now carries above its two skips names `gen/schemas`,
+ * `gen/android` and `gen/apple` while explaining which of them is source, and it
+ * quotes `SKIP_DIR` and `SKIP_PATH` to do it. Against raw text a capture here can
+ * be satisfied by the prose that *describes* the skip instead of by the skip —
+ * `cargoCode` further down carries the measurement where exactly that happened.
+ */
+const docscheckCode = read("scripts/docscheck.ts")
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .split("\n")
+  .filter((line) => !/^\s*\/\//.test(line))
+  .join("\n");
+const skipDir = capture(docscheckCode, /const SKIP_DIR = \/\^\(([^)]+)\)\$\//);
 check("docscheck's directory skip was readable", skipDir !== null, true);
+check("and it still skips this package's Rust build tree", (skipDir ?? "").split("|").includes("target"), true);
+/*
+ * ⚠ **`gen` is deliberately no longer in that list, and the assertion changed with
+ * it rather than being deleted.** `gen/android` is committed hand-edited source:
+ * this driver reads two files out of it a hundred lines down — `build.gradle.kts`
+ * for the `rustls-platform-verifier` dependency and `proguard-rules.pro` for the
+ * keep rule that stops R8 stripping it — so a rule in `.claude/rules/` has to be
+ * able to point at those files, and a skip keyed on the bare name `gen` made that
+ * a dead glob by construction. What replaced it is a path-based skip, and what is
+ * worth asserting from *this* driver is that the pattern over there still names
+ * this package's two genuinely generated trees at all: that is the half that goes
+ * quiet if somebody replaces the pattern wholesale. `docscheck` pins the split
+ * against its own walk, which is the half this one cannot see.
+ */
+check("and `gen` is not, which is what makes gen/android reachable", (skipDir ?? "").split("|").includes("gen"), false);
+const skipPath = capture(docscheckCode, /const SKIP_PATH =\s*(\/[^\n]+\/);/);
+check("docscheck's path skip was readable", skipPath !== null, true);
 check(
-  "and it skips both trees this package generates",
-  ["target", "gen"].filter((d) => !(skipDir ?? "").split("|").includes(d)),
+  "and it still refuses the two trees this package generates",
+  ["schemas", "apple"].filter((d) => !(skipPath ?? "").includes(d)),
   [],
 );
 /*
@@ -1002,7 +1115,7 @@ check(
  * symbols has to be able to resolve. Safe **only** with the skip above — a corpus
  * that reached a build tree would read every vendored crate in it.
  */
-const sourceExt = capture(docscheckSrc, /const SOURCE_EXT = \/\\\.\(([^)]+)\)\$\//);
+const sourceExt = capture(docscheckCode, /const SOURCE_EXT = \/\\\.\(([^)]+)\)\$\//);
 check("docscheck's extension list was readable", sourceExt !== null, true);
 check("and it reads Rust", (sourceExt ?? "").split("|").includes("rs"), true);
 /*
@@ -1189,6 +1302,40 @@ check(
   true,
 );
 /*
+ * ⚠ **And the shim's last line is a refusal, never a PATH lookup.**
+ *
+ * It used to read `exec node "$@"`, with a comment beside it calling PATH *"the
+ * honest last word"*. It is not one: `daemon.rs`'s `daemon_path` puts the payload's
+ * own `node_modules/.bin` **first** on the daemon's `PATH` — deliberately, so
+ * `deploy/agents.sh` resolves the node *beside* npm — and that directory is where
+ * this shim lives. So the fallback found the shim and re-execed it, for ever, on
+ * any layout where both relative probes miss. `docs/NATIVE.md`'s *Open
+ * measurements* names a `.deb` and an AppImage as exactly such a layout, and the
+ * symptom there would have been a daemon that never starts rather than one that
+ * says why.
+ *
+ * Asserted as an **absence** plus the sentence that replaced it, because the
+ * positive alone would pass on a shim that carried both.
+ */
+/*
+ * ⚠ **Compared against the code rather than the text, and this driver's own
+ * `bootCode` says why.** Written against `stage` raw it fails on the docblock
+ * above the shim — the one that explains what the old line did and quotes it —
+ * and the quiet direction is the same reader passing over a *commented-out*
+ * fallback. `//` is filtered by line start rather than anywhere, because that
+ * file is full of `https://` inside string literals.
+ */
+const stageCode = stage
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .split("\n")
+  .filter((line) => !/^\s*\/\//.test(line))
+  .join("\n");
+check(
+  "and its last word is a refusal rather than a PATH lookup",
+  [/exec node "\$@"/.test(stageCode), /exit 127/.test(stageCode)],
+  [false, true],
+);
+/*
  * ⚠ **The 552 MB that must not come back.** The two ACP adapters each pull a
  * coding-agent CLI as *optional* platform packages, which `pnpm-workspace.yaml`'s
  * `overrides` strip from the pnpm tree for the reasons Q4.114 gives at length.
@@ -1316,6 +1463,97 @@ check(
   false,
 );
 check("but an app bundle is", ((bundle["targets"] ?? []) as string[]).includes("app"), true);
+/*
+ * ── the platform overlays, and the one rule that keeps every assertion here true
+ *
+ * ⚠ **Tauri reads five configuration files and this driver reads one.**
+ * `tauri-utils`' `config/parse.rs` merges `tauri.<platform>.conf.json` over the
+ * base for `linux`, `windows`, `macos`, `android` and `ios`, through
+ * `json_patch::merge` — RFC 7386, where an array **replaces** and a `null`
+ * **deletes the key**.
+ *
+ * Measured on this checkout, 2026-09-19: with `target/daemon` and `binaries/`
+ * both moved aside, `cargo check` fails inside `build.rs` with no overlay
+ * present and **succeeds** with a `tauri.macos.conf.json` carrying
+ * `{"bundle":{"externalBin":null,"resources":null}}`. So the overlays are read
+ * by **cargo**, at compile time, and not only by the bundler — which is what
+ * makes a client build a configuration file rather than a cargo feature.
+ *
+ * ⚠ And it is what makes every assertion in this file a claim about the *base
+ * file alone*, silently, from the moment one overlay exists: the CSP, the empty
+ * permission set, `signingIdentity: null`, `dragDropEnabled: false`,
+ * `createUpdaterArtifacts`, the licence path. Re-running all of them against
+ * five merged configs is one answer. **This is the other, and it is stronger:**
+ * an overlay may set only a named allowlist of keys, so there is nothing an
+ * overlay *can* say that an assertion here is about.
+ */
+process.stdout.write("\nthe platform overlays, and what one may say\n");
+/*
+ * `$schema` is editor metadata rather than configuration — the base carries it
+ * and an overlay that did not would lose completion in every editor — so it is
+ * named here rather than left to read as an oversight.
+ */
+const OVERLAY_KEYS = ["$schema", "bundle.externalBin", "bundle.resources", "bundle.targets"];
+const flatten = (value: unknown, prefix = ""): string[] =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? Object.entries(value as Record<string, unknown>).flatMap(([key, inner]) =>
+        flatten(inner, prefix === "" ? key : `${prefix}.${key}`),
+      )
+    : [prefix];
+const overlays = readdirSync(join(ROOT, TAURI_DIR))
+  .filter((name) => /^tauri\.[a-z]+\.conf\.json$/.test(name))
+  .sort();
+/*
+ * ⚠ **`tauri.macos.conf.json` must not exist, and that is not tidiness.** The
+ * base file *is* the macOS shape — `targets: ["app"]`, the payload, the hardened
+ * runtime — so a macOS overlay would make every assertion above describe a
+ * configuration no build ever uses, while staying green.
+ */
+check("the overlays are exactly the four client platforms", overlays, [
+  "tauri.android.conf.json",
+  "tauri.ios.conf.json",
+  "tauri.linux.conf.json",
+  "tauri.windows.conf.json",
+]);
+for (const name of overlays) {
+  const overlay = json(`${TAURI_DIR}/${name}`);
+  const keys = flatten(overlay).sort();
+  check(`${name} sets only keys an overlay may set`, keys.filter((key) => !OVERLAY_KEYS.includes(key)), []);
+  /*
+   * The payload, deleted rather than emptied. `[]` and `{}` would merge to an
+   * empty container, which `tauri-build` walks and finds nothing in; `null`
+   * removes the field, which is the state the base file was in before either was
+   * added. Both work today and only one of them says what it means.
+   */
+  const overlayBundle = (overlay["bundle"] ?? {}) as Record<string, unknown>;
+  check(`and ${name} carries no daemon payload`, [overlayBundle["externalBin"], overlayBundle["resources"]], [
+    null,
+    null,
+  ]);
+  check(`and ${name} never asks for a disk image`, ((overlayBundle["targets"] ?? []) as string[]).includes("dmg"), false);
+}
+/*
+ * The two desktop overlays name a bundler and the two mobile ones do not:
+ * `tauri android build` and `tauri ios build` take the artifact kind on the
+ * command line and read `bundle.targets` for nothing at all, so a value there
+ * would be a setting with no reader.
+ */
+check(
+  "the desktop overlays name their bundler and the mobile ones name none",
+  overlays.map((name) => ((json(`${TAURI_DIR}/${name}`)["bundle"] as Record<string, unknown>)["targets"] ?? null)),
+  [null, null, ["deb", "appimage"], ["nsis"]],
+);
+/*
+ * And the sentence `build-daemon.mjs` refuses a Windows triple with names that
+ * file by name. A refusal pointing at something that does not exist is worse
+ * than no refusal, because it reads as authoritative.
+ */
+check(
+  "the Windows refusal in build-daemon.mjs names a file that is there",
+  /tauri\.windows\.conf\.json removes externalBin/.test(stageCode) &&
+    overlays.includes("tauri.windows.conf.json"),
+  true,
+);
 const mac = (bundle["macOS"] ?? {}) as Record<string, unknown>;
 /*
  * Hardened runtime on, because notarization requires it and turning it on later is
@@ -1813,6 +2051,594 @@ check(
 check("an iOS floor is decided rather than defaulted", typeof ((bundle["iOS"] ?? {}) as Record<string, unknown>)["minimumSystemVersion"], "string");
 check("and an Android one", typeof ((bundle["android"] ?? {}) as Record<string, unknown>)["minSdkVersion"], "number");
 check("no Apple development team is committed", ((bundle["iOS"] ?? {}) as Record<string, unknown>)["developmentTeam"], null);
+/*
+ * ⚠ **The two mobile platforms are in different states, and the pair is asserted
+ * together so they cannot drift.**
+ *
+ * `keyring`'s `v1` feature has no store on either: `set_credential_store` returns
+ * `Err(Invalid("platform", …))` at run time having compiled perfectly
+ * (`keyring-4.2.0/src/v1.rs:109-128`). Every other thing a mobile build is
+ * missing fails loudly at build or install time; this one passes every gate and
+ * arrives at a person who then retypes their password on every launch.
+ *
+ * **Android has a real store now** — `keyring-core` with
+ * `android-native-keyring-store`, SharedPreferences under a key held in the
+ * Android Keystore — and it is compiled and linked here rather than argued about:
+ * measured 2026-09-19, `cargo build --target aarch64-linux-android --lib`
+ * produces `libreemoat_native_lib.so`.
+ *
+ * **iOS is still refused at compile time**, because nothing on this checkout can
+ * compile it: that needs full Xcode and an `aarch64-apple-ios` target. The
+ * refusal is a tripwire on the way to that arm, not a decision against one —
+ * whoever installs the toolchain writes the `apple-native-keyring-store` arm and
+ * deletes it in the same change.
+ *
+ * Asserted as a pair. Narrowing the refusal without writing the arm, or writing
+ * an arm and leaving the refusal, are both states this catches.
+ */
+const credentialRs = read(`${TAURI_DIR}/src/credential.rs`);
+/*
+ * ⚠ **Read with the comments taken out, and this is the file in the tree where
+ * that matters most.** `credential.rs` is one long argument about which store
+ * each platform gets, and it makes that argument by quoting the code: the
+ * docblock over the refusal names `apple-native-keyring-store` and
+ * `android-native-keyring-store`, the `use` block quotes
+ * `keyring-4.2.0/src/v1.rs:109-128`, and the refusal's own message names both
+ * crates again. Both assertions below read the raw text, and the quiet direction
+ * was open on each — wrap the refusal in a block comment, which is the shape a
+ * tripwire dies in and exactly what somebody "just trying an iOS build" does, and
+ * the raw pattern goes on saying `ok` over a build that would ship with no store
+ * and keep no sign-in. Measured on this checkout: block-commented, the raw test
+ * is still `true` and the stripped one is `false`.
+ *
+ * The control beside it is `bootCode`'s and `cargoCode`'s: a pattern over a
+ * derived string passes for the wrong reason when the derivation returns
+ * nothing.
+ */
+const credentialCode = rustCode(credentialRs);
+check("the credential store's code survived the comment strip", credentialRs.length > credentialCode.length, true);
+check(
+  "iOS is refused at compile time, having no credential store yet",
+  /#\[cfg\(target_os = "ios"\)\]\s*compile_error!/.test(credentialCode),
+  true,
+);
+check(
+  "and Android is not, because it has one",
+  /#\[cfg\(target_os = "android"\)\]\s*fn entry/.test(credentialCode),
+  true,
+);
+/*
+ * And the store is named in the manifest rather than left to a default, which is
+ * the rule the desktop `keyring` line already follows one platform over.
+ */
+const cargoCode = cargoToml
+  .split("\n")
+  .map((line) => line.replace(/#.*$/, ""))
+  .join("\n");
+/*
+ * ⚠ **Compared against the code rather than the text, for `stageCode`'s reason
+ * one file over.** Written against `cargoToml` raw, the assertion below is
+ * satisfied by the prose above the dependency — measured: deleting
+ * `android-native-keyring-store = "1"` outright left this driver all green. The
+ * control is here because a pure test over a derived string passes when the
+ * derivation returns nothing.
+ */
+check("the manifest's code survived the comment strip", cargoToml.length > cargoCode.length, true);
+check(
+  "the Android store is named in the manifest, and keyring is kept off that target",
+  [
+    /^android-native-keyring-store = /m.test(cargoCode),
+    /\[target\.'cfg\(not\(any\(target_os = "android", target_os = "ios"\)\)\)'\.dependencies\]/.test(cargoToml),
+  ],
+  [true, true],
+);
+/*
+ * ⚠ **And no `openssl`, which is a plan a measurement took back out.** The
+ * intent was `openssl` with `vendored`, on the reasoning that `reqwest`'s
+ * `default-tls` is native-tls and native-tls is OpenSSL away from Apple and
+ * Windows. `cargo tree --target aarch64-linux-android` has no `openssl-sys` in
+ * it at all: `reqwest` 0.13 resolves to `rustls` with `rustls-platform-verifier`,
+ * which calls Android's own trust manager over JNI — so the `/v1` leg honours the
+ * same `network_security_config` the webview legs do rather than being blind to
+ * user-installed CAs. Asserted as an absence so the dependency cannot come back
+ * without somebody re-reading why it went.
+ */
+/*
+ * Compared against the manifest's *code*, for the reason this file already gives
+ * at the staging shim: the paragraph above this line explains why there is no
+ * `openssl` here and would satisfy the pattern on its own. TOML comments are `#`
+ * to end of line, and no dependency line in this file carries one.
+ */
+check("and no vendored OpenSSL, which the Android tree does not use", /openssl/.test(cargoCode), false);
+/*
+ * ⚠ **And the companion positive, because the line above is a pure negative over
+ * a *derived* string.** `/openssl/.test(cargoCode)` answers `false` for the
+ * reason the assertion is about and also for two it is not: a strip that returned
+ * the empty string, and one that ate the dependency tables. Both pass it exactly
+ * as loudly. The control two checks up says only that *something* was removed —
+ * one `#` anywhere in the file satisfies it — so it cannot tell those apart
+ * either.
+ *
+ * So both halves of the discrimination are stated. The word **is** in the file,
+ * in the paragraph explaining why it is not a dependency, which is what proves
+ * the pattern still matches something at all; and the three tables an
+ * `openssl = …` would have to appear in survived the strip, which is what proves
+ * the negative is being taken over the place it is about.
+ *
+ * ⚠ A red on the first half means the explanation went, and that is worth a red:
+ * this absence is a measurement — `cargo tree --target aarch64-linux-android`
+ * carries no `openssl-sys` — and an absence whose reason has been deleted is the
+ * next person's dependency.
+ */
+report(
+  "and that negative is taken over a string the dependency tables survived",
+  /openssl/.test(cargoToml) &&
+    /^\[dependencies\]$/m.test(cargoCode) &&
+    /^\[target\.'cfg\(target_os = "android"\)'\.dependencies\]$/m.test(cargoCode) &&
+    /^reqwest = \{/m.test(cargoCode),
+  `${cargoToml.length - cargoCode.length} characters of comment removed, ${
+    cargoCode.split("\n").filter((line) => /^[a-z][\w-]* = /.test(line)).length
+  } key lines left`,
+);
+
+/* ------------------------------------------------------------------ *
+ * Android: one symbol, one manifest, and the three halves of TLS
+ *
+ * ⚠ **Nothing on this checkout can compile Android, and for as long as that was
+ * true nothing read it either.** Homebrew's cargo, no `rustup`, no NDK — so
+ * `cargo build --target aarch64-linux-android` is not available here, and
+ * `.github/workflows/check.yml`'s `native-android` job is where that arm is
+ * compiled at all. But a compiler is a compiler: it cannot see a JNI symbol that
+ * no longer matches the Kotlin looking it up, an `android:allowBackup` flipped
+ * back to the template's default, or a class R8 deleted on the way into the APK.
+ * Every one of those compiles, links, signs and installs.
+ *
+ * ⚠ And **`gen/android` is generated**, which is what makes all of it one class
+ * of failure rather than three. `tauri android init` writes that project from its
+ * own templates and would overwrite every file this section reads;
+ * `native-packaging.md` records it shipping Tauri's icons three builds running
+ * for exactly that reason, and the directory is committed so that it *can* be
+ * edited. Nothing else in this repository would notice the edits going away.
+ *
+ * So this section is the half of the Android story that is text, and its subject
+ * is the one the whole file has: **a rule written down in more than one place,
+ * with nothing comparing the copies.**
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nAndroid: the symbol, the manifest, and what R8 is told to keep\n");
+
+const ANDROID_DIR = `${TAURI_DIR}/gen/android`;
+const gradleKts = read(`${ANDROID_DIR}/app/build.gradle.kts`);
+const gradleCode = kotlinCode(gradleKts);
+const proguard = read(`${ANDROID_DIR}/app/proguard-rules.pro`);
+const proguardCode = proguard
+  .split("\n")
+  .filter((line) => !/^\s*#/.test(line))
+  .join("\n");
+const cargoLock = read(`${TAURI_DIR}/Cargo.lock`);
+/*
+ * The strips this section rests on, each with the control `bootCode` wrote down
+ * first: a pattern over a derived string passes when the derivation returns
+ * nothing, and every assertion below is such a pattern.
+ *
+ * `proguard-rules.pro` is *mostly* comment — the keep rule carries ten lines of
+ * measurement above it and the template's own commented-out examples above that
+ * — so a strip that took the rule with them would leave the TLS line below green
+ * over an APK with nothing kept in it. Hence the second half: something was
+ * removed **and** something is left.
+ */
+check("the Gradle script's code survived the comment strip", gradleKts.length > gradleCode.length, true);
+check(
+  "and the keep file's did, without taking the rule with it",
+  proguard.length > proguardCode.length && proguardCode.trim().length > 0,
+  true,
+);
+
+/* ── the one symbol, derived from the Kotlin and differenced against the Rust ── */
+
+/**
+ * ⚠ **One identifier is written down in five files and nothing compared them.**
+ *
+ * `MainActivity.kt` declares `external fun initNdkContext`; the JVM turns that
+ * into the symbol it looks for in the loaded library by JNI's own mangling rule —
+ * `Java_`, then the package with every `.` as `_`, then the class, then the
+ * method — and `credential.rs` exports that string **as a literal function
+ * name**. Between them sit three more copies of the package: `namespace` and
+ * `applicationId` in `build.gradle.kts`, and `identifier` in `tauri.conf.json`,
+ * which is the one nobody thinks of as an Android file and is what a re-run of
+ * `tauri android init` **derives the Kotlin package from**.
+ *
+ * ⚠ **What a mismatch costs, and why no compiler sees it.** Rust exports whatever
+ * name it is given, and the JVM resolves an `external fun` lazily, at the first
+ * call. So a renamed method, a renamed class, or a package Tauri regenerated from
+ * a changed `identifier` all produce a clean
+ * `cargo clippy --target aarch64-linux-android`, a clean Gradle build, a signed
+ * APK — and an `UnsatisfiedLinkError` thrown out of `onCreate` on first launch.
+ * `credential.rs` records what the *absence* of that one call already cost: the
+ * first Android build panicked inside `setup` before drawing a pixel.
+ *
+ * ⚠ **A derivation, not a count and not a floor.** The expected symbol is built
+ * from the Kotlin side and the two sets are compared for equality, so a Kotlin
+ * `external fun` with no Rust export, a Rust export with no Kotlin declaration, a
+ * renamed package and a second symbol added to one side alone are each a
+ * different red line. A count would survive a *swap*, and a floor cannot see a
+ * skipped item — which is the lesson `readStored`'s census three sections up is
+ * already written out of.
+ *
+ * Both sides are read comment-stripped, because each quotes the other: the
+ * docblock above the Rust export explains the JNI plumbing, and `MainActivity.kt`
+ * names the Rust symbol in full — *"`credential.rs`'s
+ * `Java_com_reemoat_app_MainActivity_initNdkContext`"* — so over raw text one
+ * side's prose satisfies the other side's pattern with no code between them.
+ */
+const KOTLIN_MAIN = `${ANDROID_DIR}/app/src/main/java/com/reemoat/app/MainActivity.kt`;
+const activityRaw = read(KOTLIN_MAIN);
+const activity = kotlinCode(activityRaw);
+check("the activity's code survived the comment strip", activityRaw.length > activity.length, true);
+
+const kotlinPackage = capture(activity, /^package ([A-Za-z_][\w.]*)\s*$/m);
+const kotlinClass = capture(activity, /^class (\w+)\s*:/m);
+check("the activity names a package", kotlinPackage !== null, true);
+check("and a class", kotlinClass !== null, true);
+/*
+ * ⚠ **And the file sits where its own package says it does.** Kotlin compiles a
+ * source file whose directory disagrees with its `package` declaration without a
+ * word, but `tauri android init` writes — and overwrites — *by directory*. So a
+ * package changed without moving the file leaves the next init generating a
+ * second `MainActivity` beside this one, with Tauri's body in it and no
+ * `initNdkContext` at all, while this one goes on compiling. Derived rather than
+ * restated, so the literal path read above is differenced against the only thing
+ * that decides it.
+ */
+check(
+  "and the file sits in the directory that package names",
+  KOTLIN_MAIN,
+  `${ANDROID_DIR}/app/src/main/java/${(kotlinPackage ?? "").split(".").join("/")}/${kotlinClass}.kt`,
+);
+
+/**
+ * The symbol the JVM will look for, by JNI's own mangling rule.
+ *
+ * `Java_`, then the package segments, the class and the method joined by `_`,
+ * with every `_` *inside* a name doubled to `_1` — the escape that stops `a_b.C`
+ * and `a.b_C` naming one symbol. A `$` would become `_00024` and a non-ASCII
+ * character `_0xxxx`; neither can occur here, because every name reaching this is
+ * captured with `\w`, which admits neither. An overloaded native method takes a
+ * `__` suffix and an encoded signature — none of these is overloaded, and one
+ * that became so needs this function told rather than left to answer a string
+ * that is confidently wrong.
+ */
+const jniSymbol = (pkg: string, cls: string, method: string): string =>
+  `Java_${[...pkg.split("."), cls, method].map((part) => part.replace(/_/g, "_1")).join("_")}`;
+
+const declaredExternals = [
+  ...activity.matchAll(/^\s*(?:private |internal |public |protected )?external fun (\w+)\(/gm),
+]
+  .map((m) => m[1])
+  .filter((name): name is string => name !== undefined)
+  .sort();
+const wantedSymbols = declaredExternals
+  .map((name) => jniSymbol(kotlinPackage ?? "", kotlinClass ?? "", name))
+  .sort();
+report(
+  "the activity declares native methods at all",
+  declaredExternals.length > 0,
+  `${declaredExternals.length}: ${declaredExternals.join(", ")}`,
+);
+
+/**
+ * Every `Java_` export this crate carries, swept over the whole of `src/`.
+ *
+ * ⚠ **Written tolerant of the attribute list, which is the mistake this file has
+ * already made once.** `#[tauri::command]` as a bare literal dropped every
+ * command declared `#[tauri::command(async)]` — silently, in the direction that
+ * reads as passing — and the shape is here twice over: the export carries
+ * `#[cfg(target_os = "android")]` **and** `#[unsafe(no_mangle)]`, one of which is
+ * an attribute with an argument list inside an attribute with an argument list.
+ * So the run is `(?:#\[[^\]]*\]\s*)*` and every modifier before `extern` is
+ * optional.
+ *
+ * ⚠ **`"system"` or `"C"`, because both are JNI-callable and swapping them is not
+ * a compile error.** A census naming one would drop an export the day somebody
+ * tidied the ABI string, and a dropped item is precisely what a count cannot
+ * detect.
+ *
+ * Swept over every `.rs` rather than `credential.rs` alone, for the reason the
+ * stray-command sweep gives one section up: an export in another file is a door
+ * this census would simply not see.
+ */
+const JNI_EXPORT = /((?:#\[[^\]]*\]\s*)*)(?:pub\s+)?(?:unsafe\s+)?extern\s+"(?:system|C)"\s+fn\s+(Java_\w+)/g;
+const exportedSymbols: string[] = [];
+const looseSymbols: string[] = [];
+const unexported: string[] = [];
+for (const file of readdirSync(join(ROOT, TAURI_DIR, "src"))) {
+  if (!file.endsWith(".rs")) continue;
+  const code = rustCode(read(`${TAURI_DIR}/src/${file}`));
+  for (const match of code.matchAll(JNI_EXPORT)) {
+    const attrs = match[1] ?? "";
+    const name = match[2] ?? "";
+    exportedSymbols.push(name);
+    if (!/#\[(?:unsafe\()?no_mangle\)?\]/.test(attrs) || !/#\[cfg\(target_os = "android"\)\]/.test(attrs)) {
+      unexported.push(`${file}: ${name}`);
+    }
+  }
+  for (const match of code.matchAll(/\bfn\s+(Java_\w+)/g)) looseSymbols.push(match[1] ?? "");
+}
+check(
+  "every native method the activity declares is exported by the Rust, and nothing else is",
+  exportedSymbols.sort(),
+  wantedSymbols,
+);
+/*
+ * ⚠ **And the loose sweep, which is what catches an export that stopped being
+ * one.** `fn Java_…` with the `extern` taken off is a perfectly ordinary Rust
+ * function; the pattern above stops seeing it, the equality above reports it as
+ * *missing*, and a reader would conclude the Kotlin was wrong. Counted separately
+ * so the two failures read differently: the same names both ways means the shape
+ * is intact and only the set is in question.
+ */
+check("and no Java_ function in this crate is one the census could not see", looseSymbols.sort(), exportedSymbols);
+/*
+ * ⚠ **And the two attributes without which an export is not one.** `no_mangle` is
+ * what makes the symbol the function's own name — without it the linker writes
+ * `_ZN…` and the JVM finds nothing at the first call — and
+ * `#[cfg(target_os = "android")]` is what keeps a JNI entry point out of the
+ * desktop build, where `jni` is not a dependency at all. Checked per export
+ * rather than over the file, because a file with two exports and one attribute
+ * between them is exactly what a file-wide pattern cannot see.
+ */
+check("and each of them is unmangled and Android-only", unexported, []);
+
+/*
+ * ⚠ **And the library the activity loads is the one cargo builds.** Android's
+ * `System.loadLibrary("x")` resolves `libx.so` out of the APK's `jniLibs`, and
+ * the name in there is `[lib] name` from `Cargo.toml` — a fourth copy of a string
+ * nothing compared. Renaming the crate's lib without the `loadLibrary` call is
+ * the same `UnsatisfiedLinkError`, from the same `onCreate`, on a build that
+ * compiled and signed.
+ *
+ * `cdylib` with it, because that is the crate type producing the `.so` at all: a
+ * `[lib]` that lost it still builds `staticlib` and `rlib`, cargo says nothing,
+ * Gradle packages no shared object, and the failure is the same error from a
+ * directory that is simply empty.
+ */
+const loadedLibrary = capture(activity, /System\.loadLibrary\("(\w+)"\)/);
+check("the activity loads a library by name", loadedLibrary !== null, true);
+check("and it is the one this crate's [lib] produces", capture(cargoCode, /^\[lib\]\s*\nname = "(\w+)"/m), loadedLibrary);
+check(
+  "which is built as a shared object Android can load",
+  (capture(cargoCode, /crate-type = \[([^\]]*)\]/) ?? "").includes(`"cdylib"`),
+  true,
+);
+/*
+ * ⚠ **And the package, in the three other places it is written down.**
+ * `namespace` is what Gradle compiles the Kotlin under, `applicationId` is what
+ * the APK installs as, and `identifier` is neither — it is the seed
+ * `tauri android init` derives the Kotlin package from, so changing it and
+ * re-running init regenerates `MainActivity.kt` under a new package while
+ * `credential.rs`'s literal symbol stays exactly where it was.
+ *
+ * Compared as one set rather than as three pairs, so a failure names every copy
+ * that disagrees instead of the first one it reaches.
+ */
+check(
+  "the identifier, both Gradle names and the Kotlin package are one string",
+  [
+    conf["identifier"],
+    capture(gradleCode, /^\s*namespace = "([\w.]+)"\s*$/m),
+    capture(gradleCode, /^\s*applicationId = "([\w.]+)"\s*$/m),
+  ],
+  [kotlinPackage, kotlinPackage, kotlinPackage],
+);
+
+/* ── the manifest, and the two channels a device key must not leave by ────── */
+
+/**
+ * ⚠ **The device's X25519 private key can sit in a file, and Android ships two
+ * mechanisms whose whole job is to copy that file off the phone.**
+ *
+ * `config.rs`'s `read_device_key_fallback` exists because a keyring write can be
+ * accepted and lost; where it is taken, `server.json` in the app-private
+ * directory holds the chosen control plane, the device id and the device private
+ * key itself — which is why `write_stored` goes to the length of an `0600` set at
+ * `open` time and a rename onto a fresh inode. **Auto Backup** uploads that
+ * directory to the person's Google Drive and **`adb backup`** pulls it to a
+ * laptop, and both are on by default. Everything `e2ee.md` claims about what a
+ * capability stolen off the wire is worth rests on that key not being anywhere
+ * else.
+ *
+ * ⚠ **Three attributes, because the platform changed the answer twice.**
+ * `allowBackup="false"` is the whole of it up to API 30; `fullBackupContent` is
+ * the API-23-to-30 spelling of the same refusal; and from API 31 up it is the
+ * `dataExtractionRules` file that decides. A phone in the field is on exactly one
+ * of those levels and nobody chooses which, so all three are asserted rather than
+ * the newest.
+ */
+const manifestXml = read(`${ANDROID_DIR}/app/src/main/AndroidManifest.xml`);
+const manifest = xmlCode(manifestXml);
+check("the manifest's markup survived the comment strip", manifestXml.length > manifest.length, true);
+const application = /<application\b[\s\S]*?>/.exec(manifest)?.[0] ?? "";
+check("the application element was found to read", application.length > 0, true);
+check(
+  "nothing this app stores may leave by either backup channel",
+  [
+    /android:allowBackup="false"/.test(application),
+    /android:fullBackupContent="false"/.test(application),
+    /android:dataExtractionRules="@xml\/\w+"/.test(application),
+  ],
+  [true, true, true],
+);
+/*
+ * ⚠ **The attribute names a resource, and the resource is where the refusal
+ * actually lives.** `dataExtractionRules` pointing at a file that is not there is
+ * a build failure; pointing at one that excludes nothing is not. So the attribute
+ * alone asserts that somebody typed an opt-out, never that they wrote one.
+ * Resolved by the name the manifest gives rather than by a literal path, so
+ * renaming the resource cannot leave this reading a file nothing refers to.
+ */
+const rulesName = capture(application, /android:dataExtractionRules="@xml\/(\w+)"/) ?? "";
+const rulesPath = `${ANDROID_DIR}/app/src/main/res/xml/${rulesName}.xml`;
+check("the rules the manifest names are a file that is there", existsSync(join(ROOT, rulesPath)), true);
+const rulesXml = existsSync(join(ROOT, rulesPath)) ? read(rulesPath) : "";
+const rules = xmlCode(rulesXml);
+check("the rules' markup survived the comment strip", rulesXml.length > rules.length, true);
+/*
+ * ⚠ **Both channels, each read out of its own element rather than out of the
+ * file.** Cloud backup and device transfer are two separate opt-outs and a file
+ * excluding only one is silent on the other — so a single `domain="root"`
+ * anywhere in the file is the assertion that cannot fail. Measured: delete the
+ * `device-transfer` exclusion and a file-wide search still answers `true`.
+ * `between` answers the empty string unless both anchors are present and in
+ * order, which is what makes the deleted-element case a red rather than a
+ * borrowed `ok`.
+ */
+for (const channel of ["cloud-backup", "device-transfer"] as const) {
+  const section = between(rules, `<${channel}>`, `</${channel}>`);
+  check(`${channel} was found to read`, section.length > 0, true);
+  check(`and ${channel} excludes the whole app-private tree`, /<exclude\s+domain="root"\s*\/>/.test(section), true);
+}
+/*
+ * ⚠ **And the one component that publishes a door into that same directory.**
+ * `androidx.core.content.FileProvider` is what hands another app a `content:` URI
+ * for a file this one holds, and `file_paths.xml` scopes it to `.` — the whole
+ * external and cache trees. `exported="false"` is what keeps that door usable
+ * only through a URI this app granted; exported, any app on the phone could ask
+ * the provider directly. Tauri's template ships it `false` and nothing here would
+ * notice it becoming `true`.
+ *
+ * Asserted **inside the element**, with the count beside it, because the
+ * file-wide form is green in both wrong directions at once: the activity above is
+ * legitimately `exported="true"`, and a second, exported provider added below
+ * would be covered by this one's `false`.
+ */
+const provider = /<provider\b[\s\S]*?>/.exec(manifest)?.[0] ?? "";
+check("there is exactly one provider to check", (manifest.match(/<provider\b/g) ?? []).length, 1);
+check(
+  "and the file provider is unexported in the element that names it",
+  [/android:name="androidx\.core\.content\.FileProvider"/.test(provider), /android:exported="false"/.test(provider)],
+  [true, true],
+);
+/*
+ * ⚠ **And the build type a release is actually built with, read as its own
+ * block.** `isMinifyEnabled = true` is the precondition that makes the keep rule
+ * below load-bearing rather than decoration. `isDebuggable` is what would make
+ * the shipped process attachable with `run-as` and `jdb` — on a phone that means
+ * the device key and everything the app can reach, which is the same thing
+ * `get-task-allow` is asserted absent for one platform over.
+ *
+ * Read out of `getByName("release")` rather than out of the file, because the
+ * debug block three lines above legitimately sets `isDebuggable = true` and
+ * `isJniDebuggable = true`. A file-wide search for either is green whichever
+ * block it is in.
+ */
+const releaseBuild = between(gradleCode, `getByName("release") {`, "kotlinOptions {");
+check("the release build type was found to read", releaseBuild.length > 0, true);
+check(
+  "a release minifies and is not debuggable",
+  [/isMinifyEnabled = true/.test(releaseBuild), /isDebuggable/.test(releaseBuild), /isJniDebuggable/.test(releaseBuild)],
+  [true, false, false],
+);
+
+/* ── Android TLS: three halves of one fact ────────────────────────────────── */
+
+/**
+ * ⚠ **"Android TLS works" is three edits in three languages, and each one alone
+ * is silent.**
+ *
+ * `reqwest` 0.13 on this target resolves to rustls with `rustls-platform-verifier`
+ * — measured, `cargo tree --target aarch64-linux-android` carries no
+ * `openssl-sys` at all — and that crate is the only reason the `/v1` leg honours
+ * the same `network_security_config` the webview legs do, user-installed CAs
+ * included. What it asks for in return is three things:
+ *
+ *   1. **The Rust initialises it, from the JNI entry point.** `src/android.rs` in
+ *      `rustls-platform-verifier` 0.7.0 opens *"On Android, initialization must be
+ *      done before any verification is attempted"*, and its `global()` is an
+ *      `.expect("Expect rustls-platform-verifier to be initialized")` — a
+ *      **panic**, on the first HTTPS request, out of a build that compiled clean.
+ *      Measured 2026-09-19: no init call existed anywhere in this tree.
+ *   2. **The Kotlin half is in the APK.** The verifier calls
+ *      `org.rustls.platformverifier.CertificateVerifier` over JNI; that class
+ *      ships as an `.aar` inside the `rustls-platform-verifier-android` crate, so
+ *      `build.gradle.kts` adds the crate's own directory as a Maven repository
+ *      and depends on it.
+ *   3. **R8 is told to keep it.** Measured 2026-09-19 on the signed release APK
+ *      this checkout had already built: with the dependency present and no keep
+ *      rule, `outputs/mapping/universalRelease/usage.txt` listed all five
+ *      `org.rustls.platformverifier` classes as removed, `classes.dex` carried
+ *      none of them, and `libreemoat_native_lib.so` still carried the class name
+ *      it was about to `FindClass`. Debug builds were green throughout, because
+ *      `isMinifyEnabled` is false there — so it fails only in a build somebody
+ *      ships.
+ *
+ * ⚠ **Asserted as one line, deliberately.** The state a review actually found was
+ * 2 and 3 present and 1 absent: an `.aar` and a keep rule protecting a class
+ * nothing would ever call, with every gate green. Three separate `ok` lines would
+ * have read as two-thirds working; one line reads as the fact it is.
+ *
+ * ⚠ **And the init is asserted *inside the JNI entry point*, by extraction.** It
+ * has to run before anything makes an HTTPS request and it needs a `JNIEnv`,
+ * which is exactly what `MainActivity.onCreate` already calls into before
+ * `super.onCreate` — the same call the Android context depends on. A pattern over
+ * the whole file would pass on an init sitting in a function nothing reaches.
+ */
+const jniBodies = [...credentialCode.matchAll(/extern\s+"(?:system|C)"\s+fn\s+Java_\w+\([\s\S]*?\n\}/g)].map(
+  (match) => match[0],
+);
+check("the JNI entry point was found to read, and there is one of it", jniBodies.length, 1);
+const jniEntry = jniBodies[0] ?? "";
+check(
+  "Android TLS is one fact: initialised in the JNI entry, in the APK, and kept from R8",
+  [
+    /rustls_platform_verifier::android::init_\w+\(/.test(jniEntry),
+    /implementation\("rustls:rustls-platform-verifier/.test(gradleCode),
+    /-keep[^\n]*org\.rustls\.platformverifier/.test(proguardCode),
+  ],
+  [true, true, true],
+);
+/*
+ * ⚠ **And exactly one copy of the crate in the tree, which is how this pair is
+ * most likely to break next.** The init call needs `rustls-platform-verifier`
+ * named in `Cargo.toml`; `reqwest` already depends on it transitively. Name a
+ * semver-incompatible version and cargo resolves **two**, happily and without a
+ * warning — the app then initialises the global of the copy it can see while
+ * reqwest's rustls reads the other one's, which is still unset. The symptom is
+ * the `.expect` panic the init was added to prevent, out of a build where the
+ * init is plainly there.
+ *
+ * Read off `Cargo.lock`, because the lock is what was actually resolved and the
+ * manifest is only what was asked for.
+ */
+for (const crate of ["rustls-platform-verifier", "rustls-platform-verifier-android"] as const) {
+  check(
+    `the tree resolves exactly one ${crate}`,
+    (cargoLock.match(new RegExp(`^name = "${crate}"$`, "gm")) ?? []).length,
+    1,
+  );
+}
+/*
+ * ⚠ **And the API level the NDK is asked for is the one Gradle declares.**
+ * `minSdk` is part of the clang triple the `native-android` job builds with, and
+ * that job's own comment says so in as many words — *"a floor raised there has to
+ * be raised here too"* — while nothing compared them. Raise `minSdk` and CI goes
+ * on compiling against the older API, which is the direction with no symptom: it
+ * links, and the symbols the newer floor promised are the ones it did not use.
+ * Lower it and CI compiles against an API the installed app may not have, which
+ * fails at `dlopen` on a real phone and nowhere else.
+ *
+ * Swept as a set rather than matched once, because the triple is written four
+ * times in that job — a probe, a message and two exports — and one of them moving
+ * alone is the same drift one level down.
+ */
+const ndkApiLevels = [
+  ...new Set(
+    [...checkWorkflow.matchAll(/aarch64-linux-android(\d+)-clang/g)]
+      .map((match) => match[1])
+      .filter((level): level is string => level !== undefined),
+  ),
+];
+check("the Android CI leg names exactly one API level", ndkApiLevels.length, 1);
+check("and it is the minSdk Gradle declares", ndkApiLevels[0], capture(gradleCode, /^\s*minSdk = (\d+)\s*$/m));
 
 /*
  * ── what the env file already on a computer is allowed to say ──────────────
@@ -1829,6 +2655,230 @@ check("no Apple development team is committed", ((bundle["iOS"] ?? {}) as Record
  * are — this file's own precedent for one rule with copies on both sides of the
  * bridge.
  */
+/*
+ * ── the Android repairs, and the shape of each one's failure ───────────────
+ *
+ * ⚠ **Everything below is about code no gate in this repository compiled until
+ * `native-android` existed, and two of these were live defects at once.** The
+ * arm is `#[cfg(target_os = "android")]`, so `cargo clippy --all-targets` on the
+ * macOS runner never sees it: `--all-targets` is every *crate* target — lib,
+ * bin, tests, examples — on the host, never another platform. What that gap held
+ * was a TLS stack that was never initialised and a Kotlin class R8 deleted out of
+ * the signed APK. Both compiled clean, and a regex is all that can watch them
+ * from here.
+ */
+check(
+  "nothing in the JNI entry point can end the process, and a null is refused before either half",
+  [
+    (jniEntry.match(/catch_unwind/g) ?? []).length,
+    /raw_env\.is_null\(\) \|\| raw_context\.is_null\(\)/.test(jniEntry),
+  ],
+  [2, true],
+);
+/*
+ * ⚠ **Two guards rather than one, and the count is the assertion.** A panic out
+ * of `extern "system"` aborts, and there is a reachable one on each side:
+ * `ndk_context::initialize_android_context` ends `assert!(previous.is_none())`
+ * and `android-native-keyring-store` exports a second initialiser from this same
+ * `.so`. Folded into one guard, that abort would also stop the TLS init — and the
+ * store has a documented degraded mode where TLS has none. The window stops at
+ * `fn adopt_context`, so a guard *moved* into the helper still leaves this at 1.
+ */
+check(
+  "and the two halves are guarded independently rather than together",
+  (between(credentialCode, "fn Java_com_reemoat_app_MainActivity_initNdkContext(", "fn adopt_context").match(
+    /catch_unwind/g,
+  ) ?? []).length,
+  2,
+);
+/*
+ * ⚠ **The store caches its success and retries its failure, and the asymmetry is
+ * the point.** It used to hold the whole `Result`, so one `probe()` that ran
+ * before the context was adopted told somebody their sign-in would not be kept
+ * for the rest of the process — the app went on saying it after the cause was
+ * gone. `adopt_context` is the opposite case and states why: a context may be
+ * written once, so there the *attempt* is what is remembered.
+ */
+const androidEntry = between(credentialCode, '#[cfg(target_os = "android")]\nfn entry(', "fn install_default_store");
+check(
+  "a store that could not be reached is retried, and only the success is remembered",
+  [
+    androidEntry.length > 0,
+    /OnceLock<\(\)>/.test(androidEntry),
+    /OnceLock<Result</.test(androidEntry),
+  ],
+  [true, true, false],
+);
+/*
+ * ⚠ **And the order in the activity, which is the whole of why any of it works.**
+ * `initNdkContext` has to run before `super.onCreate` — that is what calls into
+ * Rust and reaches both stores — and the library has to be loaded before the
+ * `external fun` can resolve at all. Three indices, compared rather than trusted.
+ */
+const loadAt = activity.indexOf("System.loadLibrary");
+const adoptAt = activity.indexOf("initNdkContext(applicationContext)");
+const tauriAt = activity.indexOf("super.onCreate");
+check(
+  "the library loads, then the context is adopted, then Tauri starts",
+  [loadAt >= 0, adoptAt > loadAt, tauriAt > adoptAt],
+  [true, true, true],
+);
+/*
+ * ⚠ **The renamed `jni` is the major the verifier itself asks for.** `init_with_env`
+ * takes a `&mut jni::Env`, a type `jni` 0.21 does not have. Two majors coexist here
+ * deliberately — tauri, tao, wry and the keyring store are all on 0.21 — so the one
+ * this crate names for the verifier has to track the verifier's own requirement and
+ * nothing else. Read out of the vendored manifest rather than written down twice.
+ */
+const renamedJni = capture(cargoToml, /^jni22 = \{ package = "jni", version = "([0-9.]+)"/m) ?? "";
+check(
+  "the renamed jni is a 0.22, which is the major the verifier's API is written against",
+  renamedJni.startsWith("0.22"),
+  true,
+);
+/*
+ * ⚠ **The Gradle distribution is pinned by hash as well as by name, together.**
+ * `distributionUrl` is a location: `gradlew` fetches ~130 MB and executes it as
+ * this user, so without the sum a redirected answer is arbitrary code in a build
+ * whose APK is still signed with the real key. Asserted as a *pair* because a
+ * version moved past its sum is a refusal nobody reads as "the second edit was
+ * missed".
+ */
+const wrapperProps = read(`${ANDROID_DIR}/gradle/wrapper/gradle-wrapper.properties`);
+const wrapperVersion = capture(wrapperProps, /distributionUrl=.*\/gradle-([0-9.]+)-bin\.zip/);
+const wrapperSum = capture(wrapperProps, /distributionSha256Sum=([0-9a-f]{64})/);
+check(
+  "the Gradle distribution is pinned by version and by hash, together",
+  [wrapperVersion !== null, wrapperSum !== null],
+  [true, true],
+);
+/*
+ * ⚠ **And the committed wrapper jar is the reviewed one, byte for byte.** It is
+ * the one file in this tree no reviewer can read: 59 KB of bytecode that `gradlew`
+ * runs before anything else, committed because `gen/android` is. The sum is a
+ * change-detector rather than a proof of provenance — it records what was looked
+ * at — and a jar that moves without this line moving with it is the thing worth
+ * stopping.
+ */
+const wrapperJarSum = createHash("sha256")
+  .update(readFileSync(join(ROOT, `${ANDROID_DIR}/gradle/wrapper/gradle-wrapper.jar`)))
+  .digest("hex");
+check(
+  "and the wrapper jar is the reviewed one, byte for byte",
+  wrapperJarSum,
+  "e996d452d2645e70c01c11143ca2d3742734a28da2bf61f25c82bdc288c9e637",
+);
+/*
+ * ⚠ **The verifier is pinned and fenced, and the fence is the half that matters.**
+ * `latest.release` resolved across `google()` and `mavenCentral()` too, because the
+ * root `allprojects` block puts them in scope for this module — so anything
+ * published under group `rustls` at a higher version would have replaced the class
+ * that checks every certificate this app sees. `exclusiveContent` is what makes the
+ * on-disk repository the only one that may serve it; pinning alone does not.
+ */
+check(
+  "the verifier is pinned, read from cargo, and served only by the on-disk repository",
+  [
+    /implementation\("rustls:rustls-platform-verifier:\$rustlsVersion"\)/.test(gradleCode),
+    /latest\.release/.test(gradleCode),
+    /exclusiveContent/.test(gradleCode),
+    /includeGroup\("rustls"\)/.test(gradleCode),
+  ],
+  [true, false, true, true],
+);
+/*
+ * ⚠ **Nothing claims a per-build-type cleartext policy the platform ignores.**
+ * `android:usesCleartextTraffic` is ignored whenever `android:networkSecurityConfig`
+ * is set, on every level at or above this app's `minSdk` — so the attribute read as
+ * a deliberate release-build decision while deciding nothing, and the two
+ * `manifestPlaceholders` feeding it decided nothing either. The config is the one
+ * authority, and it stays attached; `minSdk` is what keeps that true.
+ */
+check(
+  "nothing claims a per-build-type cleartext policy the platform ignores",
+  [
+    /usesCleartextTraffic/.test(manifest),
+    /manifestPlaceholders\[\"usesCleartextTraffic\"\]/.test(gradleCode),
+    /android:networkSecurityConfig="@xml\/network_security_config"/.test(application),
+    (capture(gradleCode, /minSdk = (\d+)/) ?? "0") >= "24",
+  ],
+  [false, false, true, true],
+);
+/*
+ * ⚠ **The four attributes that keep the device key out of a cloud backup.** An
+ * X25519 static lives in this app's private storage; `allowBackup="false"` plus the
+ * extraction rules are what stop Auto Backup and `adb backup` carrying it off the
+ * device. A future `tauri android init` rewrites this manifest with Tauri's
+ * defaults, and every one of these is absent from those.
+ */
+check(
+  "the manifest still carries all four hardening attributes",
+  [
+    /android:allowBackup="false"/.test(application),
+    /android:fullBackupContent="false"/.test(application),
+    /android:dataExtractionRules="@xml\/data_extraction_rules"/.test(application),
+    /android:networkSecurityConfig="@xml\/network_security_config"/.test(application),
+  ],
+  [true, true, true, true],
+);
+/*
+ * ⚠ **And everything `tauri android init` rewrites is ignored rather than
+ * committed, the one with absolute paths in it first.** `tauri.settings.gradle`
+ * holds this machine's `CARGO_HOME`, so it cannot be committed and a clone must
+ * regenerate it — which is what `settings.gradle` applying it makes load-bearing.
+ * The census is over the two `.gitignore` files rather than over a list here,
+ * because a list here would be the third copy.
+ */
+const genIgnore = read(`${ANDROID_DIR}/.gitignore`) + "\n" + read(`${ANDROID_DIR}/app/.gitignore`);
+for (const regenerated of [
+  "/tauri.settings.gradle",
+  "/tauri.build.gradle.kts",
+  "/tauri.properties",
+  "/proguard-tauri.pro",
+  "/src/main/**/generated",
+]) {
+  check(`${regenerated} is ignored rather than committed`, genIgnore.includes(regenerated), true);
+}
+check(
+  "and settings.gradle still applies the ignored one, which is what a clone fails on first",
+  /apply from: 'tauri\.settings\.gradle'/.test(read(`${ANDROID_DIR}/settings.gradle`)),
+  true,
+);
+/*
+ * ⚠ **And not one committed file under `gen/android` writes an absolute path
+ * down.** That is the property that decides which half of this tree may be
+ * committed at all: a path into somebody's home directory is a file that builds on
+ * one machine. Swept over the text files rather than asserted of the four known
+ * ones, so a fifth arriving is caught.
+ */
+const ignoredHere = new Set(
+  genIgnore
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("/") && !line.includes("*"))
+    .map((line) => line.slice(1)),
+);
+const absolutePaths: string[] = [];
+const sweepAndroid = (dir: string, within: string): void => {
+  for (const name of readdirSync(join(ROOT, dir))) {
+    const rel = `${dir}/${name}`;
+    const here = within === "" ? name : `${within}/${name}`;
+    if (statSync(join(ROOT, rel)).isDirectory()) {
+      // Gradle's own output, and the `generated` package `init` rewrites.
+      if (!/^(build|\.gradle|\.kotlin|\.cxx|generated)$/.test(name)) sweepAndroid(rel, here);
+      continue;
+    }
+    if (!/\.(kt|kts|gradle|pro|xml|properties)$/.test(name)) continue;
+    // Anchored `.gitignore` entries name what a clone regenerates; those are
+    // allowed the machine's own paths, and `tauri.settings.gradle` is the reason
+    // this distinction exists at all.
+    if (ignoredHere.has(here) || ignoredHere.has(name)) continue;
+    if (/\/Users\/|\/home\/[a-z]/.test(read(rel))) absolutePaths.push(rel);
+  }
+};
+sweepAndroid(ANDROID_DIR, "");
+check("no committed file under gen/android writes an absolute path down", absolutePaths, []);
+
 process.stdout.write("\nthe env file's three answers, on both sides of the bridge\n");
 const daemonRs = read(`${TAURI_DIR}/src/daemon.rs`);
 const rustConfig = [...daemonRs.matchAll(/pub const CONFIG_[A-Z]+: &str = "([a-z]+)";/g)].map((m) => m[1]);

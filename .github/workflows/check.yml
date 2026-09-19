@@ -391,3 +391,205 @@ jobs:
       - name: tauri build
         if: '!cancelled()'
         run: pnpm --dir packages/native exec tauri build --no-bundle
+
+  # The Android arm of the Rust, compiled. Its own job on `ubuntu-latest` rather
+  # than a step in `native`, for two reasons that are both about the runner: the
+  # macOS images carry no Android NDK, and this leg wants no Node payload at all.
+  #
+  # ⚠ **It exists because that arm was compiled by nothing, and two
+  # shipping-breaking defects lived in the gap at once.** `cargo clippy
+  # --all-targets` in the job above means every *crate* target — lib, bin, tests,
+  # examples — on the **host**; it never crosses to another platform. So
+  # `credential.rs`'s `#[cfg(target_os = "android")]` half, its JNI export and
+  # `lib.rs`'s `#[cfg_attr(mobile, …)]` were checked only by `nativecheck`
+  # regexes, which cannot see a signature, a missing initialisation call or a
+  # wrong symbol. Measured 2026-09-19: `rustls-platform-verifier` was never
+  # initialised and every HTTPS call would have panicked, and R8 had stripped the
+  # verifier's Kotlin half out of the signed APK. Both compiled clean.
+  #
+  # ⚠ **`--lib`, and no `pnpm native:stage`.** A client build is
+  # `tauri.android.conf.json` and nothing else — `externalBin: null` and
+  # `resources: null`, which `tauri-build` reads at *compile* time — so there is
+  # no payload for `build.rs` to copy and the `ResourcePathNotFound` that forces
+  # staging in the `native` job cannot happen here. That this job passes with
+  # nothing staged is itself the assertion that the overlay works.
+  #
+  # ⚠ **This is a compile gate, not a bundle leg, and it deliberately carries no
+  # `target: android` matrix entry.** `deploycheck` greps this file for that key
+  # to decide whether a platform may join `RELEASE_APP_TARGETS` — and what
+  # publishing an APK needs is `tauri android build`: a Gradle run, an SDK, and
+  # the `gen/android` project, none of which `cargo clippy` touches. Satisfying
+  # the release gate from here would be the weaker check standing in for the
+  # stronger one. `android-apk` below is the job that may, because it is the one
+  # that actually assembles the artifact; this one exists beside it because it
+  # answers in two minutes rather than twenty and is what a Rust change wants.
+  #
+  # ⚠ **That key is written out in this comment now, and doing so used to satisfy
+  # the gate it explains.** The grep read this file as *text*, comments included,
+  # so the paragraph above had to describe the key without ever naming it — and
+  # nothing told the next person editing here that they were under that rule.
+  # `deploycheck` strips YAML comments before the grep now, and drives the
+  # stripping on fixtures of its own, so this is prose again rather than a
+  # tripwire.
+  native-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native/src-tauri
+          key: android
+
+      # The NDK the runner already has. Named through `ANDROID_NDK_LATEST_HOME`
+      # rather than a version, because pinning one here would be a third place a
+      # toolchain version is written down and the first that nothing compares.
+      #
+      # `24` is `minSdk` in `gen/android/app/build.gradle.kts`; the API level is
+      # part of the clang triple, so a floor raised there has to be raised here
+      # too. `ring`/`aws-lc-rs` build C from a build script, which is why a
+      # target-specific `CC` and `AR` are needed and not just a linker.
+      - name: the Android toolchain
+        run: |
+          set -euo pipefail
+          ndk=${ANDROID_NDK_LATEST_HOME:?the runner image carries no Android NDK}
+          bin=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
+          [ -x "$bin/aarch64-linux-android24-clang" ] || {
+            echo "no aarch64-linux-android24-clang under $bin" >&2
+            ls "$bin" | head -40 >&2
+            exit 1
+          }
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android24-clang"
+            echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$bin/llvm-ar"
+          } >> "$GITHUB_ENV"
+
+      - name: cargo clippy (aarch64-linux-android)
+        run: >
+          cargo clippy
+          --manifest-path packages/native/src-tauri/Cargo.toml
+          --target aarch64-linux-android --lib -- -D warnings
+
+  # The APK, actually assembled. The job that makes "Android builds" a statement
+  # about an artifact rather than about a regex.
+  #
+  # ⚠ **It exists because nothing ran Gradle, and the one defect that reached a
+  # shipped artifact could only be seen there.** `native-android` above compiles
+  # the Rust and stops; R8 runs in neither. Measured 2026-09-19 on a release APK:
+  # R8 had deleted all five `org.rustls.platformverifier.*` classes — the ones the
+  # Rust TLS stack looks up by name over JNI — while `classes.dex` still shipped
+  # and the `.so` still carried the string it was about to `FindClass`. Debug
+  # builds were unaffected, which is why it survived: `isMinifyEnabled` is false
+  # there. A keep rule fixes it and `nativecheck` asserts the rule is present, but
+  # a rule that is present and *ineffective* reads exactly the same to a regex.
+  # The dex census at the end of this job is the half no text can give.
+  #
+  # ⚠ **`gen/android` must be committed for this job to run at all.** It is a
+  # checked-in project, the way a checked-in Xcode project is — `.gitignore` says
+  # so in as many words — and `settings.gradle` is the first thing Gradle reads.
+  # A checkout without it fails at configuration, not at compile.
+  #
+  # ⚠ **Unsigned, and that is the point rather than a gap.** Signing needs the
+  # release keystore, which `release.yml`'s `app-android` job holds and a job that
+  # runs on every push must never see. R8 does not care: `isMinifyEnabled` is a
+  # property of the release build type, so the stripping this job exists to catch
+  # happens with or without a key.
+  android-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The key `deploycheck` reads to decide whether a platform may join
+    # `RELEASE_APP_TARGETS`. It belongs on this job and not on `native-android`,
+    # because this is the one that proves the artifact can be built at all.
+    strategy:
+      matrix:
+        include:
+          - target: android
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native/src-tauri
+          key: android-apk
+
+      # The NDK by version rather than "whatever the image has", because the
+      # clang triple below embeds the API level and the runner image moves.
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          local-cache: true
+
+      - run: pnpm install --frozen-lockfile
+
+      # `packages/native` is outside the workspace on purpose — the root install
+      # does not reach it, and the Tauri CLI lives there. `native.yml`'s sibling
+      # job says the same thing one file over.
+      - run: pnpm --dir packages/native install --frozen-lockfile
+
+      # The one thing a fresh checkout cannot supply: `tauri android init` writes
+      # it with this machine's `CARGO_HOME` in it, so it is gitignored and
+      # regenerated rather than committed. Everything else under `gen/android` is
+      # in the tree and must not be overwritten — `init` would revert six
+      # hand-edits, which `nativecheck` asserts are present.
+      - name: the one generated file a clone does not carry
+        run: pnpm --dir packages/native exec tauri android init --skip-targets-install
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+
+      - name: assemble the release APK
+        run: pnpm --dir packages/native exec tauri android build --apk --target aarch64
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+
+      # ── the census that no regex can stand in for ──────────────────────────
+      #
+      # The verifier's Kotlin half has to survive R8 and be *in* the dex. Read out
+      # of the assembled APK rather than out of the build log, because R8 reports
+      # what it removed in `usage.txt` and a reader who trusts that file is one
+      # rename away from reading the wrong one.
+      - name: the TLS verifier survived R8
+        run: |
+          set -euo pipefail
+          apk=$(find packages/native/src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)
+          [ -n "$apk" ] || { echo "no APK was produced" >&2; exit 1; }
+          echo "APK: $apk ($(wc -c < "$apk") bytes)"
+          work=$(mktemp -d)
+          unzip -q "$apk" -d "$work" 'classes*.dex' 'lib/arm64-v8a/*.so'
+          if ! grep -qa platformverifier "$work"/classes*.dex; then
+            echo "::error::R8 stripped org.rustls.platformverifier out of the APK." >&2
+            echo "The Rust TLS stack looks that class up by name over JNI, so every" >&2
+            echo "HTTPS call would fail at run time. The keep rule in" >&2
+            echo "gen/android/app/proguard-rules.pro is what stops it." >&2
+            exit 1
+          fi
+          echo "ok  the verifier's Kotlin half is in classes.dex"
+          # And the other side of the same fact: the Rust really does look it up,
+          # so the keep rule is load-bearing rather than kept out of habit.
+          grep -qa 'org.rustls.platformverifier' "$work"/lib/arm64-v8a/*.so \
+            && echo "ok  and the native library still resolves it by name"

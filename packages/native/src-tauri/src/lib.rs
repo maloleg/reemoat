@@ -67,6 +67,21 @@ fn is_our_own(url: &url::Url) -> bool {
     }
 }
 
+/// ⚠ **The attribute is what makes a mobile build a build rather than a library
+/// nobody can start, and it was missing for as long as `main.rs` has claimed the
+/// layout was ready.**
+///
+/// `main.rs` says *"a mobile target does not use this file at all: `tauri ios` /
+/// `tauri android` build the library and call `run()` from a generated shim"* —
+/// true, and incomplete. The shim reaches this function through symbols the macro
+/// emits, and without it the `.so` links, `cargo build` is green, and the APK
+/// assembly stops with *"does not include required runtime symbols"*. Measured
+/// 2026-09-19: that is exactly where the first Android build in this project's
+/// history stopped.
+///
+/// `mobile` is `tauri-build`'s own cfg alias — `target_os` is `android` or `ios`
+/// — so there is nothing to declare and nothing that can disagree with it.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

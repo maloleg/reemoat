@@ -13,7 +13,24 @@
 //! A machine token is 300 seconds long and derived; it belongs in
 //! `packages/web/src/machine.ts` and nowhere near an OS keyring.
 
-use keyring::Entry;
+/*
+ * ⚠ **Two stores, one set of verbs, and the `use` is where they are held apart.**
+ *
+ * The desktop arm is `keyring`'s `v1` façade — macOS Keychain, Windows Credential
+ * Manager, the freedesktop Secret Service. That façade **refuses Android and iOS
+ * at run time while compiling** (`keyring-4.2.0/src/v1.rs:109-128`), so the
+ * mobile arm reaches past it to `keyring-core` and names its backing store
+ * itself.
+ *
+ * Aliased rather than branched at every call site: both `Entry` types expose the
+ * same three methods, so `PlatformStore`'s impl below is one body that compiles
+ * against whichever arm is active. A second impl would be two places for
+ * `account_for`'s scoping rule to drift apart.
+ */
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use keyring::{Entry, Error as StoreError};
+#[cfg(target_os = "android")]
+use keyring_core::{Entry, Error as StoreError};
 
 /// One constant, because Windows keys on a target string and macOS on
 /// service+account, and two spellings would be two stores on two platforms.
@@ -76,6 +93,36 @@ pub trait SecretStore {
     fn erase(&self, key: &str, scope: &str) -> Result<(), String>;
 }
 
+/// ⚠ **The one platform failure in this file that compiles, and therefore the one
+/// that has to be made not to.**
+///
+/// `keyring`'s `v1` feature is macOS Keychain, Windows Credential Manager and the
+/// freedesktop Secret Service — and on iOS or Android its `set_credential_store`
+/// returns `Err(Invalid("platform", "must be macOS, Windows, or a non-iOS,
+/// non-Android *nix variant"))` at **run time**, having compiled perfectly
+/// (`keyring-4.2.0/src/v1.rs:109-128`, read on this checkout).
+///
+/// So an iOS build made today would link, start, draw, and silently never keep a
+/// sign-in: `entry()` answers `Err`, `read` answers `None`, `write` fails,
+/// `probe()` is `false`, and the person retypes their password on every launch
+/// while the app tells them their store is not durable. Every other thing an iOS
+/// build is missing — `gen/apple`, a toolchain, a signing key — fails loudly at
+/// build or install time. This one passes every gate and arrives at a user.
+///
+/// A refusal at compile time is the only place it can be caught, so it is here.
+/// **Android took the other road and is already written**: `entry()` below names
+/// `android-native-keyring-store` through `keyring-core`. **Deleting this is a
+/// step in writing the iOS arm, not a step before it**: what replaces it is that
+/// same shape against `apple-native-keyring-store`. `probe()` is what will say
+/// whether the replacement actually works, and it needs no change either way.
+#[cfg(target_os = "ios")]
+compile_error!(
+    "keyring's `v1` feature has no credential store on iOS or Android: it compiles \
+     and then refuses at run time, so this build would never keep a sign-in. Write \
+     the mobile `SecretStore` arm (keyring-core + apple-native-keyring-store / \
+     android-native-keyring-store) and delete this refusal in the same change."
+);
+
 /// The one implementation: the platform's own credential store.
 pub struct PlatformStore;
 
@@ -101,7 +148,7 @@ impl SecretStore for PlatformStore {
         match entry.delete_credential() {
             Ok(()) => Ok(()),
             // Deleting what is not there is the outcome the caller wanted.
-            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(StoreError::NoEntry) => Ok(()),
             Err(e) => Err(format!("could not clear the sign-in: {e}")),
         }
     }
@@ -115,8 +162,226 @@ fn account_for(key: &str, scope: &str) -> String {
     format!("{key}#{scope}")
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn entry(account: &str) -> Result<Entry, String> {
     Entry::new(SERVICE, account).map_err(|e| format!("no credential store: {e}"))
+}
+
+/// Hand the Android application context to `ndk-context`, from the activity.
+///
+/// ⚠ **Nothing else does this, and that was measured the hard way.**
+/// `android-native-keyring-store` reaches the context through `ndk-context`, and
+/// `ndk_context::android_context()` is an `.expect()` — it **panics** when the
+/// context was never set. The crate ships a Kotlin companion of its own that
+/// calls in and sets it; that companion is not in this APK. And
+/// `initialize_android_context` is called by exactly two crates in this whole
+/// dependency tree — `ndk-context` itself and that store. **Tauri, tao and wry
+/// call it never.**
+///
+/// So the first Android build crashed on launch: `probe()` ran in `setup()`,
+/// reached for a context nobody had set, and panicked before a pixel was drawn.
+/// `MainActivity.kt` calls this in `onCreate`, which is the earliest moment the
+/// context exists and is still before Tauri's `setup`.
+///
+/// ⚠ **Two handles, not one, and the second has no degraded mode.**
+///
+/// The context also has to reach `rustls-platform-verifier`, which is a
+/// *separate* store from `ndk-context` and reads nothing the other one wrote.
+/// `reqwest` 0.13's `default-tls` is `rustls`, and that feature pulls the
+/// verifier — so it is what checks every certificate on the `/v1` leg. Its
+/// `src/android.rs` opens *"On Android, initialization must be done before any
+/// verification is attempted"*, and the `global()` every verification goes
+/// through ends `.expect("Expect rustls-platform-verifier to be initialized")`.
+/// `Verifier::new` does not touch it; the first **request** does. So with this
+/// second half absent the app compiles, links, installs, launches, draws, and
+/// panics on the first call to the control plane.
+///
+/// **Each half gets its own `catch_unwind`, and that is the whole reason there
+/// are two.** A panic crossing an `extern "system"` boundary aborts the process,
+/// and there is a reachable one: `ndk_context::initialize_android_context` ends
+/// `assert!(previous.is_none())`, while `android-native-keyring-store` exports a
+/// second `Java_..._initializeNdkContext` from this same `.so` that would set it
+/// first. Under one shared guard that abort would also take the TLS init with
+/// it — and the store has a documented degraded mode (`probe()` answers `false`
+/// and the app says the sign-in will be asked for again) where TLS has none.
+///
+/// # Safety
+/// Called by the JVM from `MainActivity.onCreate`. The null checks below are the
+/// only part of that contract this code enforces; `HELD` makes a second call a
+/// no-op, and `init_with_env` is `get_or_try_init` inside, so both halves are
+/// idempotent rather than merely expected-once.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_reemoat_app_MainActivity_initNdkContext(
+    env: jni::JNIEnv,
+    _class: jni::objects::JObject,
+    context: jni::objects::JObject,
+) {
+    /*
+     * ⚠ **Both raw pointers are checked here, once, because both halves below
+     * would take a null and keep it.** `jni` 0.21's `new_global_ref` is
+     * `jni_unchecked!` with no null test — the `new_weak_ref` directly beneath it
+     * checks and documents returning `None`, which is how you can tell the
+     * omission is deliberate upstream rather than an oversight — so a null would
+     * be cached into `ndk-context`'s process-global slot for the life of the
+     * process. `jni` 0.22's `EnvUnowned::from_raw` asserts instead, which under
+     * `extern "system"` is an abort.
+     */
+    let raw_env = env.get_raw();
+    let raw_context = context.as_raw();
+    if raw_env.is_null() || raw_context.is_null() {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        adopt_context(&env, &context);
+    }));
+    /*
+     * The verifier's half, through its own `jni` major. `jni-sys` 0.3 aliases
+     * `_jobject` to `jni-sys` 0.4's own type, so the `jobject` cast is an
+     * identity and only the `JNIEnv` interface pointer — which each major
+     * declares for itself — actually changes shape.
+     */
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut unowned = unsafe { jni22::EnvUnowned::from_raw(raw_env.cast()) };
+        let _ = unowned
+            .with_env(|env| {
+                let context = unsafe { jni22::objects::JObject::from_raw(env, raw_context.cast()) };
+                rustls_platform_verifier::android::init_with_env(env, context)
+            })
+            .into_outcome();
+    }));
+}
+
+/// The `ndk-context` half, lifted out of the entry point so each half can be
+/// guarded on its own.
+///
+/// `HELD` caches the **attempt** rather than the success: a `GlobalRef` that
+/// could not be made is a JVM in a state a retry will not improve, and unlike
+/// the credential store one bad moment here is not something a later call can
+/// repair — the context is set once per process by contract.
+#[cfg(target_os = "android")]
+fn adopt_context(env: &jni::JNIEnv<'_>, context: &jni::objects::JObject<'_>) {
+    use std::sync::OnceLock;
+    // A `GlobalRef` rather than the local one: the local reference dies when
+    // `onCreate` returns, and the store dereferences it much later.
+    static HELD: OnceLock<Option<jni::objects::GlobalRef>> = OnceLock::new();
+    HELD.get_or_init(|| {
+        let Ok(held) = env.new_global_ref(context) else {
+            return None;
+        };
+        // `new_global_ref` does not reject a null; see the entry point above.
+        if held.as_obj().as_raw().is_null() {
+            return None;
+        }
+        let Ok(vm) = env.get_java_vm() else {
+            return None;
+        };
+        unsafe {
+            ndk_context::initialize_android_context(
+                vm.get_java_vm_pointer() as *mut std::ffi::c_void,
+                held.as_obj().as_raw() as *mut std::ffi::c_void,
+            );
+        }
+        Some(held)
+    });
+}
+
+/// The same three verbs on Android, over SharedPreferences and the Android
+/// Keystore.
+///
+/// ⚠ **`keyring`'s `v1` façade is bypassed deliberately, not forgotten.** It has
+/// no store for this platform and says so only at run time — which is why the
+/// desktop `use` above and this function are the two halves of one decision.
+///
+/// **The store is set once and only the *success* is remembered.**
+/// `set_default_store` is global and idempotent-by-accident rather than by
+/// contract, and `android_native_keyring_store::Store::new()` reaches for the
+/// Android application context through `ndk-context`; calling it per entry would
+/// be a JNI round trip on every `host_boot`, every credential write and **twice
+/// per Noise handshake** — `commands.rs`'s own list of what is on a hot path. So
+/// a `OnceLock` still stands in front of it and the hot path is still what it
+/// was: one atomic load, no lock, no JNI.
+///
+/// ⚠ **What is no longer cached is the failure, and caching that was a defect
+/// with no way out of it.** The cell used to hold the whole `Result`, so the
+/// first attempt decided the life of the process: a `probe()` that ran before
+/// `initNdkContext` had succeeded — or during any transient the Keystore can
+/// have — left `Err` in it, and `read`, `write`, `erase` and `probe` answered
+/// from that cell for ever. The app told somebody their sign-in would not be
+/// kept and went on telling them after the cause was gone, until they
+/// force-stopped it. The cost argument above is an argument for caching a
+/// **success**; it was never an argument for making a failure permanent, and
+/// `adopt_context` above states the one case where the opposite is right.
+///
+/// The retry is a `Mutex` rather than a second `OnceLock` because what it has to
+/// buy is *serialisation* rather than memory: `host_boot` reads the credential
+/// and the device key on the same tick, so a burst of callers arriving at an
+/// unset cell must make one attempt between them rather than one each. Nothing
+/// is held across it but the attempt, and a poisoned lock is taken anyway — a
+/// holder's panic is already caught in `install_default_store`, and refusing to
+/// retry because of one would be the permanent failure arriving by another door.
+#[cfg(target_os = "android")]
+fn entry(account: &str) -> Result<Entry, String> {
+    use std::sync::{Mutex, OnceLock};
+
+    static READY: OnceLock<()> = OnceLock::new();
+    static ATTEMPT: Mutex<()> = Mutex::new(());
+
+    // The hot path, and the whole reason there is a cache at all: one acquire
+    // load. Everything below runs only while the store is still unset.
+    if READY.get().is_none() {
+        let _serialized = ATTEMPT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Tested again under the lock, so the callers that queued behind a
+        // successful attempt do not each make a second one.
+        if READY.get().is_none() {
+            install_default_store()?;
+            // Ignored rather than unwrapped: the test above is under this same
+            // lock, so it cannot lose — and unwrapping a `Result` that cannot be
+            // `Err` is a panic site added for nothing, in a file whose whole
+            // subject one function up is not ending the process.
+            let _ = READY.set(());
+        }
+    }
+    Entry::new(SERVICE, account).map_err(|e| format!("no credential store: {e}"))
+}
+
+/// Reach the Android credential store and make it the default, once.
+///
+/// ⚠ **`catch_unwind`, and it is the difference between a degraded app and no
+/// app.** Reaching the store is a JNI call, and the layer under it panics rather
+/// than answering `Err` when the Android context was never set:
+/// `ndk_context::android_context()` is an `.expect()`, and the vault calls it on
+/// the way to every `getSharedPreferences`. That took the whole process down on
+/// the first build, from inside `setup`, before anything was drawn.
+///
+/// A store that cannot be reached is a state this file already has a sentence
+/// for: `probe()` answers `false` and the app says it will ask for the password
+/// again next time. That is a working degraded mode; an abort is not, and nothing
+/// about a credential store earns the right to end the process.
+///
+/// **Safe to call again after a failure, which is what makes `entry()`'s retry
+/// legal rather than merely hopeful.** `Store::new()` goes through
+/// `by_store::vault::lookup`, which hands back an already-in-use vault for a
+/// matching config instead of building a second one, and
+/// `keyring_core::set_default_store` is a write into an `RwLock<Option<_>>`. So a
+/// second call after an `Err` costs one more JNI round trip and changes nothing
+/// else — read off `android-native-keyring-store-1.0.0/src/by_store/vault.rs:35-62`
+/// and `keyring-core-1.0.0/src/lib.rs:65-71` on this checkout, there being no
+/// Android device in this loop to measure it on.
+#[cfg(target_os = "android")]
+fn install_default_store() -> Result<(), String> {
+    std::panic::catch_unwind(|| {
+        android_native_keyring_store::Store::new()
+            // A closure rather than the bare function: `set_default_store` takes
+            // `Arc<dyn CredentialStoreApi>` and `Store::new` answers
+            // `Arc<Store>`, so the unsizing needs an argument position to happen
+            // at.
+            .map(|store| keyring_core::set_default_store(store))
+            .map_err(|e| format!("no credential store: {e}"))
+    })
+    .unwrap_or_else(|_| Err("the Android credential store could not be reached".to_string()))
 }
 
 /* The control-plane credential, which is the only secret this app has. Thin

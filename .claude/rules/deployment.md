@@ -279,7 +279,7 @@ nothing**: every decision is in `deploy/ci-deploy.sh`, driven by `deploycheck`
 through the `SSH` and `GH` seams. The ssh itself is unmeasured. Q7.94.
 
 **A release is a tag push, and `release.yml` decides nothing either.** Everything
-is in `deploy/ci-release.sh`, four verbs — `plan`, `image`, `manifest`, `publish`
+is in `deploy/ci-release.sh`, five verbs — `plan`, `image`, `manifest`, `app`, `publish`
 — **each of which re-runs every gate**, because a workflow is a graph somebody can
 re-run one job of. It refuses a tag the **six** version sites disagree with (both
 manifests, the root, `app.ts`'s `VERSION`, `src/version.ts`'s `DAEMON_VERSION`,
@@ -304,6 +304,51 @@ fork to change its §13 source, so a fork that obeys the licence gets a correct
 image label for free — and since the web client stopped drawing a source notice,
 this label and `GET /v1/instance` are the only two places the URL surfaces at all.
 Neither is a reason to change `SOURCE_URL`; both are reasons not to delete it.
+
+**The native app rides the same tag, and `app` is the verb for it.**
+`.claude/rules/native-packaging.md` owns which platform carries a daemon and which
+carries a client; this half is what a *release* does with the answer. One matrix
+leg per desktop target and a job of its own for android, each building and naming
+one artifact; `publish` puts every one of them on the same `gh release create`
+call as the installer, and **refuses a release missing an artifact its own list
+named** — by name, never by count. `manifest`'s "a silently-skipped matrix leg"
+argument, one act over and sharper: a page missing the Windows build looks
+finished to everybody except the people it was missing for.
+
+**The matrix is `plan`'s output, not a list in the YAML.** `app_runner` joins
+`app_triple`, `app_profile` and `app_artifacts` as the fourth column of one table;
+`plan` emits it as JSON and `release.yml` reads it through `fromJSON`, so adding a
+target is `RELEASE_APP_TARGETS` plus a `check.yml` leg and **no** workflow edit.
+Android is a job rather than a leg because it is the only target that reads a
+signing key and a matrix cannot scope a secret to one entry — the four
+`RELEASE_ANDROID_*` names appear in that job and nowhere else, which is `plan`'s
+whole reason for not checking them. ⚠ `deploycheck` reads `release.yml` against
+the script's `case` in **both** directions now: the `app` verb shipped with nine
+refusals, ~125 lines and no caller, and four documents described the wiring
+anyway.
+
+⚠ **`RELEASE_APP_TARGETS` is empty until `check.yml` builds something**, and it is
+the one knob spelled `${VAR-…}` rather than `${VAR:-…}` — for a list, an explicit
+empty is a request rather than an omission. `deploycheck` asserts every name in it
+has a `check.yml` leg, so a platform joins the list in the same change that gives
+it one. That is `RELEASE_PLATFORMS`' own argument about arm64, made mechanical:
+the first build of a platform in this project's history may not happen on the
+release path.
+
+⚠ **Empty means both app jobs are *skipped*, and three lines are what make that
+safe.** `plan` emits an empty matrix; each app job carries an `if:`, because an
+empty matrix in GitHub Actions is a job that **fails** rather than one that skips;
+and `publish` carries the only `if:` in a file whose header says it decides
+nothing, because GitHub skips a job whose `needs` includes a skipped one. Without
+that third line, wiring the app jobs up would have stopped every release creating
+a release page at all — after `manifest` had already pushed the image tags.
+`deploycheck` reads all three back.
+
+**And the §6 offer rides the notes.** `bundle.licenseFile` is read by the `dmg`
+and `nsis` bundlers and by nothing that builds a macOS `.app`, so the artifact most
+people download would carry no licence and no source offer. `plan` appends one
+naming this **tag** — `main` is routinely ahead of every tag — derived from
+`SOURCE_URL` so a fork gets a correct offer for free.
 
 ⚠ Two traps, both measured. **`publish` deliberately does not ask the
 image-exists question** — `manifest` has just created that tag, so asking would
@@ -359,7 +404,7 @@ untouched, because that function inspects the *local* image either way.
 | `deploy/lib.sh` | The **only** place that knows one machine from another: `service_backend`, `compose_service` (so no verb writes a compose service name by hand), where the tools are, what a unit is called, where it lives and how one is rendered and reloaded, `service_origin` and `health_probe_path` |
 | `deploy/install.sh` | One-time setup for **one** service. A wizard on a terminal, a plain installer without one |
 | `deploy/ci-deploy.sh` | What a runner does before `deploy.sh`: the secrets it must have, the daemon it may not touch, the CI verdict it will not go around. A script rather than YAML so `deploycheck` can drive every branch, through `SSH` and `GH` as seams |
-| `deploy/ci-release.sh` | What a runner does to publish one: the six versions that must agree, the CI verdict it will not go around, the tag it will not move, and the labels it derives rather than writes. Four verbs, three seams, and every gate re-run by each |
+| `deploy/ci-release.sh` | What a runner does to publish one: the six versions that must agree, the CI verdict it will not go around, the tag it will not move, the labels it derives rather than writes, and the app artifacts it names. Five verbs, five seams, and every gate re-run by each |
 | `deploy/ci-freshness.sh` | What a runner does once a week to say how stale the adapter pins are: the pins read off `package.json` by shape, three registry questions per adapter through `NPM_VIEW`, and five outcomes with the exit code each earns written in its header — behind reports, unpublished refuses, unreachable is its own code. Driven by `deploycheck` with no network |
 | `deploy/deploy.sh` | The update path. Refuses a dirty tree, builds the image once, then restarts only what the diff touched — with `RELAY_INPUTS` as the one list that decides whether the fleet's tunnels drop. On the daemon it runs `deploy/agents.sh` **before** deciding the restart, with the source read off the env file and every prune withheld, so a machine upgraded from a release that vendored the CLIs comes back with its harnesses rather than five minutes later; a script that did not finish is a line on stderr, never a failed deploy |
 | `deploy/run-daemon.sh` | What the supervisor runs. Standalone by design — it must work when the environment is at its strangest |

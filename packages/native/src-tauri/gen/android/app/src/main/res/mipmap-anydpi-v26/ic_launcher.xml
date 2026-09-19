@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ⚠ **Hand-edited, and `tauri icon` overwrites this file — while `tauri android
+  init` does something worse and does not write it at all.** That absence was
+  the original defect: with no adaptive icon Android masks the 73%-transparent
+  legacy PNG onto a **white** plate, which reads as "our icon on a white circle"
+  rather than as "no icon of ours at all".
+
+  Two edges here are this repository's, measured against the string
+  `@tauri-apps/cli` writes on 2026-09-19. It points `<background>` at
+  `@mipmap/ic_launcher_background`; this points it at
+  `@color/ic_launcher_background`, the dark badge colour next door in
+  `values/ic_launcher_background.xml`. And it adds a `<monochrome>` layer, which
+  this file does not carry.
+
+  `nativecheck` asserts the `@color` form and the colour it resolves to, against
+  comment-stripped source in both files. `.claude/rules/native-packaging.md` has
+  the census and the recipe.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+  <background android:drawable="@color/ic_launcher_background"/>
+</adaptive-icon>

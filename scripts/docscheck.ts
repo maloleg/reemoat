@@ -174,13 +174,70 @@ const SOURCE_EXT = /\.(ts|tsx|js|rs|sql|sh|yml|yaml|json|in|md)$/;
 // `pnpm-lock.yaml` failure `ROOT_FILES` refuses below, arriving by a different
 // door and a thousand times larger.
 //
-// `gen` is skipped by name rather than by path because everything under
-// `src-tauri/gen` is generated — `gen/schemas` on every compile, `gen/android` and
-// `gen/apple` once by `tauri android init` / `tauri ios init` — and a rule scoped
-// at generated output is a rule about something nobody edits. The cost is stated:
-// a `paths:` glob naming anything under `gen` would be a dead glob and fail below,
-// which is the correct answer to writing one.
-const SKIP_DIR = /^(node_modules|dist|target|gen|\.git|\.gstack)$/;
+// `gen` is **not** in this list any more, and the premise that put it there
+// expired rather than being overruled. It read: everything under `src-tauri/gen`
+// is generated, so a rule scoped at generated output is a rule about something
+// nobody edits, and a `paths:` glob naming anything under it should be a dead glob
+// and fail below. That was true of all three subdirectories the day it was
+// written. It is true of two now. `gen/android` is committed hand-edited source —
+// `MainActivity.kt` carries the `initNdkContext` call without which the first
+// Android build panicked on launch, `app/build.gradle.kts` carries the
+// `rustls-platform-verifier` Gradle dependency, and `app/proguard-rules.pro`
+// carries the keep rule without which R8 strips that dependency back out of the
+// release APK. `.gitignore` has said so since the tree landed — it matches
+// `gen/schemas/` and deliberately not `gen/android` — so this skip was the last
+// place still asserting the old premise, and the way it asserted it was by making
+// the rule file that documents those three files impossible to scope.
+const SKIP_DIR = /^(node_modules|dist|target|\.git|\.gstack)$/;
+
+/**
+ * The directories this walk refuses to enter by **path** rather than by name.
+ *
+ * ⚠ **Both halves are generated output, and the second half is the one that gets
+ * missed.** `gen/schemas` is rewritten by `tauri-build` on every compile and
+ * `gen/apple` exists on no checkout that has not run `tauri ios init`; neither is
+ * a place a rule may point at, and they are what the old name-based skip was
+ * really about.
+ *
+ * The second half is `gen/android`'s **own** build tree, and it is here because
+ * the obvious edit — delete `gen` from `SKIP_DIR` and stop — was measured and is
+ * wrong. `gen/android` is a Gradle project, and a checkout that has run one
+ * Android build carries `build/`, `.gradle/` and `.kotlin/` directories at four
+ * depths inside it. Measured on this machine, 2026-09-19: the naive edit takes
+ * this driver's own file count from 3 257 to 4 037 and its symbol corpus from
+ * 15.1 MB to 18.1 MB across 142 more files — Gradle fingerprints, `.class` files
+ * and expanded jars, 2.9 MB of somebody else's build metadata. That is
+ * precisely the `target/` failure the paragraph above already describes, arriving
+ * through a directory that had just been un-skipped for a good reason: assertion
+ * 4's `corpus.includes(s)` would start answering `true` for symbols out of that
+ * metadata, which is that ratchet switched off in the direction that reads as
+ * passing. With this half in place the count goes to 3 317 — **60** files — and
+ * the corpus gains 3 099 characters in one file.
+ *
+ * The three names are not invented here. `build` and `.gradle` are the two
+ * directory entries in `gen/android/.gitignore` — itself a committed file written
+ * by `tauri android init` — and `.kotlin` is the Kotlin daemon's session state
+ * beside them. Reading the skip off the same authority git reads means a fourth
+ * output directory in some future Gradle is a one-word edit in a place somebody is
+ * already looking.
+ *
+ * ⚠ **Sixteen build-output files still enter the walk, and that is deliberate.**
+ * `gen/android/app/.gitignore` names six of its outputs by *file* rather than by
+ * directory — the `generated/` Kotlin shims Tauri writes, `jniLibs`' `.so`, the
+ * copied `assets/tauri.conf.json`, `tauri.build.gradle.kts`, `tauri.properties`
+ * and `proguard-tauri.pro`. Excluding those would mean either a second list that
+ * drifts from theirs or a `git check-ignore` call, and this driver is offline and
+ * shells out to nothing. What they cost is bounded and worth writing down: none is
+ * a `.ts` or `.tsx`, so assertion 3 gains nothing; exactly one matches
+ * `SOURCE_EXT` — `assets/tauri.conf.json`, a byte copy of a file already in the
+ * corpus, and the 3 099 characters above — so assertion 4 gains no resolving
+ * power it did not have. The one real hazard is that a `paths:` glob written at
+ * one of them would pass on a machine that has built Android and be dead on CI,
+ * which is assertion 6's own failure inverted. The pair of assertions in section
+ * 6 pins the split, so that cannot be discovered by a red CI run alone.
+ */
+const SKIP_PATH =
+  /^packages\/native\/src-tauri\/gen\/(?:schemas|apple)$|^packages\/native\/src-tauri\/gen\/android\/(?:.*\/)?(?:build|\.gradle|\.kotlin)$/;
 
 /**
  * The repository root's own files, which no walk of `SOURCE_DIRS` ever reached.
@@ -210,13 +267,27 @@ const SKIP_DIR = /^(node_modules|dist|target|gen|\.git|\.gstack)$/;
  */
 const ROOT_FILES = ["README.md", "SECURITY.md", "THIRD-PARTY.md"];
 
+/**
+ * The working tree, minus what nobody wrote.
+ *
+ * Two skips rather than one, and they are tested at different moments on purpose.
+ * `SKIP_DIR` is a name and can be decided before the `stat`; `SKIP_PATH` is a
+ * position and is only meaningful once the entry is known to be a directory,
+ * because a *file* named `build` beside a Gradle project is somebody's source and
+ * must not vanish for sharing a word with a directory. The `relative` call is
+ * against `ROOT`, so the pattern is written in repository paths — the same
+ * spelling `repoFiles` and every `paths:` glob use, rather than a second one to
+ * keep in step.
+ */
 function walk(dir: string, out: string[] = []): string[] {
   if (!existsSync(dir)) return out;
   for (const e of readdirSync(dir)) {
     if (SKIP_DIR.test(e)) continue;
     const p = join(dir, e);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else out.push(p);
+    if (statSync(p).isDirectory()) {
+      if (SKIP_PATH.test(relative(ROOT, p))) continue;
+      walk(p, out);
+    } else out.push(p);
   }
   return out;
 }
@@ -647,8 +718,44 @@ if (readmeRoutes) {
   const sourceUrl = /^const SOURCE_URL = "([^"]+)";$/m.exec(appSource)?.[1] ?? "";
   check("app.ts still declares SOURCE_URL as a plain literal", sourceUrl.length > 0, true);
 
+  /*
+   * ⚠ **Read out of the `gh release create` call rather than off the first
+   * `$RELEASE_WORK/…` string in the file, and the difference was a real failure.**
+   *
+   * That was the first spelling, and it was correct only by *position*: `publish`
+   * happened to hold the only such line. The `app` verb then wrote the Android
+   * keystore to `"$RELEASE_WORK/android-release.jks"` — above it — and this
+   * assertion started pinning the README against the name of a **signing key**,
+   * going red with a message about the README and no hint of where the change
+   * was. A pattern that finds the right answer because nothing else is in front
+   * of it is a pattern waiting for something to be.
+   *
+   * So the anchor is the call, and the asset is the last positional argument on
+   * it: `gh release create` takes its files after every flag, and the installer
+   * is the one this whole block is about. `install.sh` is copied there from
+   * `deploy/bootstrap.sh` under its published name because
+   * `releases/latest/download/<name>` resolves on the asset name.
+   *
+   * ⚠ **The count is asserted before the name, because a narrower window is
+   * still a window.** The read was a single non-global `exec`, which takes the
+   * *first* `$RELEASE_WORK/…` on the call and is right today only because there
+   * happens to be one — the same "correct by position" the paragraph above is
+   * about, moved inside the call rather than cured. `RELEASE_NOTES_FILE`
+   * already defaults to `$RELEASE_WORK/notes.md`, so inlining that default into
+   * `--notes-file` — an ordinary tidy-up, one line long — puts a second one
+   * *ahead* of the installer. Measured on a copy spelled that way: the old
+   * pattern answers `notes.md`, and what goes red is the README assertion
+   * below, with a message about the README and no hint of where the change was.
+   * So a second argument is now its own red line naming the call, and the name
+   * is read from the **last** match, which keeps the assertion below measuring
+   * the installer while the one above says what actually moved.
+   */
   const release = read("deploy/ci-release.sh");
-  const asset = /\$RELEASE_WORK\/([A-Za-z0-9._-]+)"$/m.exec(release)?.[1] ?? "";
+  const createCall = /"\$GH" release create(?:[^\n]*\\\n)*[^\n]*/.exec(release)?.[0] ?? "";
+  check("ci-release.sh still creates the release with gh", createCall.length > 0, true);
+  const workFiles = [...createCall.matchAll(/\$RELEASE_WORK\/([A-Za-z0-9._-]+)"/g)].map((m) => m[1] ?? "");
+  check("exactly one $RELEASE_WORK file is named on that call", workFiles.length, 1);
+  const asset = workFiles.at(-1) ?? "";
   check("ci-release.sh uploads a named installer asset", asset.length > 0, true);
 
   const expected = `${sourceUrl}/releases/latest/download/${asset}`;
@@ -718,6 +825,45 @@ for (const f of ruleFiles) {
 }
 process.stdout.write(`  note  ${ruleFiles.length} rules, ${globCount} globs, ${repoFiles.length} files to match against\n`);
 check("every paths: glob matches a real file", deadGlobs, []);
+
+/*
+ * ⚠ **What "a real file" means, pinned from both sides, because the answer just
+ * changed and nothing here would have noticed.**
+ *
+ * The assertion above is only as good as `repoFiles`, and `repoFiles` rests on the
+ * one input to this driver that is a *judgement* rather than a category:
+ * `SKIP_PATH` decides that `gen/android` is source somebody edits and `gen/schemas`
+ * is not. Wrong in either direction and this section fails in the silent way it
+ * exists to prevent. Too narrow, and the rule documenting `MainActivity.kt` is a
+ * dead glob and can never be written at all. Too wide, and a glob at `gen/schemas`
+ * "matches" a file `tauri-build` overwrites on the next compile, so the rule loads
+ * today and stops arriving the first time somebody cleans a checkout — which is a
+ * rule that silently stops arriving, this assertion's entire subject.
+ *
+ * Both halves are asserted against the real tree, and neither is enough alone. The
+ * `gen/schemas` half is the weaker one and it is worth saying why: that directory
+ * is in `.gitignore`, so on CI it is absent from disk and the assertion passes for
+ * the wrong reason. It is live only on a developer's machine — which is, at least,
+ * the machine where somebody widens `SKIP_PATH`. The table is what holds on CI: it
+ * drives the pattern directly, so every row fails on a mutation whether or not the
+ * directory it names exists on the runner.
+ */
+const underGen = (d: string): boolean => repoFiles.some((p) => p.startsWith(`packages/native/src-tauri/gen/${d}/`));
+check("gen/android is a place a rule may be scoped to", underGen("android"), true);
+check("gen/schemas is not, so a glob there is still dead", underGen("schemas"), false);
+for (const [p, skipped] of [
+  ["packages/native/src-tauri/gen/schemas", true],
+  ["packages/native/src-tauri/gen/apple", true],
+  ["packages/native/src-tauri/gen/android", false],
+  ["packages/native/src-tauri/gen/android/app/src/main/res/xml", false],
+  ["packages/native/src-tauri/gen/android/buildSrc/src/main", false],
+  ["packages/native/src-tauri/gen/android/build", true],
+  ["packages/native/src-tauri/gen/android/.gradle", true],
+  ["packages/native/src-tauri/gen/android/app/build", true],
+  ["packages/native/src-tauri/gen/android/buildSrc/.kotlin", true],
+] as const) {
+  check(`the walk ${skipped ? "refuses" : "enters"} ${p}`, SKIP_PATH.test(p), skipped);
+}
 
 process.stdout.write(failures === 0 ? "\nall green\n\n" : `\n${failures} FAILED\n\n`);
 process.exit(failures === 0 ? 0 : 1);

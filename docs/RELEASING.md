@@ -83,20 +83,68 @@ The `VERSION` literal is the one worth not forgetting. It is served as the AGPL
 section 13 source offer, so a release that moves the tag and not the literal
 publishes an offer naming a version whose source nobody can fetch.
 
-## Signing the native app
+## The native app in a release
 
-Not a version question, and deliberately not here: `packages/native` carries two
+Not a version question, and that part is unchanged: `packages/native` carries two
 `version` fields and **neither is a release site** — `tauri.conf.json` names a
 *path* to the root manifest and `Cargo.toml` is pinned inert at `0.0.0`, both
-asserted by `pnpm nativecheck`. So the seven above stay seven and a native build needs
-no line in step 1.
+asserted by `pnpm nativecheck`. So the seven above stay seven and a native build
+needs no line in step 1. That sentence is load-bearing in a new way now: an app
+artifact carries a version in its **file name**, derived from the tag, and derived
+is what keeps it from being an eighth site.
 
-What a *signed* build needs is entirely environment — an Apple Developer ID
-certificate, the notarization variables, and a separate minisign keypair if updates
-are ever wanted — so no file in this repository changes to produce one.
-`docs/NATIVE.md` carries the three signatures, which of them are which, and the one
-step that has to happen before a first public build. Nothing about the native app is
-built, signed or published by a tag today.
+**A tag builds and publishes the app.** `deploy/ci-release.sh`'s `app` verb builds
+one target and names the artifact it produced; `publish` puts every one of them on
+the same `gh release create` call as `install.sh`, and refuses a release missing an
+artifact its own list named. `.claude/rules/native-packaging.md` has which platform
+gets a daemon inside it and which gets a client.
+
+**`release.yml` runs it as two jobs — `app`, a matrix, and `app-android`, one job
+— and neither holds a list of its own.** `plan` emits the matrix as JSON off the
+same table `app_triple` and `app_artifacts` are columns of, so adding a target is
+`RELEASE_APP_TARGETS` plus a `check.yml` leg and no workflow edit. Android is
+separate because it is the only target that reads a signing key and a matrix
+cannot scope a secret to one entry; the four secrets are named in that job alone.
+
+⚠ **`RELEASE_APP_TARGETS` is empty today, so a tag still publishes only the
+installer.** That is the gate rather than a gap: `deploycheck` asserts every name
+in that list is built by a `check.yml` job, so a platform is added to it in the
+same change that gives it one. Until then the machinery exists, is driven offline,
+and publishes nothing — which is the state it should be in, because the first build
+of a platform in this project's history must not happen on the release path.
+
+⚠ **Empty means both app jobs are *skipped*, and three lines make that safe.**
+`plan` emits an empty matrix; each app job carries an `if:`, because an empty
+matrix in GitHub Actions is a job that **fails** rather than one that skips; and
+`publish` carries the only `if:` in a file whose header says it decides nothing,
+because GitHub skips a job whose `needs` includes a skipped one — without it,
+wiring the app jobs up would have stopped every release creating a release page at
+all, after `manifest` had already pushed the image tags. `deploycheck` reads all
+three back, along with the script's `case` against the workflow's `run:` lines in
+both directions — the check that did not exist while the `app` verb had no caller.
+
+**What a release does not do is sign anything.** macOS and Windows artifacts are
+**unsigned**: Gatekeeper and SmartScreen will both warn, and the remedy is a
+certificate rather than code. Android is the exception — an APK that is not signed
+installs on nothing, so `app` refuses that target unless all four of
+`RELEASE_ANDROID_KEYSTORE`, `RELEASE_ANDROID_KEYSTORE_PASSWORD`,
+`RELEASE_ANDROID_KEY_ALIAS` and `RELEASE_ANDROID_KEY_PASSWORD` are set, and names
+the one that is missing. They are scoped to that job alone, which is why `plan`
+does **not** ask for them: `plan` is the job whose whole property is that it can
+write nothing anywhere.
+
+What a *signed* macOS build needs is entirely environment — an Apple Developer ID
+certificate and the notarization variables — so no file in this repository changes
+to produce one. `docs/NATIVE.md` carries the three signatures and which of them are
+which. **There is deliberately no updater**, so a build is replaced by downloading
+the next one; `docs/NATIVE.md` records that this is a one-way door for everything
+already shipped.
+
+⚠ **AGPL §6 rides the notes.** Conveying a binary is a distribution, and
+`bundle.licenseFile` is read by the `dmg` and `nsis` bundlers and by nothing that
+builds a macOS `.app`. So `plan` appends a source offer naming **this tag** —
+`main` is routinely ahead of every tag — derived from `app.ts`'s `SOURCE_URL`, so a
+fork that obeys the licence instruction gets a correct offer for free.
 
 **No `Q<n>.<m>` citations in `CHANGELOG.md`.** Everywhere else a decision can be
 cited by number and `docscheck` proves it resolves; that file is deliberately

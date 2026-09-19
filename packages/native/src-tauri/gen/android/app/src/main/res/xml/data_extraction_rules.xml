@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Nothing this app stores leaves the device.
+
+  ⚠ **In no Tauri template.** `tauri android init` does not write this file
+  and does not delete it — it rewrites `AndroidManifest.xml`, where
+  `android:dataExtractionRules` is the only reference to it, so an `init`
+  re-run orphans this file silently and Auto Backup is on again.
+  `nativecheck` asserts the attribute and this file as a pair.
+
+  ⚠ The app-private directory holds `server.json` — which carries the chosen
+  control plane, the device id, and, on the path where the Android Keystore could
+  not be reached, the device **private key** itself. Auto Backup and `adb backup`
+  would both carry that off the device and onto Google's servers or a laptop,
+  which is the one thing `credential.rs`'s whole scoping rule exists to prevent.
+
+  `allowBackup="false"` in the manifest is the API-30-and-below half; this file is
+  the half that applies from API 31 up, and both are needed.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+    </device-transfer>
+</data-extraction-rules>

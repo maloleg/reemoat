@@ -59,17 +59,17 @@ bug in the file.
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 88 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 365 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 61 | `###` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 62 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 113 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 143 | `###` |
-| | | **980** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 144 | `###` |
+| | | **982** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 980 rather than the 502
+dividers. So the count is over **both** depths, and it says 982 rather than the 504
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -24016,7 +24016,7 @@ that renders a link cannot be told "there is one" and left to invent where it go
 **⚠ Unset is the truthful state and the one this repository ships in.** Nothing
 here publishes a signed build: `tauri.conf.json` has `signingIdentity: null`, no
 updater artifacts and `targets: ["app"]` with no `dmg`, the build is arm64-only,
-and `deploy/ci-release.sh` uploads no app asset. So the page says *this server
+and `deploy/ci-release.sh` uploads no app asset [⚠ no longer true — Q4.123 built the verb; `RELEASE_APP_TARGETS` is what is still empty]. So the page says *this server
 does not publish a build* and points at building from source, which is true — and
 a compiled-in default would be a button that downloads nothing on every fork,
 under a licence that hands them the source.
@@ -24185,6 +24185,95 @@ symlink audit refuses. It is filtered out of the version map and copied into
 declared at the root so npm installs them flat.
 
 **Status.** Current. Q7.37 is the phase; `pnpm protocolcheck` is the driver.
+
+
+### Q4.123 — Which platforms carry a daemon inside them, and what a tag publishes
+
+**Question.** The app is a **client** and a **daemon host** in one binary — a Node
+runtime and a copy of `src/`, about 200 MB unpacked. Windows cannot stop a bundled
+daemon cleanly (Q4.116's neighbours; `docs/NATIVE.md`'s *What runs where*), a phone
+cannot run one at all, and on Linux `deploy/install.sh` already puts one under
+systemd. So: which builds carry it, how is that written down, and what does a tag
+do with the result?
+
+**Decision. macOS is the only full profile. Every other platform ships a client,
+declared in `tauri.<platform>.conf.json` and nowhere else.** Each overlay sets
+`externalBin` and `resources` to `null`, and Tauri merges them over the base
+through `json_patch::merge` — RFC 7386, where a `null` **deletes the key**.
+
+**Measured 2026-09-19, because the alternative was a cargo feature.** With
+`target/daemon` and `binaries/` both moved aside, `cargo check` fails inside
+`build.rs` with no overlay present and **succeeds** with a `tauri.macos.conf.json`
+carrying those two deletions. So `tauri-build` reads the overlays at *compile*
+time, not only at bundle time — which is what makes a client build a configuration
+file with no Rust in it. A feature gate would have been the answer if it did not,
+and would have cost a second shape for `cargo clippy`, `cargo test` and the command
+census to be correct about.
+
+**And on the desktop it needs no code change at all.** `Payload::locate` answers
+`None` when nothing is staged, `host_daemon_state` answers `"unsupported"`, and
+`store.ts` takes no arm on that status — the path written for a developer who
+forgot `pnpm native:stage`. ⚠ `host_local_daemon` is *not* part of it: it reads
+`~/.reemoat/daemon.json` and never depended on the payload, so a client build on
+Linux still reaches a daemon `install.sh` put there. What a client gives up is
+**starting** one, not finding one.
+
+**Why Linux is a client, which is the answer that looks inconsistent.** Nothing
+there is refused — a daemon runs on Linux and most of the fleet is Linux. What is
+not in the *bundle* is a second copy of one, on the platform where the ordinary
+way to get a daemon is the shell installer. It also sidesteps the bundle-layout
+measurement `docs/NATIVE.md` still carries, and saying so is better than letting
+that read as a coincidence.
+
+**What a tag does: a fifth verb, `app`.** One matrix leg per target; it stages the
+payload for a full profile and **refuses a client leg that still has one on the
+runner** (a re-run of one leg is the real path to that); it passes no `--bundles`,
+because the kinds are the overlay's and a flag would be the second copy of that
+list; it refuses a bundle that was not produced, or was produced twice, and names
+the artifact it copied out. `publish` puts every one of them on the same
+`gh release create` call as the installer and **refuses a release missing an
+artifact its own list named** — by name, never by count, because a page missing the
+Windows build looks finished to everybody except the people it was missing for.
+
+⚠ **`RELEASE_APP_TARGETS` ships empty, and that is the gate rather than a gap.**
+`deploycheck` asserts every name in it has a `check.yml` leg, so a platform joins
+the list in the same change that gives it one. `RELEASE_PLATFORMS`' argument about
+arm64 images, made mechanical: the first build of a platform in this project's
+history may not happen on the release path. It is also the one knob spelled
+`${VAR-…}` rather than `${VAR:-…}` — for a list, an explicit empty is a request.
+
+**Rejected: asking for the Android keystore in `plan`.** It was written and taken
+back out. The four secrets are scoped to the `app-android` job so that *who can
+read the signing key* is answerable by reading the workflow, and `plan` is the job
+whose whole property is that it can write nothing anywhere. Asking there would
+mean handing the key to the job that runs every gate, or refusing every release
+for want of a secret that job cannot see. The saving was imaginary as well: the
+app legs are siblings under `plan` and start in the same second.
+
+**Rejected: `universal-apple-darwin` as one macOS artifact.** `tauri-build`'s
+`copy_binaries` resolves `binaries/node-<target-triple>`, so a universal build
+wants a `lipo`-ed Node *and* both esbuild platform binaries inside the payload.
+Neither has been measured here; two arch-specific artifacts cover the same
+hardware with nothing unmeasured on the path.
+
+**Two things the asset names decide, and they are public surface.**
+`releases/latest/download/<name>` resolves on the asset name, so a name is a URL
+the day somebody pastes it. They carry the **version**, unlike `install.sh` —
+that one is stable because it is pasted into a shell, and a desktop artifact is
+clicked. The OS token is `std::env::consts::OS`'s spelling, already one of the two
+vocabularies `native-shell.md` names, and the arch token is one word rather than
+the four the bundlers use between them.
+
+**And the §6 offer rides the notes.** Conveying a binary is a distribution, and
+`bundle.licenseFile` is read by the `dmg` and `nsis` bundlers and by nothing that
+builds a macOS `.app` — so the artifact most people download would carry neither a
+licence nor an offer. `plan` appends one naming this **tag**, derived from
+`SOURCE_URL`, so a fork that obeys the licence instruction gets a correct offer for
+free.
+
+**Status.** Current. `.claude/rules/native-packaging.md` is the area;
+`pnpm nativecheck` holds the overlays to an allowlist and `pnpm deploycheck` drives
+the verb. Q4.119 is what this makes possible and has not switched on.
 
 
 ## Invariants — rules that were defects first
@@ -33156,4 +33245,56 @@ unit-tested and the erase is asserted at the call site, but writing and reading 
 real entry needs an unlocked login keychain, which a non-interactive shell does
 not have — the same limit every other keychain item in `credential.rs` has.
 `docs/NATIVE.md`'s hand checklist is where it happens.
+
+### Q7.144 — Can Android's user-CA trust be scoped to the control plane?
+
+**Position.** No, and the answer is structural rather than unfinished.
+`network_security_config.xml` puts `<certificates src="user" />` in its base
+config, which is every origin this app reaches. The narrower mechanism Android
+offers is a domain config, and it takes **literal hostnames written at build
+time**. This app has none to write: `REEMOAT_DEFAULT_SERVER` is a fork's
+compile-time seed and is unset in this repository, the address is otherwise typed
+into `ChooseServer` at run time and stored in the shell's config, and the relay is
+resolved **per machine** from `POST /v1/tokens` — so two machines of one account
+legitimately sit on different relays and there is not even one relay hostname per
+installation. Any list invented at build time would be exactly the self-hosted
+deployment this clause exists for, broken.
+
+**Why the clause is there at all.** `reqwest` resolves to rustls with
+`rustls-platform-verifier` on Android, which calls the platform's own trust
+manager over JNI, so one resource file governs the Rust leg and both webview legs.
+A control plane behind a CA somebody installed on their own phone is the ordinary
+deployment for this software; drop the user entry and it is refused while the same
+URL works in Chrome.
+
+**What it loosens, named rather than implied.** Somebody who installs a hostile CA
+profile gets all three legs, and they are not worth the same:
+
+1. `proxy.rs`'s `/v1` calls, which carry the account's bearer credential in an
+   authorization header. An intercepting CA reads and can replay it against the
+   control plane. There is nothing under the TLS layer here — it is an ordinary
+   HTTPS API call, and this is the leg the clause actually trades.
+2. The webview's relay leg. Inside it is a Noise_IK session keyed on the device
+   key and the machine key `machinekey.ts` announces, so an interceptor sees relay
+   framing and ciphertext it holds no key for. What it learns is who is talking to
+   which machine, and when.
+3. The webview's daemon leg. Over the relay this is case 2. Over a LAN or a
+   loopback address it is cleartext by this same file's first clause, which a user
+   CA is not needed to read at all.
+
+**Rejected.** *Move the clause into a domain config for the default server.* It
+scopes nothing in the build this repository produces, because that default is
+empty — and in a fork that sets one, it silently stops working for every user who
+typed a different address, which is the population the clause exists for.
+*Ship two resource files and pick at run time.* A network security config is
+resolved from the manifest at install time; there is no run-time selection.
+*Drop the user entry and pin the control plane's certificate instead.* Pinning
+needs a certificate known at build time, which is the same missing input one level
+down, and it would break every self-hosted instance on renewal.
+
+**Status.** Known limitation, recorded rather than mitigated. The mitigation that
+exists is Android's own: a user CA is an explicit per-device install that the
+system warns about persistently. The comment in the resource file names all three
+legs so that nobody reading it concludes the end-to-end encryption covers the one
+leg it does not.
 

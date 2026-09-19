@@ -20,11 +20,17 @@ here.** It is a **client** — it talks to a control plane, a relay and daemons 
 and it is a **daemon host**, carrying a Node runtime and a copy of `src/` so it
 can run a daemon on the computer it is installed on.
 
+**Which of the two a build is, is now a decision written down per platform**, in
+`tauri.<platform>.conf.json` — see `.claude/rules/native-packaging.md`, which owns
+this subject. macOS is the only full profile; every other platform ships a client.
+
 | | Client | Daemon host |
 |---|---|---|
 | macOS | built, measured, shipping | built, measured, shipping |
-| Linux | compiles; the bundle layout is unverified | staging works; see *Open measurements* |
-| Windows | the near-term goal | **refused**, and the refusal is in `build-daemon.mjs` by name |
+| Linux | profile declared; no CI leg and no asset yet | **not in the bundle**, by decision — see below |
+| Windows | profile declared; no CI leg and no asset yet | **refused**, and the refusal is in `build-daemon.mjs` by name |
+| Android | profile declared; `gen/android` committed; no CI leg and no asset yet | impossible |
+| iOS | profile declared; **refused at compile time** by `credential.rs`; `gen/apple` not generated | impossible |
 
 Windows is refused as a *host* rather than merely unwritten: there is no way to
 stop a bundled daemon cleanly there — `TerminateProcess` gives `scripts/daemon.ts`
@@ -33,6 +39,16 @@ pending approval dropped — and `deploy/install.sh` is a shell script with no
 supervisor to install into. `deploy/bootstrap.sh`'s `detect_platform` draws the
 same line for the shell installer and is the authority `AGENT_HOST_OS` is held
 against.
+
+**Linux is a different answer to a different question.** Nothing there is refused:
+a daemon runs on Linux, and most of the fleet is Linux. What is not in the
+*bundle* is a second copy of one. `deploy/install.sh` already installs a daemon
+under systemd on that box, and `host_local_daemon` reaches it over loopback
+whether or not this app brought its own — so a payload there would be 200 MB
+duplicating a thing the machine already has, on the one platform where the
+ordinary way to get a daemon is the shell installer. ⚠ It also sidesteps the
+bundle-layout measurement below, which is *why* it is worth saying that it does
+rather than letting that read as a coincidence.
 
 ## What it adds, and what it deliberately does not
 
@@ -148,6 +164,74 @@ happens on a machine with a daemon installed.
 | iOS | full **Xcode** *and* `rustup` |
 | Android | Android SDK + NDK (`ANDROID_HOME`, `NDK_HOME`) *and* `rustup` |
 
+### Installing the Android toolchain beside an existing Rust
+
+⚠ **Two traps, both hit on this machine on 2026-09-19, and neither announces
+itself as what it is.**
+
+**`rustup` shadows `cargo` subcommands even with `--no-modify-path`.** That flag
+keeps `PATH` and the shell profile untouched, which is what it promises and does.
+But cargo resolves `cargo <sub>` by looking in **`$CARGO_HOME/bin` before
+`PATH`** — so a rustup installed into the default `~/.cargo` puts its shims there
+and `cargo fmt` and `cargo clippy` start answering *"not installed for the
+toolchain `stable-aarch64-apple-darwin`"* on a machine whose Rust is Homebrew's.
+The build is unaffected; the two commands this document tells you to run are not.
+
+The fix is to give rustup its own home rather than to delete its shims:
+
+```bash
+export RUSTUP_HOME="$HOME/.rustup-android" CARGO_HOME="$RUSTUP_HOME/cargo"
+sh rustup-init.sh --no-modify-path -y --profile minimal
+"$CARGO_HOME/bin/rustup" target add aarch64-linux-android armv7-linux-androideabi \
+                                    i686-linux-android x86_64-linux-android
+```
+
+⚠ **And `rustup self uninstall` removes the whole `CARGO_HOME`**, registry cache
+included — so undoing a default-location install costs every dependency a
+re-download, which reads as a network problem rather than as something you did.
+
+**The two variables travel together.** `CARGO_HOME` alone finds the shim and then
+sends it looking for toolchains in `~/.rustup`, which has none: the message is
+*"could not choose a version of cargo to run, no default is configured"*, and it
+reads as a misconfigured default rather than as a missing `RUSTUP_HOME`. Set both,
+always.
+
+**What an Android build needs in its environment**, none of it in a shell profile:
+
+| | |
+|---|---|
+| `JAVA_HOME` | a real JDK 17. ⚠ `command -v javac` finds `/usr/bin/javac` on a Mac with no JDK at all — it is a stub that fails with the same "unable to locate a Java Runtime". Test with `java -version`, never with `command -v` |
+| `ANDROID_HOME` | the SDK root, with `platform-tools`, a `platforms;android-<compileSdk>` matching `gen/android/app/build.gradle.kts`, `build-tools`, and an `ndk;…` |
+| `NDK_HOME` | `$ANDROID_HOME/ndk/<version>` |
+| `CARGO_HOME`, `RUSTUP_HOME` | both, per above |
+| `PATH` | `$CARGO_HOME/bin` and `$JAVA_HOME/bin` in front |
+
+`adb` is under `$ANDROID_HOME/platform-tools` and is **not** put on `PATH` by any
+of this; call it by path or add that directory yourself.
+
+**And `tauri android init` has to run once per machine, even though
+`gen/android` is committed.** `gen/android/tauri.settings.gradle` holds *that*
+machine's cargo registry paths, so it is gitignored — and `settings.gradle`
+applies it, during Gradle's *settings evaluation*. A fresh clone therefore fails
+there, on a missing script, before any project is configured; nothing under
+`app/` is reached and the error names the script rather than the step.
+
+⚠ **`init` is also the command that reverts every hand-edit under
+`gen/android`**, so it is two commands rather than one:
+
+```bash
+pnpm --dir packages/native exec tauri android init
+git checkout -- packages/native/src-tauri/gen/android
+```
+
+`init` writes both halves; the checkout puts the committed half back and leaves
+the ignored, machine-specific half, which is what was missing. Run it on a tree
+with no other changes under `gen/android`, because the checkout does not ask.
+`.claude/rules/native-packaging.md` has the census of what the second command
+puts back — the JNI handover in `MainActivity.kt`, the signing and rustls blocks,
+the R8 keep rule, four manifest attributes and the icons — and `nativecheck`
+asserts every one of them, so forgetting the second command is a red driver.
+
 ## What is measured on this checkout, and what it costs
 
 Measured 2026-09-14 on the machine this was written on: `rustc`/`cargo` 1.95 from
@@ -159,13 +243,15 @@ Three consequences, each stated rather than worked around:
 1. **A development build works today and is arm64 only.** `--target
    universal-apple-darwin` needs `x86_64-apple-darwin`, which needs `rustup`; a
    Homebrew toolchain ships the host target and no way to add another.
-2. **iOS and Android are prepared, not buildable here.** Both blocks exist in
-   `tauri.conf.json` so the identifier and the OS floors are decided rather than
-   defaulted, and neither `tauri ios init` nor `tauri android init` has been run —
-   `src-tauri/gen/android` and `gen/apple` do not exist. The `SecretStore` boundary
-   in `credential.rs` is the one thing mobile actually forces, and it is a trait
-   already: `keyring`'s Android support is behind its own feature with a different
-   API, and iOS reaches the Apple keychain by a third path.
+2. **Android is buildable and iOS is not.** `tauri android init` has been run and
+   `src-tauri/gen/android` is **committed** — see `.claude/rules/native-packaging.md`
+   for why, and for what a future `init` would overwrite. `gen/apple` does not
+   exist. The `SecretStore` boundary in `credential.rs` is the one thing mobile
+   actually forces: Android's arm is written (`keyring-core` plus
+   `android-native-keyring-store`, with the NDK context handed over from
+   `MainActivity.kt`), and iOS is refused by a `compile_error!` until its
+   `apple-native-keyring-store` arm is written in the same change that deletes
+   the refusal. No CI job compiles either arm.
 3. **A build with no identity is unsigned**, runs locally, and is blocked by
    Gatekeeper the moment it is *downloaded*. The gap is a certificate, not code.
    ⚠ Measured on the produced bundle: `codesign -dv` reports
@@ -245,6 +331,56 @@ It is a **sibling** job with no `needs:`, for the reason the `image` job gives: 
 not offline-in-one-process, and gating it behind the others would only delay the one
 signal nothing else gives.
 
+⚠ **`native` is macOS and the host target only, and `native-android` is why that
+is now said out loud.** `cargo clippy --all-targets` means every *crate* target —
+lib, bin, tests, examples — on the runner's own platform; it never crosses to
+another. So every `#[cfg(target_os = "android")]` arm in `credential.rs`, its JNI
+export and `lib.rs`'s `#[cfg_attr(mobile, …)]` were compiled by nothing, and two
+shipping-breaking defects lived in that gap at once: `rustls-platform-verifier`
+was never initialised, so every HTTPS call would have panicked, and R8 had
+stripped the verifier's Kotlin half out of the signed APK. Both compiled clean.
+
+⚠ **Measured 2026-09-20, and it is the first time either half was ever
+compiled.** `cargo clippy --target aarch64-linux-android --lib -- -D warnings`
+is clean, which settles the two things that could only be settled by a
+compiler: `EnvUnowned` *is* reachable at the `jni` 0.22 crate root, and the
+`&mut Env` handed to `init_with_env` reborrows for `JObject::from_raw` as
+written. The negative control is the half worth keeping: an error introduced
+inside `cfg(target_os = "android")` fails that command and leaves
+`cargo clippy --all-targets` on the host **green**, which is the gap in one
+line. Reproducing it needs `rustup target add aarch64-linux-android`, an NDK,
+and `CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER`/`CC_aarch64_linux_android`/
+`AR_aarch64_linux_android` pointed at `aarch64-linux-android24-clang` and
+`llvm-ar` — `24` because that is `minSdk`. iOS still cannot be compiled here:
+it stops in `aws-lc-sys`'s and `objc2-exception-helper`'s build scripts, which
+want full Xcode, so `credential.rs`'s `compile_error!` is never reached and
+remains asserted rather than measured.
+
+`native-android` closes the Rust half on `ubuntu-latest` — the macOS images carry
+no NDK — with `cargo clippy --target aarch64-linux-android --lib`. It stages no
+payload, and that is an assertion rather than an omission: a client build is
+`tauri.android.conf.json` and nothing else, so `build.rs` has no resources to copy
+and the `ResourcePathNotFound` that forces `pnpm native:stage` in the `native` job
+cannot happen. **It is a compile gate and not a bundle leg** — publishing an APK
+needs `tauri android build`, a Gradle run and an SDK — so it deliberately carries
+no matrix entry naming the platform. `android-apk` is the job that does: it runs
+Gradle, assembles an unsigned release APK and then **reads the artifact** —
+`classes.dex` must contain `org.rustls.platformverifier` and the native library
+must still resolve it by name. That is the one assertion no text can stand in
+for, because a keep rule that is present and ineffective looks identical to a
+regex. It is also why `deploycheck`'s release gate now recognises `android` as
+built, while `RELEASE_APP_TARGETS` staying empty keeps publishing a separate,
+deliberate act.
+
+⚠ **`android-apk` needs `gen/android` committed.** It is a checked-in project
+and `settings.gradle` is the first file Gradle reads, so a checkout without it
+fails at configuration. The one file it does regenerate is
+`tauri.settings.gradle`, which carries the machine's own `CARGO_HOME` and is
+gitignored for that reason.
+
+iOS has no leg at all: nothing on a Linux runner can compile it, and
+`credential.rs` refuses it outright.
+
 **Nothing about the native app deploys, publishes or notarizes on a push.** That is
 this repository's stance rather than an omission — the control plane's own deploy is
 `workflow_dispatch` only, and a release is a tag. If a distributable is ever
@@ -314,20 +450,30 @@ The parts that need a window, a fleet or an agent, and therefore no driver:
 
 Recorded here rather than discovered, in the column this repository keeps them in:
 
-- **The Linux bundle layout, and whether it reaches the staged runtime.** Read off
-  `tauri-utils`: a `.deb` or AppImage puts resources at `/usr/lib/<productName>/`
-  while the executable is at `/usr/bin/<productName>`. Two things follow, and
-  neither is fixed here — fixing them blind on a macOS checkout is how a guess
-  becomes a measurement. `Payload::locate` takes `node` from
-  `exe.parent()?.join("node")`, which there is `/usr/bin/node` — the
-  distribution's. And `placeRuntime`'s shim probes `../../../../MacOS/node` and
-  `../../../node`, neither of which resolves from
-  `/usr/lib/Reemoat/daemon/node_modules/.bin`, so it falls to `exec node "$@"`
-  with the payload's own `.bin` first on PATH — i.e. it re-execs itself.
-  `tauri build --no-bundle` touches neither, so CI would stay green over both.
-  The instrument: `tauri build --bundles deb` on a Linux box, install it,
-  `ls -l /usr/bin/node`, then `node_modules/.bin/node --version` from inside the
-  installed payload.
+- **The Linux bundle layout, and whether it reaches the staged runtime.** ⚠ **Off
+  the shipping path now and still open**, which is two statements rather than one.
+  Linux ships a *client* build (*What runs where*), so no released `.deb` or
+  AppImage carries a payload for this to get wrong — but a full-profile Linux
+  build is still a thing somebody can ask for, and this is what it would cost.
+  Read off `tauri-utils`: a `.deb` or AppImage puts resources at
+  `/usr/lib/<productName>/` while the executable is at `/usr/bin/<productName>`.
+  `Payload::locate` takes `node` from `exe.parent()?.join("node")`, which there is
+  `/usr/bin/node` — the distribution's, a different version with a different
+  module set, and the daemon would run under it with nothing saying so. That half
+  is unfixed, deliberately: fixing it blind on a macOS checkout is how a guess
+  becomes a measurement.
+  ⚠ **The second half was half wrong and is now fixed.** This entry used to say
+  that neither of `placeRuntime`'s two probes resolves from
+  `/usr/lib/Reemoat/daemon/node_modules/.bin`. Counting from `.bin`,
+  `../../../node` is `/usr/lib/Reemoat/node` — the resource directory's own
+  sibling — so it plausibly *does*, and the open question narrows to which
+  directory the bundler puts an `externalBin` in. What was unambiguously wrong was
+  the fallback under it: `exec node "$@"`, with `daemon_path` putting that same
+  `.bin` first on PATH, is a shim that re-execs itself for ever. It says what
+  happened and exits 127 now; `nativecheck` asserts both halves.
+  The instrument for what is left: `tauri build --bundles deb` on a Linux box with
+  the payload staged, install it, `ls -l /usr/bin/node`, then
+  `node_modules/.bin/node --version` from inside the installed payload.
 - **What Windows staging costs, when it is wanted.** Five items, not the three the
   refusal used to name: a `zip` rather than a tarball (`tar -xf` reads both, so
   not a new dependency); `node.exe` at the archive root rather than under `bin/`;

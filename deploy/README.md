@@ -583,10 +583,13 @@ is also the trigger.
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-`.github/workflows/release.yml` decides nothing, the same way `deploy.yml` does
-not. `deploy/ci-release.sh` holds every gate, in four verbs — `plan`, `image`,
-`manifest`, `publish` — and each of them re-runs all of them, because a workflow is
-a graph somebody can re-run one job of. It refuses:
+`.github/workflows/release.yml` decides nothing but the shape of its own graph,
+the same way `deploy.yml` does not. `deploy/ci-release.sh` holds every gate, in
+five verbs — `plan`, `image`, `manifest`, `app`, `publish` — and each of them
+re-runs all of them, because a workflow is a graph somebody can re-run one job of.
+`deploycheck` compares that list against the workflow's `run:` lines in both
+directions, which is how the `app` verb came to be noticed: nine refusals, ~125
+lines and no caller, with four documents describing the wiring anyway. It refuses:
 
 - a tag the **six** places the version is written disagree with — the root
   manifest, both packages, `app.ts`'s `VERSION` and the newest dated heading in

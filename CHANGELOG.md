@@ -25,6 +25,75 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Added
+
+- **A tag can publish the app, and the machinery is in place before any platform
+  uses it.** `deploy/ci-release.sh` grows a fifth verb, `app`: it builds the
+  native app for one target, refuses a target no check has built, refuses a
+  client build with a daemon payload left on the runner, refuses a bundle that
+  was not produced or was produced twice, and names the artifact it copied out.
+  `publish` puts every one of them on the same `gh release create` call as
+  `install.sh` and **refuses a release missing an artifact its own list named** —
+  by name, never by count. Thirty-six new assertions in `pnpm deploycheck`
+  drive all of it with no forge, no registry and no bundler.
+- **Which platforms carry a daemon inside them is written down per platform.**
+  `tauri.linux.conf.json`, `tauri.windows.conf.json`, `tauri.android.conf.json`
+  and `tauri.ios.conf.json` remove `externalBin` and `resources`, so every
+  platform but macOS ships a client. Measured rather than assumed: `tauri-build`
+  reads those overlays at **compile time**, which is what makes a client build a
+  configuration file with no Rust in it. `pnpm nativecheck` holds an overlay to
+  an exact allowlist of keys, because it reads one configuration file and Tauri
+  reads five.
+- The release notes now carry the AGPL §6 source offer for the tag being
+  released. `bundle.licenseFile` is read by the `dmg` and `nsis` bundlers and by
+  nothing that builds a macOS `.app`, so the artifact most people download would
+  otherwise carry neither a licence nor an offer.
+
+### Fixed
+
+- **Android is compiled and assembled by CI now, and both halves were dark.**
+  `check.yml` grows `native-android`, which compiles the Rust for
+  `aarch64-linux-android` — measured green, with the negative control that an
+  error inside `cfg(target_os = "android")` fails it while `cargo clippy
+  --all-targets` on the host stays green — and `android-apk`, which runs Gradle,
+  assembles a release APK and then reads `classes.dex` to prove the TLS
+  verifier's Kotlin half survived R8. That last one is the assertion no regex can
+  stand in for: a keep rule that is present and ineffective looks identical from
+  the outside. `android-apk` needs `gen/android` committed, which `.gitignore`
+  has always said it should be.
+- **The Android arm of the Rust was compiled by nothing, and a shipped APK could
+  not do TLS.** `cargo clippy --all-targets` is every *crate* target on the host,
+  never another platform, so `credential.rs`'s Android half and its JNI export
+  were checked only by `nativecheck` regexes. R8 then stripped
+  `org.rustls.platformverifier` — the class the Rust TLS stack reaches over JNI
+  by name — out of the signed release APK: measured against the built artifact,
+  where `usage.txt` listed all five classes removed and `classes.dex` carried
+  none, while the `.so` still carried the name it would look up. Debug builds
+  were unaffected, which is what made it invisible. There is a keep rule now,
+  `nativecheck` asserts it paired with the Gradle dependency that puts the class
+  in the APK at all, and a `native-android` job compiles the arm on every push.
+- **A typo in `RELEASE_APP_TARGETS` published a release with that platform
+  silently missing.** `app_artifacts` refuses a name the table does not know by
+  returning 1 — inside a pipeline, with no `pipefail`, so `set -eu` never saw it
+  and the name contributed no asset at all. `plan`'s collision gate and
+  `publish`'s completeness gate then had nothing to find. Every name is checked
+  against the table now, by `plan` and `publish` directly rather than from inside
+  the `$( )` that made the first attempt at this equally silent.
+
+- **A mobile build would have compiled and then silently never kept a sign-in.**
+  `keyring`'s `v1` feature has no credential store on iOS or Android — it refuses
+  at run time having compiled perfectly — so an APK or an `.ipa` built today would
+  have asked for the password on every launch. Android now reaches past that
+  façade to `keyring-core` with `android-native-keyring-store`; iOS is refused at
+  compile time until its own arm is written, because everything else a mobile
+  build is missing already fails loudly and this one would not.
+- **The bundled payload's `node` shim could re-exec itself for ever.** Its last
+  line was `exec node "$@"`, and the daemon's own `PATH` puts that shim's
+  directory first — so on any layout where its two relative probes miss, a PATH
+  lookup for `node` found the shim again. It says what happened and exits 127
+  now. Reachable on a `.deb` or an AppImage, where it would have read as a
+  daemon that never starts.
+
 ## [0.9.1] - 2026-09-18
 
 ### Changed

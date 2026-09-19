@@ -101,3 +101,15 @@ packages/native/src-tauri/gen/schemas/
 # cargo profile directory.
 packages/native/src-tauri/binaries/
 .wt/
+
+# Android signing material, refused by pattern rather than by path.
+#
+# The release keystore lives outside this repository — `~/.config/reemoat-signing`
+# — and a runner materialises it from a secret into `$RUNNER_TEMP`, so neither is
+# under this tree by design. These three patterns are the backstop for the day
+# somebody copies one in to "just test it locally": losing that key means no
+# future build can update any installed copy, and leaking it is a supply-chain
+# compromise of every device that took one.
+*.jks
+*.keystore
+keystore.properties

@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 980 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 982 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -471,6 +471,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `web-composer.md` | `packages/web/src/ui/Composer.tsx`, `CommandMenu.tsx`, `AgentConfigBar.tsx`, `packages/web/src/keys.ts` | Which key sends · what a `/` opens · why a control never leaves the strip · what a chip may claim before the daemon has answered |
 | `legal-pages.md` | `packages/web/src/legal.ts`, `legal/`, `ui/legal/`, `ui/gate/Gate.tsx`, `GateCard.tsx` | Why the documents are a route rather than a sixth gate screen · why a policy is data and never markdown · whose terms a fork serves · what the consent box gates and what it deliberately does not record |
 | `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server's origin · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
+| `native-packaging.md` | `packages/native/src-tauri/tauri.*.conf.json`, `packages/native/scripts/`, `deploy/ci-release.sh` | Which platforms carry a daemon inside them and which carry a client · the one JSON file a profile is, and the measurement that made it one rather than a cargo feature · what an overlay may say, and why the list is that short · why the staging script refuses a Windows triple by name |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
 | `plugin-contributions.md` | `src/plugins/contributions.ts`, `manifest.ts`, `src/acp/`, `src/runtime/local.ts`, `packages/web/src/ui/agentCard.ts` | A plugin that adds an *agent* or a *provider* · which id is checked for membership and which only for shape, and what each costs to get wrong · where a base URL may point now · what a machine's ceiling is and why it is a refusal |

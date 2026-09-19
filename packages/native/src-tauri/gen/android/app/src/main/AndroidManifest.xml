@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ⚠ **Hand-edited, and `tauri android init` overwrites this file.**
+
+  Four attributes on `<application>` are this repository's and are in no
+  template: `android:networkSecurityConfig`, `android:dataExtractionRules`,
+  `android:allowBackup="false"` and `android:fullBackupContent="false"`.
+  Compared against the manifest embedded in `@tauri-apps/cli` on 2026-09-19 —
+  it carries none of the four. An `init` re-run therefore switches cleartext and
+  private-CA support off, switches Auto Backup on, and leaves
+  `res/xml/network_security_config.xml` and `res/xml/data_extraction_rules.xml`
+  on disk with nothing pointing at them, which is the quiet direction: those two
+  files survive an `init` untouched and are orphaned by it.
+
+  `init` is not optional on a new machine: `gen/android/tauri.settings.gradle`
+  holds that computer's cargo registry paths and is gitignored, and
+  `settings.gradle` applies it during Gradle's settings evaluation.
+  `.claude/rules/native-packaging.md` has the two-command recipe that survives
+  one. `nativecheck` asserts all four attributes against this file's
+  comment-stripped code, which is what stops this banner from answering for
+  them.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- AndroidTV support -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <!--
+      android:usesCleartextTraffic used to sit on this element, wired to a
+      manifest placeholder that was "false" for release and "true" for debug, and
+      it decided nothing on any device this app runs on. Android ignores that
+      attribute from API 24 up whenever android:networkSecurityConfig is also
+      present, and minSdk here is 24 — so the effective policy was, in every
+      build, network_security_config.xml's own base config, which permits
+      cleartext. The pair read as "release forbids cleartext" to anybody skimming
+      the manifest, and to nobody else.
+
+      It is deleted rather than corrected, because the honest version of it is
+      the resource file that already exists and says why at length.
+
+      Expressing the difference where it would actually work was considered and
+      is wrong on the merits rather than merely awkward: debug-overrides carries
+      trust anchors and not a cleartext permission, so the only way to make a
+      release build refuse cleartext is a second resource file under src/debug —
+      which would break the LAN control plane and the dev stand that the network
+      config's own comment names as ordinary shapes for this software, in
+      release builds specifically. nativecheck asserts the absence here and in
+      build.gradle.kts as a pair.
+    -->
+    <application
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.reemoat_native">
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:label="@string/main_activity_title"
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- AndroidTV support -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+          android:name="androidx.core.content.FileProvider"
+          android:authorities="${applicationId}.fileprovider"
+          android:exported="false"
+          android:grantUriPermissions="true">
+          <meta-data
+            android:name="android.support.FILE_PROVIDER_PATHS"
+            android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

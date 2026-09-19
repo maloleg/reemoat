@@ -18,11 +18,25 @@
 # run is not green, a tag that already has a release or an image, an empty
 # changelog section, a digest directory a skipped matrix leg left behind — is in
 # `deploy/ci-release.sh`, where `deploycheck` drives it with no registry, no forge
-# and no network. What is left here is a checkout and four calls.
+# and no network. What is left here is a checkout and six calls of five verbs —
+# and `deploycheck` now reads this file back against that script's own `case`, in
+# both directions, so a verb with no job and a job with no verb are each one red
+# line rather than something a reader has to notice. It was not always: the `app`
+# verb shipped with nine refusals, ~125 lines and no caller, while four documents
+# described the wiring anyway.
 #
-# The job order is `plan → image → manifest → publish`, and `publish` is last on
-# purpose: a GitHub Release whose image does not exist is the failure that looks
-# like success, and it is the one a reader would find months later.
+# The job order is `plan → image → manifest → publish`, with `app` and
+# `app-android` beside `image` under `plan`, and `publish` is last on purpose: a
+# GitHub Release whose image does not exist is the failure that looks like
+# success, and it is the one a reader would find months later.
+#
+# ⚠ **`app` and `app-android` build nothing today, and that is the gate rather
+# than an omission.** `RELEASE_APP_TARGETS` is empty in `ci-release.sh` until a
+# platform has a `check.yml` leg, so `plan` emits an empty matrix, both jobs skip
+# on their own `if:`, and a release publishes exactly what it published before
+# they existed: the notes, and the installer. They are written now rather than on
+# the day a target is added because the day a signing key is first plumbed
+# through a workflow is the worst day to also be writing the workflow.
 
 name: release
 
@@ -68,6 +82,18 @@ jobs:
     outputs:
       version: ${{ steps.plan.outputs.version }}
       image: ${{ steps.plan.outputs.image }}
+      # What the two app jobs below are gated on and built from, all four derived
+      # by `plan` from one list in `ci-release.sh`. `app_targets` is the word list
+      # a person reads and what `publish`'s download step is gated on;
+      # `app_matrix` is the same thing as JSON, in the form `fromJSON` feeds a
+      # matrix directly; `app_desktop` and `app_android` are what the `if:` lines
+      # compare, and they exist because an empty matrix here is a job that fails
+      # rather than one that skips — "no targets today" has to be sayable before
+      # the matrix is evaluated at all.
+      app_targets: ${{ steps.plan.outputs.app_targets }}
+      app_matrix: ${{ steps.plan.outputs.app_matrix }}
+      app_desktop: ${{ steps.plan.outputs.app_desktop }}
+      app_android: ${{ steps.plan.outputs.app_android }}
 
     steps:
       - uses: actions/checkout@v7
@@ -222,9 +248,223 @@ jobs:
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
 
+  # The native app, one job per desktop target, each building and naming one
+  # artifact. A **sibling** of `image` rather than a successor: an app artifact
+  # has no merge step, so there is nothing between this and `publish` — the
+  # script's own header makes the same point about the verb.
+  #
+  # ⚠ **The matrix is `plan`'s output, not a list written here.** `app_runner`,
+  # `app_triple` and `RELEASE_APP_TARGETS` are one table in `ci-release.sh`,
+  # `plan` emits it, and `deploycheck` drives the emitted JSON against fixture
+  # lists. A hand-written `include:` would be a third list to keep in step with
+  # that script and with `check.yml`, and the only one of the three that nothing
+  # can check — which is the shape this whole file exists to avoid.
+  #
+  # ⚠ **The `if:` is load-bearing, and without it this job *fails* rather than
+  # skips.** An empty matrix is not zero legs in GitHub Actions, it is an error,
+  # and `RELEASE_APP_TARGETS` ships empty on purpose. `app_desktop` rather than
+  # `app_targets`: a release asking for android alone has a non-empty target list
+  # and an empty matrix, which is exactly the case that would have failed.
+  app:
+    needs: plan
+    if: ${{ needs.plan.outputs.app_desktop != '' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # The check gate again — see the `image` job, which records what its
+      # absence cost. Every verb re-runs every gate, this one included.
+      #
+      # Deliberately no `packages: read` and no registry login: the re-release
+      # image gate runs here too and fails *open* without one, which `plan` —
+      # which asks it in full, logged in, before anything is built — already
+      # covers. A macOS or Windows runner has no docker to ask with anyway.
+      actions: read
+    strategy:
+      # One leg failing must not spend the other five. It could not publish a
+      # partial page in any case — `publish` refuses a named artifact it does not
+      # have — but that refusal is the backstop and this is the cheap half.
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.plan.outputs.app_matrix) }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # `check.yml`'s `native` job's reasoning, one act over: the runner image's
+      # Rust moves without notice, and a cross target has to be added anyway —
+      # both macOS legs run on the same arm64 runner, so `macos-x64` is a
+      # cross-compile rather than a second machine.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native/src-tauri
+          key: ${{ matrix.target }}
+
+      # Two installs, and the second is not a mistake: `packages/native` is under
+      # `packages/` and deliberately excluded from the workspace, so the root
+      # install never reaches it and the Tauri CLI would not exist.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir packages/native install --frozen-lockfile
+
+      # `frontendDist` has to exist before Tauri reads the configuration, and the
+      # failure otherwise is a path error that reads like a config bug.
+      - run: pnpm web:build
+
+      # ⚠ **No `pnpm native:stage` step, and that is the script's decision rather
+      # than an omission here.** `ci-release.sh app` stages the payload itself for
+      # a daemon-host target, and **refuses** a client target that has one lying
+      # around — a runner is reused, `binaries/node-*` outlives the build that
+      # staged it, and `tauri-build` copies whatever it finds. Staging in this
+      # file would take that refusal away from every leg.
+      - name: app
+        # The one step in this workflow that can land on Windows, where the
+        # default shell is pwsh and a POSIX script would not be run at all.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF: ${{ github.sha }}
+          RELEASE_APP_TARGET: ${{ matrix.target }}
+          # The `TAURI` seam is one word so the script can invoke it directly, and
+          # there is no `tauri` on any runner's PATH — the CLI is a dependency of
+          # `packages/native` and of nothing else in this tree.
+          TAURI: ${{ github.workspace }}/packages/native/node_modules/.bin/tauri
+        run: deploy/ci-release.sh app
+
+      - uses: actions/upload-artifact@v7
+        with:
+          # `app-` prefixed, because `publish` downloads `pattern: app-*` and
+          # `digest-*` is the other family in this run. Named after the target
+          # rather than after `strategy.job-index`, which the `image` job can use
+          # because its legs are interchangeable and these are not: `app-3` tells
+          # somebody re-running one leg nothing about which one.
+          name: app-${{ matrix.target }}
+          path: ${{ runner.temp }}/reemoat-release/apps/*
+          if-no-files-found: error
+          # Same reason as `release-notes` and `digest-*`: a re-run of one leg
+          # must replace its artifact rather than collide with it.
+          overwrite: true
+
+  # Android, which is a job rather than a matrix leg.
+  #
+  # ⚠ **Because of the four secrets, and that is the whole reason.**
+  # `ci-release.sh`'s `plan` explains at length why it does not check them: they
+  # are scoped *here*, so "who can read the signing key" is answerable by reading
+  # this file. A matrix cannot scope a secret to one entry, so folding android in
+  # above would hand the keystore to every desktop leg as well — and to `plan`,
+  # the job whose whole stated property is that it can write nothing anywhere.
+  #
+  # The second reason is ordinary: an APK wants a JDK, the Android SDK, the NDK
+  # and a Gradle run, and shares no step with `tauri build` except the checkout.
+  app-android:
+    needs: plan
+    if: ${{ needs.plan.outputs.app_android == '1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # The check gate again. See the `app` job above for why there is no
+      # registry credential beside it.
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # Gradle's JDK, not Tauri's. `gen/android` is committed rather than
+      # generated — `native-packaging.md` has the icon measurement that made it
+      # so — therefore nothing here runs `tauri android init`.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Four ABIs in one universal APK, which is why `app_triple` answers nothing
+      # for android and why the asset name carries no arch token.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native/src-tauri
+          key: android-release
+
+      # The NDK the runner already has, named through `ANDROID_NDK_LATEST_HOME`
+      # for `check.yml`'s reason: pinning a version here would be a third place a
+      # toolchain version is written down and the first that nothing compares.
+      # `tauri android build` reads `NDK_HOME`; `ANDROID_HOME` the image sets.
+      - name: the Android toolchain
+        run: |
+          set -euo pipefail
+          ndk=${ANDROID_NDK_LATEST_HOME:?the runner image carries no Android NDK}
+          echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir packages/native install --frozen-lockfile
+      - run: pnpm web:build
+
+      - name: app
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF: ${{ github.sha }}
+          RELEASE_APP_TARGET: android
+          TAURI: ${{ github.workspace }}/packages/native/node_modules/.bin/tauri
+          # ⚠ **The only four repository secrets this workflow reads, named in
+          # this job and nowhere else.** `deploycheck` asserts both halves — that
+          # these are the four, and that no other job mentions one. The script
+          # refuses android with any one unset and names the one that is missing:
+          # an unsigned APK installs on nothing, and one signed with a throwaway
+          # key can never be replaced on a device that took it, because Android
+          # refuses an upgrade whose signer changed.
+          RELEASE_ANDROID_KEYSTORE: ${{ secrets.RELEASE_ANDROID_KEYSTORE }}
+          RELEASE_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_ANDROID_KEYSTORE_PASSWORD }}
+          RELEASE_ANDROID_KEY_ALIAS: ${{ secrets.RELEASE_ANDROID_KEY_ALIAS }}
+          RELEASE_ANDROID_KEY_PASSWORD: ${{ secrets.RELEASE_ANDROID_KEY_PASSWORD }}
+        run: deploy/ci-release.sh app
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app-android
+          path: ${{ runner.temp }}/reemoat-release/apps/*
+          if-no-files-found: error
+          overwrite: true
+
   # Last, and only once the image it describes exists.
   publish:
-    needs: manifest
+    needs: [plan, manifest, app, app-android]
+    # ⚠ **Without this line a release stops publishing anything the moment an app
+    # job is skipped — which is every release today.** GitHub skips a job whose
+    # `needs` includes a skipped one unless that job carries a conditional, and
+    # both app jobs are gated on a target list that ships empty. So wiring them
+    # up without this would have left every release pushing its image tags and
+    # then quietly creating no release page at all: the half-done state that
+    # `publish`-is-last exists to prevent, arriving by the other door.
+    #
+    # It is the one `if:` in a file whose header says it decides nothing, and
+    # what it says is about the **graph** rather than about the release: an app
+    # leg this release did not ask for must not take the release page with it.
+    # The release decision stays in the script — `!cancelled()` deliberately lets
+    # a **failed** app job reach `publish`, where the completeness gate refuses
+    # by name and says which artifact is missing, rather than a silent skip.
+    if: ${{ !cancelled() && needs.manifest.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -244,6 +484,24 @@ jobs:
         with:
           name: release-notes
           path: ${{ runner.temp }}/reemoat-release
+
+      # Every app artifact, merged into the one directory `RELEASE_APP_DIR`
+      # defaults to — `$RELEASE_WORK/apps`, which is why no env var is set for it
+      # below. Gated on the target list for the same reason the jobs above are:
+      # with no `app-*` artifact anywhere in the run there is nothing for the
+      # pattern to match, and what a zero-match download should mean is a
+      # decision this file does not get to make.
+      #
+      # ⚠ **A `pattern:` will satisfy a re-run with a subset and say nothing**,
+      # which is why `publish` re-derives the list it expects and refuses by
+      # name. The re-run-one-job button this file names as its whole recovery
+      # story is exactly the path that produces a subset.
+      - uses: actions/download-artifact@v8
+        if: ${{ needs.plan.outputs.app_targets != '' }}
+        with:
+          pattern: app-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/reemoat-release/apps
 
       - name: publish
         env:

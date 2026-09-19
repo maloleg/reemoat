@@ -140,12 +140,22 @@ const NODE_DIST = "https://nodejs.org/dist";
  * targets" is exactly the mistake that makes a cross-platform product accumulate
  * macOS-shaped decisions.
  *
- * So every desktop triple is named here with the archive it needs, and the ones
- * whose *unpacking* is not written yet are refused by name rather than silently
- * doing the wrong thing. Windows is a different shape in three ways at once — a
- * `.zip` rather than a tarball, `node.exe` at the archive root rather than under
- * `bin/`, and an `.exe` suffix on the staged binary — which is why it is a
- * separate piece of work and not a line in this table.
+ * So every desktop triple is named here with the archive it needs, and the one
+ * shape this script cannot unpack is refused **by name**.
+ *
+ * ⚠ **That refusal is a decision now rather than an unfinished job, and the
+ * distinction matters to whoever reads it next.** Windows ships as a *client*
+ * build — `tauri.windows.conf.json` carries no `externalBin` and no `resources`,
+ * so nothing there would read a payload staged for it — and the reason is older
+ * than packaging: `docs/NATIVE.md`'s *What runs where* refuses Windows as a daemon
+ * **host** because there is no way to stop a bundled daemon cleanly there, and
+ * `deploy/install.sh` has no supervisor to install into either. The three
+ * differences a Windows payload would have to answer are recorded in the refusal
+ * below, so that they are still written down on the day somebody changes that.
+ *
+ * The rows stay in this table regardless. `pnpm nativecheck` counts them and
+ * asserts every one names an esbuild binary — an assertion that would go vacuous
+ * the moment the table described one platform.
  */
 const TARGETS = {
   "aarch64-apple-darwin": { dir: "darwin-arm64", archive: "tar.gz", esbuild: "@esbuild/darwin-arm64" },
@@ -210,10 +220,15 @@ if (target === undefined) {
 }
 if (target.archive !== "tar.gz") {
   fail(
-    `${triple} needs a ${target.archive} archive, and unpacking one is not written yet.\n` +
-      "  Windows also puts node.exe at the archive root rather than under bin/, and the staged\n" +
-      "  binary needs an .exe suffix — three differences, so it is its own change rather than\n" +
-      "  a line in TARGETS. Refusing rather than staging something that cannot run.",
+    `${triple} is a client-only target: this app carries no daemon there.\n` +
+      "  tauri.windows.conf.json removes externalBin and resources, so nothing in that bundle\n" +
+      "  would read a payload staged here. docs/NATIVE.md's *What runs where* has the reason,\n" +
+      "  and it is not packaging: a bundled daemon cannot be stopped cleanly on Windows.\n" +
+      "\n" +
+      `  If that ever changes, a ${target.archive} archive is only the first of three\n` +
+      "  differences — Windows also puts node.exe at the archive root rather than under bin/,\n" +
+      "  and the staged binary needs an .exe suffix. Refusing rather than staging something\n" +
+      "  that cannot run.",
   );
 }
 
@@ -501,8 +516,18 @@ function placeRuntime(runtime) {
    *   bundle  Contents/Resources/daemon/node_modules/.bin → ../../../../MacOS/node
    *   dev     target/<profile>/daemon/node_modules/.bin   → ../../../node
    *
-   * The final `exec node` is not a third guess; it is what happens if this file is
-   * ever run from a tree that is neither, and PATH is then the honest last word.
+   * ⚠ **There is no third guess, and the line that used to be one was a
+   * self-exec.** It read `exec node "$@"`, and this comment claimed *"PATH is then
+   * the honest last word"*. It is not. `daemon_path` in `src-tauri/src/daemon.rs`
+   * puts **this very directory first** on the daemon's `PATH`, deliberately and for
+   * a reason of its own — `deploy/agents.sh` resolves the runtime as the node
+   * *beside* npm, and both live here. So a PATH lookup for `node` finds this shim
+   * and re-execs it, for ever, on any layout where both probes above miss. That is
+   * the case a `.deb` or an AppImage would have been, and the loop would have been
+   * reported as a daemon that hangs at startup.
+   *
+   * A payload that cannot find its runtime is a staging bug. Saying so is the only
+   * honest last word.
    */
   const binDir = join(stageDir, "node_modules", ".bin");
   mkdirSync(binDir, { recursive: true });
@@ -515,7 +540,8 @@ function placeRuntime(runtime) {
       `for candidate in "$basedir/../../../../MacOS/node" "$basedir/../../../node"; do\n` +
       `  [ -x "$candidate" ] && exec "$candidate" "$@"\n` +
       `done\n` +
-      `exec node "$@"\n`,
+      `echo "reemoat: the bundled Node runtime was not found beside this payload" >&2\n` +
+      `exit 127\n`,
   );
   chmodSync(join(binDir, "node"), 0o755);
 
