@@ -1500,6 +1500,51 @@ ol.md-paren > li::marker {
 }
 
 /*
+ * A row standing aside to make room for one being dragged past it.
+ *
+ * ⭐ **This exists because `.tap` above refuses `transform`, and refusing it is
+ * that rule's entire point.** Transitions here are opt-in per property, so `.tap`
+ * writes the `transition` *shorthand* — which resets `transition-property` to
+ * exactly the three colours it names. An element carrying `tap` therefore ignores
+ * Tailwind's `transition-transform` completely, and the neighbours in a reorder
+ * jump to their new position instead of sliding to it.
+ *
+ * ⚠ **Specificity has nothing to do with it and chasing that is the wrong
+ * repair.** `.transition-transform` lives inside `@layer utilities` and every rule
+ * in this file is unlayered on purpose, so `.tap` wins outright however the class
+ * string is written. Measured on the built stylesheet: the utilities layer spans
+ * bytes 9909–51781 with `.transition-transform` at 43519 inside it, against `.tap`
+ * at 56918 outside. That is the same trap `agent-strip.md` records for
+ * `touch-none`, one property to the left — and the reason it was not caught twice
+ * is that both lists which already reorder, the session rows and the agent strip,
+ * carry **no** `.tap` on the element that shifts.
+ *
+ * So the opt-in gains a second member rather than `.tap` gaining a fourth
+ * property: `transform` on every `.tap` in the app would put a 150ms interpolation
+ * on every row of a list that re-renders on every event, which is the smear the
+ * docblock above exists to prevent. This one is applied **only while a drag is
+ * live**, and never to the row under the pointer — that one's transform is
+ * rewritten every frame, and a transition restarts the interpolation on each
+ * write, so it crawls after the finger instead of following it.
+ *
+ * ⚠ **The three colour declarations are `.tap`'s, restated because a shorthand
+ * cannot extend one.** They must stay in step with the rule above; `webcheck`
+ * compares them. It sits after `.press` as well as after `.tap` so that an element
+ * wearing both still slides — no such element exists today, and this is here so
+ * that one arriving does not have to rediscover any of the above.
+ *
+ * `prefers-reduced-motion` needs nothing: the block at the foot of this file
+ * zeroes `transition-duration` on `*` with `!important`.
+ */
+.slides {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    transform 150ms ease;
+}
+
+/*
  * One focus ring for the whole app.
  *
  * Per-component focus styling is how the fifth copy of a control ends up with

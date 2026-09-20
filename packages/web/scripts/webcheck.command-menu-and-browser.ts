@@ -2,8 +2,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { check } from "./webcheck.env.js";
 import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 import { snapshot, workspaceAt } from "./webcheck.ws.js";
+import { storage } from "./webcheck.env.js";
+import type { MachineId } from "../src/ids.js";
 import {
+  MAX_MACHINE_ORDER,
   RANK_STEP,
+  dropSlot,
   allRows,
   canReorder,
   commandsPlan,
@@ -15,7 +19,10 @@ import {
   folderNames,
   folderPathOf,
   foldersOf,
+  groupsVersion,
   machineTabs,
+  nextOrder,
+  orderMachines,
   matchesQuery,
   orderSessions,
   rankBetween,
@@ -24,6 +31,7 @@ import {
   selectMachine,
   selectedMachineIn,
   sessionGroups,
+  setMachineOrder,
   sessionLabel,
   setQuery,
   siblingsOf,
@@ -1146,6 +1154,105 @@ process.stdout.write("\nwhat is actually on screen\n");
   check("and a tab carries the count its rows would", machineTabs(groups, currentView(groups)).map((t) => t.blockedCount), [1, 0]);
 
   /*
+   * ⭐ **The order the machines are in, and the half a source pin cannot see.**
+   *
+   * `sessionGroups` is memoised on the identity of `state.sessions` and
+   * `state.machines`, and a reorder replaces neither — so without the order's
+   * version in that guard a drop repaints nothing until the four-second poll
+   * happens to hand over a new `machines` array. That reads as a drag doing nothing
+   * for four seconds and then jumping, and **every assertion written off the source
+   * text stays green with the guard reverted**, which is why this pair is driven
+   * against the real function instead.
+   */
+  {
+    const before = sessionGroups(state);
+    const versionBefore = groupsVersion();
+    setMachineOrder(["m_b", "m_a"]);
+    check("a reorder invalidates the fleet memo", sessionGroups(state) === before, false);
+    check(
+      "and the tabs come back in the order somebody set",
+      machineTabs(sessionGroups(state), currentView(sessionGroups(state))).map((t) => t.id),
+      ["m_b", "m_a"],
+    );
+    /*
+     * The tab bar still adds no sort of its own: what it draws is exactly what the
+     * store handed it, which is the property the assertion above this block is
+     * about and the reason the order was applied in `store.ts` rather than here.
+     */
+    check(
+      "the tab bar is still store order, now that the store has an opinion",
+      machineTabs(sessionGroups(state), currentView(sessionGroups(state))).map((t) => t.id),
+      sessionGroups(state).groups.map((g) => g.id),
+    );
+    check("and the fallback tab is the first in that order, not the first by name", selectedMachineIn(sessionGroups(state)), "m_b");
+    check("it is written where a reload will find it", storage.get("reemoat.machineOrder"), JSON.stringify(["m_b", "m_a"]));
+    /*
+     * Both readers of the tab list subscribe to the screen's own version rather
+     * than to a second store, so the bridge in `groups.ts` is what makes a reorder
+     * repaint. Asserted as a number moving, because a missing `subscribeMachineOrder`
+     * leaves every other assertion here green.
+     */
+    check("and the screen's own version moved, so both axes re-render", groupsVersion() > versionBefore, true);
+    const settled = groupsVersion();
+    setMachineOrder(["m_b", "m_a"]);
+    check("committing the same order again tells nobody", groupsVersion(), settled);
+    /*
+     * ⚠ **Reset, and this is not tidiness.** Every section below reads
+     * `sessionGroups` on its own fixtures out of one shared `storage` Map in one
+     * process, so an order left behind here reorders somebody else's assertion
+     * three sections away — where it would be read as a defect in whatever that
+     * section is about.
+     */
+    setMachineOrder([]);
+    storage.delete("reemoat.machineOrder");
+  }
+
+  /*
+   * The merge itself, driven directly. `natural` arrives from `store.ts` already
+   * sorted by name, so clause 2 *is* the name sort rather than a replacement for
+   * it — which is what a machine nobody has dragged relies on.
+   */
+  {
+    const natural = [{ id: "m_a" }, { id: "m_b" }, { id: "m_c" }] as never as { id: MachineId }[];
+    const ids = (rows: readonly { id: string }[]) => rows.map((r) => r.id);
+    check("with nothing stored, the order is the name sort it always was", ids(orderMachines(natural, [])), ["m_a", "m_b", "m_c"]);
+    check("a stored order leads, and the rest keep the name sort behind it", ids(orderMachines(natural, ["m_c"])), ["m_c", "m_a", "m_b"]);
+    check("a machine the fleet no longer holds is dropped at draw time, not at write time", ids(orderMachines(natural, ["m_gone", "m_c"])), ["m_c", "m_a", "m_b"]);
+    check("and a hand-edited duplicate cannot draw one machine twice", ids(orderMachines(natural, ["m_c", "m_c"])), ["m_c", "m_a", "m_b"]);
+    /*
+     * ⚠ **`natural` decides membership; `stored` decides only order.** Reading
+     * them as symmetric is the mistake `agentStrip.ts` records having to name, and
+     * here the consequence is sharper: `web-shell.md` says a machine with no
+     * sessions still gets a tab, and that tab is the only route to starting a
+     * session on a machine somebody has just added.
+     */
+    check("membership is the fleet's, and this may not narrow it", orderMachines(natural, ["m_a"]).length, natural.length);
+
+    check("what is written back keeps a slot for a machine the fleet lost", nextOrder(["m_a", "m_gone", "m_b"], ["m_b", "m_a"]), ["m_b", "m_gone", "m_a"]);
+    check("and a machine nobody had heard of is written at the end", nextOrder([], ["m_a", "m_b"]), ["m_a", "m_b"]);
+    check("a duplicate cannot survive the round trip", nextOrder(["m_a", "m_a"], ["m_a"]), ["m_a"]);
+    check(
+      "and the stored list is bounded rather than validated",
+      nextOrder([], Array.from({ length: 300 }, (_, i) => `m_${String(i)}`)).length,
+      MAX_MACHINE_ORDER,
+    );
+
+    /*
+     * ⚠ **Rounded by construction rather than by arithmetic.** `dropIndex` divides
+     * travel by one measured row and is exact on a uniform column; a machine tab is
+     * its label's width, so past the first neighbour that division drifts. This
+     * counts midpoints instead and carries the same property — an entry swaps when
+     * the dragged one is more than half over it — off a grid that is not one.
+     */
+    check(
+      "an entry takes its neighbour's place as the pointer passes that neighbour's middle",
+      [dropSlot([50, 150, 250], 0, 149), dropSlot([50, 150, 250], 0, 151), dropSlot([50, 150, 250], 0, 251), dropSlot([50, 150, 250], 2, 49)],
+      [0, 1, 2, 0],
+    );
+    check("and a pointer that has not moved reports the slot it started in", dropSlot([50, 150, 250], 1, 150), 1);
+  }
+
+  /*
    * Folders. The key is the repo root where there is one, so a session started
    * three levels inside a repository files under the project a human recognises
    * rather than under `packages/web`.
@@ -1592,6 +1699,16 @@ process.stdout.write("\nthe orphan section, drawn and walked from one list\n");
    * `touch-none` here" and the check goes quiet.
    */
   check("the rail is a scroller before it is a drag surface", /touch-none/.test(browser), false);
+  /*
+   * **And the axis it *does* claim is named, with the other two given back.** The
+   * ban above says what may not be on this box; this says what is, because a
+   * scroller that declares nothing leaves the swipe racing the pan it is trying to
+   * replace. `pan-y` keeps the list scrolling and `pinch-zoom` keeps the page
+   * zoomable, which a bare `pan-y` would not — and it is one arbitrary value
+   * rather than two utilities, since two setting one property are resolved by
+   * Tailwind's emission order rather than by the class string.
+   */
+  check("and the axis it does claim is named, with the other two given back", /\[touch-action:pan-y_pinch-zoom\]/.test(browser), true);
   /*
    * ⚠ **Comment-stripped, unlike the ban above it, and for the opposite reason.**
    * `touch-none` is banned as a *string* so prose cannot reintroduce it quietly;

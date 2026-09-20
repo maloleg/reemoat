@@ -110,16 +110,24 @@ const UNREACHABLE = "That machine is not reachable right now, so the row was not
 const PART_MOVED = "Some rows beside it did not move, so this group is not in the order you asked for.";
 
 /** Pixels from an edge of the scroller at which a live drag starts scrolling it. */
-const SCROLL_EDGE = 60;
+export const SCROLL_EDGE = 60;
 /** The fastest that scroll goes, per frame. */
-const SCROLL_MAX = 14;
+export const SCROLL_MAX = 14;
 
-/** How fast to scroll, given how far into the edge band the pointer is. */
-function driftFor(box: { top: number; bottom: number }, y: number): number {
-  const intoTop = SCROLL_EDGE - (y - box.top);
-  if (intoTop > 0) return -Math.min(SCROLL_MAX, (intoTop / SCROLL_EDGE) * SCROLL_MAX);
-  const intoBottom = SCROLL_EDGE - (box.bottom - y);
-  if (intoBottom > 0) return Math.min(SCROLL_MAX, (intoBottom / SCROLL_EDGE) * SCROLL_MAX);
+/**
+ * How fast to scroll, given how far into the edge band the pointer is.
+ *
+ * **Axis-free, because the machine folders drag on both.** It was
+ * `({top, bottom}, y)` here and a near-copy in `MachineAgentsSection`; a third
+ * copy for a horizontal strip would have been the point at which the two constants
+ * above started disagreeing with each other. `near`/`far` are the scroller's
+ * leading and trailing edges along whichever axis is being dragged.
+ */
+export function driftFor(near: number, far: number, at: number): number {
+  const intoNear = SCROLL_EDGE - (at - near);
+  if (intoNear > 0) return -Math.min(SCROLL_MAX, (intoNear / SCROLL_EDGE) * SCROLL_MAX);
+  const intoFar = SCROLL_EDGE - (far - at);
+  if (intoFar > 0) return Math.min(SCROLL_MAX, (intoFar / SCROLL_EDGE) * SCROLL_MAX);
   return 0;
 }
 
@@ -162,6 +170,18 @@ export interface RowDrag {
   pressing: string | null;
   /** True while any drag is live, which is when a shift is worth animating. */
   sliding: boolean;
+  /**
+   * Whether a drag has armed and owns the touch, asked synchronously.
+   *
+   * **A function over a ref, not the `dragging` state beside it**, and the two are
+   * not interchangeable. This is read inside a `touchmove` handler by the swipe
+   * that shares this scroller — a per-frame decision, on the standing rule that
+   * per-frame work does not go through React. `dragging` is a render behind by
+   * construction, and a render behind is a whole gesture here: the hold arms on a
+   * timer, so the frame in which a swipe must decide to stand down is precisely
+   * the frame in which React has not yet been told.
+   */
+  armed: () => boolean;
   /**
    * Put this on the thing that follows the pointer while a drag is live.
    *
@@ -455,7 +475,8 @@ export function useRowDrag(state: AppState): RowDrag {
       rolling.current = null;
       return;
     }
-    const drift = driftFor(box.getBoundingClientRect(), lastY.current);
+    const seen = box.getBoundingClientRect();
+    const drift = driftFor(seen.top, seen.bottom, lastY.current);
     if (drift !== 0) box.scrollTop += drift;
     // Every frame, not only when the scroll moved: the space a group reserves
     // animates in over 150ms, so the row's own base is still travelling while the
@@ -1000,6 +1021,7 @@ export function useRowDrag(state: AppState): RowDrag {
     dragging: move?.key ?? null,
     pressing,
     sliding: move !== null,
+    armed: () => live.current?.armed === true,
     pillRef,
     unpinning: move !== null && move.origin.zone === PINNED_FOLDER && move.target.zone !== PINNED_FOLDER,
     spaceFor,

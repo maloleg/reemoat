@@ -1126,4 +1126,47 @@ async function connect(id: string, channels: never = fetchChannel) {
    */
   const resume = /private async runResume\([\s\S]*?\n    this\.patch\(\{ resuming: true \}\);[\s\S]{0,400}/.exec(store)?.[0] ?? "";
   check("and the resume funnel is what asks again", /await this\.refreshLocalMachine\(\);/.test(resume), true);
+
+  /*
+   * **The second reader of that fact, and it wants it for the same reason the
+   * badge does.** New session draws this computer's own file panel instead of
+   * walking the daemon's tree over the wire — which is only ever right where the
+   * daemon *is* this computer, and `localMachineId` is the only thing in the
+   * client that answers that. The negative beside it is the one that matters: a
+   * picker keyed on `route.kind` would put the tree back the moment somebody chose
+   * the relay on the machine they are sitting at, and a screen could not reach
+   * `route.kind` anyway — `MachineConnection` is pinned to four modules a section
+   * up and no `ui/` file is among them.
+   */
+  const start = stripComments(readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8"));
+  check(
+    "the OS panel is gated on which computer this is, and on the shell saying it can",
+    /osDialog=\{nativeBoot\(\)\?\.picksFolder === true && state\.localMachineId === selected\}/.test(start),
+    true,
+  );
+  /*
+   * ⚠ **`picksFolder` rather than `inNativeShell()`, and an APK that would not
+   * compile is why.** A shell exists on Android too and has no folder panel there:
+   * `tauri-plugin-dialog` offers no `blocking_pick_folder`, because the platform's
+   * own answer is a Storage Access Framework tree URI rather than a path. So "is
+   * there a shell" is not the question — "can this shell do it" is, and the shell
+   * is what answers. `nativecheck` holds that capability to the `#[cfg]` its
+   * implementation actually carries.
+   */
+  check("and a shell that cannot do it is not asked", /inNativeShell\(\)/.test(start), false);
+  check("and never on the routing preference", /localOff|route\.kind|kind === "local"/.test(start), false);
+  /*
+   * One derivation and one mount. Two `<DirectoryPicker` call sites would be two
+   * places for the predicate to disagree with itself, and a second
+   * `localMachineId` in this file would be the copy that gets it wrong.
+   */
+  check("it is derived once", (start.match(/localMachineId/g) ?? []).length, 1);
+  check("and there is one picker for both arms to live in", (start.match(/<DirectoryPicker/g) ?? []).length, 1);
+  /*
+   * ⚠ **And no listing is issued on that arm.** The point of the panel is the
+   * round trip it removes; a tree drawn beside it would be two controls answering
+   * one question, which is the defect the one-writer rule in
+   * `webcheck.machine-limit-and-probe.ts` already exists for.
+   */
+  check("the listing effect stands down where the panel stands up", /path === null \|\| osDialog\) return;/.test(start), true);
 }

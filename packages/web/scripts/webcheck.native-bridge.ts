@@ -258,6 +258,26 @@ report("there are files to sweep at all", files.length >= 50, `${files.length} m
     [],
   );
 
+  /*
+   * ⚠ **A cancel is not a failure, and the two seams say so in opposite ways.**
+   * `saveNative` answers `false` for a dismissed panel; `pickFolderNative` answers
+   * `null`. What both must never do is turn a dismissal into an error, and what
+   * *this* one must never do is turn an error into a dismissal — which is where it
+   * parts company with `copyNative` one block up, that swallows because losing a
+   * clipboard write costs the chrome and nothing else. A swallowed folder is a
+   * `Start` button dead over a folder nobody can see is missing, so the absence of
+   * a `try` in that body is asserted rather than left to a docblock.
+   */
+  const bridge = stripComments(src("native.ts"));
+  const pickBody = /export async function pickFolderNative[\s\S]*?\n\}/.exec(bridge)?.[0] ?? "";
+  report("the folder seam was found", pickBody.length > 0, `${String(pickBody.length)} chars`);
+  check(
+    "a dismissed folder panel answers null rather than throwing",
+    /\(await invoke<string \| null>\("host_pick_folder", \{ start \}\)\) \?\? null/.test(pickBody),
+    true,
+  );
+  check("and a real failure is not swallowed into one", /\btry\b|\bcatch\b/.test(pickBody), false);
+
   const clipboard = stripComments(src("ui/clipboard.ts"));
   check("the clipboard seam still carries its fallback", /execCommand\("copy"\)/.test(clipboard), true);
   check("and asks the platform first", /if \(inNativeShell\(\)\) return await copyNative\(text\);/.test(clipboard), true);

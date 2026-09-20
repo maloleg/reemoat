@@ -1,3 +1,4 @@
+import { subscribeMachineOrder } from "../machineOrder";
 import type { MachineId } from "../ids";
 import { relativeTo } from "../paths";
 import type { MachineGroup, SessionGroups, SessionRow } from "../store";
@@ -88,6 +89,23 @@ function bump(): void {
   version += 1;
   for (const listener of [...listeners]) listener();
 }
+
+/*
+ * **The machines' order is a thing on this screen, so it moves this screen's
+ * version.**
+ *
+ * Both readers of the tab list — `SessionBrowser` and `MachineColumn` — already
+ * subscribe to `groupsVersion`, and a second `useSyncExternalStore` in each would
+ * be two subscriptions per component to keep in step for one counter, which is two
+ * ways for them to disagree about whether a render happened. Registered from this
+ * module's body and never removed, which is `overlay.ts`'s idiom — and it touches
+ * no DOM, so a driver importing this file is unaffected.
+ *
+ * The order itself lives beside `store.ts` rather than here: `store.ts` applies it
+ * inside `sessionGroups` and may not import from `ui/`. This line is the bridge,
+ * not the state.
+ */
+subscribeMachineOrder(bump);
 
 export function isFolderCollapsed(id: FolderId): boolean {
   return collapsed.has(id);
@@ -390,9 +408,12 @@ export function currentView(groups: SessionGroups): ListView {
  * grant revoked and restored puts you back on your tab rather than on whatever
  * happened to be first while it was gone.
  *
- * The fallback is first **by name**, not by activity. Activity flickers on the
+ * The fallback is first **in the reader's own order** — which is by name until
+ * somebody has dragged a machine — and never by activity. Activity flickers on the
  * four-second poll, and a default tab that moves while you are looking at it is
- * the same failure as a list that reorders under a travelling thumb.
+ * the same failure as a list that reorders under a travelling thumb. A stored
+ * order does not flicker, which is the whole of why one is allowed and the other
+ * is not; `machineOrder.ts` carries that argument.
  */
 export function selectedMachineIn(groups: SessionGroups): MachineId | null {
   // The membership test is what narrows this: `selected` may be `ALL_MACHINES`,

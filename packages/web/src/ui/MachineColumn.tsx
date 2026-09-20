@@ -1,10 +1,11 @@
 import { Layers, Menu as MenuIcon, Plus } from "lucide-react";
-import { useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { mayAddMachine } from "../quota";
 import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { sessionGroups, type AppState } from "../store";
 import { Icon, Monogram } from "./bits";
+import { useMachineDrag, type MachineDrag } from "./machineDrag";
 import {
   allTab,
   currentView,
@@ -81,7 +82,24 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
   const tabs = machineTabs(groups, view);
   const all = allTab(groups, view);
   const selected = view.all ? null : view.machine;
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const drag = useMachineDrag({ axis: "y", tabs });
+
+  /*
+   * ⚠ **One callback ref, stable, composing both readers of this node.** The drag
+   * installs its touch listeners here and the effect below reads a scroll
+   * position, and an inline arrow would be a new function every render — which is
+   * the defect the phone's strip records at length: React detaches and re-attaches
+   * it, so anything keyed on the ref runs on every render of a rail that
+   * re-renders on the four-second poll and on every stream event.
+   */
+  const hold = useCallback(
+    (node: HTMLDivElement | null): void => {
+      scroller.current = node;
+      drag.scrollerRef(node);
+    },
+    [drag.scrollerRef],
+  );
 
   useEffect(() => {
     if (selected === null) return;
@@ -140,7 +158,7 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
           <Icon as={MenuIcon} size={18} />
         </button>
       </div>
-      <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={hold} className="min-h-0 flex-1 overflow-y-auto">
         {/*
          * All is first, and unlike the horizontal strip it needs no pinning
          * outside the scroller. There it was half a pill bled to the rail's left
@@ -149,11 +167,19 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
          * the first entry is the last thing to leave — the promise is kept by the
          * axis rather than by a shape.
          */}
+        {/* `All` takes no `index` and no `drag`: it is the fleet rather than a
+            machine, and it is not in the list a reorder may touch. */}
         <MachineEntry tab={all} glyph={<Icon as={Layers} size={14} />} />
-        {tabs.map((tab) => (
-          <MachineEntry key={tab.id} tab={tab} />
+        {tabs.map((tab, index) => (
+          <MachineEntry key={tab.id} tab={tab} index={index} drag={drag} />
         ))}
       </div>
+      {/* A keyboard move shifts an entry that may be scrolled out of view, on a
+          column with no other live region. The sentence is the hook's, so both
+          axes owe the same one. */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {drag.announcement}
+      </p>
       {mayAddMachine(state.me) && (
         /*
          * Outside the scroller and at the bottom: adding a machine is not one more
@@ -196,7 +222,18 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
  * `pointer-events-none` so the badge is not a hole in the middle of the control it
  * sits on, which is the rail bell's rule.
  */
-function MachineEntry({ tab, glyph }: { tab: MachineTab; glyph?: ReactNode }): ReactNode {
+function MachineEntry({
+  tab,
+  glyph,
+  index,
+  drag,
+}: {
+  tab: MachineTab;
+  glyph?: ReactNode;
+  /** Absent on `All`, which is not a machine and may not be reordered. */
+  index?: number;
+  drag?: MachineDrag;
+}): ReactNode {
   /*
    * ⚠ **The whole tile carries the selection, not the chip inside it.**
    *
@@ -225,14 +262,38 @@ function MachineEntry({ tab, glyph }: { tab: MachineTab; glyph?: ReactNode }): R
    */
   const tile = tab.selected ? "bg-raised" : "hover:bg-raised/60";
   const chip = tab.selected ? "bg-surface text-fg" : "bg-raised text-muted";
+  const movable = drag !== undefined && index !== undefined;
+  const shift = movable ? drag.shiftFor(index) : 0;
+  const lifted = movable && drag.dragging === tab.id;
+  /*
+   * ⚠ **A lifted entry needs a ground of its own.** These tiles paint nothing when
+   * unselected, so one carried over its neighbours would show them through it.
+   * `bg-surface` is the one step above `raised` this palette has — and **not**
+   * `bg-raised`, which is what *selection* means here, so a lifted entry wearing it
+   * would read as the machine you are looking at.
+   *
+   * The neighbours are transitioned and the carried entry never is: its transform
+   * is rewritten every frame, so a transition restarts the interpolation on each
+   * write and it crawls after the finger. `.press` stays off it for the same
+   * family of reason — `scale(0.97)` held for the length of a drag reads as broken.
+   *
+   * ⚠ **`slides`, not `transition-transform`.** This entry carries `.tap`, whose
+   * `transition` shorthand resets `transition-property` to three colours and is
+   * unlayered — so the utility is ignored outright and the neighbours *teleport*.
+   * `index.css` carries the measurement; the short version is that the two lists
+   * which already reorder both happen to shift an element with no `.tap` on it.
+   */
   return (
     <button
       type="button"
-      data-machine={tab.id}
       onClick={() => selectMachine(tab.id)}
       aria-pressed={tab.selected}
       title={tab.name}
-      className={`tap group relative flex w-full flex-col items-center gap-1 px-0.5 py-2 ${tile}`}
+      style={shift === 0 ? undefined : { transform: `translateY(${String(shift)}px)` }}
+      {...(movable ? drag.bind(tab.id, index) : { "data-machine": tab.id })}
+      className={`tap group relative flex w-full flex-col items-center gap-1 px-0.5 py-2 ${tile} ${
+        drag?.sliding === true && !lifted ? "slides" : ""
+      } ${lifted ? "z-10 bg-surface shadow-lg will-change-transform" : ""}`}
     >
       {glyph === undefined ? (
         <Monogram name={tab.name} className={chip} />

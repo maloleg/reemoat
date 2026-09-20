@@ -18,7 +18,7 @@ import { openableHref } from "./ui/links";
  * it. `pnpm nativecheck` asserts both halves, because either alone would pass
  * while the other broke.
  *
- * **What the shell is for, in one list.** Four things the webview cannot do for
+ * **What the shell is for, in one list.** Five things the webview cannot do for
  * itself, and nothing else:
  *
  *   1. reach the control plane, which mounts no CORS at all (`src/cors.ts` is the
@@ -26,7 +26,15 @@ import { openableHref } from "./ui/links";
  *   2. keep a sign-in in the operating system's credential store rather than in
  *      `localStorage`, keyed on the server it belongs to,
  *   3. open a link in the real browser,
- *   4. write a file through a save panel.
+ *   4. write a file through a save panel,
+ *   5. ask this computer for a folder, through its own file panel.
+ *
+ * ⚠ **The fifth is the only one that is per *machine* rather than per process.**
+ * The other four are true wherever this shell runs; that one is offered for the
+ * daemon running on this same computer and for no other, because a panel can only
+ * see this computer's disk. On every other machine the folder is still walked over
+ * the wire. `.claude/rules/native-panels.md` is where that predicate lives, and
+ * `NewSession.tsx` is where it is applied.
  *
  * Everything else — the relay, the daemons, the WebSocket, the cursor rules, the
  * make-before-break rotation, `sendWithProgress`'s upload progress — stays in the
@@ -97,6 +105,23 @@ export interface NativeBoot {
    */
   credential: string | null;
   platform: string;
+  /**
+   * Whether this shell can open a folder panel at all.
+   *
+   * ⚠ **Declared by the host rather than inferred here, and the two things it
+   * replaces were both wrong.** Keying on `platform` would have read
+   * `"android"` through `hostPlatform`, which narrows it to `"other"` along with
+   * every future desktop target — a guess that reads as a fact. Relying on a phone
+   * having no local daemon, and therefore never matching `localMachineId`, is true
+   * today and is luck rather than a rule.
+   *
+   * `false` on Android and iOS: `tauri-plugin-dialog` has no
+   * `blocking_pick_folder` there, because the platform's own answer is a Storage
+   * Access Framework tree *URI* rather than a path. Found by an APK failing to
+   * compile while every offline check was green — none of them builds for
+   * `aarch64-linux-android`.
+   */
+  picksFolder: boolean;
   /**
    * What this computer is called, for naming the machine it becomes.
    *
@@ -694,6 +719,28 @@ export async function saveNative(blob: Blob, filename: string): Promise<boolean>
   return await invoke<boolean>("host_save_file", bytes, {
     headers: { "x-reemoat-filename": encodeURIComponent(filename) },
   });
+}
+
+/**
+ * Ask this computer for a folder, through its own file panel.
+ *
+ * `null` is a **cancel**, and it must not be drawn as a failure nor as "no
+ * folder": the caller keeps whatever it already had. A real failure **throws** —
+ * which is where this parts company with {@link copyNative}, one function up,
+ * that swallows because losing a clipboard write costs the chrome and nothing
+ * else. Losing a folder silently is how `Start` comes to be dead over a folder
+ * nobody can see is missing.
+ *
+ * `start` is a seed for where the panel opens and nothing more; the host ignores
+ * one it cannot honour rather than refusing.
+ *
+ * Only ever called for the machine this app is running on. That is not enforced
+ * here and could not be — this file has no idea which daemon a screen is talking
+ * to — it is `NewSession.tsx`'s predicate, and `webcheck.local-route.ts` holds it
+ * there.
+ */
+export async function pickFolderNative(start: string | null): Promise<string | null> {
+  return (await invoke<string | null>("host_pick_folder", { start })) ?? null;
 }
 
 /**

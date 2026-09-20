@@ -53,6 +53,7 @@ export const {
 } = await import("../src/store.js");
 export const {
   currentView,
+  groupsVersion,
   folderNames,
   folderPathOf,
   allRows,
@@ -70,6 +71,9 @@ export const {
   visibleRows,
   waitingFloor,
 } = await import("../src/ui/groups.js");
+export const { MAX_MACHINE_ORDER, dropSlot, nextOrder, orderMachines, setMachineOrder } = await import(
+  "../src/machineOrder.js"
+);
 export const { expandConfig, prune, reduceConfig } = await import("../src/configMemory.js");
 export const { RANK_STEP, canReorder, compareRows, effectiveRank, orderSessions, rankBetween, resolveDrop } = await import(
   "../src/sessionOrder.js"

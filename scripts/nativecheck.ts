@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import { inflateSync } from "node:zlib";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -934,6 +935,112 @@ report(
   "the census reaches the argument form of the attribute, not only the bare one",
   argAttrs > 0 && declared.length > bareAttrs,
   `${declared.length} commands, ${argAttrs} of them declared with arguments`,
+);
+
+/*
+ * ⭐ **A desktop-only API must be behind a gate that names the platforms it is
+ * missing on, and this check exists because one was not.**
+ *
+ * `host_pick_folder` shipped calling `blocking_pick_folder` with no `cfg` at all.
+ * `tauri-plugin-dialog` 2.7.3 offers that method on desktop only — Android's own
+ * answer to "choose a folder" is `ACTION_OPEN_DOCUMENT_TREE`, which hands back a
+ * Storage Access Framework tree *URI* rather than a path, so the plugin does not
+ * wrap it under that name. `host_save_file` survives beside it because a *file*
+ * panel does have a mobile arm.
+ *
+ * ⚠ **The gap this closes is not the bug, it is the class.** `pnpm typecheck`,
+ * `pnpm check`, `cargo clippy` and 74 `cargo test`s were all green when that
+ * shipped, and every one of them was honest: **none compiles for
+ * `aarch64-linux-android`**. The APK build is the only thing that did, and it runs
+ * by hand and rarely. This is the static half — it cannot know what a crate offers
+ * on a target, so the list is named and measured rather than derived, and the
+ * `report` keeps it from going quiet if a name is ever renamed away.
+ */
+const MOBILE_ABSENT = ["blocking_pick_folder"];
+const MOBILE_GATE = '#[cfg(not(any(target_os = "android", target_os = "ios")))]';
+
+/** The attribute lines immediately above a definition, nearest last. */
+function attrsAbove(code: string, needle: string): string[] {
+  const at = code.indexOf(needle);
+  if (at < 0) return [];
+  const before = code.slice(0, at).split("\n");
+  const out: string[] = [];
+  for (let i = before.length - 1; i >= 0; i -= 1) {
+    const line = (before[i] ?? "").trim();
+    if (line.length === 0) continue;
+    if (!line.startsWith("#[")) break;
+    out.unshift(line);
+  }
+  return out;
+}
+
+const ungated = MOBILE_ABSENT.filter((api) => {
+  const at = commandsCode.indexOf(api);
+  if (at < 0) return false;
+  // The function the call sits in: the last `fn` declared above it.
+  const head = commandsCode.slice(0, at);
+  const fnAt = head.lastIndexOf("fn ");
+  const name = /fn ([a-z0-9_]+)/.exec(commandsCode.slice(fnAt))?.[1] ?? "";
+  return !attrsAbove(commandsCode, `fn ${name}(`).includes(MOBILE_GATE);
+});
+report(
+  "the desktop-only dialog calls are still called by these names",
+  MOBILE_ABSENT.every((api) => commandsCode.includes(api)),
+  MOBILE_ABSENT.join(" "),
+);
+check("and every one of them is behind a gate naming the platforms it is missing on", ungated, []);
+
+/*
+ * ⚠ **One condition, two mechanisms, and nothing else can compare them.** A
+ * `cfg!` macro and a `#[cfg]` attribute cannot share a token, so the platform
+ * condition is written twice — once as `PICKS_FOLDER`, which the page reads as a
+ * declared capability, and once on the function it describes. A build where those
+ * disagree draws a control the shell will refuse, and compiles perfectly.
+ */
+const picksFolder = /pub const PICKS_FOLDER: bool = cfg!\(([\s\S]*?)\);/.exec(commandsCode)?.[1] ?? "";
+report("the folder capability is declared as a constant", picksFolder.length > 0, picksFolder);
+check(
+  "and the capability it announces is the condition its implementation is gated on",
+  `#[cfg(${picksFolder})]`,
+  MOBILE_GATE,
+);
+/*
+ * And the page reads that capability rather than deriving one. `platform` narrows
+ * `"android"` to `"other"` along with every future desktop target, and "a phone
+ * has no local daemon" is true today and is luck rather than a rule.
+ */
+const newSession = read("packages/web/src/ui/NewSession.tsx");
+check(
+  "the page asks the shell what it can do rather than guessing from the platform",
+  [/nativeBoot\(\)\?\.picksFolder === true/.test(newSession), /hostPlatform\(/.test(newSession), /platform === "android"/.test(newSession)],
+  [true, false, false],
+);
+
+/*
+ * ⚠ **The `(async)` rule for a platform panel, which that file's own header
+ * states and nothing held it to.**
+ *
+ * `commands.rs` says it at length: the panel's result is delivered *by* the main
+ * event loop, so a bare `#[tauri::command]` blocking on `blocking_save_file` or
+ * `blocking_pick_folder` is waiting on the loop it is itself holding — a frozen
+ * window at best and a deadlock at worst. The attribute is the whole fix and the
+ * docblock already warns it is easy to lose in a refactor, which is a hazard named
+ * with no mechanism behind it.
+ *
+ * Split on the attribute and look at what each body reaches. Comment-stripped, or
+ * the paragraph above would match itself.
+ */
+const panelBlocks = commandsCode
+  .split(/(?=#\[tauri::command)/)
+  .filter((block) => /app\s*\n?\s*\.dialog\(\)|\.dialog\(\)|\.blocking_/.test(block));
+const panelNames = panelBlocks.map((block) => /pub (?:async )?fn ([a-z0-9_]+)/.exec(block)?.[1] ?? "?");
+report("some command waits on a platform panel", panelBlocks.length > 0, panelNames.join(" "));
+check(
+  "and every command that does runs off the main thread",
+  panelBlocks.filter((block) => !/^#\[tauri::command\([^)]*async[^)]*\)\]/.test(block.trim())).map(
+    (block) => /pub (?:async )?fn ([a-z0-9_]+)/.exec(block)?.[1] ?? "?",
+  ),
+  [],
 );
 
 /* ------------------------------------------------------------------ *
@@ -2878,6 +2985,319 @@ const sweepAndroid = (dir: string, within: string): void => {
 };
 sweepAndroid(ANDROID_DIR, "");
 check("no committed file under gen/android writes an absolute path down", absolutePaths, []);
+
+/* ------------------------------------------------------------------ *
+ * The icon, which nothing checked at all
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe icon, at every size a bundle asks for\n");
+
+/**
+ * Enough of a PNG reader to answer where the artwork is.
+ *
+ * ⚠ **All five filter types, rather than assuming zero.** `icons.mjs` writes
+ * filter 0 on every row, so a decoder that only knew that one would agree with
+ * the generator and with nothing else — and the failure this section exists to
+ * catch is somebody replacing a raster by hand, out of an editor that filters
+ * adaptively. A decoder narrower than the format is a check that stops biting the
+ * moment the file stops being ours.
+ */
+interface Decoded {
+  width: number;
+  height: number;
+  colour: number;
+  depth: number;
+  bpp: number;
+  px: Buffer;
+}
+
+function decodePng(bytes: Buffer): Decoded {
+  const byte = (buf: Buffer, at: number): number => buf[at] ?? 0;
+  let at = 8;
+  let width = 0;
+  let height = 0;
+  let depth = 0;
+  let colour = 0;
+  const parts: Buffer[] = [];
+  while (at + 8 <= bytes.length) {
+    const len = bytes.readUInt32BE(at);
+    const type = bytes.toString("ascii", at + 4, at + 8);
+    const body = bytes.subarray(at + 8, at + 8 + len);
+    if (type === "IHDR") {
+      width = body.readUInt32BE(0);
+      height = body.readUInt32BE(4);
+      depth = byte(body, 8);
+      colour = byte(body, 9);
+    }
+    if (type === "IDAT") parts.push(body);
+    at += 12 + len;
+  }
+  const bpp = colour === 6 ? 4 : colour === 2 ? 3 : colour === 4 ? 2 : 1;
+  const raw = inflateSync(Buffer.concat(parts));
+  const stride = width * bpp;
+  const px = Buffer.alloc(stride * height);
+  let read = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = byte(raw, read);
+    read += 1;
+    for (let x = 0; x < stride; x += 1) {
+      const cur = byte(raw, read + x);
+      const a = x >= bpp ? byte(px, y * stride + x - bpp) : 0;
+      const b = y > 0 ? byte(px, (y - 1) * stride + x) : 0;
+      const c = x >= bpp && y > 0 ? byte(px, (y - 1) * stride + x - bpp) : 0;
+      let value = cur;
+      if (filter === 1) value = cur + a;
+      else if (filter === 2) value = cur + b;
+      else if (filter === 3) value = cur + ((a + b) >> 1);
+      else if (filter === 4) {
+        const guess = a + b - c;
+        const da = Math.abs(guess - a);
+        const db = Math.abs(guess - b);
+        const dc = Math.abs(guess - c);
+        value = cur + (da <= db && da <= dc ? a : db <= dc ? b : c);
+      }
+      px[y * stride + x] = value & 0xff;
+    }
+    read += stride;
+  }
+  return { width, height, colour, depth, bpp, px };
+}
+
+/** The smallest box holding every pixel that is not effectively transparent. */
+function opaqueBox(img: Decoded): { x: number; y: number; width: number; height: number } {
+  let x0 = img.width;
+  let y0 = img.height;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < img.height; y += 1) {
+    for (let x = 0; x < img.width; x += 1) {
+      const alpha = img.bpp === 4 ? (img.px[(y * img.width + x) * 4 + 3] ?? 0) : 255;
+      // Eight of 255, so one antialiased edge pixel does not read as absent and a
+      // rounding artefact does not read as present.
+      if (alpha <= 8) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+}
+
+const png = (rel: string): Decoded => decodePng(readFileSync(join(ROOT, rel)));
+
+/*
+ * Apple's grid: an 824×824 squircle in a 1024×1024 canvas. Restated here rather
+ * than imported, because `icons.mjs` is JavaScript and this config compiles none —
+ * so the two copies are held to each other instead, which is the same shape
+ * `OPENABLE` is checked in two sections up.
+ */
+const MARGIN = 100 / 1024;
+
+/*
+ * ⚠ **Every one of these is new, and the reason to say so is that the tree they
+ * landed on had none.** Nothing in `nativecheck`, `imagecheck`, `pincheck`,
+ * `deploycheck`, `docscheck` or any of the forty `webcheck` files asserted
+ * anything about an icon — which is how a badge drawn at 100% of its canvas
+ * shipped for the life of the project, and how `packages/native/icon.png` came to
+ * be named by a script and never exist.
+ */
+// `bundle` is the one read at the top of this file; the icon list is its own.
+const iconList = (bundle["icon"] ?? []) as string[];
+report("the bundle names icons at all", iconList.length > 0, `${String(iconList.length)} entries`);
+check(
+  "every icon the bundle names exists on disk",
+  iconList.filter((rel) => !existsSync(join(ROOT, TAURI_DIR, rel))),
+  [],
+);
+
+/*
+ * The macOS container, parsed rather than trusted. `ic10` is the 1024 the Dock
+ * scales from, and the member list is pinned so that dropping the four legacy
+ * RGB+mask members is a decision on the record rather than something to infer.
+ */
+const icns = readFileSync(join(ROOT, TAURI_DIR, "icons/icon.icns"));
+const members: string[] = [];
+let member: Buffer | null = null;
+{
+  let cursor = 8;
+  while (cursor + 8 <= icns.length) {
+    const type = icns.toString("ascii", cursor, cursor + 4);
+    const len = icns.readUInt32BE(cursor + 4);
+    if (len < 8) break;
+    members.push(type);
+    if (type === "ic10") member = icns.subarray(cursor + 8, cursor + len);
+    cursor += len;
+  }
+}
+check("the icns is an icns", icns.toString("ascii", 0, 4), "icns");
+check("and its declared length is its real one", icns.readUInt32BE(4), icns.length);
+check(
+  "it carries the eight PNG members a macOS 13 floor reads, and no legacy RLE",
+  members,
+  ["ic11", "ic12", "ic07", "ic08", "ic13", "ic09", "ic14", "ic10"],
+);
+report("the 1024 member was found", member !== null, `${String(members.length)} members parsed`);
+
+/*
+ * ⭐ **The bug this section was written for, stated as a number.** Every raster in
+ * this tree had an opaque bounding box equal to its whole canvas — a badge drawn
+ * corner to corner, about a quarter larger in linear terms than every icon beside
+ * it in the Dock. Apple's grid leaves 9.77% transparent on each side, and that is
+ * the entire difference.
+ *
+ * One pixel of tolerance, because the margin is fractional below 1024 and the
+ * edge is antialiased: 128 × 100/1024 is 12.5, and a box can honestly begin at
+ * either 12 or 13.
+ */
+const inset = (rel: string): string => {
+  const img = png(rel);
+  const box = opaqueBox(img);
+  const want = img.width * MARGIN;
+  const side = img.width * (1 - 2 * MARGIN);
+  const ok = Math.abs(box.x - want) <= 1 && Math.abs(box.y - want) <= 1 && Math.abs(box.width - side) <= 2;
+  return ok ? "inset" : `${String(box.width)}x${String(box.height)} at ${String(box.x)},${String(box.y)}`;
+};
+
+const macOsRasters = ["icons/icon.png", "icons/128x128@2x.png", "icons/128x128.png", "icons/64x64.png", "icons/32x32.png"];
+check(
+  "every raster this project generates is inset to that grid",
+  macOsRasters.map((name) => `${name} ${inset(`${TAURI_DIR}/${name}`)}`),
+  macOsRasters.map((name) => `${name} inset`),
+);
+if (member !== null) {
+  const box = opaqueBox(decodePng(member));
+  check("and so is the member the Dock actually draws", [box.x, box.y, box.width, box.height], [100, 100, 824, 824]);
+  check(
+    "which is the same bytes as the file that looks like the master",
+    Buffer.compare(member, readFileSync(join(ROOT, TAURI_DIR, "icons/icon.png"))),
+    0,
+  );
+}
+
+/*
+ * ⚠ **Android is neither inset further nor full-bleed, and both halves bite.**
+ * Its adaptive foreground is the mark *alone* on transparency at 58% of the frame
+ * — a different treatment for a different mask, hand-authored because `tauri icon`
+ * does not produce one — while its legacy rasters are correctly opaque edge to
+ * edge. `native-packaging.md` records that a `tauri icon` run overwrites the first
+ * with the whole badge; this is what would catch that, and `icons.mjs` writes
+ * nothing here at all.
+ */
+const DENSITIES = ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"];
+const ART_ASPECT = 170 / 192;
+for (const tree of [`${TAURI_DIR}/icons/android`, `${ANDROID_DIR}/app/src/main/res`]) {
+  const foreground = DENSITIES.map((density) => {
+    const img = png(`${tree}/mipmap-${density}/ic_launcher_foreground.png`);
+    const box = opaqueBox(img);
+    const share = box.height / img.height;
+    const aspect = box.width / box.height;
+    return share > 0.57 && share < 0.59 && Math.abs(aspect - ART_ASPECT) < 0.01 ? "the mark, inset to the safe zone" : `${String(box.width)}x${String(box.height)} of ${String(img.width)}`;
+  });
+  check(`${tree}: the adaptive foreground is the mark alone, not the badge`, foreground, DENSITIES.map(() => "the mark, inset to the safe zone"));
+  const legacy = DENSITIES.flatMap((density) =>
+    ["ic_launcher.png", "ic_launcher_round.png"].map((name) => {
+      const img = png(`${tree}/mipmap-${density}/${name}`);
+      const box = opaqueBox(img);
+      return box.width === img.width && box.height === img.height ? "full bleed" : `${String(box.width)} of ${String(img.width)}`;
+    }),
+  );
+  check(`${tree}: and the legacy rasters still fill their frame`, [...new Set(legacy)], ["full bleed"]);
+}
+
+/*
+ * ⚠ **Two committed comments claimed this check and it did not exist.** Both
+ * `mipmap-anydpi-v26/ic_launcher.xml` and `values/ic_launcher_background.xml` say
+ * in their banners that `nativecheck` pins the `@color` form and the colour it
+ * resolves to. A grep for `ic_launcher` in this file returned nothing. So it is
+ * written here rather than the claim being softened — and comment-stripped,
+ * because both files quote the very strings being looked for, which is the hazard
+ * `MainActivity.kt`'s own assertion already records.
+ */
+const stripXml = (text: string): string => text.replace(/<!--[\s\S]*?-->/g, "");
+for (const tree of [`${TAURI_DIR}/icons/android`, `${ANDROID_DIR}/app/src/main/res`]) {
+  const adaptive = stripXml(read(`${tree}/mipmap-anydpi-v26/ic_launcher.xml`));
+  const colours = stripXml(read(`${tree}/values/ic_launcher_background.xml`));
+  check(
+    `${tree}: the launcher's background is a colour, not a mipmap`,
+    [
+      /<background android:drawable="@color\/ic_launcher_background"\s*\/>/.test(adaptive),
+      /@mipmap\/ic_launcher_background/.test(adaptive),
+      /<monochrome/.test(adaptive),
+    ],
+    [true, false, false],
+  );
+  check(
+    `${tree}: and it is the badge colour the browser tab already uses`,
+    /<color name="ic_launcher_background">(#[0-9a-f]{6})<\/color>/.exec(colours)?.[1],
+    "#1c1a16",
+  );
+}
+
+/*
+ * The mark is one drawing written in three places — `favicon.svg`, `Mark.tsx` and
+ * the landing repository's own copy, which is not on this filesystem. Two of the
+ * three are here, so the two are held to each other; the generator is the reason
+ * there is no fourth, and it is asserted to *read* the first rather than restate
+ * it.
+ */
+const favicon = read("packages/web/public/favicon.svg");
+const faviconBars = [...favicon.matchAll(/<rect(?: x="([\d.]+)")?(?: y="([\d.]+)")? width="([\d.]+)" height="([\d.]+)" rx="([\d.]+)"\/>/g)].map(
+  (m) => [Number(m[1] ?? 0), Number(m[2] ?? 0), Number(m[4])] as const,
+);
+const mark = read("packages/web/src/ui/Mark.tsx");
+const markBars = [...mark.matchAll(/\{ x: ([\d.]+), y: ([\d.]+), height: ([\d.]+) \}/g)].map(
+  (m) => [Number(m[1]), Number(m[2]), Number(m[3])] as const,
+);
+report("both copies of the mark were read", faviconBars.length === 3 && markBars.length === 3, `${String(faviconBars.length)} and ${String(markBars.length)} bars`);
+check("the mark is the same three bars in both places it is drawn", markBars, faviconBars);
+check(
+  "including the asymmetry nobody may straighten in one copy",
+  [/BAR_WIDTH = 50/.test(mark), /BAR_RADIUS = 16\.43/.test(mark), /VIEW_WIDTH = 170/.test(mark), /VIEW_HEIGHT = 192/.test(mark)],
+  [true, true, true, true],
+);
+
+/*
+ * ⚠ **The browser's badge is still full-bleed, and that is the platform masking
+ * rather than an oversight.** A tab strip does not mask an icon, so a margin there
+ * is a smaller mark for nothing; iOS masks `apple-touch-icon.png` itself, and that
+ * file is colour type 2 — it has no alpha channel to carry a margin with. Pinned
+ * so that a later pass "fixing the inconsistency" has to read this first.
+ */
+check("the favicon's badge still fills its viewBox", /<rect width="192" height="192" rx="48"/.test(favicon), true);
+check("and the home-screen icon has no alpha to inset with", png("packages/web/public/apple-touch-icon.png").colour, 2);
+
+/*
+ * The generator reads the artwork rather than restating it, and states only the
+ * two numbers that are Apple's.
+ */
+const generator = read(`${NATIVE}/scripts/icons.mjs`);
+check(
+  "the generator derives the mark from the favicon and states only the grid",
+  [/favicon\.svg/.test(generator), /100 \/ 1024/.test(generator), /185\.4 \/ 824/.test(generator), /BAR_WIDTH|16\.43/.test(generator)],
+  [true, true, true, false],
+);
+check(
+  "and it writes nothing under either Android tree",
+  [/icons\/android/.test(generator.replace(/\/\*\*[\s\S]*?\*\//g, "")), /gen\/android/.test(generator.replace(/\/\*\*[\s\S]*?\*\//g, ""))],
+  [false, false],
+);
+
+/*
+ * ⚠ **And the line that would have caught the whole thing.** `package.json` said
+ * `tauri icon icon.png` for the life of this package and `packages/native/icon.png`
+ * has never existed — a script naming a file that is not there, which nothing
+ * looked at because nothing looked at icons. `build-daemon.mjs` is the precedent:
+ * its own refusal already names a file this file checks the existence of.
+ */
+const nativeScripts = (json(`${NATIVE}/package.json`)["scripts"] ?? {}) as Record<string, string>;
+const namedFiles = [...new Set(Object.values(nativeScripts).flatMap((line) => line.match(/[\w./-]+\.(?:mjs|png|json)/g) ?? []))];
+report("the manifest's scripts name files at all", namedFiles.length > 0, namedFiles.join(" "));
+check(
+  "and every file a script in this manifest names exists",
+  namedFiles.filter((rel) => !existsSync(join(ROOT, NATIVE, rel))),
+  [],
+);
 
 process.stdout.write("\nthe env file's three answers, on both sides of the bridge\n");
 const daemonRs = read(`${TAURI_DIR}/src/daemon.rs`);

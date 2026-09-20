@@ -10,12 +10,14 @@ import {
   Plus,
   Search,
 } from "lucide-react";
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { MachineId, SessionKey } from "../ids";
 import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
 import { folderLabel } from "../paths";
+import { useMachineDrag } from "./machineDrag";
+import { useMachineSwipe } from "./machineSwipe";
 import { navigate, newPath, sessionPath } from "../router";
 import { settingsPath } from "../settings";
 import { elapsedSince, sessionGroups, sessionLists, type AppState, type SessionRow, type SetupState } from "../store";
@@ -112,6 +114,24 @@ export function SessionBrowser({
   const { filter } = view;
 
   const tabs = machineTabs(groups, view);
+  const all = allTab(groups, view);
+  /*
+   * The flick between machines. `[All, …machines]` is the list it steps through,
+   * which is the strip's own draw order read once — `All` is a tab you can be on,
+   * so it is a tab you can arrive at.
+   *
+   * It refuses while a row drag owns the touch; it needs no such arrangement with
+   * the *tab* drag, whose listeners are on the strip's scroller rather than this
+   * one. `machineSwipe.ts` argues both.
+   */
+  const swipe = useMachineSwipe({ tabs: [all, ...tabs], armed: drag.armed });
+  const listRef = useCallback(
+    (node: HTMLDivElement | null): void => {
+      drag.scrollerRef(node);
+      swipe.scrollerRef(node);
+    },
+    [drag.scrollerRef, swipe.scrollerRef],
+  );
   const floor = waitingFloor(groups, view);
   // **Through the helper *and* through the needle**, which is the whole point:
   // these lists are drawn here and stepped through by `keyboard.ts`, and they were
@@ -197,8 +217,15 @@ export function SessionBrowser({
        * and nothing in JavaScript — which is `AppShell`'s standing rule.
        */}
       {state.machines.length > 0 && (
-        <div className="lg:hidden">
-          <MachineTabs tabs={tabs} all={allTab(groups, view)} canAdd={mayAddMachine(state.me)} />
+        /*
+         * `stripRef` on the element that *carries* the breakpoint, not on anything
+         * derived from it: the swipe asks once per gesture whether this is laid out
+         * at all, which is how it runs on a phone and not on the desktop rail
+         * without a second source of truth for the width. `machineSwipe.ts` argues
+         * why that is not a breakpoint in JavaScript.
+         */
+        <div ref={swipe.stripRef} className="lg:hidden">
+          <MachineTabs tabs={tabs} all={all} canAdd={mayAddMachine(state.me)} />
         </div>
       )}
 
@@ -240,7 +267,28 @@ export function SessionBrowser({
        * — which is what lets auto-scroll move the box under a gesture without any
        * of the arithmetic needing a correction.
        */}
-      <div ref={drag.scrollerRef} className="relative min-h-0 flex-1 overflow-y-auto">
+      {/*
+       * ⚠ **One stable callback composing the two tenants of this box**, never an
+       * inline arrow: React detaches and re-attaches a new function every render,
+       * and this rail re-renders on the four-second poll and on every stream event.
+       *
+       * ⚠ **`[touch-action:pan-y_pinch-zoom]`, and every part of that is chosen.**
+       * It tells the engine up front that this box pans vertically and that the
+       * horizontal axis belongs to the app, which is the second guard the swipe
+       * leans on — one that does not share a cause with its `preventDefault`, which
+       * is `agent-strip.md`'s standing pattern. One *arbitrary value* rather than
+       * two utilities, because two setting one property are resolved by Tailwind's
+       * emission order rather than by the class string. `pinch-zoom` is kept
+       * deliberately: `pan-y` alone would take zoom off the whole rail for one
+       * gesture's convenience. And it names an axis rather than refusing every
+       * gesture: `touch-action: none` here would take vertical scrolling from nine
+       * tenths of this list, which is why the class spelling of it is banned from
+       * this file outright — the rail is a scroller before it is anything else.
+       */}
+      <div
+        ref={listRef}
+        className="relative min-h-0 flex-1 overflow-y-auto [touch-action:pan-y_pinch-zoom]"
+      >
         {drag.unpinning && (
           /*
            * **What letting go will do, said in words, at the pointer.**
@@ -278,276 +326,288 @@ export function SessionBrowser({
             </div>
           </div>
         )}
-          {/* Skeletons only while the answer is genuinely unknown. "No sessions"
-            from a machine that has answered is information; from one that is
-            still probing it is a guess that flickers. */}
-        {folders.length === 0 && everything.length === 0 && pinned.length === 0 && probing && (
-          <Skeleton rows={4} />
-        )}
+        {/*
+         * ⚠ **A bare wrapper, carrying no layout of its own.** The swipe writes a
+         * transform onto this node once per `touchmove`, and everything that
+         * measures inside this box measures in the *scroller's* content
+         * coordinates — `rowDrag.measure`'s drop slots above all. A wrapper that
+         * established a containing block, or changed the document's height, would
+         * move every one of those midpoints. The "release to unpin" pill stays a
+         * child of the scroller and **outside** this, or it would travel with the
+         * swipe instead of following the pointer.
+         */}
+        <div ref={swipe.wrapRef}>
+            {/* Skeletons only while the answer is genuinely unknown. "No sessions"
+              from a machine that has answered is information; from one that is
+              still probing it is a guess that flickers. */}
+          {folders.length === 0 && everything.length === 0 && pinned.length === 0 && probing && (
+            <Skeleton rows={4} />
+          )}
 
-        {/* Names a remedy the reader can act on, rather than describing something
-            somebody else has not done. */}
-        {state.machines.length === 0 && !probing && (
-          <div className="px-4 py-6 text-center">
-            <p className="text-sm text-muted">No machines yet.</p>
-            {/*
-              * A door, or the sentence saying why there is not one — never
-              * neither, which is the property `machineQuotaNotice` and
-              * `mayAddMachine` are asserted as a pair to keep.
-              *
-              * This is the screen a newly-confirmed account lands on when the
-              * instance hands out no machines by default, so it is the one place
-              * that sentence has to be right.
-              *
-              * `plain`, for the reason spelled out at the New session button
-              * below: `bg-fg` is the affirmative action *inside* a decision, and
-              * this is a navigation to Settings. An empty fleet is the one screen
-              * where nothing competes with it anyway, so the fill bought no
-              * emphasis it did not already have.
-              */}
-            {mayAddMachine(state.me) ? (
-              <>
-                {/*
-                  * The command is the whole answer: it installs the daemon, asks
-                  * for a credential on the terminal and enrols the machine. There
-                  * is no button beside it any more — it led to Settings → Machines,
-                  * which used to hand back a code to carry by hand and now draws
-                  * this same command, so the door opened onto the thing already on
-                  * screen.
-                  *
-                  * `location.origin` and not a constant: the page is served by
-                  * the control plane it talks to, so this is the same address the
-                  * server substitutes into the script it hands back. A
-                  * self-hosted instance prints its own.
-                  */}
-                {/*
-                  * Below `lg` only. At `lg` the rail is 280px and the pane beside
-                  * it is empty, so `NothingSelected` draws the command there at a
-                  * width it can be read at; here it is the whole screen and the
-                  * command takes the rail's width rather than a `max-w-xs` it
-                  * could not fit in.
-                  */}
-                <div className="lg:hidden">
-                  <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
-                  <div className="text-left">
-                    <CommandLine command={installCommand(controlPlaneOrigin())} />
+          {/* Names a remedy the reader can act on, rather than describing something
+              somebody else has not done. */}
+          {state.machines.length === 0 && !probing && (
+            <div className="px-4 py-6 text-center">
+              <p className="text-sm text-muted">No machines yet.</p>
+              {/*
+                * A door, or the sentence saying why there is not one — never
+                * neither, which is the property `machineQuotaNotice` and
+                * `mayAddMachine` are asserted as a pair to keep.
+                *
+                * This is the screen a newly-confirmed account lands on when the
+                * instance hands out no machines by default, so it is the one place
+                * that sentence has to be right.
+                *
+                * `plain`, for the reason spelled out at the New session button
+                * below: `bg-fg` is the affirmative action *inside* a decision, and
+                * this is a navigation to Settings. An empty fleet is the one screen
+                * where nothing competes with it anyway, so the fill bought no
+                * emphasis it did not already have.
+                */}
+              {mayAddMachine(state.me) ? (
+                <>
+                  {/*
+                    * The command is the whole answer: it installs the daemon, asks
+                    * for a credential on the terminal and enrols the machine. There
+                    * is no button beside it any more — it led to Settings → Machines,
+                    * which used to hand back a code to carry by hand and now draws
+                    * this same command, so the door opened onto the thing already on
+                    * screen.
+                    *
+                    * `location.origin` and not a constant: the page is served by
+                    * the control plane it talks to, so this is the same address the
+                    * server substitutes into the script it hands back. A
+                    * self-hosted instance prints its own.
+                    */}
+                  {/*
+                    * Below `lg` only. At `lg` the rail is 280px and the pane beside
+                    * it is empty, so `NothingSelected` draws the command there at a
+                    * width it can be read at; here it is the whole screen and the
+                    * command takes the rail's width rather than a `max-w-xs` it
+                    * could not fit in.
+                    */}
+                  <div className="lg:hidden">
+                    <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
+                    <div className="text-left">
+                      <CommandLine command={installCommand(controlPlaneOrigin())} />
+                    </div>
+                    {/* ⚠ **Inside `lg:hidden`, with the command.** At `lg` the pane
+                        draws both instead, and an offer hoisted out of this div
+                        would render twice — once in a 280px rail and once beside
+                        it. The same reason the command is in here. No wrapper: the
+                        component fills its box and centres its own contents. */}
+                    <MachineOffer config={state.config} me={state.me} />
                   </div>
-                  {/* ⚠ **Inside `lg:hidden`, with the command.** At `lg` the pane
-                      draws both instead, and an offer hoisted out of this div
-                      would render twice — once in a 280px rail and once beside
-                      it. The same reason the command is in here. No wrapper: the
-                      component fills its box and centres its own contents. */}
-                  <MachineOffer config={state.config} me={state.me} />
-                </div>
-              </>
-            ) : (
-              <p className="mx-auto mt-2 max-w-xs text-xs text-muted">{machineQuotaNotice(state.me)}</p>
-            )}
-          </div>
-        )}
+                </>
+              ) : (
+                <p className="mx-auto mt-2 max-w-xs text-xs text-muted">{machineQuotaNotice(state.me)}</p>
+              )}
+            </div>
+          )}
 
-        {/*
-         * **Pinned is a folder, and it is back below the machine bar.**
-         *
-         * It was hoisted above the tabs on the argument that a pin is
-         * cross-machine, and that is true — but it made the top of the rail a
-         * region that does not scroll, so a handful of pins pushed the folders off
-         * the screen. Down here it is one more collapsible group among the
-         * folders, drawn with a pin where the folder glyph goes: it reads as one
-         * without being one, and it collapses through the same persisted set.
-         *
-         * The machine is named on these rows only under All. On a machine's own
-         * tab every row on screen is that machine's, so the label would be the
-         * same word on every line.
-         */}
-        {pinned.length > 0 && (
-          <GroupSection
-            icon={Pin}
-            name="Pinned"
-            id={PINNED_FOLDER}
-            blockedCount={pinned.filter((row) => needsHuman(row.snapshot)).length}
-            space={drag.spaceFor(PINNED_FOLDER)}
-            sliding={drag.sliding}
-          >
-            {pinned.map((row, index) => (
-              <SessionLine
-                key={row.key}
-                row={row}
-                state={state}
-                selected={row.key === activeKey}
-                showMachine={view.all}
-                indented
-                drag={drag.bind(row, PINNED_FOLDER)}
-                lifted={drag.dragging === row.key}
-                pressed={drag.pressing === row.key && drag.dragging !== row.key}
-                sliding={drag.sliding}
-                shift={drag.shiftFor(PINNED_FOLDER, index, row.key)}
-              />
-            ))}
-          </GroupSection>
-        )}
+          {/*
+           * **Pinned is a folder, and it is back below the machine bar.**
+           *
+           * It was hoisted above the tabs on the argument that a pin is
+           * cross-machine, and that is true — but it made the top of the rail a
+           * region that does not scroll, so a handful of pins pushed the folders off
+           * the screen. Down here it is one more collapsible group among the
+           * folders, drawn with a pin where the folder glyph goes: it reads as one
+           * without being one, and it collapses through the same persisted set.
+           *
+           * The machine is named on these rows only under All. On a machine's own
+           * tab every row on screen is that machine's, so the label would be the
+           * same word on every line.
+           */}
+          {pinned.length > 0 && (
+            <GroupSection
+              icon={Pin}
+              name="Pinned"
+              id={PINNED_FOLDER}
+              blockedCount={pinned.filter((row) => needsHuman(row.snapshot)).length}
+              space={drag.spaceFor(PINNED_FOLDER)}
+              sliding={drag.sliding}
+            >
+              {pinned.map((row, index) => (
+                <SessionLine
+                  key={row.key}
+                  row={row}
+                  state={state}
+                  selected={row.key === activeKey}
+                  showMachine={view.all}
+                  indented
+                  drag={drag.bind(row, PINNED_FOLDER)}
+                  lifted={drag.dragging === row.key}
+                  pressed={drag.pressing === row.key && drag.dragging !== row.key}
+                  sliding={drag.sliding}
+                  shift={drag.shiftFor(PINNED_FOLDER, index, row.key)}
+                />
+              ))}
+            </GroupSection>
+          )}
 
-        {/*
-         * The whole fleet, flat, when the All tab is selected.
-         *
-         * One group rather than folders, because a folder is a directory *on a
-         * machine* and the same path on two hosts is two different folders. What
-         * replaces the folder as the "where" is the machine on each row.
-         */}
-        {everything.length > 0 && (
-          <GroupSection
-            icon={Layers}
-            name="All chats"
-            id={ALL_FOLDER}
-            blockedCount={everything.filter((row) => needsHuman(row.snapshot)).length}
-          >
-            {everything.map((row) => (
-              <SessionLine
-                key={row.key}
-                row={row}
-                state={state}
-                selected={row.key === activeKey}
-                showMachine
-                indented
-              />
-            ))}
-          </GroupSection>
-        )}
+          {/*
+           * The whole fleet, flat, when the All tab is selected.
+           *
+           * One group rather than folders, because a folder is a directory *on a
+           * machine* and the same path on two hosts is two different folders. What
+           * replaces the folder as the "where" is the machine on each row.
+           */}
+          {everything.length > 0 && (
+            <GroupSection
+              icon={Layers}
+              name="All chats"
+              id={ALL_FOLDER}
+              blockedCount={everything.filter((row) => needsHuman(row.snapshot)).length}
+            >
+              {everything.map((row) => (
+                <SessionLine
+                  key={row.key}
+                  row={row}
+                  state={state}
+                  selected={row.key === activeKey}
+                  showMachine
+                  indented
+                />
+              ))}
+            </GroupSection>
+          )}
 
-        {folders.map((folder) => (
-          <FolderSection
-            key={folder.id}
-            folder={folder}
-            state={state}
-            activeKey={activeKey}
-            drag={drag}
-          />
-        ))}
+          {folders.map((folder) => (
+            <FolderSection
+              key={folder.id}
+              folder={folder}
+              state={state}
+              activeKey={activeKey}
+              drag={drag}
+            />
+          ))}
 
-        {/* Rows whose machine is no longer granted. Shown rather than dropped: a
-            session vanishing with no explanation is the worse failure. Drawn on
-            every tab, because their machines have no tab at all — which is also
-            what lets `waitingFloor` count them as reachable. */}
-        {orphans.length > 0 && (
-          <Section name="No longer granted" count={orphans.length}>
-            {orphans.map((row) => (
-              <SessionLine
-                key={row.key}
-                row={row}
-                state={state}
-                selected={row.key === activeKey}
-                showMachine
-                indented
-              />
-            ))}
-          </Section>
-        )}
+          {/* Rows whose machine is no longer granted. Shown rather than dropped: a
+              session vanishing with no explanation is the worse failure. Drawn on
+              every tab, because their machines have no tab at all — which is also
+              what lets `waitingFloor` count them as reachable. */}
+          {orphans.length > 0 && (
+            <Section name="No longer granted" count={orphans.length}>
+              {orphans.map((row) => (
+                <SessionLine
+                  key={row.key}
+                  row={row}
+                  state={state}
+                  selected={row.key === activeKey}
+                  showMachine
+                  indented
+                />
+              ))}
+            </Section>
+          )}
 
-        {/*
-         * **"No sessions here yet" is a claim, and with a narrowing default it
-         * became a false one.**
-         *
-         * When the filter was `"all"` an empty list really did mean the machine
-         * had never run anything. It is `"active"` now, so this fires whenever
-         * the current *slice* is empty — and a machine whose four conversations
-         * have all ended drew "No sessions here yet." over them, with the filter
-         * glyph in its resting state, so nothing on screen contradicted it. The
-         * mirror case is one tap away: choose Ended on a machine that is busy.
-         *
-         * So the sentence asks the unfiltered question before it makes a claim,
-         * and where there *are* rows behind the filter it says so and offers the
-         * way to them — which is also the only thing that makes narrowing the
-         * default honest rather than merely quieter.
-         */}
-        {folders.length === 0 && everything.length === 0 && state.machines.length > 0 && !probing && (
-          <div className="px-4 py-6 text-center">
-            {needle.trim().length > 0 ? (
-              /*
-               * **The way out, symmetric with the `Show all` three branches
-               * below.** ⚠ It read *one branch below*, and `selectedOwnerDisabled`
-               * and `selectedOverLimit` both sit between the two — a count in a
-               * comment, which is the kind of claim a new arm expires with no
-               * symptom anywhere.
-               *
-               * The needle is module state in `groups.ts` and deliberately not
-               * persisted, so the only other exit is the native clear on a
-               * `type="search"` field — which Firefox and several Android
-               * browsers do not draw at all. A typo therefore emptied the fleet
-               * and left a screen with nothing on it to press, which is the one
-               * shape this empty state exists to refuse: it already refuses it
-               * for the filter, and the search is the same trap one axis over.
-               *
-               * Clearing does not promise rows. It hands the arms below this one
-               * the question, and whichever of them fires makes its own offer —
-               * the filter's `Show all`, or one of the two sentences about a
-               * machine that is not being reached. Two taps to two different
-               * remedies, each named where it applies, rather than one button
-               * guessing which was meant.
-               */
-              <>
-                <p className="text-sm text-muted">Nothing matches.</p>
-                <Button className="mt-3" onClick={() => setQuery("")}>
-                  Clear search
-                </Button>
-              </>
-            ) : selectedOwnerDisabled ? (
-              /*
-               * The sibling of the arm below, and it has to be its own sentence:
-               * this machine is switched off because its **owner** was banned, so
-               * retiring a machine — the remedy the limit arm names — does
-               * nothing at all here. Ordered first for `machineBadgeText`'s
-               * reason.
-               */
-              <p className="text-sm text-muted">
-                This machine&rsquo;s owner has been disabled, so it is not being reached.
-              </p>
-            ) : selectedOverLimit ? (
-              /*
-               * The same class of false claim as the one above, from a different
-               * cause: this machine may have a dozen conversations, and none of
-               * them can be listed because it is not being reached at all. It is
-               * the only place in the rail that says why, machine reachability
-               * having left this column with the machine headers.
-               */
-              <p className="text-sm text-muted">
-                This machine is over the machine limit, so it is not being reached.
-              </p>
-            ) : hiddenHere > 0 ? (
-              <>
+          {/*
+           * **"No sessions here yet" is a claim, and with a narrowing default it
+           * became a false one.**
+           *
+           * When the filter was `"all"` an empty list really did mean the machine
+           * had never run anything. It is `"active"` now, so this fires whenever
+           * the current *slice* is empty — and a machine whose four conversations
+           * have all ended drew "No sessions here yet." over them, with the filter
+           * glyph in its resting state, so nothing on screen contradicted it. The
+           * mirror case is one tap away: choose Ended on a machine that is busy.
+           *
+           * So the sentence asks the unfiltered question before it makes a claim,
+           * and where there *are* rows behind the filter it says so and offers the
+           * way to them — which is also the only thing that makes narrowing the
+           * default honest rather than merely quieter.
+           */}
+          {folders.length === 0 && everything.length === 0 && state.machines.length > 0 && !probing && (
+            <div className="px-4 py-6 text-center">
+              {needle.trim().length > 0 ? (
+                /*
+                 * **The way out, symmetric with the `Show all` three branches
+                 * below.** ⚠ It read *one branch below*, and `selectedOwnerDisabled`
+                 * and `selectedOverLimit` both sit between the two — a count in a
+                 * comment, which is the kind of claim a new arm expires with no
+                 * symptom anywhere.
+                 *
+                 * The needle is module state in `groups.ts` and deliberately not
+                 * persisted, so the only other exit is the native clear on a
+                 * `type="search"` field — which Firefox and several Android
+                 * browsers do not draw at all. A typo therefore emptied the fleet
+                 * and left a screen with nothing on it to press, which is the one
+                 * shape this empty state exists to refuse: it already refuses it
+                 * for the filter, and the search is the same trap one axis over.
+                 *
+                 * Clearing does not promise rows. It hands the arms below this one
+                 * the question, and whichever of them fires makes its own offer —
+                 * the filter's `Show all`, or one of the two sentences about a
+                 * machine that is not being reached. Two taps to two different
+                 * remedies, each named where it applies, rather than one button
+                 * guessing which was meant.
+                 */
+                <>
+                  <p className="text-sm text-muted">Nothing matches.</p>
+                  <Button className="mt-3" onClick={() => setQuery("")}>
+                    Clear search
+                  </Button>
+                </>
+              ) : selectedOwnerDisabled ? (
+                /*
+                 * The sibling of the arm below, and it has to be its own sentence:
+                 * this machine is switched off because its **owner** was banned, so
+                 * retiring a machine — the remedy the limit arm names — does
+                 * nothing at all here. Ordered first for `machineBadgeText`'s
+                 * reason.
+                 */
                 <p className="text-sm text-muted">
-                  {hiddenHere === 1 ? "One conversation here" : `${hiddenHere} conversations here`}
-                  {filter === "ended" ? ", none of them ended." : ", all of them ended."}
+                  This machine&rsquo;s owner has been disabled, so it is not being reached.
                 </p>
-                <Button className="mt-3" onClick={() => setFilter("all")}>
-                  Show all
-                </Button>
-              </>
-            ) : (
-              /*
-               * The genuine first run, and the only arm here where the sentence
-               * is the whole truth: no needle, no filter withholding anything,
-               * the machine reachable and it has never run a session.
-               *
-               * **A line rather than a button, and the button it points at is
-               * the reason.** New session already sits at the foot of this
-               * column, and a second copy of it in the middle of the list would
-               * be the app's one create action drawn twice on the one screen
-               * where it cannot be missed. What that button deliberately is not
-               * is loud — `plain` rather than `primary`, argued at length in
-               * `SidebarFoot`, because it is pressed a few times a day — and on
-               * an empty list that de-emphasis leaves it as quiet as the folder
-               * headers it no longer sits under. So the sentence does the
-               * pointing that the fill declines to do.
-               */
-              <>
-                <p className="text-sm text-muted">No sessions here yet.</p>
-                <p className="mx-auto mt-2 max-w-xs text-xs text-muted">
-                  New session, at the bottom of this list, starts one.
+              ) : selectedOverLimit ? (
+                /*
+                 * The same class of false claim as the one above, from a different
+                 * cause: this machine may have a dozen conversations, and none of
+                 * them can be listed because it is not being reached at all. It is
+                 * the only place in the rail that says why, machine reachability
+                 * having left this column with the machine headers.
+                 */
+                <p className="text-sm text-muted">
+                  This machine is over the machine limit, so it is not being reached.
                 </p>
-              </>
-            )}
-          </div>
-        )}
+              ) : hiddenHere > 0 ? (
+                <>
+                  <p className="text-sm text-muted">
+                    {hiddenHere === 1 ? "One conversation here" : `${hiddenHere} conversations here`}
+                    {filter === "ended" ? ", none of them ended." : ", all of them ended."}
+                  </p>
+                  <Button className="mt-3" onClick={() => setFilter("all")}>
+                    Show all
+                  </Button>
+                </>
+              ) : (
+                /*
+                 * The genuine first run, and the only arm here where the sentence
+                 * is the whole truth: no needle, no filter withholding anything,
+                 * the machine reachable and it has never run a session.
+                 *
+                 * **A line rather than a button, and the button it points at is
+                 * the reason.** New session already sits at the foot of this
+                 * column, and a second copy of it in the middle of the list would
+                 * be the app's one create action drawn twice on the one screen
+                 * where it cannot be missed. What that button deliberately is not
+                 * is loud — `plain` rather than `primary`, argued at length in
+                 * `SidebarFoot`, because it is pressed a few times a day — and on
+                 * an empty list that de-emphasis leaves it as quiet as the folder
+                 * headers it no longer sits under. So the sentence does the
+                 * pointing that the fill declines to do.
+                 */
+                <>
+                  <p className="text-sm text-muted">No sessions here yet.</p>
+                  <p className="mx-auto mt-2 max-w-xs text-xs text-muted">
+                    New session, at the bottom of this list, starts one.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <SidebarFoot machine={view.machine} />
@@ -693,11 +753,20 @@ function SidebarHeader({
  * 2px mark with a 1px rule showing beneath it reads as two lines that failed to
  * meet, which is the defect `SidebarFoot` records about the composer's border.
  *
- * `inset-x-3` matches the tab's own `px-3`, so the mark is as wide as the word and
- * not as wide as its target.
+ * ⚠ **`inset-x-4` matches the tab's own `px-4`, and the pair was two numbers
+ * agreeing by hand with nothing checking them.** This paragraph claimed the match
+ * while the tabs were widened around it, which is exactly when such a pair drifts;
+ * `webcheck` now reads **both** out of this file and requires them equal.
+ *
+ * What the mark spans is therefore the tab's **content box** — the word wherever
+ * the word is wider than the tab's floor, and the padded box where it is not.
+ * Wrapping the label in a `relative` span to make it the word's width *by
+ * construction* was considered and rejected: `-bottom-px` would then resolve
+ * against the label's line box rather than the bar's hairline, and a 2px mark
+ * floating under the text is the defect the paragraph above is about.
  */
 function TabUnderline(): ReactNode {
-  return <span aria-hidden="true" className="absolute inset-x-3 -bottom-px h-0.5 rounded-full bg-fg" />;
+  return <span aria-hidden="true" className="absolute inset-x-4 -bottom-px h-0.5 rounded-full bg-fg" />;
 }
 
 /**
@@ -730,6 +799,21 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
   const selected = tabs.find((tab) => tab.selected)?.id ?? null;
   const stripRef = useRef<HTMLDivElement | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
+  const drag = useMachineDrag({ axis: "x", tabs });
+  /*
+   * ⚠ **One stable callback ref, composing three readers of this node.** The drag
+   * installs its touch listeners, the cut-edge effect measures it, and the
+   * scroll-into-view effect finds a tab inside it. An inline arrow here is a new
+   * function every render — the exact defect the `[selected]` effect below records
+   * having shipped, on a strip that re-renders on the four-second poll.
+   */
+  const hold = useCallback(
+    (node: HTMLDivElement | null): void => {
+      scroller.current = node;
+      drag.scrollerRef(node);
+    },
+    [drag.scrollerRef],
+  );
   /**
    * The gradient at the cut edge, and it is the second cue rather than the first.
    *
@@ -847,7 +931,7 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
         type="button"
         onClick={() => selectMachine(all.id)}
         aria-pressed={all.selected}
-        className={`tap relative flex min-h-11 shrink-0 items-center gap-1.5 px-3 text-sm whitespace-nowrap ${
+        className={`tap relative flex min-h-11 shrink-0 items-center gap-1.5 px-4 text-sm whitespace-nowrap ${
           all.selected ? "font-semibold text-fg" : "text-muted hover:text-fg"
         }`}
       >
@@ -876,7 +960,7 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
        */}
       <div className="relative min-w-0 flex-1">
         <div
-          ref={scroller}
+          ref={hold}
           /*
            * `no-scrollbar` only in the many-machine case, and the classic bar it
            * hides really is worth hiding: this strip is one 44px row of tabs above
@@ -899,15 +983,31 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
           className={lone ? "" : "no-scrollbar overflow-x-auto overscroll-x-contain"}
         >
           <div className={`flex ${lone ? "w-full" : "w-max"}`}>
-            {tabs.map((tab) => (
+            {tabs.map((tab, index) => (
               <button
                 key={tab.id}
                 type="button"
                 onClick={() => selectMachine(tab.id)}
                 aria-pressed={tab.selected}
-                // Read by the effect above, which is how it finds this node without
-                // a ref per tab that would change identity on every render.
-                data-machine={tab.id}
+                style={
+                  drag.shiftFor(index) === 0
+                    ? undefined
+                    : { transform: `translateX(${String(drag.shiftFor(index))}px)` }
+                }
+                /*
+                 * `data-machine` comes from `bind` now and is read by three things:
+                 * the scroll-into-view effect above, which is how it finds this node
+                 * without a ref per tab that would change identity on every render;
+                 * the drag's own `closest`; and its measurement.
+                 *
+                 * ⚠ **A hold reorders and a flick does not.** The swipe that moves
+                 * between machines lives on the list below this strip and stands
+                 * down while `drag.armed()` is true, and this gesture is abandoned
+                 * the moment a finger travels `PRESS_SLOP` — so the same 8px that
+                 * tells the swipe it is horizontal has already killed the hold.
+                 * One number, imported rather than re-typed, in `machineDrag.ts`.
+                 */
+                {...drag.bind(tab.id, index)}
                 /*
                  * **Selection is weight plus `TabUnderline`, and no fill at all.**
                  *
@@ -929,9 +1029,25 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
                  * The edge fade below is what now says there is more of the strip;
                  * nothing says it is draggable when it is not cut.
                  */
-                className={`tap relative flex min-h-11 items-center gap-1.5 px-3 text-sm whitespace-nowrap ${
-                  lone ? "flex-1 justify-center" : "shrink-0"
-                } ${tab.selected ? "font-semibold text-fg" : "text-muted hover:text-fg"}`}
+                /*
+                 * ⚠ **`min-w-22` is 88px, which is two 44px tap floors** — derived
+                 * from the one bound this app already has rather than chosen by
+                 * eye, and on the **non-`lone`** arm only, so the one-machine case
+                 * below keeps `flex-1` and its own paragraph stays true word for
+                 * word. The cost is paid by the change that incurs it: with four
+                 * or more machines a floor means fewer tabs fit and the strip is
+                 * cut more often, which is what the fade beside it and the swipe
+                 * under it are both for.
+                 */
+                className={`tap relative flex min-h-11 items-center gap-1.5 px-4 text-sm whitespace-nowrap ${
+                  lone ? "flex-1 justify-center" : "min-w-22 shrink-0 justify-center"
+                } ${tab.selected ? "font-semibold text-fg" : "text-muted hover:text-fg"} ${
+                  /* `slides` rather than `transition-transform`: this tab carries
+                     `.tap`, which is unlayered and resets `transition-property` to
+                     three colours, so the utility never applies and the neighbours
+                     jump. `index.css` has the measurement. */
+                  drag.sliding && drag.dragging !== tab.id ? "slides" : ""
+                } ${drag.dragging === tab.id ? "z-10 bg-ink shadow-lg will-change-transform" : ""}`}
               >
                 {tab.name}
                 {tab.selected && <TabUnderline />}
@@ -954,9 +1070,12 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
          * `pointer-events-none` because it lies over the last tab: a gradient
          * that swallowed the tap would make the machine you can half-see the one
          * machine you cannot select. `w-8` was "one pill-height of gradient" and is
-         * now 8px against a 44px tab — still short enough that what it dims is the
-         * cut edge rather than a whole label, but it is no longer a fraction of
-         * anything and would have to be re-measured rather than re-derived.
+         * 8px against a 44px tab. ⚠ **It said this "is no longer a fraction of
+         * anything and would have to be re-measured rather than re-derived", and
+         * widening the tabs re-derived it instead**: at `px-4` it is exactly twice
+         * a tab's own inset, which is a relation `webcheck` asserts rather than the
+         * literal. Still short enough that what it dims is the cut edge rather than
+         * a whole label.
          */}
         {!lone && (
           <div
@@ -966,6 +1085,12 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
           />
         )}
       </div>
+
+      {/* The keyboard half of the reorder, said out loud. Both axes owe the same
+          sentence and the hook owns it, so they cannot drift. */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {drag.announcement}
+      </p>
 
       {/*
        * Add a machine, drawn as one more tab.
@@ -995,7 +1120,7 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
         /*
          * **Wider than a square, so it is a tab and not an icon button.**
          *
-         * `px-3` is the machine tabs' own inset, so this sits in their rhythm and
+         * `px-4` is the machine tabs' own inset, so this sits in their rhythm and
          * reads as one more thing in the row rather than as a control bolted to the
          * end of it.
          *
@@ -1006,7 +1131,7 @@ function MachineTabs({ tabs, all, canAdd }: { tabs: MachineTab[]; all: MachineTa
          * into `SidebarHeader` in the same change that made these tabs — it is
          * above this strip now, not below it — so there is no stack left to break.
          */
-        className="tap flex min-h-11 shrink-0 items-center justify-center px-3 text-muted hover:text-fg"
+        className="tap flex min-h-11 shrink-0 items-center justify-center px-4 text-muted hover:text-fg"
       >
         <Icon as={Plus} size={14} />
       </button>

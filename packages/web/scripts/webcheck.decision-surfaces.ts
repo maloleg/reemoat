@@ -10,9 +10,17 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * for a reason worth stating: a blanket rule would be false. Measured across
    * `src/ui`, 40 of 57 class strings carrying `tap` or `press` do not reach 44px,
    * and most of them are right not to — `SignIn`'s `tap ${LINK}` is a link inside a
-   * sentence, `AgentsPanel`'s are `<summary>` elements in running text, and the
-   * machine tabs are deliberately 32px pills in a strip you drag sideways. A check
-   * needing a 40-entry exception list is a list, not a check.
+   * sentence, `AgentsPanel`'s are `<summary>` elements in running text, and
+   * `tabPill` is deliberately a 32px pill — navigation between two views of one
+   * pop-up, with its own argued exemption at the function. A check needing a
+   * 40-entry exception list is a list, not a check.
+   *
+   * ⚠ **That third example used to be "the machine tabs", and it had stopped being
+   * true.** The pills went when the strip became underline tabs — a change this
+   * file's sibling asserts from the other side, pinning the pill class *absent*
+   * from `SessionBrowser.tsx` — and those tabs are `min-h-11`, now `px-4` and
+   * `min-w-22` besides. So the paragraph was arguing that a blanket rule would be
+   * false from an example that clears the floor, which is worse than stale.
    *
    * What makes these three different is consequence. A mis-tap here answers the
    * agent: it approves a command, refuses one, or submits a form into the model's

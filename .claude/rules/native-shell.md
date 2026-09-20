@@ -376,10 +376,8 @@ and `parseLegalDoc` assertably disjoint. A typed `/register` falls through to
   comparing an origin, or building a URL out of `location.origin`, is
   macOS-specific — which is why `controlPlaneOrigin()` exists and why `is_our_own`
   in `lib.rs` names all three.
-- **`<a download>` is a request to a browser.** A webview under a custom scheme is
-  not obliged to honour it, so `saveBlob` hands the bytes to the shell and the shell
-  shows the platform's save panel. Raw IPC bytes, never JSON: the download bound is
-  100 MiB and that as a JSON number array is roughly 600 MB of string.
+- **The two platform panels are `native-panels.md`** — the save panel, the folder
+  panel a local daemon gets, and the `(async)` rule both of them turn on.
 - **Tauri's asset protocol already falls back to `index.html`**, so the pathname
   router, deep links and `location.reload()` on a deep path all work with no
   handler of our own.

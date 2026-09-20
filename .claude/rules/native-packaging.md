@@ -21,6 +21,13 @@ paths:
   # must agree, so opening either one has to summon it — this was in no rule's
   # globs at all, which is how three builds shipped somebody else's logo.
   - packages/native/src-tauri/icons/android/*
+  # And the macOS/Windows tree beside it, plus the artwork both are derived from.
+  # The inset section below is about the relationship between the three, and it
+  # could be reached from none of them: `icons/*` was in no rule's globs, which is
+  # the same gap that let the Android tree ship somebody else's logo.
+  - packages/native/src-tauri/icons/*
+  - packages/web/public/favicon.svg
+  - packages/native/src-tauri/tauri.conf.json
 ---
 
 # Packaging the native app
@@ -251,6 +258,77 @@ Both trees are written: `gen/android` because that is what builds, and
 `src-tauri/icons/android` so the next person diffing them does not find them
 disagreeing. **A future `tauri android init` overwrites the first**, which is one
 more reason `gen/android` is committed rather than generated.
+
+## The macOS inset, and why it is one platform's
+
+⚠ **The badge was 100% of its canvas on every macOS raster in this tree**, opaque
+corner to corner, and that is why the tile read about a quarter larger in linear
+terms than everything beside it in the Dock. Apple's grid is an **824×824
+squircle in a 1024×1024 canvas** — a 9.77% transparent margin per side — and the
+difference between those two numbers was the whole of the defect.
+
+⚠ **Verified against Apple's own icons, and the naive reading disagrees.** Pages,
+Numbers, Keynote and GarageBand all measure **854** of 1024 at an alpha threshold of
+8, which would say this icon is 30px too small. They carry a **soft drop shadow**:
+across Pages' middle row alpha runs `75:1 80:4 85:9 90:16 95:29` and then jumps to
+`100:201`. Past the ramp all four measure **824**, the same as this icon. So anybody
+re-measuring a system icon to check this number must threshold past the shadow —
+and this icon deliberately has none, a cosmetic difference left alone because the
+defect was size and a shadow would move the bounding box the assertions read.
+
+**The inset is macOS's, not the artwork's**, and the per-platform table is the
+section rather than a footnote to it:
+
+| Surface | Geometry | Why |
+|---|---|---|
+| `icons/icon.icns`, `icon.png`, the sized PNGs, `icon.ico` | **inset** to 824/1024 | macOS masks and expects the margin |
+| `icons/android/`, `gen/android/` foreground | the mark alone at 58% | a different mask, a different safe zone — and hand-authored, above |
+| `icons/android/`, `gen/android/` legacy rasters | full bleed | correct, and a `tauri icon` run is what breaks them |
+| `icons/ios/*`, `packages/web/public/apple-touch-icon.png` | full bleed | iOS masks its own; this inset would double. That PNG is colour type 2 and has no alpha to inset *with* |
+| `packages/web/public/favicon.svg` | full bleed | a tab strip does not mask, so a margin there is a smaller mark for nothing. It stays the **source** |
+| `Square*Logo.png`, `StoreLogo.png` | unchanged, and **unmeasured** | a Windows tile sits on a coloured plate and wants a third geometry. No CI leg, no asset, no measurement — a stated gap rather than a guess |
+
+**`tauri icon` is retired rather than re-run, and `packages/native/scripts/icons.mjs`
+is what replaced it.** The reason is the section above: that command overwrites
+`ic_launcher_foreground.png` with the whole badge and rewrites both launcher XMLs
+back to `@mipmap/…` and `#fff`, so every run has to be followed by a hand-restore
+of three files — which is the same shape as the `git checkout -- gen/android` that
+already gets forgotten. The generator writes **only** the macOS and Windows files
+and nothing under either Android tree, which `nativecheck` asserts from the other
+side by reading the script.
+
+It also replaced a script that could not run: `package.json` said `tauri icon
+icon.png` and `packages/native/icon.png` **has never existed**. Nothing noticed,
+because nothing looked at icons at all.
+
+**Two numbers in that file are Apple's and the rest is read off `favicon.svg`.**
+`MARGIN` is `100 / 1024` and `RADIUS` is `185.4 / 824`; the mark's six numbers are
+parsed out of the SVG rather than retyped, so the app icon is a stated *transform*
+of the favicon rather than a fourth copy of the drawing. `rx` is the one thing
+that does not scale — the favicon's corner is 25% of its side and Apple's is 22.5%
+of the squircle. The corner is still a **circular arc** rather than a
+continuous-curvature squircle: the defect being fixed was size, and changing the
+curvature in the same commit would make the before and after unreadable against
+each other.
+
+⚠ **Nothing in this repository asserted anything about an icon before this**, in
+any of the twelve drivers — which is how both of the above shipped. `nativecheck`
+now carries a PNG decoder (all five filter types, so it still bites on a raster
+somebody replaces by hand) and pins: every path in `bundle.icon` exists; the
+`.icns` member list is the eight PNG types a macOS 13 floor reads, with no legacy
+RGB+mask members; `ic10` is 824×824 at (100,100) and is the same bytes as
+`icon.png`; every generated raster is inset to the same grid; Android's foreground
+is the mark and its legacy rasters are full bleed, across both trees and all five
+densities; the mark agrees between `favicon.svg` and `Mark.tsx`; the favicon and
+`apple-touch-icon.png` are still full bleed; and **every file a script in
+`packages/native/package.json` names exists**, which is the line that would have
+caught `tauri icon icon.png` years ago.
+
+⚠ It also **writes the assertion two committed comments already claimed.**
+`mipmap-anydpi-v26/ic_launcher.xml` and `values/ic_launcher_background.xml` each
+say in their banner that `nativecheck` pins the `@color` form and the colour;
+a grep for `ic_launcher` in that driver returned nothing. It is comment-stripped,
+because both files quote the strings being looked for.
 
 ## What a clone cannot build, and the one file that is this machine's
 

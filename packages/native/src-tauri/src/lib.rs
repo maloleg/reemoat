@@ -105,6 +105,7 @@ pub fn run() {
             commands::host_copy_text,
             commands::host_open_external,
             commands::host_save_file,
+            commands::host_pick_folder,
         ])
         .setup(|app| {
             /*

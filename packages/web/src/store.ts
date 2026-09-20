@@ -23,6 +23,7 @@ import {
 import { isTruncationMarker } from "./permission";
 import { hostPlatform, localNetworkDetail } from "./platform";
 import { mayAddMachine } from "./quota";
+import { machineOrder, machineOrderVersion, orderMachines } from "./machineOrder";
 import { mergeOptimistic } from "./sessionOrder";
 import { provideSignInAuth } from "./signInAuth";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
@@ -4061,6 +4062,13 @@ export interface SessionGroups {
 
 let groupsForSessions: SessionRow[] | null = null;
 let groupsForMachines: MachineState[] | null = null;
+/**
+ * The machine order the cache was built under.
+ *
+ * `-1` cannot collide with a real version, which is one fewer thing to hold in
+ * your head than relying on `groupsCache !== null` to cover the first call.
+ */
+let groupsForOrder = -1;
 let groupsCache: SessionGroups | null = null;
 
 /**
@@ -4082,12 +4090,27 @@ let groupsCache: SessionGroups | null = null;
  * carries machine state too. `emitTranscripts` replaces neither, so a streamed
  * event still costs nothing — the same property `sessionLists` defends.
  *
- * **Groups are ordered by name, always — never by reachability.** `reach` flickers,
- * and a list that reorders itself while a thumb is already travelling toward a row
- * is the one failure this app cannot have.
+ * **Groups are ordered by name until a reader drags one, and never by
+ * reachability.** `reach` flickers, and a list that reorders itself while a thumb
+ * is already travelling toward a row is the one failure this app cannot have — a
+ * *stored* order is allowed for exactly that reason, since it moves when somebody
+ * moves it and at no other moment. `machineOrder.ts` is the merge and
+ * `machine-gestures.md` is the rule; a derived order is still banned outright.
+ *
+ * ⚠ **Which is why the order's version is in the guard above.** The memo is keyed
+ * on the identity of `sessions` and `machines`, and a reorder replaces neither —
+ * so without it a drop repaints nothing until the four-second poll happens to hand
+ * over a new `machines` array, which reads as a drag that does nothing for four
+ * seconds and then jumps. It is the third input and the only one that moves off
+ * the poll.
  */
 export function sessionGroups(state: AppState): SessionGroups {
-  if (groupsForSessions === state.sessions && groupsForMachines === state.machines && groupsCache !== null) {
+  if (
+    groupsForSessions === state.sessions &&
+    groupsForMachines === state.machines &&
+    groupsForOrder === machineOrderVersion() &&
+    groupsCache !== null
+  ) {
     return groupsCache;
   }
 
@@ -4187,11 +4210,17 @@ export function sessionGroups(state: AppState): SessionGroups {
   for (const row of lists.active) place(row, "active");
   for (const row of lists.ended) place(row, "ended");
 
-  const groups = [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+  /*
+   * The name sort **stays**, and is `orderMachines`' `natural`: it is the position
+   * of every machine nobody has dragged, and deleting it would leave such a
+   * machine with no order at all rather than with a stored one.
+   */
+  const groups = orderMachines([...byId.values()].sort((a, b) => a.name.localeCompare(b.name)), machineOrder());
 
   groupsCache = { pinned, groups, orphans };
   groupsForSessions = state.sessions;
   groupsForMachines = state.machines;
+  groupsForOrder = machineOrderVersion();
   return groupsCache;
 }
 

@@ -1,20 +1,19 @@
 //! Everything the webview may ask this process to do, and nothing else.
 //!
-//! Seventeen, and the list is short on purpose: an app-defined command is not
+//! The list is short on purpose: an app-defined command is not
 //! ACL-gated, so this file *is* the capability surface. `pnpm nativecheck` holds
 //! it to the set `packages/web/src/native.ts` actually calls, in both directions —
 //! a command nobody calls is a door nobody is watching, and a call with no command
 //! behind it is a runtime failure no offline check would otherwise see.
 //!
-//! ⚠ **That number is prose and nothing asserts it, which is why it has been
-//! wrong twice.** It read *twelve* while thirteen were registered —
-//! `host_daemon_log` arrived and the sentence did not move — and then *fifteen*
-//! while seventeen were, which is the same failure with the same cause: a count
-//! restated in a comment is exactly the
-//! kind of claim `docs/DECISIONS.md` records this repository learning not to keep.
-//! What the driver compares is the two *lists*, which is the property that
-//! matters; this sentence is a reader's orientation, and if it disagrees with
-//! `generate_handler!` in `lib.rs`, the handler is right.
+//! ⚠ **There was a count here and it is gone, having been wrong three times.**
+//! It read *twelve* while thirteen were registered — `host_daemon_log` arrived and
+//! the sentence did not move — then *fifteen* while seventeen were, then
+//! *seventeen* while eighteen were. Three corrections is the point at which the
+//! number stops being orientation and starts being the kind of claim
+//! `docs/DECISIONS.md` records this repository learning not to keep. What the
+//! driver compares is the two *lists*, which is the property that matters, and
+//! `generate_handler!` in `lib.rs` is the answer to "how many".
 //!
 //! ## Which of these may hold the main thread
 //!
@@ -27,14 +26,17 @@
 //!
 //! **The rule: a command that waits on a socket, on a disk flush, on a platform
 //! panel or on a child process carries `(async)`; so does one on a path hot enough
-//! that even a keyring round trip is too much.** Ten do, each with the measurement
-//! at its own docblock:
+//! that even a keyring round trip is too much.** Each carries the measurement at
+//! its own docblock, and `nativecheck` now asserts the platform-panel half of this
+//! rule rather than leaving it to a reader — a command whose body reaches
+//! `app.dialog()` or a `blocking_` call must carry the argument form:
 //!
 //! - `host_daemon_state` and `host_local_daemon` — a loopback `/health` probe
 //!   worth three `PROBE_TIMEOUT`s in the bad case.
 //! - `host_device_dh` — an OS keyring round trip **twice per Noise handshake**,
 //!   which is the hot-path clause rather than the waiting one.
 //! - `host_save_file` — a platform panel, and then up to `MAX_DOWNLOAD_BYTES`.
+//! - `host_pick_folder` — a platform panel, and nothing after it.
 //! - `host_set_server`, `host_device_set`, `host_device_clear`,
 //!   `host_device_key_reset` — a `server.json` write, which `config.rs` makes
 //!   durable by flushing the file **and** its directory entry: two `sync_all`s.
@@ -555,6 +557,15 @@ fn exe_path() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
+/// Whether this build has a folder panel to open at all.
+///
+/// ⚠ **One spelling, two mechanisms, and `nativecheck` holds them to each other.**
+/// A `cfg!` macro and a `#[cfg]` attribute cannot share a token, so the condition
+/// exists twice — here and on `pick_folder` — and a build where they disagree is a
+/// page that draws a control the shell will refuse. The driver compares the two
+/// strings for exactly that reason.
+pub const PICKS_FOLDER: bool = cfg!(not(any(target_os = "android", target_os = "ios")));
+
 /// What the first paint needs, in one round trip.
 ///
 /// One call rather than four, because the webview cannot draw anything honest
@@ -604,6 +615,16 @@ pub struct Boot {
     ///
     /// It comes from `config.rs` rather than the keyring, and that is what makes
     /// it survive a machine whose credential store silently discards writes.
+    /// Whether this shell can open a folder panel — see {@link PICKS_FOLDER}.
+    ///
+    /// **A declared capability rather than something the page infers.** The page
+    /// could have keyed the panel on `platform`, but `HostPlatform` narrows
+    /// `"android"` to `"other"` along with every future desktop target, so that
+    /// would be a guess that reads as a fact. It could also have relied on the
+    /// accident that a phone has no local daemon and therefore never matches
+    /// `localMachineId` — which is true today and is luck, not a rule.
+    #[serde(rename = "picksFolder")]
+    pub picks_folder: bool,
     #[serde(rename = "deviceId")]
     pub device_id: Option<String>,
     /// This installation's X25519 public key on that server, base64url.
@@ -667,6 +688,7 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
         host_name: daemon::host_name(),
         app_version: app.package_info().version.to_string(),
         durable: host.durable,
+        picks_folder: PICKS_FOLDER,
         device_id,
         device_public_key: device_key.as_ref().map(|k| k.public_key.clone()),
         device_key_at_rest: device_key.as_ref().map(|k| k.at_rest.clone()),
@@ -954,4 +976,94 @@ pub fn host_save_file(app: AppHandle, request: tauri::ipc::Request<'_>) -> Resul
         .map_err(|e| format!("could not use that location: {e}"))?;
     std::fs::write(&path, bytes).map_err(|e| format!("could not write the file: {e}"))?;
     Ok(true)
+}
+
+/// Ask this computer for a folder, through the platform's own panel.
+///
+/// Called for exactly one machine: the one this app is running on. That is
+/// **not** enforced here and could not be — the shell has no idea which daemon a
+/// page is talking to — it is `NewSession.tsx`'s predicate, and
+/// `webcheck.local-route.ts` is what holds it there. What this side guarantees is
+/// narrower and is the honest half: the panel shows *this* computer's disk, and
+/// so a path it answers is only ever meaningful about this computer.
+///
+/// Answers `None` where the panel was dismissed. **A cancel is not a failure**,
+/// and drawing it as one is a lie about what the person just did —
+/// `host_save_file`'s `Ok(false)` is the same distinction one command up.
+///
+/// `start` is a **hint and never a boundary.** A panel can be walked anywhere, so
+/// checking it is about landing somewhere useful rather than about safety — which
+/// is the opposite of `host_cp`'s origin, where the comparison is the only thing
+/// standing between the page and a credential going somewhere nobody chose. A
+/// seed that is relative, gone, or not a directory is ignored rather than
+/// refused: a seed that cannot be honoured must not stop a panel opening.
+///
+/// ⚠ **`(async)`, for `host_save_file`'s reason exactly.**
+/// `blocking_pick_folder` carries the same *"should **NOT** be used when running
+/// on the main thread"* as its sibling, because the panel's result is delivered
+/// *by* the main event loop — so a main-thread command blocking on it waits on the
+/// loop it is itself holding.
+#[tauri::command(async)]
+pub fn host_pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
+    pick_folder(app, start)
+}
+
+/// The real one, on the platforms that have a folder panel to open.
+///
+/// ⚠ **Split into two functions rather than gated at the declaration**, and both
+/// halves of that are deliberate. The *body* is what is platform-specific —
+/// `blocking_pick_folder` does not exist on mobile — while the **command must go
+/// on existing everywhere**: three separate censuses read this file and `lib.rs`
+/// as text (`nativecheck`'s declared-against-registered, and
+/// `webcheck.native-bridge.ts`'s two), and a `#[cfg]` on the declaration or on the
+/// `generate_handler!` line would leave all three asserting a surface that is not
+/// the one a mobile build actually has. `credential.rs` aliases its two `Entry`
+/// types the same way and for the same reason: one body at the call site, the
+/// platform difference resolved above it.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
+    let mut panel = app.dialog().file();
+    if let Some(seed) = start {
+        let at = std::path::PathBuf::from(&seed);
+        if at.is_absolute() && at.is_dir() {
+            panel = panel.set_directory(at);
+        }
+    }
+    let Some(chosen) = panel.blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|e| format!("could not use that folder: {e}"))?;
+    // `to_str().unwrap()` is the one line that turns a mounted volume into a
+    // panic. APFS enforces UTF-8 so this arm is unreachable on the platform this
+    // ships on, and it is written for the ones it does not — the same shape as
+    // `host_save_file`'s "that filename is not text".
+    path.into_os_string()
+        .into_string()
+        .map(Some)
+        .map_err(|_| "that folder's name is not text".to_string())
+}
+
+/// ⚠ **Android and iOS have no folder panel, and this is what that cost.**
+///
+/// `tauri-plugin-dialog` 2.7.3 offers `blocking_pick_file` on mobile and **not**
+/// `blocking_pick_folder`: Android's equivalent is `ACTION_OPEN_DOCUMENT_TREE`
+/// through the Storage Access Framework, which hands back a tree *URI* rather than
+/// a filesystem path, and the plugin does not wrap it. `host_save_file` survives
+/// beside this only because a *file* panel does have a mobile arm.
+///
+/// Found by an APK build failing to compile, after `pnpm check`, `cargo clippy`
+/// and 74 `cargo test`s were all green — **none of them compiles for
+/// `aarch64-linux-android`**, so every one of them was honest and beside the
+/// point. `nativecheck` now carries the static half of that lesson; the whole of
+/// it is that a second target is not covered until something builds for it.
+///
+/// Unreachable in practice: {@link Boot::picks_folder} is `false` on this arm, so
+/// `NewSession.tsx` never draws the control that would call it. It answers rather
+/// than panicking because "the page should never ask" is not a reason to make
+/// asking fatal.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn pick_folder(_app: AppHandle, _start: Option<String>) -> Result<Option<String>, String> {
+    Err("this platform has no folder panel".to_string())
 }

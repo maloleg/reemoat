@@ -609,6 +609,28 @@ process.stdout.write("\nthe machine limit\n");
     //    the one that lets the parent hold a folder the picker is not showing.
     check("and reports the absence of a folder too", /if \(path !== null\) onPick/.test(src), false);
     check("reporting it unconditionally instead", /onPick\(path\);/.test(src), true);
+    /*
+     * ⚠ **And the report's dependencies are `path` alone**, which is the half that
+     * became load-bearing when the picker grew a second arm. `osDialog` arrives one
+     * `runResume` after the first render, so a dependency list holding it would
+     * re-fire the report at that moment — a second writer on a different clock,
+     * which is this whole block's subject arriving through a new door.
+     */
+    check("and the report is keyed on the folder and nothing else", /onPick\(path\);\s*\}, \[path\]\);/.test(src), true);
+    /*
+     * ⚠ **A dismissed file panel leaves the folder alone.** `pickFolderNative`
+     * answers `null` for a cancel, and writing that through would clear a folder
+     * somebody had already chosen — which is `setCwd(null)` above arriving by the
+     * one route this file did not previously have.
+     */
+    check("a cancelled panel is not a choice", /if \(picked !== null\) setPath\(picked\);/.test(src), true);
+    /*
+     * **And the panel arm grows no second way to make a folder.** Every platform's
+     * open panel has a New Folder button that hands back what it made, already
+     * selected; a copy beside it would post against a parent this arm deliberately
+     * does not list. One call site, on the tree arm, is what that means on disk.
+     */
+    check("there is one route to making a folder, and it is the tree's", (src.match(/\.makeDir\(/g) ?? []).length, 1);
   }
 
   {

@@ -157,9 +157,10 @@ have to enter. These are the rules a change here must not break:
 - **Anything that filters the list belongs beside the filter**, in `groups.ts`
   module state. A component `useState` makes `j`/`k` step onto rows the rail is not
   drawing. Q3.15.
-- **Tabs and folders are ordered by name, never by reachability or activity.**
-  Both flicker on the four-second poll, and a list reordering under a travelling
-  thumb is the one thing this cannot do. **Rows inside them are their reader's**:
+- **Ordered by name until a reader drags a tab (`machine-gestures.md`), and never
+  by reachability or activity.** Both of those flicker on the four-second poll, and
+  a list reordering under a travelling thumb is the one thing this cannot do —
+  which is why a *stored* order is allowed where a derived one is not. **Rows inside them are their reader's**:
   `sessions.rank`, a position clock defaulting to `createdAt`, descending. A drag
   writes it through `/meta`, with `pinned` beside it when the drop crossed Pinned;
   an absent `rank` is a daemon that cannot store one and freezes that gesture

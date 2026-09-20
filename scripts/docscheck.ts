@@ -145,6 +145,17 @@ const SOURCE_DIRS = ["src", "scripts", "deploy", "packages", ".github", "plugins
  * be invisible to the symbol check while its manifest was not.
  */
 /*
+ * `mjs` is in this list for `packages/native/scripts/`, which is where the icon
+ * generator lives.
+ *
+ * Three first-party files, no dependency manifests among them. Without it a
+ * decision about the icon pipeline could not cite the pipeline: `looksLikeSymbol`
+ * would flag a `CONST_CASE` name out of `icons.mjs` and assertion 4 would call it
+ * dangling, which is the check failing about its own corpus rather than about the
+ * document. The same argument `js` carries one comment up, for a package that is
+ * deliberately not TypeScript.
+ */
+/*
  * `rs` is in this list for the native shell, and it is safe **only** because
  * `SKIP_DIR` one comment down skips `target`.
  *
@@ -159,7 +170,7 @@ const SOURCE_DIRS = ["src", "scripts", "deploy", "packages", ".github", "plugins
  * names and `Cargo.lock` is a larger one, which is the `pnpm-lock.yaml` hazard
  * `ROOT_FILES` already refuses two comments down.
  */
-const SOURCE_EXT = /\.(ts|tsx|js|rs|sql|sh|yml|yaml|json|in|md)$/;
+const SOURCE_EXT = /\.(ts|tsx|js|mjs|rs|sql|sh|yml|yaml|json|in|md)$/;
 // `.gstack` is not part of this repository — it is a local agent-tooling
 // directory that some contributors have in their checkout. Skipped so a walk
 // never descends into somebody's private tooling and reports citations from it;
@@ -486,6 +497,10 @@ const FOREIGN = new Set([
   "approvalPolicy", // codex's own session field
   "sandboxPolicy", // codex's own session field
   "clientWidth", // the DOM
+  // The File System Access API's own type, quoted in Q7.145 for what it does *not*
+  // carry: a real path. That absence is the whole reason the browser arm keeps the
+  // tree while the shell gets a panel, so the name has to be quotable.
+  "FileSystemDirectoryHandle",
   "translateY", // CSS
   "recvBuf", // `yamux-js` internals, in the entry about its broken flow control
   "resOnFinish", // likewise

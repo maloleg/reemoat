@@ -1939,6 +1939,222 @@ process.stdout.write("\nthe menu, the machines and the build\n");
   );
   check("while the strip it was borrowed from still has them", /no-scrollbar/.test(browser) && /edge-fade/.test(browser), true);
   /*
+   * ⚠ **The reorder is one gesture with two presentations, and a hook is what
+   * keeps that true.** `MachineColumn`'s own docblock argues — and `web-shell.md`
+   * restates — that the two axes are two components and that a `variant` prop
+   * *"which could disagree with the CSS no longer exists"*. A shared
+   * `<MachineList axis=…>` would undo exactly that; a hook inverts it, so the
+   * gesture is one body and the presentation stays two. Asserted as a shape rather
+   * than left to a reviewer, because the tidying edit here is to merge them.
+   */
+  const machineDrag = stripComments(readFileSync(new URL("../src/ui/machineDrag.ts", import.meta.url), "utf8"));
+  check(
+    "the machine reorder is a hook, and both axes mount it",
+    [/export function useMachineDrag\(/.test(machineDrag), /useMachineDrag\(\{ axis: "y"/.test(column), /useMachineDrag\(\{ axis: "x"/.test(browser)],
+    [true, true, true],
+  );
+  check(
+    "and it splices through the body the agent strip already had",
+    [/from "\.\.\/agentStrip"/.test(machineDrag), /\bmoveRow\(/.test(machineDrag)],
+    [true, true],
+  );
+  /*
+   * `web-shell.md`'s two sentences about this gesture, and the second is why an
+   * entry can still be *clicked* to select a machine: capture at the press
+   * retargets the synthesised `click` to the capturing element, which is Q3.576 one
+   * control over. The slop constants are imported rather than re-typed, because the
+   * swipe on the same screen decides it is horizontal at the same distance and two
+   * copies drifting is a hold and a swipe both arming on one finger.
+   */
+  check(
+    "a finger's gesture begins on touchstart and refuses the scroll only while live",
+    [
+      /addEventListener\("touchstart", going\.start, \{ passive: false \}\)/.test(machineDrag),
+      /addEventListener\("touchmove", going\.move, \{ passive: false \}\)/.test(machineDrag),
+      /if \(event\.cancelable\) event\.preventDefault\(\);/.test(machineDrag),
+    ],
+    [true, true, true],
+  );
+  check("and the pointer is taken at arm rather than at the press", /setPointerCapture/.test(machineDrag.slice(machineDrag.indexOf("const arm"))), true);
+  check("while the press itself captures nothing", /setPointerCapture/.test(machineDrag.slice(0, machineDrag.indexOf("const arm"))), false);
+  check("the hold and the swipe share one distance, by import", [/PRESS_SLOP/.test(machineDrag), /from "\.\/rowDrag"/.test(machineDrag)], [true, true]);
+  /*
+   * The three things a reorder must not do, each asserted where its mechanism is.
+   * The first is the likeliest defect in the whole change: without it every drop
+   * also selects the tab it just moved.
+   */
+  check("a drop may not also select the machine it dropped", /onClickCapture/.test(machineDrag), true);
+  check("All is refused rather than being absent by luck", /id === ALL_MACHINES/.test(machineDrag), true);
+  check("and the class that would take scrolling from the list is never used", /touch-none/.test(machineDrag), false);
+  /*
+   * ⭐ **The neighbours slide rather than teleporting, and the class that does it
+   * is not the obvious one.** Both machine surfaces carry `.tap`, whose
+   * `transition` *shorthand* resets `transition-property` to three colours — and
+   * every rule in `index.css` is unlayered on purpose, so it beats
+   * `transition-transform` inside `@layer utilities` outright, whatever the class
+   * string says. The result is a reorder where the dragged entry follows the
+   * pointer and everything else jumps.
+   *
+   * ⚠ **Neither list that already reorders would have caught it.** The session
+   * rows and the agent strip both shift an element carrying **no** `.tap`, so the
+   * utility works there and the trap only appears on a surface where a row is also
+   * a button. `agent-strip.md` records the same cascade fault for `touch-none`.
+   */
+  const sheet = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+  const tapAt = sheet.indexOf(".tap {");
+  const slidesAt = sheet.indexOf(".slides {");
+  report("both transition opt-ins were found", tapAt > 0 && slidesAt > 0, `tap at ${String(tapAt)}, slides at ${String(slidesAt)}`);
+  check("the sliding opt-in is declared after the one it has to beat", slidesAt > tapAt, true);
+  check("and it carries the transform the other refuses", /\.slides \{[^}]*transform \d+ms/.test(sheet), true);
+  /*
+   * The three colour declarations are `.tap`'s, restated because a shorthand
+   * cannot extend one — so they are two copies that must stay in step.
+   */
+  const decls = (block: string): string[] =>
+    (/\{([\s\S]*?)\}/.exec(block)?.[1] ?? "")
+      .split(",")
+      .map((one) => one.trim().replace(/^transition:\s*/, "").replace(/;$/, ""))
+      .filter((one) => one.length > 0);
+  const tapDecls = decls(sheet.slice(tapAt));
+  const slideDecls = decls(sheet.slice(slidesAt));
+  check("and it still says everything the other one does", slideDecls.slice(0, tapDecls.length), tapDecls);
+  /*
+   * And both machine surfaces reach for it rather than for the utility, which is
+   * the half a stylesheet check cannot see.
+   */
+  /*
+   * ⚠ **Scoped to the strip, not swept over the file.** `SessionBrowser.tsx` uses
+   * `transition-transform` legitimately twice — on the chevron that rotates when a
+   * folder opens — and those carry no `.tap`, so the utility works there. A
+   * file-wide ban would be a check that is right about the wrong elements, and the
+   * way it would be "fixed" is by breaking a chevron.
+   */
+  const stripBody = browser.slice(browser.indexOf("function MachineTabs("));
+  const tabsOnly = stripBody.slice(0, stripBody.indexOf("\nfunction "));
+  report("the tab strip's own body was isolated", tabsOnly.length > 0 && tabsOnly.length < browser.length, `${String(tabsOnly.length)} chars`);
+  for (const [what, code] of [["the phone's tab strip", tabsOnly], ["the desktop column", column]] as const) {
+    check(`${what} slides its neighbours with the opt-in, not the utility`, [/\? "slides"/.test(code), /"transition-transform"/.test(code)], [true, false]);
+  }
+  /*
+   * ⭐ `agent-strip.md`: *"a pointer gesture that is the only way to reorder is a
+   * control a keyboard cannot reach at all."* There is no handle here to hang
+   * arrows on, so the entry takes them held with `Alt` — which also leaves
+   * `keyboard.ts`'s bare-key rules untouched. And it is said out loud, because a
+   * key press moves an entry that may be scrolled out of view on two surfaces that
+   * had no live region between them.
+   */
+  check(
+    "the same control answers a keyboard",
+    [/altKey/.test(machineDrag), /ArrowUp/.test(machineDrag), /ArrowLeft/.test(machineDrag), /isTypingInto\(/.test(machineDrag)],
+    [true, true, true, true],
+  );
+  check("and a keyboard move is announced", /moved to position/.test(machineDrag), true);
+  check(
+    "on both axes, from the one sentence the hook owns",
+    [/aria-live="polite"/.test(column), /aria-live="polite"/.test(browser), /drag\.announcement/.test(column), /drag\.announcement/.test(browser)],
+    [true, true, true, true],
+  );
+  /*
+   * Neither axis re-derives the order. It is `store.ts`'s, merged there so both
+   * inherit one answer and `machineTabs` still adds no sort of its own.
+   */
+  for (const [what, code] of [["the phone's tab strip", browser], ["the desktop column", column]] as const) {
+    check(`${what} draws the order it is handed and sorts nothing itself`, [/localeCompare/.test(code), /machineOrder\(/.test(code)], [false, false]);
+  }
+
+  /*
+   * ⚠ **The underline and the tab's inset were two numbers agreeing by hand.**
+   * `TabUnderline`'s docblock claimed `inset-x-3` matched `px-3` and nothing
+   * checked it — which is exactly the pair that drifts the moment somebody widens
+   * the tabs. Both are read out of the file and required equal, so the claim is a
+   * mechanism rather than a sentence.
+   */
+  const strip = stripComments(browser);
+  const tabInset = /min-h-11 items-center gap-1\.5 px-(\d+)/.exec(strip)?.[1] ?? "";
+  const markInset = /absolute inset-x-(\d+) -bottom-px/.exec(strip)?.[1] ?? "";
+  report("both insets were found to compare", tabInset.length > 0 && markInset.length > 0, `tab px-${tabInset}, mark inset-x-${markInset}`);
+  check("the mark under a tab is as wide as the tab's own content box", markInset, tabInset);
+  /*
+   * `All` and the `+` sit in the machine tabs' rhythm — the `+`'s own docblock
+   * says so — so all three move together or the strip reads as two controls that
+   * wandered in beside a row of tabs.
+   */
+  check("All and the + share that inset", (strip.match(new RegExp(`px-${tabInset}\\b`, "g")) ?? []).length >= 3, true);
+  /*
+   * And the fade is a fraction of something again: its own comment said `w-8` "is
+   * no longer a fraction of anything and would have to be re-measured rather than
+   * re-derived", and at this inset it is exactly twice it. Asserted as the relation
+   * rather than as the literal, which is the difference between the two.
+   */
+  check("the cut edge fades by twice a tab's inset", /w-8 bg-gradient-to-l/.test(strip) && Number(tabInset) * 2 === 8, true);
+  /*
+   * ⚠ **And the desktop column did not follow.** Moving `MACHINE_COLUMN_PX` moves
+   * all three rail bounds with it to keep the subtraction above true, and
+   * `clampRailWidth` preserves a stored *total* — so every existing reader would
+   * silently lose the delta off their list. The column's own bound is a different
+   * one: 68px of the 72 is the name, and two hosts eliding to `server-…` is the
+   * failure it is shaped against. Two axes, two constraints, no shared number.
+   */
+  const { MACHINE_COLUMN_PX: columnPx } = await import("../src/ui/rail.js");
+  check("widening the phone's tabs did not widen the desktop column", columnPx, 72);
+  check("and the two insets are not one number by accident", new RegExp(`px-${tabInset}\\b`).test(stripComments(column)), false);
+
+  /*
+   * The flick between machines.
+   *
+   * ⚠ **No breakpoint in JavaScript, and the gate is not one in disguise.**
+   * `AppShell`: *"CSS already knows the width, and a second source of truth for it
+   * is how a resized window ends up rendering a rail that is not there."* This
+   * stores nothing, subscribes to nothing and re-renders nothing — it reads, once
+   * per gesture, whether the `lg:hidden` tab strip is laid out at all, which is
+   * layout the browser computed from the same two class strings the breakpoint has
+   * always been answered in. `SessionBrowser` is mounted twice and each mount's
+   * ancestor is `display: none` at the other width, so exactly one can ever swipe.
+   */
+  const swipe = stripComments(readFileSync(new URL("../src/ui/machineSwipe.ts", import.meta.url), "utf8"));
+  check(
+    "the swipe asks no second source of truth about the width",
+    [/matchMedia\("\(min-width/.test(swipe), /innerWidth <|window\.innerWidth\b(?!.*EDGE)/.test(swipe), /\blg:/.test(swipe)],
+    [false, false, false],
+  );
+  check("it asks the DOM's own answer instead, once per gesture", /offsetParent === null/.test(swipe), true);
+  const appShell = readFileSync(new URL("../src/ui/AppShell.tsx", import.meta.url), "utf8");
+  check("and the breakpoint is still answered in two class strings", [/lg:hidden/.test(browser), /lg:flex/.test(appShell)], [true, true]);
+  /*
+   * The one `matchMedia` it may make, and it is the hole `index.css`'s own
+   * reduced-motion block has had three times: that block zeroes
+   * `transition-duration` on `*`, which makes the settle free — and cannot reach a
+   * transform this file writes per frame.
+   */
+  check("a follow that CSS cannot reach asks about reduced motion itself", /prefers-reduced-motion/.test(swipe), true);
+  check(
+    "it begins on touchstart, non-passive, like every touch gesture here",
+    [/addEventListener\("touchstart", going\.start, \{ passive: false \}\)/.test(swipe), /addEventListener\("touchmove", going\.move, \{ passive: false \}\)/.test(swipe)],
+    [true, true],
+  );
+  /*
+   * ⚠ **One number, two gestures, and exactly one of them is ever live.**
+   * `rowDrag` abandons an unarmed hold past `PRESS_SLOP` in *any* direction, and
+   * that number's own docblock puts it below the ~10px at which engines commit a
+   * pan. So the distance at which this decides it is horizontal is the distance at
+   * which the hold is already dead and the scroller has not yet taken the touch.
+   * Imported rather than re-typed, or the two drift and one finger arms both.
+   */
+  check("the swipe's slop is the hold's, by import rather than by coincidence", [/PRESS_SLOP/.test(swipe), /from "\.\/rowDrag"/.test(swipe)], [true, true]);
+  check("and it stands down while a row drag owns the touch", /busy\.current\(\)/.test(swipe), true);
+  check("the platform's own Back keeps its edge", /EDGE_DEAD_ZONE/.test(swipe), true);
+  /*
+   * It moves a selection and nothing else. `announce`/`data-nav` is for a screen
+   * *replacing* another one, and a tab change replaces nothing — there is no
+   * history entry and `navMove` has no value for it.
+   */
+  check(
+    "a swipe selects a machine and does not navigate",
+    [/selectMachine\(/.test(swipe), /navigate\(/.test(swipe), /startViewTransition/.test(swipe)],
+    [true, false, false],
+  );
+  check("and it clamps at both ends rather than wrapping", /Math\.min\(Math\.max\(/.test(swipe), true);
+  /*
    * ⚠ **The phone's strip is a tab bar, not a row of pills.** The selected tab is
    * marked by a rule under the word — the one shape that survives translating an
    * accent-coloured underline into a monochrome palette — rather than by a

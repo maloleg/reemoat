@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 88 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 365 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 62 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 368 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 63 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 113 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 144 | `###` |
-| | | **982** | |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 146 | `###` |
+| | | **988** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 982 rather than the 504
+dividers. So the count is over **both** depths, and it says 988 rather than the 507
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -21983,6 +21983,140 @@ finished, including an expensive model, with nothing on screen saying why.
 
 **Status.** Deliberate non-goal for now
 
+#### Q3.619 — Machines in the reader's order, without a schema change
+
+**Question.** The tabs are ordered by name and `web-shell.md` says they must be:
+*"never by reachability or activity. Both flicker on the four-second poll, and a
+list reordering under a travelling thumb is the one thing this cannot do."*
+Somebody wants to drag them.
+
+**Decision.** The rule is **narrowed rather than reversed**, on its own stated
+reason. Flicker is what it bans — and an order a person set does not flicker: it
+moves when they move it and at no other moment. So ordering by `reach` or by
+activity stays banned outright, and `reemoat.machineOrder` is merged over the name
+sort in `sessionGroups`.
+
+**Per device, in `localStorage`**, the `reemoat.railWidth` / `reemoat.machineTab`
+idiom. Owner's call: the control plane has nowhere to put a per-user order and a
+schema migration is not worth one. The cost is real and stated — the order set on
+a desktop is not the order on a phone.
+
+**`orderMachines`' shape is `orderStrip`'s, not `sessions.rank`'s**, and the
+argument is `agentStrip.ts`'s read one list over: **which list gains members on the
+commonest act in the product.** Starting a session is what this app is *for*, so
+that list grows constantly and a new row must have an honest position with nothing
+stored — hence a position clock, `rankBetween`, and a re-space when two instants
+collide. Machines are added by hand, a handful per account, over months, so a
+whole-list rewrite per reorder costs nothing and removes every way the arithmetic
+can be wrong. There is also no server to hold a rank, and the list is bounded
+(`MAX_MACHINE_ORDER`) where sessions are not.
+
+**Measurement — and it is the whole of this entry.** `sessionGroups` is memoised on
+the *identity* of `state.sessions` and `state.machines`, and a reorder replaces
+neither. Without `machineOrderVersion()` in that guard a drop repaints nothing
+until the four-second poll happens to hand over a new `machines` array: a drag that
+does nothing for four seconds and then jumps. **Every assertion written off the
+source text stays green with the guard reverted** — verified by reverting it — so
+the pair is driven against the real function instead, and three cases go red.
+
+**One deliberate divergence from the agent strip.** `nextOrder` keeps a slot for a
+machine the fleet no longer holds, where `MachineAgentsSection` drops such an entry
+on the next reorder. `selectedMachineIn` already promises revoke-and-restore for
+the selected *tab*; an order that forgot while the tab remembered would be two
+halves of one preference disagreeing.
+
+**Alternatives tried and taken back out.** A per-machine `rank` in `localStorage` —
+the same information with strictly more ways to disagree with itself. Sorting
+inside `machineTabs` — two axes, two sorts, and it falsifies that function's own
+docblock and the assertion under it in the same edit.
+
+**Status.** Current. `machine-gestures.md` is the area.
+
+#### Q3.620 — Two horizontal gestures on one phone screen, and what actually keeps them apart
+
+**Question.** The owner asked for the chats' drag on the machines *and* a Telegram
+flick between machines. On a phone that is a horizontal drag on a 44px tab strip
+and a horizontal flick on the list under it — two gestures on one axis on one
+screen, which is the conflation every gesture rule here exists to prevent.
+
+**Decision.** Both are built, and what separates them is **which box the finger
+landed in**. `machineDrag`'s listeners are on the *strip's* scroller and
+`machineSwipe`'s are on the *list's*; the two are siblings, so a touch beginning on
+a tab never reaches the swipe and one beginning on the list never reaches the drag.
+That is structural rather than lucky, and it is worth writing down because the
+plan for this work assumed a predicate would be needed and budgeted for one.
+
+**What did need a predicate** is `rowDrag`, which owns the same scroller as the
+swipe: a finger held still for 400ms and *then* moved sideways is a real case. So
+the swipe refuses while `rowDrag.armed()` — a **ref, not React state**, because the
+frame in which a hold arms is the frame in which React has not been told.
+
+**And one number does the rest.** `SWIPE_SLOP` is `PRESS_SLOP`, imported rather
+than re-typed. `rowDrag` abandons an unarmed hold past 8px *in any direction*, and
+that number's own docblock puts it below the ~10px at which engines commit a pan —
+so at the one distance where the swipe decides it is horizontal, the hold is
+already dead **and** the scroller has not taken the touch. Two copies drifting
+apart is a hold and a swipe both live on one finger.
+
+**Alternative taken back out.** Reordering on the desktop column only, with the
+phone inheriting the result. It was the recommendation until the surfaces were
+looked at: the collision it avoided does not exist, and it would have left a
+phone-only reader unable to reorder at all.
+
+**Status.** Current.
+
+#### Q3.621 — Swiping between machines without a breakpoint in JavaScript
+
+**Question.** `SessionBrowser` is mounted **twice** — once in `AppShell`'s
+`hidden … lg:flex` aside and once in `App.tsx`'s `lg:hidden` div — and `AppShell`
+forbids a second source of truth for the width: *"CSS already knows the width, and
+a second source of truth for it is how a resized window ends up rendering a rail
+that is not there."* A swipe handler inside that component mounts on the desktop
+rail too.
+
+**Decision.** A **per-gesture read of the DOM's own answer**, at `touchstart` and
+never cached: the swipe runs only where the `lg:hidden` tab strip **is laid out**,
+`offsetParent !== null`.
+
+Three things make that not a breakpoint in disguise. It is **not state** — nothing
+stored, subscribed to or re-rendered, so it cannot disagree with CSS and cannot go
+stale; it is layout the browser computed from the same two class strings the
+breakpoint has always been answered in. It is **exclusive in both directions** —
+each mount's ancestor is `display: none` at the other width, so exactly one can
+ever swipe and neither knows which one it is. And it is **semantic rather than
+dimensional**: the gesture moves the *tab strip's* selection, so it runs where the
+tab strip is the control on screen, and the width is only how that is decided.
+
+**The rest of the contract.** `touchstart`, non-passive through
+`addEventListener` because React attaches `onTouchMove` passively; horizontal
+intent decided once as `|dx| > |dy| * 1.5` past the slop and never reconsidered;
+`event.cancelable === false` treated as vertical, because the engine has already
+claimed the pan and arguing with it is how a swipe becomes a stutter;
+`preventDefault` only after the axis resolves, never on `touchstart`, which would
+kill the tap that opens a session. A **second guard that does not share that
+cause** — `[touch-action:pan-y_pinch-zoom]`, one arbitrary value rather than two
+utilities, since two setting one property are resolved by Tailwind's emission order
+rather than by the class string, and `pinch-zoom` kept because `pan-y` alone takes
+zoom off the whole rail. A 24px dead zone at each viewport edge, because
+`overscroll-behavior: none` stops the rubber-band and says nothing about the
+platform's own Back. Clamped at both ends, never wrapping.
+
+⚠ **`prefers-reduced-motion` is read in the hook**, not left to `index.css`. That
+file's blanket block zeroes `transition-duration` on `*`, which makes the settle
+free — and **cannot reach a transform written per frame from JavaScript**. It is
+the same hole that file records having had three times. Under reduced motion no
+transform is written and the swipe still commits: reduced motion removes the
+motion, not the feature.
+
+**Alternatives taken back out.** A view transition — `announce`/`data-nav` is for a
+screen *replacing* another one, and a tab change has no history entry and no
+`navMove` value. Telegram's true two-page turn — it needs both machines' lists
+mounted at once, on a rail whose whole design is one machine at a time
+(`waitingFloor` exists because of it). What ships is a nudge and a swap.
+
+**Status.** Current.
+
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -24274,6 +24408,73 @@ free.
 **Status.** Current. `.claude/rules/native-packaging.md` is the area;
 `pnpm nativecheck` holds the overlays to an allowlist and `pnpm deploycheck` drives
 the verb. Q4.119 is what this makes possible and has not switched on.
+
+### Q4.124 — Why the dock icon was the wrong size, and the generator that replaced `tauri icon`
+
+**Question.** Reemoat's tile reads noticeably larger in the macOS Dock than the
+apps beside it. Why?
+
+**Measurement.** Every macOS raster in the tree had an opaque bounding box equal to
+its **whole canvas** — `icon.png` 512×512 in 512×512, `ic10` 1024×1024 in 1024×1024,
+zero margin. Apple's grid is an **824×824 squircle in a 1024×1024 canvas**: a 100px,
+9.77% transparent margin per side. Drawn at 100% the badge is about a quarter larger
+in linear terms than a conformant icon, which is the entire defect.
+
+⚠ **Checked against Apple's own shipping icons rather than against the
+documentation, and the first reading disagreed.** Pages, Numbers, Keynote and
+GarageBand all measure **854** of 1024 at an alpha threshold of 8 — not 824 — which
+would say this icon is now 30px too small. They are not: those icons carry a **soft
+drop shadow**, and the alpha profile says so outright. Across the middle row of
+Pages, alpha runs `75:1 80:4 85:9 90:16 95:29` and then jumps to `100:201 105:255`.
+Re-measured at any threshold past the ramp, all four are **824** — the same number
+as this icon, to the pixel.
+
+Two things follow. The geometry here is confirmed empirically and not just from a
+spec. And this icon has **no shadow**, which is a real cosmetic difference from
+Apple's and is left alone deliberately: the defect being fixed is size, a shadow is
+a separate design decision, and baking one in would move the very bounding box the
+assertions are written against.
+
+**Decision.** Inset to that grid, from `packages/native/scripts/icons.mjs` — a
+committed, zero-dependency Node generator — and **retire `tauri icon`**. Two numbers
+in that file are Apple's (`MARGIN`, `RADIUS`); the mark's six are parsed out of
+`packages/web/public/favicon.svg` rather than retyped, so the app icon is a stated
+*transform* of the favicon rather than a fourth copy of the drawing.
+
+**Why not re-run `tauri icon` against a committed master.** `native-packaging.md`
+already records what it does: it overwrites `ic_launcher_foreground.png` — correctly
+hand-authored as the mark alone on transparency at 58% of the frame — and rewrites
+two launcher XMLs back to `@mipmap/…` and `#fff`. Three builds shipped somebody
+else's logo out of that class of bug, and a hand-restore that must be remembered is
+the same shape as the `git checkout -- gen/android` that already gets forgotten. The
+generator writes **only** the macOS and Windows files, which `nativecheck` asserts
+by reading the script.
+
+**Two defects found in passing, both from the same cause.** `package.json` ran
+`tauri icon icon.png` and **`packages/native/icon.png` has never existed** — a script
+naming a file that is not there, for the life of the package. And two committed
+Android XML comments claimed `nativecheck` pinned their `@color` form and colour; it
+did not. Both are fixed, the second by writing the assertion rather than softening
+the claim.
+
+⚠ **Nothing in any of the twelve drivers asserted anything about an icon**, which is
+how all three shipped. There is now a PNG decoder in `nativecheck` (all five filter
+types, so it still bites on a raster replaced by hand) and nine assertions, including
+one that every file a script in that manifest names exists — the line that would have
+caught the dead script years ago. Verified non-vacuous: five go red on the tree before
+this change.
+
+**One platform, deliberately.** Android's foreground is the mark at 58% of its frame
+and its legacy rasters are correctly full-bleed; iOS and `apple-touch-icon.png` stay
+full-bleed because iOS masks its own icons and this inset would double; the favicon
+stays full-bleed because a tab strip does not mask. The Windows Store tiles are
+**unmeasured** and stay as they are, which is a stated gap rather than a guess.
+
+**Alternative deferred.** A continuous-curvature squircle `<path>` — more faithful,
+one inside-test away in `coverage`. Not in this commit: the defect is *size*, and a
+corner-curvature change alongside it makes the before and after unreadable.
+
+**Status.** Current. `.claude/rules/native-packaging.md` is the area.
 
 
 ## Invariants — rules that were defects first
@@ -33297,4 +33498,143 @@ exists is Android's own: a user CA is an explicit per-device install that the
 system warns about persistently. The comment in the resource file names all three
 legs so that nobody reading it concludes the end-to-end encryption covers the one
 leg it does not.
+
+### Q7.145 — Which folder picker a local daemon gets, and what stops it being the route
+
+**Question.** `DirectoryPicker` walks the tree over the wire — `GET /fs/roots`, then
+`GET /fs/list` per level — for every machine. On the computer the app is *running
+on*, that is a network round trip to answer a question the operating system already
+has a panel for.
+
+**Decision.** On a local daemon the OS panel **replaces** the tree. Remote machines
+are untouched. The predicate is `inNativeShell() && state.localMachineId === selected`,
+derived once at the mount site and passed down as one boolean.
+
+**Not `route.kind === "local"`**, for three reasons and any one is sufficient. The
+route is a *preference* — `setLocalOff` turns loopback off per machine, so a picker
+keyed on it puts the tree back the instant somebody chooses the relay on the machine
+they are sitting at. It answers *reachability* while this question is *identity*; a
+local daemon momentarily unreachable is still this computer. And a screen cannot
+reach it at all: `MachineConnection` is pinned to an exact four-module set with no
+`ui/` file among them. `AppState.localMachineId` already carries this argument for
+the `this device` badge; the picker is its second reader.
+
+**No daemon change, no wire change, no new route.** `resolveCwd` is deliberately
+unconfined and `POST /sessions` takes any non-empty string, so `REEMOAT_ROOTS`
+narrows what `GET /fs/list` *lists* and nothing else. One new Rust command,
+`host_pick_folder`, on a dialog plugin already linked and already driven from Rust —
+so `capabilities/default.json` stays `"permissions": []`.
+
+**What it loosens, named.** The panel is not narrowed by `REEMOAT_ROOTS`; that was
+never a boundary, and who can take this path at all is the uid that already owns
+`~/.reemoat`.
+
+⚠ **One genuinely new failure mode, recorded rather than pre-mitigated.** Picking
+`~/Desktop`, `~/Documents` or `~/Downloads` on macOS puts the agent inside a
+TCC-protected directory. The panel grants access to the *app* through the powerbox;
+the reader is the **daemon's child**, a separate process. To measure: start a session
+in `~/Desktop` on a full build and ask the agent to `ls`. No `NS*UsageDescription`
+key is added before that answer exists.
+
+**A `(async)` rule became a mechanism in passing.** `commands.rs` argued at length
+that a command waiting on a platform panel must carry the argument form — the panel's
+result is delivered *by* the main event loop, so a main-thread command blocking on it
+waits on the loop it is holding — and nothing held it to that. `nativecheck` now
+splits the file on the attribute and requires it of every body reaching `.dialog()`
+or a `blocking_` call. Verified non-vacuous.
+
+**Alternatives tried and taken back out.** *Beside the tree rather than instead of
+it* — two controls answering one question, and the footer's `cwd` then has two
+writers, which is the defect `onPick`'s unconditional report exists for.
+*`showDirectoryPicker()` in the browser* — it answers a `FileSystemDirectoryHandle`
+and yields **no real path**, and a real path is the entire payload since `cwd` is
+interpreted on the daemon's own filesystem. *A Rust `read_dir` command feeding the
+existing tree* — it would make the shell a filesystem browser for a page that renders
+agent output, and would answer about the wrong disk whenever the daemon is elsewhere.
+
+**One thing the tree arm being kept bought.** Four existing assertions —
+`webcheck.navigation.ts`'s crumb bar and **Up one folder**, `webcheck.typography.ts`'s
+crumb class string, `decision-surfaces`' `aimed === 9`, `refusing-controls`' two
+`disabled:opacity-40` — stay green **because both arms live in one component**.
+Deleting the tree outright would have taken all four with it.
+
+⚠ **It shipped broken on Android, and the fix changed the predicate.**
+`blocking_pick_folder` does not exist on mobile in `tauri-plugin-dialog` 2.7.3 —
+Android's own answer to "choose a folder" is `ACTION_OPEN_DOCUMENT_TREE`, a Storage
+Access Framework tree *URI* rather than a path, which the plugin does not wrap.
+`host_save_file` survives beside it only because a *file* panel has a mobile arm.
+The command was declared and registered unconditionally, so the APK failed to
+compile: `error[E0599]: no method named blocking_pick_folder`.
+
+Three things came out of that. **Only the body is gated**, not the declaration or
+the `generate_handler!` line — a `#[cfg]` there would leave all three text-based
+censuses asserting a surface a mobile build does not have. **The page now reads a
+declared capability**, `Boot.picksFolder`, rather than `inNativeShell()`: a shell
+exists on Android too, and the two available guesses are both wrong — `platform`
+narrows `"android"` to `"other"` along with every future desktop target, and "a
+phone has no local daemon so it never matches `localMachineId`" is true today and
+is luck. And **`nativecheck` gained the static half** of the lesson: a named list
+of desktop-only dialog APIs, each required to sit behind a gate naming the
+platforms it is missing on, plus a comparison of `PICKS_FOLDER`'s `cfg!` against
+the `#[cfg]` on the function it describes — one condition written twice, because a
+macro and an attribute cannot share a token, and a build where they disagree
+compiles perfectly while drawing a control the shell refuses. Verified by
+reverting: the check goes red on the code that shipped.
+
+**Status.** Built. `.claude/rules/native-panels.md` is the area; Q7.146 is the
+gap that let it through.
+
+### Q7.146 — Two build targets, and only one of them is what "green" means
+
+**Question.** `pnpm check`, `cargo clippy` and 74 `cargo test`s were green while
+the Android APK would not compile (Q7.145). What is the standing gap?
+
+**Position.** **Nothing in the automated gate builds for
+`aarch64-linux-android`**, and nothing in it is wrong. `pnpm check` is TypeScript
+and the offline drivers. `cargo clippy` and `cargo test` run on the **host**
+target. So a function that references an API a crate does not offer on mobile is
+invisible to all of them, and the APK build is the only thing that sees it — and
+it is run by hand, rarely, from one session.
+
+**What has been done about it.** The static half, in `nativecheck`: a named list
+of desktop-only dialog APIs, each required to sit behind a gate naming the
+platforms it is missing on, with a `report` so a rename cannot make it go quiet;
+and `PICKS_FOLDER`'s `cfg!` held against the `#[cfg]` on its implementation. That
+catches the *class* that shipped. It cannot catch the general case: a driver
+cannot know what a crate offers on a target without asking the compiler.
+
+**What has not, and the condition for doing it.** `cargo check --target
+aarch64-linux-android` in the drivers. Not built now, and the reason is a cost
+rather than a doubt: it needs the NDK on whatever runs it, and this development
+machine has a Homebrew Rust toolchain with **no `rustup`** — the same fact that
+makes desktop builds arm64-only (`docs/NATIVE.md`). So it would be a check that
+is green on one machine and absent on another, which is worse than a stated gap.
+
+⚠ **And one trap about what counts as evidence, found while checking the fix.**
+The obvious confirmation — grep the shipped Android `.so` for
+`blocking_pick_folder` and find it absent — proves **nothing**. That name is a Rust
+method; it never reaches a binary as a string literal on *any* target, and it is
+equally absent from the macOS build. `host_pick_folder` *is* greppable, because Tauri
+emits it for the IPC table — so the two names look alike and answer different
+questions. **The compilation is the proof**, and it is sufficient: the previous
+commit failed at `E0599` on that method and this one reaches a signed APK.
+
+⭐ **And the transferable half is not about `grep`, it is about what the control
+tested.** There *was* a control — an invented symbol, searched for and correctly
+not found — and it was green, which is exactly why the conclusion was believed. It
+answered *"does this search work"*. The question that needed answering was *"does
+this search distinguish a symbol the gate removed from one that was never a string
+in the first place"*, and against that hypothesis the control is silent: both
+answers look identical. A green control over the wrong hypothesis is worse than no
+control, because it converts a guess into a finding. The same shape appears
+throughout this document under a different name — an assertion written from the
+code rather than from the intent, which then agrees with the code.
+
+**The trigger to revisit.** While the APK is built by hand and rarely, a compile
+error found at build time is a cheap failure. The moment it joins the ordinary
+cycle — a CI leg, or a release that ships it — that target has to be in something
+that runs before a person is waiting on it. `native-packaging.md`'s platform
+matrix is where that change would show up first.
+
+**Status.** Open. The class is covered; the target is not.
 
