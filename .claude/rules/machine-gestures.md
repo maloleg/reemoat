@@ -200,6 +200,40 @@ This is deliberately **not** Telegram's two-page turn, which needs both machines
 lists mounted at once on a rail whose whole design is one machine at a time. What
 ships is a nudge and a swap.
 
+## Which machine is selected, and why it is not a band
+
+**The selected machine is a filled 28px mark; the tile behind it paints nothing.**
+It was `bg-raised` across the whole tile, on the argument that a folder rail marks
+the selected folder as a band and that `raised` is what this palette spends on
+state. Both halves are true in isolation. What they missed is the column *beside*
+it: the session list marks its own selected row with the same token, full-bleed and
+square, abutting across one pixel of `border-edge`.
+
+⚠ **They can never line up, and that is arithmetic rather than a bug to fix.** Both
+heads agree at 56px and the rhythms then diverge — a machine tile is `py-2` + a 28px
+mark + `gap-1` + an 18px label = 66px, a session row is 64px with a subline and 42px
+without, and the list's first child is a folder header. Two identical grey
+rectangles at unrelated offsets, which is what was reported as the column looking
+crooked. Pinning the offsets would leave the next change to either rhythm to reopen
+it; removing the band removes the edge there is nothing to line up.
+
+⚠ **`bg-fg` on a mark narrows Q3.209 rather than repealing it.** This app already
+keeps a shorter list than that sentence: `TabUnderline` is 2px of it, the bell is a
+dot with `ring-2 ring-ink`, and the blocked count is `bg-fg text-ink` at 16px in
+three places. The measurement is **area** — the chip is 784px², smaller than the
+32px circle `Composer` already draws and a quarter of the pill that rule was written
+about. Barred as a pill-sized fill, licensed as a mark. Q3.624.
+
+⚠ **The fill carries `transition-colors` and it is not decoration.** `.tap` is on
+the `<button>`, `transition` is not inherited, and the chip is a child `<span>` — so
+the band cross-faded only because it was painted on the `.tap` element. Without it
+the selection *snaps*. It must never be `transition-transform`: `webcheck` bans that
+string in this file outright, for the `slides` reason above.
+
+**And the badge gained `ring-2 ring-ink`.** The count and the selected mark are both
+`bg-fg` and overlap by two pixels at the mark's corner, so on the one machine that
+most needs reading — selected, with work blocked on it — they grew as one shape.
+
 ## The tabs' own numbers
 
 **Three class strings share one inset** — `All`, a machine tab, and the `+` — and

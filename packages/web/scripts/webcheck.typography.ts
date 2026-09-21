@@ -260,6 +260,13 @@ process.stdout.write("\nevery site of the caps idiom, and the ones that are outs
       anchor: "const DRAWER_HEADING =",
       why: "the drawer's own px-3 inset, which MENU_HEADING's px-2.5 would put 2px inboard of its rows",
     },
+    {
+      file: "ui/TaskPanel.tsx",
+      hits: 1,
+      constant: false,
+      anchor: "const FINISHED_HEADING =",
+      why: "text-faint, spent by both arms of the finished band: every other heading there names work that is going",
+    },
   ];
 
   const IDIOM = /tracking-wider/g;

@@ -777,20 +777,35 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      */
     check("the bordered card is drawn only where this block names the plugin", /names \? "mt-3 rounded-lg border border-edge p-3" : "mt-3"/.test(consent), true);
     /*
-     * ⚠ **And the tap target went with the component instead of being lost in the
-     * move.** `min-h-11` is on the fold because it opens the list of capabilities
-     * somebody is about to grant a stranger's code, and this app is used from a
-     * phone. It is asserted against `bits.tsx` now, where the class string lives: a
-     * height that disappears in a refactor disappears silently, which is the same
-     * quiet loss `aria-expanded` was nearly a victim of when `AskCard`'s collapse
-     * became an `IconButton`.
+     * ⭐ **The fold is the height of its own words now, and the 44px it carried is
+     * gone by the owner's call.**
+     *
+     * This asserted the opposite, on the argument that `min-h-11` was right
+     * *"because it opens the list of capabilities somebody is about to grant a
+     * stranger's code, and this app is used from a phone"*. That reasons from the
+     * **importance** of what is behind the fold, and a tap floor is not about
+     * importance — it is about what a mis-tap costs. `web-shell.md` scopes the
+     * floor to controls that *answer an agent*, asserted on three files, and says
+     * outright that a blanket version would be false, naming a `<summary>` and a
+     * link inside a sentence as things that are right not to reach it. Opening a
+     * fold costs one tap to undo; **approving the grant does not**, and that
+     * control is untouched and still swept by the three-file check above.
+     *
+     * ⚠ **What is kept is the other half of the original finding**, which was never
+     * about the height: `aria-expanded` and the component itself, so the plugin
+     * screens cannot fall back to the platform's `<details>`. A height that
+     * disappears in a refactor disappears silently — so the absence is pinned as
+     * deliberately as the presence was, and in the same file.
      */
+    const bitsFold = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
     check(
-      "and the fold keeps its 44px, in the file it moved to",
-      /className="tap flex min-h-11 w-full items-center gap-1\.5/.test(
-        stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8")),
-      ),
-      true,
+      "and the fold is the height of its words, with the disclosure itself intact",
+      [
+        /className="tap flex w-full items-center gap-1\.5 text-left text-xs/.test(bitsFold),
+        /className="tap flex min-h-11 w-full items-center gap-1\.5/.test(bitsFold),
+        /aria-expanded=\{open\}/.test(bitsFold),
+      ],
+      [true, false, true],
     );
     /*
      * ⚠ **The sentence naming the blast radius is OUTSIDE the fold and above it,

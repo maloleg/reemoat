@@ -205,12 +205,11 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
 /**
  * One machine in the column — or the fleet, which is drawn the same way.
  *
- * **Selection is a band on the whole tile, and the chip steps up on top of it** —
- * `bg-raised` on the entry, `bg-surface` on the monogram inside it. The ⚠ at the
- * top of the function body is the argument; read it before moving the fill.
- *
- * It is not `bg-fg` either way: that is the affirmative action inside a decision
- * and picking a folder is a navigation.
+ * **Selection is a filled 28px mark, and the tile behind it paints nothing** —
+ * `bg-fg text-ink` on the monogram, no band on the entry. The ⚠ at the top of the
+ * function body is the argument, including the measurement that retired the band
+ * and why `bg-fg` on a mark narrows Q3.209 rather than repealing it; read it before
+ * moving the fill.
  *
  * **The name is drawn under the square and truncated, and that is what tells two
  * machines apart.** A monogram alone cannot: two hosts whose names begin with the
@@ -235,42 +234,75 @@ function MachineEntry({
   drag?: MachineDrag;
 }): ReactNode {
   /*
-   * ⚠ **The whole tile carries the selection, not the chip inside it.**
+   * ⚠ **The mark carries the selection, and the tile carries nothing** — which is
+   * a reversal of what this docblock argued, and the reason is a measurement about
+   * the *pair* of columns rather than about this one.
    *
-   * It was the chip alone, and at 28px against a rail that is `ink` it was a tone
-   * step you had to go looking for — on a strip whose entire job is saying which
-   * machine you are reading. A folder rail marks the selected folder as a *band*,
-   * and that is what `raised` is for here: `web-shell.md`'s rule is that `raised`
-   * means state — a tab you are on, a toggle that is on, a chosen menu row.
+   * It was a `bg-raised` band across the whole tile, on the argument that a folder
+   * rail marks the selected folder as a band and that `raised` is what this palette
+   * spends on state. Both halves are still true in isolation. What they missed is
+   * that the session list beside this column marks its own selected row with the
+   * same token, full-bleed and square — `bg-raised`, no radius, abutting across one
+   * pixel of `border-edge`. Two identical grey rectangles, and they can never line
+   * up: the heads agree at 56px and the rhythms then diverge, a machine tile being
+   * `py-2` + a 28px mark + `gap-1` + an 18px label = 66px against a session row's
+   * 64px with a subline and 42px without, with a folder header as the list's first
+   * child. So the selected machine and the selected chat sat at unrelated offsets
+   * wearing the same fill, which is what was reported as the column looking
+   * crooked. It is not two numbers that need agreeing — it is one signal drawn
+   * twice on two grids, and pinning the offsets would leave the next change to
+   * either rhythm to reopen it.
    *
-   * Which leaves the chip needing to stay visible on top of it, and `surface` is
-   * the one step above `raised` this palette has. So a selected entry is a white
-   * chip on a grey band and an unselected one is a grey chip on nothing: it reads
-   * at a glance and spends no colour, of which there is none to spend.
+   * Filling the **mark** removes the failure by construction: there is no band, so
+   * there is no edge to line up with anything. The selected entry is an inverted
+   * 28px chip and the unselected one is the `raised` chip it always was.
    *
-   * The label carries the third signal, `font-medium text-fg` against
+   * ⚠ **`bg-fg` on a 28px mark, which narrows Q3.209 rather than repealing it.**
+   * The rule is that `bg-fg` is the affirmative action inside a decision and is not
+   * spent on navigation, and this app already keeps a shorter list than the
+   * sentence: `TabUnderline` is 2px of it, the rail bell is a dot with
+   * `ring-2 ring-ink`, and the blocked count is `bg-fg text-ink` at 16px in three
+   * places including the badge twelve lines down. The measurement is area — the
+   * chip is 28×28 = 784px², smaller than the 32px circle `Composer` already draws
+   * and a quarter of the ≈100×32 pill that rule was written about. So it is barred
+   * as a pill-sized fill and licensed as a *mark*, which is the shape every
+   * existing exception already has.
+   *
+   * ⚠ **`transition-colors` on the chip, and it is not decoration.** `.tap` is on
+   * the `<button>`, `transition` is not inherited, and the chip is a child `<span>`
+   * — so the band cross-faded only because the band was on the `.tap` element.
+   * Moving the fill onto the chip without this makes the selection *snap*. It must
+   * be `transition-colors` and never `transition-transform`: `webcheck` bans the
+   * latter in this file by literal, because `.tap`'s `transition` shorthand is
+   * unlayered and swallows it — see the `slides` ⚠ below.
+   *
+   * The label carries the second signal, `font-medium text-fg` against
    * `text-muted`, for the reason the session rows already give — with the palette
-   * this delicate one signal is not enough, and these three cost nothing.
+   * this delicate one signal is not enough, and it costs nothing.
    *
    * ⚠ **Full-bleed and square, not an inset rounded pill.** The inset was tried
    * and it cost eight pixels of every label in a column where the label is the
    * only thing telling two machines apart — `server-fra` and `server-hel` both
-   * elided to `server-…`, which is the one failure a folder rail cannot have. A
-   * band running edge to edge is also what the reference draws, and it buys the
-   * padding back: `px-0.5` leaves 68px of the 72 for the name, four more than
-   * before any of this.
+   * elided to `server-…`, which is the one failure a folder rail cannot have.
+   * `px-0.5` leaves 68px of the 72 for the name. That argument was made for the
+   * band and survives it: it is about the label's room, not about the fill.
    */
-  const tile = tab.selected ? "bg-raised" : "hover:bg-raised/60";
-  const chip = tab.selected ? "bg-surface text-fg" : "bg-raised text-muted";
+  const tile = tab.selected ? "" : "hover:bg-raised/60";
+  const chip = tab.selected
+    ? "bg-fg text-ink transition-colors"
+    : "bg-raised text-muted transition-colors";
   const movable = drag !== undefined && index !== undefined;
   const shift = movable ? drag.shiftFor(index) : 0;
   const lifted = movable && drag.dragging === tab.id;
   /*
-   * ⚠ **A lifted entry needs a ground of its own.** These tiles paint nothing when
-   * unselected, so one carried over its neighbours would show them through it.
-   * `bg-surface` is the one step above `raised` this palette has — and **not**
-   * `bg-raised`, which is what *selection* means here, so a lifted entry wearing it
-   * would read as the machine you are looking at.
+   * ⚠ **A lifted entry needs a ground of its own.** These tiles paint nothing at
+   * all now — selected or not — so one carried over its neighbours would show them
+   * straight through it. `bg-surface` is the one step above `raised` this palette
+   * has, and it is still the right answer for a different reason than the one this
+   * paragraph used to give: it said `bg-raised` was refused because *that* is what
+   * selection means here, and selection is a filled mark now. What is left is the
+   * plain one — `raised` is the tile's own hover, so a lifted entry wearing it
+   * would read as a tile the pointer happens to be over.
    *
    * The neighbours are transitioned and the carried entry never is: its transform
    * is rewritten every frame, so a transition restarts the interpolation on each
@@ -313,7 +345,16 @@ function MachineEntry({
         {tab.name}
       </span>
       {tab.blockedCount > 0 && (
-        <span className="pointer-events-none absolute top-1 right-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink">
+        /*
+         * ⚠ **`ring-2 ring-ink`, which arrived with the filled mark.** The badge
+         * and the selected chip are both `bg-fg` and they overlap by two pixels at
+         * the mark's top-right corner, so on the one machine that most needs
+         * reading — selected, with work blocked on it — the count grew out of the
+         * chip as one shape. The ring is the rail bell's own idiom twelve files
+         * over, and it is the cheapest thing that separates two fills of the same
+         * colour without introducing a third.
+         */
+        <span className="pointer-events-none absolute top-1 right-2 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fg px-1 text-2xs font-semibold text-ink ring-2 ring-ink">
           {tab.blockedCount}
         </span>
       )}

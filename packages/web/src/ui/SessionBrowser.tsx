@@ -2073,48 +2073,68 @@ function SidebarFoot({ machine }: { machine: MachineId | null }): ReactNode {
    * the rule this list already follows between every other pair of things.
    */
   return (
+    /*
+     * ⚠ **`pb-2` on the inner box and `pb-safe` on this one, which is the
+     * composer's own arrangement copied deliberately.**
+     *
+     * The two stacks sit either side of the rail divider and their bottom edges
+     * are read as one line. They were 8px apart: the composer's band is `pb-safe`
+     * (12px floor) with a `pb-2` on the column *inside* it, so the box you type in
+     * stops 20px above the floor, while this footer had `pb-safe` alone and the
+     * button stopped at 12 — hanging below the thing it is supposed to line up
+     * with.
+     *
+     * ⚠ **The 8px may not go beside `pb-safe` on this element**, and that is a
+     * cascade fact rather than a preference: `.pb-safe` is declared unlayered in
+     * `index.css`, so it beats any `pb-*` utility on the same node whatever the
+     * class string says, and the edit would be a **silent no-op**. `Composer.tsx`
+     * records that measurement at length; this is the second surface to need it,
+     * which is why it is written here too rather than pointed at.
+     */
     <div className="pb-safe shrink-0 px-3 pt-3">
-      {/*
-       * The tab bar **writes** the route rather than the dialog reading the tab
-       * bar, which is `router.ts`'s own rule: sidebar state feeding a routed
-       * dialog forgets itself on back-and-forward.
-       */}
-      {/*
-       * `plain`, not `primary`, for the machine tab's reason read once more.
-       *
-       * `bg-fg` is a near-black block, and in a rail whose three greys sit within
-       * 1.22:1 of each other it was the only heavy object on the screen — drawing
-       * the eye to a button somebody presses a few times a day, permanently. This
-       * app spends that fill on the affirmative action *inside* a decision (Send,
-       * an approval on the ask card), and "start something new" is a navigation.
-       * Full width and a leading glyph are what make it findable instead.
-       */}
-      {/*
-       * **Not full width, and 36px rather than 44px.**
-       *
-       * Both come from where its top edge lands. This footer and the composer are
-       * bottom-anchored stacks either side of the rail divider, so the button's
-       * top sits as high above the bottom as the two rows below it are tall —
-       * about twelve pixels above the composer's message box, which is what made
-       * it read as floating rather than as part of the same line. `size="sm"`
-       * spends eight of those twelve; the remainder is not chased, because both
-       * stacks are content-derived and an exact match would be a coincidence that
-       * the next change breaks (the same reason this footer has no `border-t`).
-       *
-       * Width does **not** follow, and that was tried the other way: at content
-       * width the button floated in the middle of a column whose every other row
-       * is full-bleed, which reads as an object dropped into the footer rather
-       * than as the footer's own control. Full width with a leading glyph, short
-       * rather than tall.
-       */}
-      <Button
-        size="sm"
-        className="w-full"
-        onClick={() => navigate(machine === null ? newPath() : newPath(machine))}
-      >
-        <Icon as={Plus} size={16} />
-        New session
-      </Button>
+      <div className="pb-2">
+        {/*
+         * The tab bar **writes** the route rather than the dialog reading the tab
+         * bar, which is `router.ts`'s own rule: sidebar state feeding a routed
+         * dialog forgets itself on back-and-forward.
+         */}
+        {/*
+         * `plain`, not `primary`, for the machine tab's reason read once more.
+         *
+         * `bg-fg` is a near-black block, and in a rail whose three greys sit within
+         * 1.22:1 of each other it was the only heavy object on the screen — drawing
+         * the eye to a button somebody presses a few times a day, permanently. This
+         * app spends that fill on the affirmative action *inside* a decision (Send,
+         * an approval on the ask card), and "start something new" is a navigation.
+         * Full width and a leading glyph are what make it findable instead.
+         */}
+        {/*
+         * **Not full width, and 36px rather than 44px.**
+         *
+         * Both come from where its top edge lands. This footer and the composer are
+         * bottom-anchored stacks either side of the rail divider, so the button's
+         * top sits as high above the bottom as the two rows below it are tall —
+         * about twelve pixels above the composer's message box, which is what made
+         * it read as floating rather than as part of the same line. `size="sm"`
+         * spends eight of those twelve; the remainder is not chased, because both
+         * stacks are content-derived and an exact match would be a coincidence that
+         * the next change breaks (the same reason this footer has no `border-t`).
+         *
+         * Width does **not** follow, and that was tried the other way: at content
+         * width the button floated in the middle of a column whose every other row
+         * is full-bleed, which reads as an object dropped into the footer rather
+         * than as the footer's own control. Full width with a leading glyph, short
+         * rather than tall.
+         */}
+        <Button
+          size="sm"
+          className="w-full"
+          onClick={() => navigate(machine === null ? newPath() : newPath(machine))}
+        >
+          <Icon as={Plus} size={16} />
+          New session
+        </Button>
+      </div>
       {/*
        * ⚠ **The account row, the help popover and the plugin launcher have all
        * left this footer for the menu drawer, and only one of them is a loss.**

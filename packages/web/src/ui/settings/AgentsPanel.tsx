@@ -1381,7 +1381,7 @@ function LoginWizard({
         so `webcheck` asserts the rule and not a copy of it.
       */}
       <details open={rawTranscriptIsOpen(view, outcome)}>
-        <summary className="tap cursor-pointer list-none text-2xs text-muted hover:text-fg">
+        <summary className="tap list-none text-2xs text-muted hover:text-fg">
           Show terminal output
         </summary>
         <pre

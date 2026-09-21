@@ -1,12 +1,5 @@
-import { LogOut, Puzzle, Settings as SettingsIcon, X } from "lucide-react";
-import {
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type AnimationEvent,
-  type ReactNode,
-} from "react";
+import { LogOut, Puzzle, Settings as SettingsIcon } from "lucide-react";
+import { useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { marketPath } from "../market";
 import { pluginPath, screenPlugins } from "../plugins";
@@ -14,8 +7,9 @@ import { navigate } from "../router";
 import { settingsPath } from "../settings";
 import { sessionGroups, store, type AppState } from "../store";
 import { APP_VERSION } from "../version";
-import { Icon, IconButton, Monogram, personEmoji } from "./bits";
+import { Icon, Monogram, personEmoji } from "./bits";
 import { currentView, groupsVersion, subscribeGroups } from "./groups";
+import { useLeaving } from "./leaving";
 import { LAYER, useDismissible } from "./overlay";
 
 /**
@@ -62,8 +56,18 @@ const DRAWER_EXIT_MS = 260;
  *
  * `min-h-12` rather than `min-h-11`: the 44px floor is a *minimum*, and a row this
  * wide with a 18px glyph reads as cramped at exactly the floor.
+ *
+ * ⚠ **No weight, by the owner's call, and the paragraphs above survive it
+ * untouched.** This carried `font-medium` and the head's name `font-semibold`; what
+ * they were arguing for is the *size* and the *ink* — `text-sm` rather than
+ * `text-xs`, the glyph in the same colour as the words — and neither of those
+ * moved. Weight was doing a third job nobody asked it to: three rows and a name in
+ * a 352px panel are already the only things in it, so emphasis had nothing to
+ * separate them from. `DRAWER_HEADING` keeps its `font-semibold` because that is
+ * the caps idiom rather than emphasis, and `webcheck.typography.ts` runs a census
+ * over every site that spends it.
  */
-const DRAWER_ROW = "tap flex min-h-12 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-medium";
+const DRAWER_ROW = "tap flex min-h-12 w-full items-center gap-3 rounded-md px-3 text-left text-sm";
 
 /**
  * A band naming what the rows under it are, at **this panel's** inset.
@@ -179,109 +183,24 @@ export function MenuDrawer({
 
   /*
    * **The panel outlives `open` by its own exit animation**, and by
-   * `DRAWER_EXIT_MS` only where that animation never reports.
+   * {@link DRAWER_EXIT_MS} only where that animation never reports.
    *
-   * Opening is a CSS animation on mount and needs no state; leaving cannot be,
-   * because an unmounted element does not animate. So a close keeps the element
-   * on screen with the outgoing animation on it and drops it on the panel's own
-   * `animationend`; the timer below is the backstop rather than the wait, for the
-   * reason the ⚠ at the foot of this docblock gives.
-   *
-   * ⚠ **This paragraph said `DRAWER_EXIT_MS` *was* the wait, and that stopped
-   * being true in the same change that wired up `animationend` 25 lines below.**
-   * A docblock that still promises the old lifetime is worse than no docblock: it
-   * is the thing that stops the next reader checking which clock actually ends the
-   * exit.
+   * ⚠ **The mechanism moved to `leaving.ts` and every paragraph that used to be
+   * here moved with it** — the render-derived transition and the frame it was
+   * measured against, the `wasOpen` ref, the backstop that may not be deleted, and
+   * why `animationend` is compared by target rather than by keyframe name. It was
+   * extracted when `TaskPanel` needed the same thing on a phone, which is the point
+   * at which a measured mechanism with four such paragraphs stops being allowed to
+   * exist twice. What stays here is the number and the class strings, because those
+   * are this panel's rather than the mechanism's.
    *
    * `AgentConfigBar`'s picker keeps its panel mounted past dismissal for the same
    * reason — neither layer is a route, so neither has a view-transition snapshot to
-   * leave behind — but not on the same clock: read 2026-09-19, its `dismiss` still
-   * ends on a flat `window.setTimeout(…, SHEET_EXIT_MS)`. What the two share is the
-   * extra lifetime and the argument for it; nothing asserts that they agree about
-   * what ends it, and this sentence is a reading of that file rather than a check.
-   *
-   * ⚠ **The transition is derived during render and may never move to an effect.**
-   * It was an effect, and that shipped a visible flash: an effect runs *after* the
-   * commit, so the render where `open` first turns false still saw
-   * `leaving === false`, took the early return, and **unmounted the panel** — the
-   * browser painted a frame with no drawer at all. Only then did the effect set
-   * `leaving`, remounting it to play the exit. What that looks like is the menu
-   * vanishing and then calmly closing a moment later, which is exactly how it was
-   * reported. Setting state during render of this same component is React's
-   * documented escape hatch for state derived from props: the render output is
-   * discarded and re-run immediately, so nothing intermediate is ever committed
-   * and there is no frame to see.
-   *
-   * ⚠ **`wasOpen` is what stops the exit playing on the first render.** Without
-   * it a cold load starts at `open === false`, reads that as a transition out of
-   * `open`, and slides a panel nobody opened off the screen. The ref is not state
-   * precisely because writing it must not schedule a render of its own.
-   *
-   * Re-opening during the exit cancels it: the `open` arm clears `leaving` in the
-   * same render, and the timer's cleanup drops the pending unmount, so a double
-   * tap on the hamburger cannot strand a half-faded panel.
-   *
-   * ⚠ **What ends the exit is `animationend`, and the timer below is only the
-   * backstop.** The wait was a bare `DRAWER_EXIT_MS` timer, which is a constant
-   * standing in for a duration that is not constant: under `prefers-reduced-motion`
-   * `index.css` collapses every animation to `0.01ms !important`, so the panel is
-   * gone within a frame and the timer went on holding the `"sheet"` layer — and
-   * therefore `inert` on `#root` — for the rest of the 260ms. Taps hit nothing and
-   * the bare-letter shortcuts were dead over a screen with no drawer on it. Both
-   * halves of that are now decided by the thing being waited for: the panel says
-   * when its own movement finished, in either motion setting, and 260ms is what
-   * happens if it never says so.
+   * leave behind — and is deliberately **not** a caller of the hook: its `open` is
+   * its own `useState`, flipped from inside the exit timer, so `shown === open`
+   * throughout. `leaving.ts`'s docblock carries that distinction.
    */
-  const [leaving, setLeaving] = useState(false);
-  const wasOpen = useRef(false);
-  if (open !== wasOpen.current) {
-    wasOpen.current = open;
-    // Only a close begins an exit; an open cancels one that is in flight.
-    setLeaving(!open);
-  }
-  /*
-   * ⚠ **The backstop, and it may never be deleted as redundant with the event
-   * below.** An `animationend` that does not arrive is not hypothetical — an
-   * animation cancelled by a class change, a tab backgrounded across the exit, or
-   * a browser that fires nothing for a `0.01ms` duration all end the same way, and
-   * what that costs here is not a stuck animation: `leaving` never clears, the
-   * panel never unmounts, and the `"sheet"` layer holds `inert` on `#root`
-   * **for ever**, which is an app that cannot be tapped or typed at with nothing
-   * on screen to explain why. So the timer stays and the event only ever makes the
-   * wait shorter.
-   */
-  useEffect(() => {
-    if (!leaving) return;
-    const timer = window.setTimeout(() => setLeaving(false), DRAWER_EXIT_MS);
-    return () => window.clearTimeout(timer);
-  }, [leaving]);
-
-  /*
-   * The panel's own movement ending, which is the only thing that knows how long
-   * the exit actually took.
-   *
-   * ⚠ **`event.target !== event.currentTarget` rather than a name match on
-   * `event.animationName`.** `animationend` bubbles, so a child that ever animates
-   * — a row, a spinner, anything a later edit adds inside the panel — would end
-   * this panel's life early from the inside. Comparing the two targets is a fact
-   * about *this* element; matching `drawer-out` by name would be a fourth copy of
-   * a keyframe name that already lives in `index.css`, in the class string and in
-   * `webcheck`, and a rename would make this fall silently back to the timer with
-   * everything still green.
-   *
-   * The `leaving` guard is about the **arrival**, and it is a precondition rather
-   * than a measured bug: the same node plays `animate-drawer` on open and fires
-   * `animationend` for that too, so without it every open ends in a
-   * `setLeaving(false)` on a panel that is not leaving. That is a no-op today, and
-   * it is exactly the kind of no-op that stops being one the moment the flag means
-   * anything more than it does now.
-   */
-  const onExitEnd = (event: AnimationEvent<HTMLElement>): void => {
-    if (!leaving || event.target !== event.currentTarget) return;
-    setLeaving(false);
-  };
-
-  const shown = open || leaving;
+  const { shown, leaving, onAnimationEnd } = useLeaving(open, DRAWER_EXIT_MS);
   /*
    * ⚠ **The layer's lifetime is `shown`, never `open`, and the difference is the
    * whole of the exit animation.**
@@ -305,9 +224,10 @@ export function MenuDrawer({
    * timer.** Holding it for a constant `DRAWER_EXIT_MS` traded this defect for its
    * mirror: under `prefers-reduced-motion` the panel is gone in a frame, so the
    * app was inert and keyboard-dead for 260ms with nothing covering it. `leaving`
-   * is cleared by the panel's own `animationend` now, so "the layer is up" and
-   * "something is covering the app" are the same statement in both motion
-   * settings rather than in one of them.
+   * is cleared by the panel's own `animationend` now — `leaving.ts` owns that and
+   * carries the measurement — so "the layer is up" and "something is covering the
+   * app" are the same statement in both motion settings rather than in one of
+   * them.
    */
   useDismissible("sheet", onClose, shown);
   const machine = shown ? currentView(sessionGroups(state)).machine : null;
@@ -389,40 +309,50 @@ export function MenuDrawer({
         aria-modal="true"
         aria-label="Menu"
         /*
-         * ⚠ **This is what ends the exit, and the timer above is what happens if
-         * it never fires.** The panel is the element the outgoing keyframe is on,
-         * so it is the only thing in this file that knows when the movement is
-         * actually over — which under `prefers-reduced-motion` is a frame rather
-         * than `DRAWER_EXIT_MS`, and holding the `"sheet"` layer for the constant
-         * left the app inert with nothing on screen for the difference.
+         * ⚠ **This is what ends the exit, and {@link DRAWER_EXIT_MS} is what
+         * happens if it never fires.** The panel is the element the outgoing
+         * keyframe is on, so it is the only node here that knows when the movement
+         * is actually over — which under `prefers-reduced-motion` is a frame rather
+         * than the constant, and holding the `"sheet"` layer for the constant left
+         * the app inert with nothing on screen for the difference. `leaving.ts`
+         * carries the rest, including why it compares targets rather than names.
          */
-        onAnimationEnd={onExitEnd}
+        onAnimationEnd={onAnimationEnd}
         className={`pt-safe pb-safe pl-safe ${
           leaving ? "animate-drawer-out" : "animate-drawer"
         } fixed inset-y-0 left-0 flex w-88 max-w-[85vw] flex-col overflow-hidden border-r border-edge bg-surface shadow-2xl ${LAYER.overlay}`}
       >
         {/*
-         * The head: who you are, and the way out.
+         * The head: who you are.
          *
-         * **The identity half is still not a control.** There is no Account row
-         * below it for the reason the docblock gives, and making the monogram or
-         * the name pressable would put the panel's only destination on the one
-         * element that does not look like one.
+         * **The identity half is not a control.** There is no Account row below it
+         * for the reason the docblock gives, and making the monogram or the name
+         * pressable would put the panel's only destination on the one element that
+         * does not look like one.
          *
-         * ⚠ **The ✕ is not decoration and it is not a duplicate of the scrim.**
-         * This panel inerts `#root`, so a tap on the scrim is the *only* way out
-         * that does not go through Escape — and the scrim is `aria-hidden` and a
-         * `<div>`, which means a screen-reader user on a touch device had nothing
-         * to press. It is `IconButton` at `nav` because that is what `Sheet`'s own
-         * ✕ is, down to the 32px of ink reaching 44px: this row is the head of a
-         * layer that covers the app, exactly as that one is, and a second size
-         * here would be a second answer to a question already settled. `ml-1`
-         * keeps that reach off the truncating name beside it.
+         * ⚠ **There was a ✕ here and it is gone by the owner's call. The gap it
+         * covered is real, narrow, and recorded rather than smoothed over.** This
+         * panel registers `"sheet"`, so `inert` lands on `#root` and the rows
+         * behind it are precisely what cannot be reached; the scrim is an
+         * `aria-hidden` `<div>`, which is the same reasoning that keeps it from
+         * being a phantom tab stop. So the ways out are now: Escape, which
+         * `useDismissible` gives the topmost layer; a tap on the scrim; the
+         * hamburger that opened it; and Android's Back, through `App`'s
+         * `usePathname()` effect. What that leaves without one is a screen-reader
+         * user on **iOS** — an `aria-hidden` scrim is skipped by VoiceOver's
+         * navigation, and iOS has no Back. It is one platform and one assistive
+         * technology, which is why this is a line here rather than a refusal.
+         *
+         * ⚠ **The remedy, if it is ever wanted, is not a `tabIndex` on the scrim.**
+         * `overlay.ts` states that `inert` is the mechanism and a hand-rolled trap
+         * must not be added, `Sheet` argues that a viewport-sized button is a
+         * phantom tab stop, and `webcheck` pins `tabIndex` absent from this file.
+         * A ✕ is the shape that works, which is what makes putting it back a
+         * one-line change rather than a redesign. Q3.628.
          */}
         <div className="flex shrink-0 items-center gap-3 px-3 pt-3 pb-4">
           <Monogram name={name} glyph={personEmoji(name)} size="md" className="bg-raised" />
-          <span className="min-w-0 flex-1 truncate text-base font-semibold">{name ?? "Signed in"}</span>
-          <IconButton icon={X} label="Close menu" onClick={onClose} size="nav" className="-mr-1 ml-1" />
+          <span className="min-w-0 flex-1 truncate text-base">{name ?? "Signed in"}</span>
         </div>
         {/*
          * The one extra fact worth a line, and only when it is true. Not `me.id` —
@@ -496,11 +426,20 @@ export function MenuDrawer({
          * ⚠ **The product mark was here and has been taken out.** A wordmark at
          * the foot of a menu is a thing to look at rather than a thing to read,
          * and the one fact this line carries — which build you are running — was
-         * the smaller half of it. `text-muted` rather than `text-faint` for the
-         * same reason: it is the only place in the app that answers "what am I
-         * running", so it is written to be read once rather than to disappear.
+         * the smaller half of it.
+         *
+         * ⚠ **`text-faint` and centred, by the owner's call, reversing the tone
+         * this paragraph argued for.** It read `text-muted` "because it is the only
+         * place in the app that answers *what am I running*, so it is written to be
+         * read once rather than to disappear". The premise is no longer true: the
+         * build is also on Settings → Account, which is one row above this line in
+         * the same panel. So what is left is a footer stamp, and a footer stamp is
+         * the one kind of string `faint` exists for. Centred for the same reason —
+         * left-aligned it reads as a fourth row of the list above it, which is
+         * exactly what it is not; nothing else in this panel is centred, and that
+         * is what separates it.
          */}
-        <div className="shrink-0 px-4 pb-2 text-2xs text-muted">Version {APP_VERSION}</div>
+        <div className="shrink-0 px-4 pb-2 text-center text-2xs text-faint">Version {APP_VERSION}</div>
       </aside>
     </>,
     document.body,

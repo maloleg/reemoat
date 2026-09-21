@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useSyncExternalStore, type ReactNode } from "react";
 import { AGENT_HOST_OS, installCommand } from "../enrollment";
 import { controlPlaneOrigin } from "../native";
 import { keyOf } from "../ids";
@@ -11,7 +11,9 @@ import { MachineColumn } from "./MachineColumn";
 import { SessionBrowser } from "./SessionBrowser";
 import { useKeyboard } from "./keyboard";
 import { LAYER } from "./overlay";
-import { RAIL_DEFAULT, RAIL_MAX, RAIL_MIN, clampRailWidth, railWidth, setRailWidth, subscribeRail } from "./rail";
+import { PaneHandle } from "./PaneHandle";
+import { rail, railWidth, subscribeRail } from "./rail";
+import { subscribeTaskWidth, taskWidth } from "./taskWidth";
 
 /**
  * One layout, two shapes.
@@ -63,9 +65,27 @@ export function AppShell({
    * value outlives any component, and `webcheck` reads it with no React at all.
    */
   const width = useSyncExternalStore(subscribeRail, railWidth);
+  /*
+   * ⚠ **The background panel's width is written here rather than by the panel**,
+   * and the reason is the frame before the panel exists. `TaskPanel` mounts only
+   * while it is open, so a property written from inside it would land one commit
+   * after the card had already painted at `index.css`'s declared width — the exact
+   * mount-jump `--rail-w`'s own declaration exists to prevent, arriving on every
+   * open instead of on every reload.
+   *
+   * `null` is *nobody has chosen*, and it is removed rather than written: the
+   * stylesheet declares 20rem and steps to 26rem at `xl`, and an inline declaration
+   * on `documentElement` beats both media blocks. So a reader who has never dragged
+   * gets the two breakpoints, one who has gets their own number at every size, and
+   * a double-click on the separator hands the breakpoints back by removing this
+   * again. `taskWidth.ts` carries the argument for the two defaults.
+   */
+  const taskW = useSyncExternalStore(subscribeTaskWidth, taskWidth);
   useEffect(() => {
     document.documentElement.style.setProperty("--rail-w", `${width}px`);
-  }, [width]);
+    if (taskW === null) document.documentElement.style.removeProperty("--task-w");
+    else document.documentElement.style.setProperty("--task-w", `${String(taskW)}px`);
+  }, [width, taskW]);
 
   return (
     /*
@@ -371,122 +391,38 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
  * default by feel.
  */
 function RailHandle(): ReactNode {
-  const [dragging, setDragging] = useState(false);
-  /**
-   * Read for `aria-valuenow` alone — the *visible* width is the custom property,
-   * which a drag writes without telling React. Subscribed rather than read once
-   * because a screen reader has to be told the committed number after a keyboard
-   * step, and that is the one path that does re-render.
-   */
-  const announced = useSyncExternalStore(subscribeRail, railWidth);
-  /** The last width the pointer asked for, so `pointerup` commits what is on screen. */
-  const latest = useRef(RAIL_DEFAULT);
-
-  const apply = (px: number): void => {
-    document.documentElement.style.setProperty("--rail-w", `${px}px`);
-  };
-
-  /** Where this drag began, and `null` whenever one is not in flight. */
-  const from = useRef<{ x: number; width: number } | null>(null);
-
-  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
-    // Left button only. A right-click would otherwise arm a drag that no
-    // `pointerup` on the same button ever disarms.
-    if (event.button !== 0) return;
-    // One pointer at a time. A second one landing on the strip mid-drag would
-    // rebase `from` onto `railWidth()` — the width as it was *before* the drag
-    // started, since nothing commits until `pointerup` — and the rail would jump
-    // by however far the first finger had already travelled.
-    if (from.current !== null) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    from.current = { x: event.clientX, width: railWidth() };
-    latest.current = railWidth();
-    setDragging(true);
-  };
-
-  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
-    const origin = from.current;
-    if (origin === null) return;
-    latest.current = clampRailWidth(origin.width + event.clientX - origin.x);
-    apply(latest.current);
-  };
-
-  const finish = (commit: boolean): void => {
-    if (from.current === null) return;
-    from.current = null;
-    setDragging(false);
-    if (commit) setRailWidth(latest.current);
-    // Re-stated from the committed value either way: on commit `setRailWidth`
-    // clamps and may land where the pointer did not, and on cancel the property is
-    // still showing wherever the gesture was abandoned.
-    apply(railWidth());
-  };
-
-  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
-    // Inline-start/end rather than "smaller/bigger": this app is LTR throughout —
-    // `Header`'s leading control, the rail on the left — so the two coincide, and
-    // spelling it this way is what a future RTL pass has to change rather than
-    // discover.
-    const step = event.shiftKey ? 48 : 16;
-    if (event.key === "ArrowLeft") setRailWidth(railWidth() - step);
-    else if (event.key === "ArrowRight") setRailWidth(railWidth() + step);
-    else if (event.key === "Home") setRailWidth(RAIL_DEFAULT);
-    else return;
-    // Only after one of the three matched. An unconditional `preventDefault` here
-    // would eat Tab off a focused separator, which is the one key that has to keep
-    // working on a control whose whole purpose is to be reachable.
-    event.preventDefault();
-  };
-
   return (
+    /*
+     * ⚠ **Out of flow, anchored on `--rail-w`, and *after* `<main>`** — all three
+     * are held by a driver reading this file, which is why this wrapper exists at
+     * all rather than `<PaneHandle>` being mounted here directly. `Header` is
+     * `sticky` at `LAYER.header` and `Composer` is `sticky` in the same pane; a
+     * positioned element with `z-auto` loses to one with `z-30`, so the strip has
+     * to carry `LAYER.header` **and** be the later sibling. Move it back between
+     * the panes, or drop the layer class, and the top and bottom of a full-height
+     * divider go dead while the app looks entirely normal.
+     */
     <div
-      className={`absolute inset-y-0 hidden w-2 -translate-x-1/2 lg:block ${LAYER.header}`}
+      /*
+       * ⚠ **`[@media(pointer:fine)]` nested inside `lg:`, and this was false here
+       * before the panel's separator existed.** `lg` is 1024px, which an iPad Pro
+       * in portrait matches exactly, so this 8px `touch-action: none` strip was
+       * grabbable by a finger lying across the first character of every session
+       * title — with `bg-transparent group-hover:` as its whole appearance, i.e.
+       * none. `PaneHandle`'s docblock has always said these exist only where the
+       * pointer is a mouse, and that is the standing argument for an 8px target
+       * under this app's 44px floor; it is a mechanism rather than a claim now.
+       *
+       * Nested rather than a competing `[@media(pointer:coarse)]:hidden`: two
+       * `display` utilities in one string are resolved by Tailwind's emission order
+       * rather than by the string. Narrowing the one that turns it on has no such
+       * contest.
+       */
+      className={`absolute inset-y-0 hidden w-2 -translate-x-1/2 lg:[@media(pointer:fine)]:block ${LAYER.header}`}
       style={{ left: "var(--rail-w)" }}
     >
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Sidebar width"
-        aria-valuenow={announced}
-        aria-valuemin={RAIL_MIN}
-        aria-valuemax={RAIL_MAX}
-        tabIndex={0}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={() => finish(true)}
-        onPointerCancel={() => finish(false)}
-        onDoubleClick={() => setRailWidth(RAIL_DEFAULT)}
-        onKeyDown={onKeyDown}
-        /*
-         * `-left-1` centres the 8px target on the 1px border rather than beside it,
-         * so the thing under the cursor is the line somebody is aiming at. 8px is
-         * under the 44px this app gives a *tap* target and deliberately so: this
-         * control exists only at `lg`, where the pointer is a mouse, and a 44px
-         * grab strip there would swallow clicks aimed at the first character of
-         * every session title in the list.
-         *
-         * `touch-none` because a touchscreen laptop is still `lg`: without it the
-         * browser claims the gesture as a scroll and `pointercancel` fires instead
-         * of a drag.
-         */
-        className="group absolute inset-0 cursor-col-resize touch-none"
-      >
-        {/*
-         * The line itself, which is the rail's border thickening under the cursor.
-         * `bg-edge-strong` is the token every control in this app is identified by
-         * and the only one with a ≥3:1 floor — the same reason a field's border is
-         * that and never `edge`. Transparent at rest: the `border-r` underneath is
-         * already drawing the division, and a permanently visible second line beside
-         * it is two dividers where the palette argument asks for one.
-         */}
-        <div
-          aria-hidden="true"
-          className={`absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 transition-colors ${
-            dragging ? "bg-edge-strong" : "bg-transparent group-hover:bg-edge-strong/60"
-          }`}
-        />
-      </div>
+      {/* `sign: 1` — the rail is to the left of its handle, so rightwards is wider. */}
+      <PaneHandle pane={rail} label="Sidebar width" sign={1} className="absolute inset-0" />
     </div>
   );
 }

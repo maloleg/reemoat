@@ -42,6 +42,87 @@
  */
 :root {
   --rail-w: 384px;
+  /*
+   * **And the background panel's, which is the second draggable pane and the
+   * first one with two declared answers.**
+   *
+   * `ui/taskWidth.ts` owns the bounds, `AppShell` writes a *chosen* width onto
+   * `documentElement` from the same effect, and `TaskPanel` spends this through
+   * `md:w-[var(--task-w)]` with `SessionView` opening
+   * `md:pr-[calc(var(--task-w)+0.75rem)]` beside it — the panel's width plus the
+   * 12px it stands off the edge, which is the subtraction that used to be two
+   * literals in two files.
+   *
+   * ⚠ **Two declarations, and the later one wins by *source order alone*.** Both
+   * are unlayered `:root`, and `@media` adds no specificity — which is this file's
+   * own post-mortem three hundred lines down, where every phone animation shipped
+   * onto the desktop for exactly this reason. So the override below is not
+   * stronger than this, it is merely later, and `webcheck` asserts the order
+   * rather than the values: written above this block it would silently never
+   * apply.
+   */
+  --task-w: 320px;
+  /*
+   * ⚠ **And the width actually spent, because the two panes' clamps are
+   * independent and their sum is not bounded anywhere.**
+   *
+   * `TASK_MAX` is 512 and `RAIL_MAX` is 552, and both are one ordinary gesture away
+   * at any width. Measured in a real browser at a 1024px window with both dragged
+   * to their maxima: the conversation column's content box floored at **0px**, its
+   * header title measured 0px wide, and the docked card lay 52px **over** the
+   * session rail. Neither module can see the other and neither can see the window —
+   * `webcheck` bans `matchMedia`/`innerWidth`/`clientWidth` in `TaskPanel.tsx` by
+   * literal, and a JavaScript clamp there would be a second source of truth for a
+   * width CSS already knows.
+   *
+   * So the clamp is here, where the viewport is. `--task-w` stays the *stored*
+   * number — it is what `PaneHandle` writes, reads back through `getComputedStyle`
+   * and announces — and `--task-fit` is what the panel and the gutter actually
+   * spend. `15.75rem` is a 240px floor for the conversation plus the 12px the card
+   * stands off the edge, so the floor is the conversation's own content and not the
+   * gap beside it.
+   *
+   * ⚠ **`var()` substitutes lazily, which is the whole reason this can be declared
+   * before the things it depends on.** Redefining `--task-room` in the `lg` block
+   * and `--task-w` in the `xl` block re-resolves `--task-fit` at use time; it is not
+   * frozen here. That is the one place in this pair where source order does *not*
+   * decide, and it is worth saying beside the ⚠ above where it does.
+   *
+   * The rail term only exists where the rail does: below `lg` the aside is
+   * `hidden`, so the room is the whole window.
+   */
+  --task-room: 100vw;
+  --task-fit: min(var(--task-w), calc(var(--task-room) - 15.75rem));
+}
+
+@media (min-width: 64rem) {
+  :root {
+    --task-room: calc(100vw - var(--rail-w));
+  }
+}
+
+/*
+ * 26rem where there is room for the rail and both panes.
+ *
+ * The conversation's width is **not monotonic in the window's**, which is why this
+ * is a step rather than one number: at `lg` the rail arrives and takes
+ * `RAIL_DEFAULT`, so the 20rem panel leaves 308px at 1024 — narrower than the 436px
+ * the same panel leaves at 768 with no rail at all. 20rem where the row is shared and
+ * 26rem where it is not, and the `lg` row is the tight one, accepted rather than
+ * hidden: the panel is opened, never opened *for* somebody, and closing it gives
+ * the whole width back.
+ *
+ * `80rem` is `xl`, written as Tailwind writes it. It is a breakpoint in CSS and
+ * nowhere else, which is `AppShell`'s standing rule — a resized window cannot end
+ * up drawing a docked panel over a conversation that made room for a different
+ * one. The two px values here are asserted against `TASK_DEFAULT`/`TASK_WIDE`, the
+ * same pin `--rail-w` carries after `19.5rem` and `312` agreed only at a 16px
+ * root.
+ */
+@media (min-width: 80rem) {
+  :root {
+    --task-w: 416px;
+  }
 }
 
 /*
@@ -604,6 +685,41 @@
     }
   }
 
+  /*
+   * And `rise` leaving, which is the third of these pairs and arrived last.
+   *
+   * `TaskPanel` is a bottom sheet on a phone and a card docked beside the
+   * conversation from `md`, and it carried `md:animate-none` — no arrival there at
+   * all, which was fine while a close was an unmount in one frame. It is not fine
+   * once `animationend` is what ends the exit: an element carrying
+   * `animation: none` never fires one, so the exit falls to the backstop and a
+   * **fully visible** card sits over the conversation for the whole of it. Every
+   * variant that can be on screen owes an outgoing animation, which is the rule
+   * `leaving.ts` states and this token is what lets that panel keep it.
+   *
+   * So the docked card arrives on `rise` — `SHEET_PANEL`'s own answer for "a card
+   * at a width where there is no edge to have come from" — and leaves on this. 140ms
+   * either way, against the sheet's 260: it travels six pixels rather than a
+   * screen. ⚠ **A travel of six pixels rather than a slide, and that is measured
+   * against what happens beside it.** The conversation's gutter collapses in the
+   * same frame the panel starts leaving, so a card that *moved* any real distance
+   * would cross text that is reflowing underneath it.
+   *
+   * `both`, for `sheet-out`'s reason: without a fill the card snaps back to full
+   * opacity for the frames between the animation ending and React dropping it. The
+   * easing is the arrival's curve mirrored rather than a curve chosen again —
+   * `ease-out` and `ease-in` are each other's reflection, which is the same
+   * relation `sheet-out` spells out with a `cubic-bezier`.
+   */
+  --animate-rise-out: rise-out 140ms ease-in both;
+
+  @keyframes rise-out {
+    to {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+
   @keyframes blink {
     0%,
     100% {
@@ -749,10 +865,14 @@ body {
  * before a single `pointermove` arrived. On a desktop it worked, because a mouse
  * is not gated by `touch-action` — which is exactly the shape of bug that ships.
  *
- * This is a **default**, not a decision, and base is where a default goes — the
- * same sentence the cursor rule above makes. Nothing else in this app overrides
- * `touch-action` today, so moving it changes one control's behaviour and no
- * other's.
+ * This is a **default**, not a decision, and `base` is where a default goes. That
+ * sentence used to be borrowed from the rule below, which set the mouse's shape on
+ * every pressable element and has since been removed outright — so the argument is
+ * written out here, where it is now the only copy: an unlayered rule beats every
+ * utility regardless of specificity, so a bare-element default written at the top
+ * level makes the matching utility a dead class wherever somebody needs one.
+ * Nothing else in this app overrides `touch-action` today, so moving it changes one
+ * control's behaviour and no other's.
  */
 @layer base {
   button {
@@ -761,35 +881,41 @@ body {
 }
 
 /*
- * A pointer over anything you can press — **restored, because Tailwind took it
- * away.**
+ * **Nothing in this client changes the mouse, and the rule that used to is gone
+ * by the owner's call.**
  *
- * v3's preflight carried `button, [role="button"] { cursor: pointer }` and v4
- * dropped it, deliberately, on the grounds that the browser default is what a
- * native button does. The result here is that *every* button in this app has
- * shown the ordinary arrow: the sign-in doors, the kebabs, the approve buttons,
- * the config strip. On a phone nobody can tell; on a desktop it is the one cue
- * that separates a control from a caption, and this app spends nothing else on
- * that — with the accent colour gone, an unfilled button is drawn in the colour
- * of what it sits on and identified by its border alone.
+ * There was an `@layer base` block here setting the hand shape on every enabled
+ * `button`, every `[role="button"]` and the one `<summary>` — restored on purpose
+ * after Tailwind v4's preflight dropped it, on the argument that with the accent
+ * colour gone an unfilled button is drawn in the colour of what it sits on, so
+ * the shape of the mouse was the one thing left separating a control from a
+ * caption. That argument was true and it is not the decision: the owner's
+ * instruction is that no module here changes the mouse from its default, and
+ * nothing is to make it react.
  *
- * `:not(:disabled)` because a control that will not act must not claim it will.
- * That is the whole of the exception: `Button` disables Send until there is
- * something to send, and the arrow there is correct.
+ * **What is left as the cue, so that nobody re-adds this to fix a report.** Every
+ * pressable thing in this app already answers hover — `.tap` carries a 120ms
+ * colour transition, rows take `hover:bg-raised`, captions take `hover:text-fg`,
+ * and the two resize separators thicken their line under the pointer. That is a
+ * cue on the control rather than on the pointer, which is the trade being made.
  *
- * **Inside `@layer base`, unlike every other rule in this file**, and the
- * docblock on the focus ring below is why: an unlayered rule beats every
- * utility regardless of specificity, so writing this one at the top level would
- * make `cursor-default` and `cursor-not-allowed` dead classes wherever somebody
- * needed one. This is a default, not a decision — base is where a default goes.
+ * ⚠ **The ban is a sweep over `src/`, not the absence of a rule here**, because
+ * three different wrong states satisfy a regex on this file alone: the
+ * declaration written unlayered, the same declaration with other whitespace, and
+ * a utility class in a `.tsx` — which Tailwind emits from *source text*, so it
+ * never appears in this stylesheet at all. `webcheck` walks both extensions and
+ * holds an allow-list, so a second exception is a failing check rather than a
+ * precedent somebody finds later.
+ *
+ * ⚠ **Anchors are not in scope and cannot be.** The eight real `<a>` elements get
+ * the hand from every user-agent stylesheet, and taking it back would mean this
+ * file setting a cursor — the thing being banned — on the only elements whose
+ * shape is universally understood. The claim is about what this app sets.
+ *
+ * The `@layer base` block above survives with its own argument intact; it used to
+ * borrow half of one from here. The reason a bare-element default belongs in
+ * `base` is stated there now, where it is load-bearing.
  */
-@layer base {
-  button:not(:disabled),
-  [role="button"]:not(:disabled),
-  summary {
-    cursor: pointer;
-  }
-}
 
 /*
  * 16px in every form control, decoupled from the reading scale above.

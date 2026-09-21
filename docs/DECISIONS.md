@@ -58,18 +58,18 @@ bug in the file.
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 88 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 368 | `####` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 380 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 63 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 113 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 146 | `###` |
-| | | **988** | |
+| | | **1000** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 988 rather than the 507
+dividers. So the count is over **both** depths, and it says 1000 rather than the 507
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -22117,6 +22117,643 @@ mounted at once, on a rail whose whole design is one machine at a time
 **Status.** Current.
 
 
+#### Q3.622 — A panel that lines up, against a panel that has nothing to line up with
+
+**Question.** The background panel's head and the conversation's header drew two
+`border-b` rules that read as one line across the window, and they were 4px apart:
+`SHEET_HEAD` is `min-h-14` (56px) while the header was content-derived —
+`pt-safe` (8) plus a title-and-subtitle block plus `pb-3` (12) — which lands at 60.
+
+**The first fix was a number, and it worked.** `min-h-15` on both, held together by
+a driver because Tailwind scans source text and `xl:${CONST}` generates no class.
+The two rules met.
+
+**The second fix was a shape, and it is the one that shipped.** The panel stands
+12px off every edge at `xl` — rounded, bordered, lifted. ⭐ **The difference is not
+quality, it is what each closes.** The number answers *"why do these two lines not
+match"*, and has to be re-answered on every later change to either row. The inset
+card **abolishes the question**: a card that touches nothing lines up with nothing,
+so there is no edge to meet and nothing to keep in step. A construction that
+removes a question is cheaper than an answer that must be maintained, and the flush
+edges were what made the question askable at all — the panel was claiming the same
+edges as the window's own chrome.
+
+⚠ **Moving it inward was not free, and the trap is in the other axis.**
+`TASK_PANEL_GUTTER` reserved *exactly* the panel's width. Docking 12px off the
+right edge moves the panel's **left** edge 12px further in, so a gutter still equal
+to the width is overlapped by precisely that much — the card sliding over the last
+12px of every line of the conversation. The gutter is 26.75rem now and the driver
+asserts the **subtraction** (`gutter − width === inset`, the inset read from the
+class) where it used to assert equality. Verified on the built artifact: 26.75 −
+26 = 0.75 = `right-3`.
+
+**Two more decisions in the same pass.** The header's `border-b` is gone and its
+ground went `bg-surface/95` from `/85`: what separates a sticky bar from the
+conversation scrolling behind it is that the conversation stops being *legible* as
+it passes, which is the ground's job — at 85 the words read through, and the rule
+was doing work the fill should have done. Removing the rule without strengthening
+the ground is the edit that looks tidy and is a regression, so the two are asserted
+together. And the panel's own name went `text-lg` → `text-xs`: a sub-window may not
+announce itself more loudly than the screen it is inside (`SessionTitle` is
+`text-sm`), asserted as the comparison on this app's scale rather than as either
+number.
+
+⚠ **The top inset had to be written as one expression.** `pt-safe` plus a `pt-*`
+is a **silent no-op** — `.pt-safe` is unlayered and beats any padding utility on
+the same element — so the floor moves inside the safe-area expression itself. The
+third surface in this app to meet that cascade fact, after `Composer.tsx`'s
+`.pb-safe` and the rail's footer; it is now swept rather than remembered.
+
+**Status.** Current.
+
+#### Q3.623 — `working` is optimistic, and the optimism is at the reading
+
+**Question.** Between pressing Enter and the next snapshot there is a gap — a round
+trip at best, and on a session coming back from being released the whole of a
+restart. The conversation said nothing at all for that time while the message sat
+visibly in it.
+
+**Decision.** `working` ORs the pending echo:
+`echo !== null || (snapshot !== null && showsWorking(snapshot))`. This interface is
+already optimistic about exactly that fact one line up — the message itself is
+drawn from the echo before the log confirms it — and the foot staying silent beside
+a message plainly on its way was the one place it was not.
+
+⚠ **The predicate may not learn about echoes.** `wire.ts`'s four are pure functions
+over *what the daemon said*, asserted as a partition, and an echo is not something
+the daemon said. So the `||` belongs at the call site and nowhere else; both halves
+are asserted — that the reading ORs it, and that `wire.ts` still has no idea the
+module exists.
+
+**It costs nothing when it is wrong.** `clearEcho` runs on a refused send, and
+`landEcho`/`settleEcho` clear it when the log catches up, so the optimistic arm is
+bounded by the same lifetime the drawn message already has. And it tells no lie the
+Stop control could act on: `canCancelTurn` is read from the snapshot and stays
+false until there is a turn to cancel.
+
+**Status.** Current.
+
+
+#### Q3.624 — a selected machine is a filled mark, not a band beside the chats
+
+**Question.** The machine folders wore `bg-raised` across the whole tile when
+selected. The session list beside them marks its own selected row with the same
+token, full-bleed and square. Reported as the folder column looking crooked.
+
+**Decision.** The band goes; the 28px mark is filled instead —
+`bg-fg text-ink` against `bg-raised text-muted`, with the label's weight as the
+second signal. The tile paints nothing when selected.
+
+**The two bands could never line up, and that is arithmetic.** Both column heads
+agree at 56px — `pt-safe` 8 + `min-h-11` 44 + `pb-1` 4 against `pt-safe` 8 + a 40px
+search field + `pb-2` 8 — and the rhythms then diverge: a machine tile is `py-2` 16
++ a 28px mark + `gap-1` 4 + an 18px label = 66px, a session row at `lg` is 64px with
+a subline and 42px without, and the list's first child is a folder header rather
+than a row. Two identical grey rectangles at unrelated offsets across one pixel of
+`border-edge`. Pinning the offsets would leave the next change to either rhythm to
+reopen it; removing the band removes the edge there is nothing left to line up with.
+
+⚠ **This narrows Q3.209 rather than repealing it.** That says `bg-fg` is the
+affirmative action inside a decision *and nothing else*, and the practised rule was
+already shorter than the sentence: `TabUnderline` is 2px of it arguing its own
+licence in as many words, the rail bell is a dot with `ring-2 ring-ink`, the blocked
+count is `bg-fg text-ink` at 16px in three places, and `Composer` ships a 32×32
+circle of it. The measurement that makes this a narrowing and not a hole is **area**:
+the mark is 28×28 = 784px², *smaller* than that circle and a quarter of the ≈100×32
+pill Q3.209 was written about. Barred as a pill-sized fill, licensed as a mark.
+
+⚠ **`transition-colors` on the chip is not decoration.** `.tap` is on the
+`<button>`, `transition` is not an inherited property, and the chip is a child
+`<span>` — so the old band cross-faded only because it was painted on the `.tap`
+element. Moving the fill inward without it makes the selection snap. It may not be
+`transition-transform`, which `webcheck` bans in that file outright because `.tap`'s
+unlayered `transition` shorthand swallows it.
+
+**The badge gained `ring-2 ring-ink`.** The count and the mark are both `bg-fg` and
+overlap by two pixels at the corner, so on the one machine that most needs reading —
+selected, with work blocked on it — they grew as a single shape.
+
+**Status.** Current.
+
+
+#### Q3.625 — the background panel collapses rather than vanishing, and every width it can be drawn at owes an exit
+
+**Question.** `TaskPanel` closed with `if (!open) return null` — one frame, on a
+phone, under a sheet that had taken 260ms to arrive. Its scrim had no animation in
+*either* direction.
+
+**Decision.** `useLeaving` in `ui/leaving.ts`, extracted from `MenuDrawer` where
+every part of it was measured: the render-derived transition, `animationend` as the
+clock, the constant as a backstop that may not be deleted, and `shown` rather than
+`open` feeding both the mount guard and `useDismissible`.
+
+**Extracted at the second caller rather than the third.** `AgentConfigBar` keeps a
+panel past dismissal too and is deliberately not a caller: its `open` is its own
+`useState`, flipped from inside the exit timer, so `shown === open` throughout and
+its render reads `{open && !leaving && (`, which a driver pins as a literal. A
+different shape wearing the same word. What made extraction right here is that the
+drawer's version carries four separately measured paragraphs, and a hand-written
+second copy inherits none of them.
+
+⚠ **`md:animate-none` had to go, and it had been correct.** It cancels
+`animate-sheet`, whose `translateY(100%)` would otherwise slide the docked card up
+from the bottom of the screen — right while a close was an unmount in one frame, and
+exactly wrong once `animationend` is the clock: an element carrying `animation: none`
+fires none, so at `md` and above the exit falls to the backstop and leaves a **fully
+visible** card over the conversation for its whole duration. `--animate-rise-out` is
+the mirror of a keyframe that already existed, the card arrives on `rise` as
+`SHEET_PANEL` does, and the cancellation moved onto the *other arm* — written beside
+a standing `md:animate-none` it would be two utilities setting one property in one
+variant, resolved by Tailwind's emission order rather than by the class string.
+
+**`TASK_PANEL_EXIT_MS` is the longer of the two exits** — 260 for the sheet against
+140 for the card — because a backstop under either cuts a movement off mid-slide.
+Read out of the stylesheet by the driver, since neither file can see the other's
+number, and declared beside this panel's own class strings rather than imported:
+three surfaces, three constants, each asserted against its own token.
+
+**Status.** Current.
+
+
+#### Q3.626 — the background panel is draggable, on the rail's own separator
+
+**Question.** The panel docked at two fixed widths. The rail beside it has had a
+drag handle since Q3.5's neighbourhood, and the owner asked for the same thing here
+— reusing the module rather than writing a second one.
+
+**Decision.** `ui/paneWidth.ts` holds the mechanism; `rail.ts` and `taskWidth.ts`
+are two instantiations; `ui/PaneHandle.tsx` is `RailHandle` generalised, with `sign`
+as the only difference between a pane left of its handle and one right of it.
+
+⚠ **`rail.ts` keeps its filename and all four exported names.** `webcheck` drives
+`clampRailWidth`, `railWidth`, `setRailWidth` and `subscribeRail` by name *and*
+behaviourally, so keeping them made this four lines instead of a rewrite of nine
+assertions that are about the rail rather than about where its code lives.
+
+**`null` is a state, and only this pane has one.** The rail has one width at every
+size, so unset and default are the same rail. The panel has two declared widths,
+because the conversation's width is not monotonic in the window's — at `lg` the rail
+arrives and takes 384px, so the 20rem panel leaves 308px at 1024, narrower than the
+436px the same panel leaves at 768 with no rail at all. So `index.css` declares 20rem and steps
+to 26rem at `xl`, `null` means *the stylesheet decides*, and a chosen width is
+written onto `documentElement`, which beats both media blocks. A double-click resets
+by **removing** the key: a stored default is still a chosen width and would go on
+beating both blocks, leaving the `xl` step present, declared, correct and
+unreachable.
+
+⚠ **Both declarations are unlayered `:root` and `@media` adds no specificity.** The
+wide one wins because it comes **later** and for no other reason — this stylesheet's
+own post-mortem, where every phone animation once shipped onto the desktop for
+exactly that. The order is asserted, not just the values.
+
+**The gutter retires a class of defect rather than an instance.** It was
+`md:w-[20rem] xl:w-[26rem]` against `md:pr-[20.75rem] xl:pr-[26.75rem]`, two literals
+in two files four hundred lines apart with a driver walking both lists. It is
+`md:pr-[calc(var(--task-w)+0.75rem)]` now — the same property plus the 12px the card
+stands off the edge — so there is no second copy left to drift. What is still written
+twice is that 12px, three `*-3` utilities and a `+ 0.75rem`, and *that* is asserted
+as an equality.
+
+⚠ **Four defects found by review after it worked, each measured, each invisible to
+the gate.** (a) A press that never moved committed a width — `pointerup` fires for a
+zero-pixel press, and on this pane that turns *the stylesheet decides* into a number
+that beats both declared widths: a click at 1400px stored 416, after which a 900px
+window drew 416 where the stylesheet says 320. (b) Unmounting mid-drag is **not** a
+`pointercancel`: measured on Chrome 151, removing the element holding the capture
+delivers no `pointerup`, no `pointercancel` and not even `lostpointercapture`, so the
+property this gesture wrote outlived the pane and `reset()` — `committed` already
+being `unset` — was an early-returning no-op. (c) The separator was live under a
+finger: `md` is 768 and `lg` is 1024, which every tablet clears, so both handles were
+tabbable, capture-taking `touch-action: none` strips across the edge of the
+conversation with no visible appearance at all. `[@media(pointer:fine)]` is nested
+**inside** the width variant, never written as a competing
+`[@media(pointer:coarse)]:hidden` — two `display` utilities in one string are
+resolved by Tailwind's emission order. (d) `aria-valuenow` is required on a focusable
+separator and, unlike `slider`, the spec names no repair, so engines synthesised a
+value outside the range this element advertised.
+
+⚠ **And the two panes' bounds are independent with their sum bounded nowhere.**
+`TASK_MAX` 512 against `RAIL_MAX` 552, both one gesture away at any width. Measured
+at a 1024px window with both at their maxima: the conversation's content box floored
+at **0px**, its title measured 0px wide, and the card lay 52px over the session rail.
+The clamp is in CSS because CSS is the side that knows the viewport —
+`--task-fit: min(var(--task-w), calc(var(--task-room) - 15.75rem))`, a 240px floor
+plus the 12px gap, with `--task-room` being the window less the rail where the rail
+exists. `--task-w` stays the stored number the separator writes and announces;
+`--task-fit` is what is spent. `var()` substitutes lazily, which is why it can be
+declared above what it depends on.
+
+**One DOM read, once per gesture, and it is not a breakpoint.**
+`getComputedStyle(documentElement)` for the pane's own property is CSS *answering*
+rather than JavaScript deciding — `machineSwipe`'s `offsetParent` licence. Without
+it the first drag at `xl` begins from the `md` default and jumps 96px under the
+pointer. A JavaScript clamp against the available width was refused outright:
+`webcheck` bans `matchMedia`/`innerWidth`/`clientWidth` in that file by literal, and
+it would be a second source of truth for a width CSS already knows. Which does not
+mean there is no clamp — it means the clamp is in CSS, where the viewport is, and
+`--task-fit` is what the panel and the gutter actually spend. The cost is stated as
+a floor rather than a width: the conversation keeps 240px at every size, and past
+that a drag stops widening the card rather than eating the text.
+
+**Status.** Current.
+
+
+#### Q3.627 — nothing in this client changes the mouse
+
+**Question.** `index.css` carried an `@layer base` rule setting `pointer` on every
+enabled `button`, every `[role="button"]` and the app's one `<summary>` — restored
+on purpose after Tailwind v4's preflight dropped it. The owner's instruction: no
+module in the UI may change the mouse from its default, and nothing should make it
+react.
+
+**Decision.** The rule is deleted, with the two classes that only existed to cancel
+it (`disabled:cursor-default` in `EventList`, `cursor-pointer` on `AgentsPanel`'s
+`<summary>`) and the `col-resize` on the resize separators. The assertion is
+**inverted rather than removed**: a sweep over `packages/web/src` with an allow-list
+that is empty.
+
+**The old argument was true and it is not the decision.** It ran: with the accent
+colour gone an unfilled button is drawn in the colour of what it sits on, so the
+pointer's shape is the one cue separating a control from a caption on a desktop.
+What answers instead is the control rather than the pointer — `.tap`'s 120ms colour
+transition, `hover:bg-raised` on rows, `hover:text-fg` on captions, and the
+separators' line thickening. **The cost is real and unassertable**: a
+`text-muted hover:text-fg` caption at rest is identified by nothing, and no driver
+here can see that.
+
+⚠ **`col-resize` on `PaneHandle` is the one exception, and it went out and came
+back within a day.** It was swept with everything else on the reading that the
+instruction was about the mouse rather than about which control earns an exemption;
+the owner reversed it, and the reversal is the better answer. The ban is about a
+*pointer* shape claiming that ordinary text is pressable — an arrow pair over the
+1px division between two panes is the opposite of that, and it is the only thing
+saying an 8px transparent strip can be dragged at all, on a control whose whole
+appearance at rest is a line that lights on hover. The allow-list holds one
+**path**, and one entry covers both separators because they are one component; a
+second file wearing a cursor fails the check rather than arriving as a precedent.
+
+⚠ **Four wrong states satisfy a regex on `index.css` alone** — unlayered, other
+whitespace, a utility in a `.tsx`, which Tailwind emits from *source text* and never
+puts in the stylesheet, and `style={{ cursor: … }}`, the form React code actually
+reaches for, which the first pattern could not see at all and which `AppShell`
+already has an object literal ready for on the very element whose shape was deleted.
+
+⚠ **And the class spelling may not appear in a comment either, which is the sharper
+half.** This repository keeps its history in its docblocks, so the natural way to
+record a deleted utility is to name it — and Tailwind's scanner does not strip
+comments and reads every file under `packages/web`, `scripts/` included. Measured:
+the driver's own positive control, written as a literal, compiled the banned rule
+into **both** shipped stylesheets while printing `ok` — the one thing the ban exists
+to keep out of the artefact, put there by the check asserting it was gone. So the
+utility arm runs a second time over raw source across both authored trees, while the
+declaration arm stays comment-stripped so the record itself is not an offender. Both
+build outputs are now free of any cursor rule, which is the property that was
+actually wanted and was never the one being checked. So it is a sweep over the one file list that takes
+`.css` as well as `.tsx`; `srcFiles()` is `.ts`/`.tsx` only, and a check built on it
+would leave the stylesheet unread. And the declaration arm is anchored on a cursor
+**value**: `wire.ts` declares `cursor: number` for the transcript's byte cursor, so
+a bare colon makes the wire protocol an offender — a red gate whose only available
+repair is loosening the pattern. A control asserts it does not match that line.
+
+**Anchors are out of scope and cannot be in it.** The eight real `<a>` elements take
+the hand from every user-agent stylesheet, and reclaiming it would mean this app
+setting a cursor on the only elements whose shape is universally understood.
+
+**Status.** Current.
+
+
+#### Q3.628 — the menu drawer loses its weight and its ✕, and the build line becomes a stamp
+
+**Question.** Three owner calls on one panel: the bold type reads badly, the ✕ is
+not wanted, and the version at the foot should be centred and quieter.
+
+**Decision.** `DRAWER_ROW` drops `font-medium` and the head's name drops
+`font-semibold`; the `IconButton` goes; the build line takes `text-center` and
+`text-faint`.
+
+**The weight was doing a third job nobody asked for.** What its paragraphs argued
+was the *size* and the *ink* — `text-sm` rather than `text-xs`, the glyph in the
+same colour as the words, against a first draft that read as a list of footnotes —
+and neither of those moved. Three rows and a name in a 352px panel are the only
+things in it, so emphasis had nothing to separate them from. `DRAWER_HEADING` keeps
+its `font-semibold`: that is the small-caps idiom rather than emphasis, and
+`webcheck.typography.ts` runs a census over every site that spends it, so a sweep
+for `font-` across the file would have demanded deleting the one weight with an
+argument. The check reads the two class strings separately for that reason.
+
+⚠ **The ✕ closed a real gap and removing it reopens it, narrowly.** This panel
+registers `"sheet"`, so `inert` lands on `#root` and the rows behind it are
+precisely what cannot be reached; the scrim is an `aria-hidden` `<div>`, by the
+same reasoning that keeps it from being a phantom tab stop. What is left is Escape
+(the topmost layer's, through `useDismissible`), a tap on the scrim, the hamburger
+that opened it, and Android's Back through `App`'s `usePathname()` effect. That
+leaves a screen-reader user on **iOS** with none of them: VoiceOver's navigation
+skips an `aria-hidden` element and iOS has no Back. One platform and one assistive
+technology — stated rather than argued away, and cheap to reverse, which is why it
+is a line at the code rather than a refusal.
+
+⚠ **The remedy, if it is ever wanted, is the ✕ and not a `tabIndex` on the scrim.**
+`overlay.ts` states that `inert` is the mechanism and a hand-rolled trap may not be
+added, `Sheet` argues that a viewport-sized button is a phantom tab stop, and
+`webcheck` pins `tabIndex` absent from this file.
+
+**The assertion is inverted rather than deleted, and it keeps its positive
+control.** It pins the ✕ absent **and** that the two remaining mechanisms are
+wired — a negative alone would go green over a drawer nobody can close at all. The
+control stays because this is now a check *asserting* an absence, which is the one
+shape where a pattern that stopped matching is indistinguishable from success.
+
+**The build line reverses a tone its own docblock argued.** That read `text-muted`
+*"because it is the only place in the app that answers what am I running, so it is
+written to be read once rather than to disappear"*. The premise is no longer true —
+Settings → Account carries the build, one row above this line in the same panel —
+so what is left is a footer stamp, which is what `faint` is for. Centred for the
+same reason: left-aligned it reads as a fourth row of the list above it, and
+nothing else in this panel is centred.
+
+**Status.** Current.
+
+
+#### Q3.629 — the background panel's head is spelled out at 44px, and composing the sheet's could not have shortened it
+
+**Question.** The panel's header band was reported as too tall. It composed
+`SHEET_HEAD` — 56px — around a `text-xs` `<h2>` and a 24px `sm` button.
+
+**Decision.** `PANEL_HEAD`, written out in `TaskPanel.tsx`, `min-h-11`. Every other
+token is `SHEET_HEAD`'s in `SHEET_HEAD`'s order.
+
+⚠ **The obvious repair is a measured no-op.** `` `${SHEET_HEAD} min-h-11` `` puts
+two `min-h-*` utilities on one element, resolved by the stylesheet's emission order
+rather than by the class string — and that order is **numeric and ascending**:
+`.min-h-9`, `.min-h-10`, `.min-h-11`, `.min-h-12`, `.min-h-14` in that sequence
+inside one layer. So composition can only ever make a head *taller*. `h-10` is no
+escape (a `min-height` of 56 beats a `height` of 40 by the box algorithm, not the
+cascade), and `min-h-[2.75rem]` is the same bet in a less legible form: there is
+not one arbitrary `min-h` in the shipped sheet to say where one would land.
+
+⚠ **Inverting `SHEET_HEAD` to 44 and letting `Sheet` compose 56 back on would
+work, and is refused for exactly that reason.** Upward composition is the direction
+emission order permits, so it is the smaller diff and it lands — and it makes a
+head's height depend on which of two numbers is larger, which is the trap
+`BUTTON_SIZE` and `DRAWER_HEADING` each spent a docblock closing. It also hands the
+next person who wants a shorter sheet head a revert that fails in silence.
+
+**44 rather than 40, and the two pixels are the reason.** Every `ICON_BUTTON_SIZE`
+entry reaches this app's 44px floor through a positioned `::after` that costs no
+layout, and the `<aside>` carries `overflow-hidden`, which clips hit-testing along
+with paint — so at 40 the ✕ is a 42px target with a 2px strip gone off the top and
+nothing on screen to explain it. At 44 it ends flush bar a corner lens the card's
+own 16px radius takes, at the point furthest from the glyph. It still takes a fifth
+off the band.
+
+**Two sentences in that file were already false and went with it.** One claimed
+`sm:px-5` "arrives with the constant", which stopped being true the moment the row
+was spelled out; the other said "the scroller and **the foot** above carry it too",
+and there is no foot — it was deleted when the standing output sentence went. The
+head's inset is now differenced against the scroller's by a driver rather than
+asserted in prose.
+
+**Status.** Current.
+
+
+#### Q3.630 — the finished band folds, and clearing it hides rather than destroys
+
+**Question.** A workflow that ended while the panel was open appeared to stay put.
+The owner asked for finished tasks to be remembered, folded by default, and
+clearable — with `Finished` itself not disappearing.
+
+**Decision.** `FinishedSection` in `TaskPanel.tsx`, seeded closed, with a control
+that records which rows this reader is done with in `finishedTasks.ts`.
+
+**Why it looked stuck, which is not what it was.** `taskSections` moved the row to
+`Completed` correctly all along. But `PanelBody` names a section only when
+something else is populated — Claude Code's own suppression rule — so with one
+workflow and no delegations the finished card kept its place, its size and its
+position, with its chip changed from `(running)` to `(done)` and **nothing on
+screen saying the word**. A band that folds is what says the row moved.
+
+⚠ **Seeded closed *in the section*, never in `TaskPanel`.** The panel renders
+nothing while `!shown`, so everything below `PanelBody` unmounts on every close and
+a `useState(false)` there is read afresh on every open — the whole of "collapsed by
+default", with nothing stored and nothing to keep in step. `TaskPanel` itself is
+rendered unconditionally by `EventList`, so the same line in its body would survive
+every close and every session switch. One character apart in a diff, opposite in
+behaviour, so the driver reads the position rather than the value.
+
+⚠ **The clear hides and destroys nothing.** The daemon has exactly one
+background-task route and it is *stop*: no forget, no delete, no clear. It keeps
+terminal rows on purpose so this panel can answer *did that build finish*. So
+another tab still sees them, and so does this one after a reload.
+
+⚠ **In memory rather than `localStorage`, which is the opposite call from
+`groups.ts`'s collapse set and the same one `echo.ts` made.** Those persist a
+*preference about this client*; this is a *claim about rows on a remote machine*,
+and three things destroy those with nothing to tell the browser — a daemon restart
+(`asyncTasks` is a `Map` with nothing in SQLite), the agent's own `/clear`, and
+eviction at the cap. A stored set would go on hiding ids that can never be seen
+again, and would hide a freshly spawned row that reused one.
+
+⚠ **The write replaces rather than unions, and that is the prune.** Stored as
+exactly what is finished at that instant, the set is always a subset of what the
+wire holds and is still the union of everything ever cleared — a row cleared an
+hour ago is finished now too. Driven rather than read off the source: every source
+pin stays green over a union.
+
+⚠ **The hidden set never reaches `tasks.ts`.** Pushed in there, `taskSections`
+would answer no `Completed` section once everything was cleared and the band would
+vanish with it — the owner's rule reversed by a change that reads as a
+simplification. It is a display filter, and the wire's partition stays the wire's.
+
+**The count is not Claude Code's, and a reader arriving from it will misread
+ours.** Theirs is a lifetime list for a run. Ours is how many finished rows the
+daemon is still holding: capped with live rows at `MAX_TRACKED_ASYNC_TASKS`, lossy
+oldest-finished-first, gone on a restart. Raising the cap is a wire decision rather
+than a client one — 32 tasks is already around 93 KB per snapshot.
+
+**One gap is left open rather than closed, because closing it reverses Q3.622.**
+Once nothing is outstanding, `footSays` answers `null`, `WaitingFoot` is not drawn,
+and `onOpenTasks` has no other call site — so the panel cannot be *re*opened to
+read the record it now keeps. Everything here works while something is running and
+is unreachable when nothing is. The repair is one condition at `EventList`'s foot,
+and it is an owner call: the line that used to stand there was removed on the
+grounds that work which is over is not information anybody asked for twice.
+
+**Status.** Current.
+
+
+#### Q3.631 — the background panel gets a second door, and the band exists when nothing does
+
+**Question.** Q3.630 left a gap open and named it: once nothing is outstanding
+`footSays` answers `null`, `WaitingFoot` is not drawn, and `onOpenTasks` had exactly
+one call site — so the record the panel had just learned to keep became unreachable
+at the moment it became worth reading. The owner closed it: a `Background tasks` row
+in a kebab at the top right, opening the panel **even when there are no tasks**, and
+showing only Finished in that state.
+
+**Decision.** `SessionMenu` gains an optional `onOpenTasks`, the row is drawn first
+when it is passed, and the `lg:hidden` wrapper around the header's kebab is gone.
+`taskSections` stops emitting `Completed`; `PanelBody` draws the band itself.
+
+**Why the door is a menu row and not a line at the foot.** Q3.622 removed
+`N background tasks finished` on the owner's call — work that is over is not
+information anybody asked for twice — and the obvious repair was to put it back
+under another name, which `footSays`' own ⚠ refuses in advance. A kebab row is a
+door without a standing sentence, so the removal stands and the record is reachable.
+
+⚠ **The `lg:hidden` wrapper was right for every row it was about and wrong for the
+one that arrived.** Rename, Pin, Resume and Stop are all on the session's row in the
+rail, so above `lg` the menu was a second door to a door. `Background tasks` is on
+no rail row at any width, which is precisely not a duplicate — the premise the old
+argument rested on. The four are **kept** at `lg` rather than hidden inside the
+menu: one control holding different things at different widths is a harder thing to
+explain than a duplicate one glance away, and gating them would leave
+`label="Session actions"` false at the width where the menu holds no session action.
+
+⚠ **Three prose sites rested on that wrapper and nothing enforced it.** A sweep of
+every driver for `lg:hidden` returns three hits, none about this header — so the
+change would have gone green with `SessionView`'s docblock and **two** paragraphs in
+`Header.tsx` left lying, the second of which argues the 44px kebab from "neither
+control exists above `lg`, so there is no pointer for a large hover ground to look
+heavy to". There is one now. The size stays: it is a prop, and choosing a second by
+width is a breakpoint answered in JavaScript, which `AppShell` forbids. The pair is
+asserted in both directions now.
+
+⚠ **`taskSections` had to stop emitting the band, and that finally makes its own
+docblock true.** It claimed *"`Agents` sits above these and `Completed` below them,
+and neither is a member … Both are drawn by the panel around this list"* while
+pushing `Completed` into the array. A function returning a section per thing that
+exists cannot return one for a thing that does not, so `sections` now means *how
+many live kinds* — all any caller read it for — and the band is `PanelBody`'s.
+
+⚠ **One `bands` count replaced two proxies, and this is the half that would have
+broken in silence.** The `Agents` heading was gated on `sections.length > 0` and a
+live section's own on `sections.length > 1`, both standing in for *is there more
+than one band on screen* — true while `Completed` was inside `sections`, false the
+moment it moved out. Left alone, a lone live kind beside the band goes unlabelled
+and `Agents` disappears whenever the band is the only other thing. **No driver
+anywhere reads `aria-labelledby`, `"Agents"` or `PanelHeading`**, so nothing would
+have said a word.
+
+⚠ **The band is gated on `reports`, which narrows the owner's words on purpose.**
+`Completed (0)` is a count, and a count of finished background work is an **answer**.
+claude is the one agent of the four with a lifecycle on the wire; kimi backgrounds
+shells and says nothing, codex leaves a PTY behind an ordinary tool call, opencode
+cannot background at all. Ungated, the panel would assert zero finished on three of
+them in the same breath as the sentence above it disclaiming any such knowledge. So
+*even if there are none* holds on claude and not on the other three — stated rather
+than discovered. The `||` arm is belt: a non-reporting agent's list is always empty.
+
+**Nothing to show is a heading, not a fold** — and that is a repair rather than a
+concession. It was already reachable before the band became unconditional: clearing
+the list leaves `tasks.length > 0` with `shown.length === 0`, so the control stayed
+pressable over an empty body, verbatim the defect `EventList` names as *a disclosure
+whose body is empty is a control that lies about having something behind it*. One
+condition covers the cleared session and the one that never backgrounded anything,
+and there is no clear control beside a zero: an act with no object.
+
+**Status.** Current.
+
+
+#### Q3.632 — a disclosure fold is the height of its own words, and the finished band is a tone quieter
+
+**Question.** `Completed (1)` was a 44px band beside a 24px trash, reported as far
+too tall — *"especially against the delete button on the right"* — and too loud.
+
+**Decision.** Both of this app's caps-band folds drop `min-h-11`:
+`FinishedSection`'s and `bits.tsx`'s `Disclosure`. The finished band takes
+`FINISHED_HEADING`, the idiom at `text-faint`.
+
+⚠ **The 44px each fold carried was argued, and the argument was about the wrong
+thing.** `Disclosure`'s was pinned with a reason: *"`min-h-11` is on the fold
+because it opens the list of capabilities somebody is about to grant a stranger's
+code, and this app is used from a phone."* That reasons from the **importance of
+what is behind the fold**, and a tap floor is not about importance — it is about
+what a mis-tap costs. Opening a fold costs one tap to undo. **Approving the grant
+does not**, and that control is untouched and still swept by the three-file check.
+`FinishedSection`'s carried the same shape of reason and falls to the same answer.
+
+**The app's own rule was already on this side.** `web-shell.md`: the floor is
+scoped to controls that *answer an agent* — the ask, permission and elicitation
+cards — and *"a blanket rule would be false: most `tap`/`press` strings do not reach
+44px and are right not to"*. The example it gave for that was "the 32px machine
+pills", which have not existed since the machine tabs became `min-h-11`; the folds
+replace it, so the sentence names something live again.
+
+⚠ **`` `${SETTINGS_HEADING} text-faint` `` is a silent no-op**, two members of one
+colour family on one element being resolved by Tailwind's alphabetical emission
+rather than by the string. So the band's tone is spelled out, which makes it the
+**sixth** site of the caps idiom outside the three constants —
+`webcheck.typography.ts` carries a *census* rather than a count, so a sixth reddens
+it as *found, not listed* until the table names it. That census caught this file's
+prose at *four* once and has now caught it at *five*.
+
+⚠ **Both arms of the band spend it.** The fold and the empty heading are one band
+in two states, and a tone on only one of them changes its colour at the moment it
+empties — which is the one moment nothing about it has changed. `PanelHeading`
+therefore takes the whole class string rather than a colour to append, defaulted so
+every live section is unchanged.
+
+**Status.** Current.
+
+
+#### Q3.633 — an absent answer was drawn as a negative one: the panel's empty state is three-valued
+
+**Question.** Reported from a screenshot: after a restart the background panel says
+*"This agent doesn't report background work, so nothing here can say whether any is
+running"* — about claude, which reports. And the finished band is not drawn either.
+
+**Decision.** `backgroundReporting` in `tasks.ts`, three-valued —
+`reports` / `silent` / `unasked` — with the three sentences as a `Record` over the
+union. `TaskPanel` draws `BACKGROUND_EMPTY[reporting]`.
+
+**The conflation, exactly.** `reportsBackgroundTasks` is read off the attached
+agent's declared capability, and `doStop` sets it to `false` — which a daemon
+restart reaches for every session, and which parking reaches on its own. The
+daemon's docblock is explicit that `false` means *"nobody asked"*. The client turned
+that into a sentence asserting a property **of the agent**, at a moment when there
+is no agent. An absent answer drawn as a negative one, which is the failure this
+repository names in `transcriptNotice`, in `machineSubline` and in the
+`reportsBackgroundTasks` field's own reason for existing — and it was reached
+through that very field.
+
+⚠ **`hasLiveAgent` already existed for this question and is reused rather than
+re-derived.** Its docblock: *"the statuses in which an agent process exists and can
+be asked something … the question every answer about the agent's controls turns
+on."* `stopping` is excluded there on a measurement — `doStop` fans a snapshot out
+both before and after it empties the agent's state, so a frame can legitimately read
+`stopping` with nothing on it — and inheriting that is the whole reason not to test
+`isTerminal` here.
+
+⚠ **A missing row lands in the `unasked` arm, and the arm's sentence is worded to
+be true of both.** `Transcript` looks its row up independently of the screen's own
+guard, so `null` is reachable. *Nothing has asked* covers a row that has not arrived
+exactly as well as a session with no agent; what it may never become is a fourth arm
+saying something about an agent nothing has heard from. The driver pins that the arm
+names no agent at all.
+
+**The sentence answers the question somebody in that state is holding.** Not *why is
+this empty* but *where did my finished list go*: `asyncTasks` is a `Map` in the
+daemon's memory with nothing in SQLite, and `doStop` empties it, so background work
+is not kept across a restart. Q3.630 recorded that as a bound; this is the first
+place it is said to a reader.
+
+⚠ **`unasked` is barred from the finished band along with `silent`**, and for the
+same reason rather than by analogy: after a restart the daemon's rows are gone, so
+`Completed (0)` would say *nothing finished* about a session that may have finished
+ten things before the process died. The band returns the moment an agent does, which
+is when the count means something again.
+
+**The old pair of assertions was a shape check and stayed green over all of this.**
+It sliced 200 characters before the claim and looked for a `reports ?` in them —
+every arm can be wrong with that shape intact, and the missing arm was not
+expressible in it at all. The partition is driven now. The slice went with it: an
+`indexOf` answering -1 feeds `slice(-201, -1)`, which hands back the last 200 bytes
+of the file rather than nothing, so deleting the sentence would have turned the
+check green over a message about something else entirely.
+
+**Status.** Current.
+
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -33618,6 +34255,19 @@ equally absent from the macOS build. `host_pick_folder` *is* greppable, because 
 emits it for the IPC table — so the two names look alike and answer different
 questions. **The compilation is the proof**, and it is sufficient: the previous
 commit failed at `E0599` on that method and this one reaches a signed APK.
+
+⚠ **A third instance, and it is the one where the tool was honest.** Checking that
+a new `pt-[max(1rem,env(safe-area-inset-top))]` reached the built stylesheet, a grep
+for `padding-top:max(1rem,env(...))` returned nothing — reading as a class that had
+not generated. It had: Tailwind prints `max(1rem, env(...))`, with a space after the
+comma that the generator inserts and the author never typed.
+
+**What all three share is one sentence.** Each searched for a *string* while wanting
+to know about a *property*, and took the match — or its absence — as the answer.
+The Rust method name is not a string in any binary; the invented-symbol control
+answered a different question; the generator's whitespace is not the author's. A
+search is evidence about a property only when something has established that the
+two coincide, and in none of the three had anything.
 
 ⭐ **And the transferable half is not about `grep`, it is about what the control
 tested.** There *was* a control — an invented symbol, searched for and correctly

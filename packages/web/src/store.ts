@@ -2,6 +2,7 @@ import { authFailure, signedOutText, type AuthFailure } from "./account";
 import { forgetAttachments } from "./attach";
 import { forgetAllConfig, rememberConfig, rememberedConfig } from "./configMemory";
 import { clearEcho, landEcho, settleEcho } from "./echo";
+import { forgetHiddenFinished } from "./finishedTasks";
 import { forgetAsks } from "./ask";
 import { forgetChoices } from "./choices";
 import * as cp from "./cp";
@@ -3382,6 +3383,9 @@ class AppStore implements StreamSink {
     // And the message that was on its way to it. There is nothing left to draw it
     // in and no event that can ever settle it.
     clearEcho(key);
+    // And which finished rows this reader had cleared. There is nothing left to
+    // hide: the rows themselves are the daemon's, and this session has none.
+    forgetHiddenFinished(key);
     forgetAsks(key);
     // Anything optimistically drawn for a session that is gone. Every entry is
     // also released when its own request settles, so this is about the window in

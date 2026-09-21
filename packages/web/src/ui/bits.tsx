@@ -2305,7 +2305,7 @@ export function Disclosure({
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         aria-controls={id}
-        className="tap flex min-h-11 w-full items-center gap-1.5 text-left text-xs text-muted hover:text-fg"
+        className="tap flex w-full items-center gap-1.5 text-left text-xs text-muted hover:text-fg"
       >
         <Icon
           as={ChevronRight}

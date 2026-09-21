@@ -83,9 +83,13 @@ stays off, because it is untrusted text quoting an untrusted repository.
     that numbers nothing keeps `null` and joins exactly as it does today — that
     arm is what the driver protects. Q3.604.
 
-- **Background work is drawn on one surface, and the transcript's foot is a way
-  in rather than a copy.** `WaitingFoot` counts both sources and opens
-  `TaskPanel`; it holds no list of its own and claims no region under it
+- **Background work is drawn on one surface, and there are two ways in.**
+  `WaitingFoot` counts both sources and opens `TaskPanel` — but it is drawn only
+  while something is **outstanding**, so the moment the last task ended the record
+  the panel keeps became unreachable. The session header's kebab is the other door
+  and is why that kebab now exists at every width: `Background tasks` is on no rail
+  row, unlike every other row in it. Q3.631.
+  `WaitingFoot` counts both sources and opens `TaskPanel`; it holds no list of its own and claims no region under it
   (`aria-haspopup="dialog"`, never `aria-expanded`). The panel's own decisions —
   the section order and labels, the chip table over the five states, the duration
   and token formatters, the four-cell meter — are `tasks.ts`, so `webcheck` drives
@@ -94,24 +98,69 @@ stays off, because it is untrusted text quoting an untrusted repository.
   departs it is because the wire has no such field**, and each departure is named
   at the code. Q3.603.
   - **Two placements, one element, and the breakpoint is answered only in CSS.**
-    A bottom sheet below `xl`, docked right at `xl` with `SessionView` taking
-    `TASK_PANEL_GUTTER` — the other half of `TASK_PANEL_WIDTH`, declared beside it
-    so `webcheck` can assert the two are one length, which nothing could do while
-    each was a literal in its own file. It **portals** — `fixed` only means the
-    viewport where no ancestor carries a `transform` or `backdrop-filter`, and the header and
-    composer here are one hop from one — and it is **`menu`** in `overlay.ts`,
-    never `sheet`: `sheet` puts `inert` on `#root`, which at `xl` would switch off
-    the conversation it is docked *beside*, and making that conditional is
-    breakpoint state in JavaScript.
+    A bottom sheet below `md`, docked right from `md` with `SessionView` taking
+    `TASK_PANEL_GUTTER` — `calc` of the same custom property the panel's own width
+    is, so the two cannot drift and neither is a literal a reader can drag away
+    from. **It is resizable there, on the rail's own separator**; the widths, the
+    exit animation and every measurement behind both are `docked-panels.md`. It
+    **portals** — `fixed` only means the viewport where no ancestor carries a
+    `transform` or `backdrop-filter`, and the header and composer here are one hop
+    from one — and it is **`menu`** in `overlay.ts`, never `sheet`: `sheet` puts
+    `inert` on `#root`, which from `md` would switch off the conversation it is
+    docked *beside*, and making that conditional is breakpoint state in
+    JavaScript.
+  - **The finished band folds, and it stands at zero.** `taskSections` moved a
+    completed row to `Completed` all along — but a section is named only when
+    something else is populated, so one workflow finishing alone kept its card in
+    place at the same size with only its chip changed, and nothing said the word.
+    `FinishedSection` is that band, and **`taskSections` no longer emits it** —
+    the owner's rule is that Finished is reachable even when nothing exists, and a
+    function returning a section per thing that exists cannot return one for a
+    thing that does not. So `sections` means *how many live kinds* and the band is
+    the panel's, which is what that function's docblock always claimed. One `bands`
+    count replaced the two `sections.length` proxies the headings were gated on, or
+    a lone live kind would have lost its label in silence. ⚠ **The band is gated on
+    `reports`**: `Completed (0)` is a count, and a count of finished work is an
+    *answer* — on the three agents that report no lifecycle it would assert exactly
+    what the sentence beside it disclaims. And nothing to show is a **heading, not
+    a fold**: a disclosure over an empty body is a control that lies, which was
+    already reachable by clearing the list. It is seeded closed **in the section
+    rather than in `TaskPanel`**, because the panel renders nothing while `!shown` and everything
+    below it unmounts on every close — which is the whole of "collapsed by default"
+    with no state to store — while `TaskPanel` itself is rendered unconditionally
+    and would keep it. The clear **hides, and destroys nothing**: the daemon has one
+    background-task route and it is *stop*; it keeps terminal rows on purpose so
+    this panel can answer *did that build finish*. So `finishedTasks.ts` is a module
+    `Map` in memory, never `localStorage` — it is a claim about rows on a remote
+    machine, and a restart, the agent's `/clear` and eviction at the cap each
+    destroy those with nothing to tell the browser. It **replaces** rather than
+    unions, which is the prune that keeps it a subset of the wire. And the hidden
+    set never reaches `tasks.ts`: pushed in there the band would vanish when
+    emptied, which is the owner's rule reversed by a change that reads as a
+    simplification. ⚠ **The count is not Claude Code's.** Theirs is a lifetime list;
+    ours is how many finished rows the daemon still holds — capped with live rows at
+    `MAX_TRACKED_ASYNC_TASKS`, lossy oldest-finished-first, and gone on a restart.
   - **⚠ A workflow's agents are not on this wire and the panel says nothing about
     them.** The adapter marks every `local_agent` task `ignored` before publishing,
     and no payload carries a phase, a fraction, a model or a count. So `Phases` is
     one phase titled `Agents` — Claude Code's own fallback — with no fraction
     (their rule for a zero total) and **no rows**. An empty table under a heading
     would be a claim about ten agents that are running.
-  - **⚠ `No tasks currently running` is gated on `reportsBackgroundTasks`.** It is
-    true for claude and false for the other three, and an ungated copy is a
-    sentence about kimi's backgrounded shells that is simply wrong.
+  - **⚠ The empty state is a three-valued partition, and it was a boolean.**
+    `No tasks currently running` is true for claude and false for the other three,
+    so it is gated — but `reportsBackgroundTasks: false` is **two** facts. The
+    daemon's own docblock calls it *"nobody asked"*, and `doStop` sets it, which a
+    restart reaches for every session. So with no agent attached the panel asserted
+    *"This agent doesn't report background work"* about claude. `backgroundReporting`
+    in `tasks.ts` splits it on `hasLiveAgent` — the predicate that already existed
+    for *"the statuses in which an agent process exists and can be asked
+    something"*, `stopping` excluded on a measured argument — and a missing row
+    lands in the same arm, whose sentence is worded to be true of both and to name
+    no agent at all. The sentences are a `Record` over the union, so a fourth state
+    is a compile error and the partition is swept rather than the shape of an
+    expression. The finished band is barred there with `silent`, for one reason:
+    the daemon's rows are gone after a restart, so a zero would say *nothing
+    finished* about a session that may have finished ten things. Q3.633.
   - **⚠ Elapsed time comes from `startedAt`/`endedAt`, never `usage.durationMs`.**
     The agent's duration rides a *progress* frame and the adapter drops both the
     final `usage` and `end_time`, so a finished task's own number is stale and a
