@@ -25,6 +25,32 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-22
+
+### Added
+
+- **The app, for five platforms, on the release page.** macOS for Apple silicon
+  and for Intel, Linux as a `.deb` and an AppImage, Windows as an installer, and
+  Android as a signed APK. Each is built on every push by a check that builds
+  exactly the bundle the release publishes, and a platform cannot be added to a
+  release without one.
+
+### Fixed
+
+- **0.10.0 has no release page, and this is the release it should have been.**
+  0.10.0 was tagged and its control-plane image published, but its release failed
+  while building the Linux app, so none of the apps were published and there are
+  no 0.10.0 downloads. The code is the same: everything listed under 0.10.0 below
+  reaches the apps here for the first time.
+- **A release that failed still published its image.** The image tags people
+  pull — the version's own and `latest` — were created as soon as the image was
+  built, whether or not the apps built, which is how 0.10.0 ended up with an image
+  and nothing else. They are now created only after every app has built, so a
+  release that fails leaves nothing behind and can simply be run again.
+- **The Linux app could not be built by a release.** The check that builds it on
+  every push installed the system libraries it links against; the release job that
+  builds the same app did not. Both now install them from one list.
+
 ## [0.10.0] - 2026-09-22
 
 ### Added

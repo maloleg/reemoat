@@ -362,24 +362,13 @@ jobs:
           targets: ${{ matrix.triple }}
 
       # WebKitGTK and the bundler's own tools, which no other leg needs and the
-      # runner image does not carry. `libwebkit2gtk-4.1-dev` is what `wry` links
-      # against on Linux; `patchelf` and `librsvg2-dev` are the AppImage
-      # bundler's, and without them the build fails inside a downloaded tool with
-      # no mention of this file.
-      - name: the Linux toolchain
-        if: matrix.target == 'linux-x64'
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libsoup-3.0-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            desktop-file-utils
+      # runner image does not carry. An action rather than a step, because
+      # `release.yml`'s `app` job builds the same bundle and a package list
+      # written in both files is two lists — the release that first published a
+      # Linux app had the step here and not there. The action carries the
+      # measurement; `deploycheck` asserts both jobs use it.
+      - uses: ./.github/actions/linux-app-deps
+        if: runner.os == 'Linux'
 
       - uses: Swatinem/rust-cache@v2
         with:

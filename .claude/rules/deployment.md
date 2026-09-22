@@ -5,6 +5,7 @@ paths:
   - deploy/launchd/*
   - deploy/systemd/*
   - .github/*
+  - .github/actions/*/action.yml
   - scripts/deploycheck.ts
   - scripts/imagecheck.ts
 ---
@@ -332,22 +333,27 @@ the script's `case` in **both** directions now: the `app` verb shipped with nine
 refusals, ~125 lines and no caller, and four documents described the wiring
 anyway.
 
-⚠ **`RELEASE_APP_TARGETS` is empty until `check.yml` builds something**, and it is
-the one knob spelled `${VAR-…}` rather than `${VAR:-…}` — for a list, an explicit
-empty is a request rather than an omission. `deploycheck` asserts every name in it
-has a `check.yml` leg, so a platform joins the list in the same change that gives
-it one. That is `RELEASE_PLATFORMS`' own argument about arm64, made mechanical:
-the first build of a platform in this project's history may not happen on the
-release path.
+⚠ **`RELEASE_APP_TARGETS` names five, and each has a `check.yml` leg building the
+same bundle** — `native`'s four-leg matrix bundles for real, `android-apk` is
+android's. It is the one knob spelled `${VAR-…}`, an explicit empty being a
+request. `deploycheck` asserts every name has a leg: the first build of a platform
+may not happen on the release path. ⚠ *The same* is literal — the Linux packages
+are one composite action both jobs use, because v0.10.0's release job lacked the
+list its check leg had and died on `gobject-2.0`.
 
 ⚠ **Empty means both app jobs are *skipped*, and three lines are what make that
 safe.** `plan` emits an empty matrix; each app job carries an `if:`, because an
 empty matrix in GitHub Actions is a job that **fails** rather than one that skips;
-and `publish` carries the only `if:` in a file whose header says it decides
-nothing, because GitHub skips a job whose `needs` includes a skipped one. Without
-that third line, wiring the app jobs up would have stopped every release creating
-a release page at all — after `manifest` had already pushed the image tags.
-`deploycheck` reads all three back.
+and `publish` carries an `if:`, because GitHub skips a job whose `needs` includes
+a skipped one. Without that third line, wiring the app jobs up would have stopped
+every release creating a release page at all. `deploycheck` reads all three back.
+
+⚠ **`manifest` waits for every app, so a failed release publishes nothing.** It
+creates the tags people pull and used to need `image` alone — so v0.10.0's Linux
+leg died and `:v0.10.0` and `:latest` were pushed anyway, a public image the
+re-release gate will never let be rebuilt. Now an app failure leaves no tag: fix,
+move the git tag, run again. Its `if:` counts `skipped` as done and `failure` as
+not, both halves asserted.
 
 **And the §6 offer rides the notes.** `bundle.licenseFile` is read by the `dmg`
 and `nsis` bundlers and by nothing that builds a macOS `.app`, so the artifact most

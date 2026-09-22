@@ -1,0 +1,39 @@
+# The system libraries a Linux app build links against, and the AppImage
+# bundler's own tools — in **one** place, used by both workflows that build one.
+#
+# ⚠ **It is an action rather than a step written twice because written twice is
+# what failed.** `check.yml`'s `native` matrix grew a `linux-x64` leg with these
+# packages inline and went green; `release.yml`'s `app` job builds the same
+# bundle and had no such step, so the first release to publish a Linux app died
+# 26 seconds into `cargo` on *"The system library `gobject-2.0` required by crate
+# `gobject-sys` was not found"* — and `manifest`, which needed only the image,
+# pushed the image tag a minute later anyway, which spent v0.10.0. A check leg is
+# only worth something while it builds what the release builds, and two copies of
+# a package list are two lists.
+# `deploycheck` asserts that both jobs use this and that neither carries an
+# `apt-get` of its own.
+#
+# `libwebkit2gtk-4.1-dev` is what `wry` links against, and pulls the GTK and
+# GLib development files `gobject-sys` asks `pkg-config` for; `patchelf` and
+# `librsvg2-dev` are the AppImage bundler's, and without them the build fails
+# inside a downloaded tool with no mention of this file. Measured green on
+# `ubuntu-latest` in `check.yml`'s `linux-x64` leg, `deb` and `appimage` both.
+name: Linux app dependencies
+description: The system packages tauri needs to build and bundle the app on Linux.
+runs:
+  using: composite
+  steps:
+    - name: the Linux toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libwebkit2gtk-4.1-dev \
+          libjavascriptcoregtk-4.1-dev \
+          libsoup-3.0-dev \
+          libgtk-3-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          patchelf \
+          desktop-file-utils
