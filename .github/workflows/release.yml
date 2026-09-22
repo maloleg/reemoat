@@ -194,8 +194,24 @@ jobs:
           overwrite: true
 
   # The digests, merged into the tags people type.
+  #
+  # ⚠ **It waits for every app, and that is what keeps a failed release from
+  # spending its version.** This is the job that creates the tags people pull —
+  # `image` pushes by digest and names nothing — and it used to need `image`
+  # alone. So when v0.10.0's Linux leg died it pushed `:v0.10.0` and moved
+  # `:latest` a minute later anyway: no release page, no apps, and a version the
+  # re-release gate would never let be built again, because the image under its
+  # name is public and somebody may have pulled it. Waiting costs nothing but
+  # wall-clock — the image is built in parallel as before and only the naming
+  # waits — and it means an app that fails leaves **nothing** published: fix it,
+  # move the tag, run again.
+  #
+  # `skipped` counts as done for both app jobs, for the reason `publish`'s `if:`
+  # gives: GitHub skips a job whose `needs` includes a skipped one unless it
+  # carries a conditional, and a release with no app target skips them by design.
   manifest:
-    needs: image
+    needs: [image, app, app-android]
+    if: ${{ !cancelled() && needs.image.result == 'success' && (needs.app.result == 'success' || needs.app.result == 'skipped') && (needs['app-android'].result == 'success' || needs['app-android'].result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -306,6 +322,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.triple }}
+
+      # ⚠ **The step whose absence spent v0.10.0.** `check.yml`'s `linux-x64` leg
+      # installed WebKitGTK and went green; this job builds the same bundle and did
+      # not, and died in `gobject-sys`'s build script on a `pkg-config` miss. One
+      # action for both, so the list cannot be edited on one side only —
+      # `deploycheck` asserts this job and that one both use it.
+      - uses: ./.github/actions/linux-app-deps
+        if: runner.os == 'Linux'
 
       - uses: Swatinem/rust-cache@v2
         with:

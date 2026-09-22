@@ -5721,6 +5721,78 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
   );
 
   /*
+   * ⚠ **`manifest` waits for every app, and that is what keeps a failed release
+   * from spending its version.** It is the job that creates the tags people pull
+   * — `image` pushes by digest and names nothing — and it used to need `image`
+   * alone. v0.10.0's Linux leg died in `cargo` and `manifest` pushed `:v0.10.0`
+   * and moved `:latest` a minute later anyway: no release page, no apps, and a
+   * version the re-release gate will never let be built again, because the image
+   * under that name is public. Both halves are asserted, because each alone is the
+   * old behaviour: the `needs` without the `if:` is a job GitHub skips whenever an
+   * app job is skipped, and an `if:` of bare `!cancelled()` is one that runs after
+   * an app job *failed* — which is the case this exists for.
+   */
+  const jobText = (yml: string, job: string): string => {
+    const lines = yml.slice(yml.indexOf("\njobs:\n")).split("\n");
+    const start = lines.findIndex((line) => line === `  ${job}:`);
+    if (start < 0) return "";
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex((line) => /^  [a-z][a-z0-9-]*:[ \t]*$/.test(line));
+    return [lines[start], ...(end < 0 ? rest : rest.slice(0, end))].join("\n");
+  };
+  const manifestJob = jobText(releaseYml, "manifest");
+  check("the manifest job is readable at all", manifestJob !== "", true);
+  const manifestNeeds = /^    needs:[ \t]*\[([^\]]*)\]/m.exec(manifestJob)?.[1]?.split(",").map((n) => n.trim()).sort() ?? [];
+  check("manifest names nothing until the image and every app are built", manifestNeeds, ["app", "app-android", "image"]);
+  const manifestIf = /^    if:[ \t]*(.*)$/m.exec(manifestJob)?.[1] ?? "";
+  check(
+    "and it runs only when each of them succeeded or was skipped by design",
+    [
+      manifestIf.includes("needs.image.result == 'success'"),
+      manifestIf.includes("needs.app.result == 'success'"),
+      manifestIf.includes("needs['app-android'].result == 'success'"),
+      /needs\.app\.result == 'failure'|needs\['app-android'\]\.result == 'failure'/.test(manifestIf),
+    ],
+    [true, true, true, false],
+  );
+
+  /*
+   * ⚠ **And the Linux build's system packages are one list, used by both jobs
+   * that build a Linux app.** `check.yml`'s `linux-x64` leg carried them inline
+   * and went green; `release.yml`'s `app` job builds the same bundle and did not,
+   * which is how v0.10.0 died on a `pkg-config` miss for `gobject-2.0`. A check
+   * leg proves something only while it builds what the release builds, so the
+   * list is a composite action and this asserts both jobs use it — and that
+   * neither workflow grew an `apt-get` of its own beside it, which is how the two
+   * would drift again with every assertion above still green.
+   */
+  const checkWorkflow = withoutComments(readFileSync(join(repoRoot, ".github", "workflows", "check.yml"), "utf8"));
+  const depsAction = join(repoRoot, ".github", "actions", "linux-app-deps", "action.yml");
+  const usesDeps = /^[ \t]*-[ \t]*uses:[ \t]*\.\/\.github\/actions\/linux-app-deps[ \t]*$/m;
+  check("the Linux app dependencies are one action", existsSync(depsAction), true);
+  /*
+   * Comment-stripped, for the reason the `target:` grep above is: the action's
+   * own header names this package while explaining why it is there, so the raw
+   * file satisfied the check with the install line deleted. Measured — that was
+   * the first negative test here, and it passed.
+   */
+  check(
+    "and it installs what the build demonstrably cannot do without",
+    existsSync(depsAction) && /^[ \t]+libwebkit2gtk-4\.1-dev\b/m.test(withoutComments(readFileSync(depsAction, "utf8"))),
+    true,
+  );
+  check(
+    "which the release's app job and the check's native job both use",
+    [usesDeps.test(jobText(releaseYml, "app")), usesDeps.test(jobText(checkWorkflow, "native"))],
+    [true, true],
+  );
+  check(
+    "and neither workflow installs a package list of its own beside it",
+    [/apt-get/.test(releaseYml), /apt-get/.test(checkWorkflow)],
+    [false, false],
+  );
+
+  /*
    * The four Android secrets, and **which job reads them**. `ci-release.sh`'s
    * `plan` gives that scoping as its whole reason for not checking them itself —
    * "who can read the keystore is answerable by reading release.yml" — so it is a
