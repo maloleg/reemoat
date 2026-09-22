@@ -25,6 +25,18 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Android app would not install on a OnePlus 13 by tapping the APK.** The
+  phone's own installer — OxygenOS, Android 16 — answered "App not installed as
+  package appears to be invalid", while the same file installed on a Pixel, and
+  over `adb` on that very phone. The APK carried only the signature Android has
+  checked since 7.0; it now carries the older JAR signature beside it, which
+  Android ignores and which that installer most likely wanted. *Most likely*
+  rather than certainly: it is confirmed only once this release's APK is
+  installed on a OnePlus. A release now also refuses to publish an APK missing
+  either signature.
+
 ## [0.10.1] - 2026-09-22
 
 ### Added

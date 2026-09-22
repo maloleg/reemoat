@@ -2895,6 +2895,44 @@ check(
   [/isMinifyEnabled = true/.test(releaseBuild), /isDebuggable/.test(releaseBuild), /isJniDebuggable/.test(releaseBuild)],
   [true, false, false],
 );
+/*
+ * ⚠ **And what a release is signed with — which that file's banner said was
+ * asserted here, and was not.** `build.gradle.kts` lists the edits an `init`
+ * re-run takes out and says this driver pins each against its code; measured
+ * when the fourth was added, a grep for `signingConfig` in this file returned
+ * nothing. So the edit deciding whether a release is signed at all rested on the
+ * banner alone, which is the shape `ic_launcher` had before this driver read it.
+ *
+ * ⚠ **The fourth is `enableV1Signing = true`, and losing it has no symptom short
+ * of somebody's phone.** Left unset, AGP signs with the JAR scheme only below
+ * `minSdk` 24, so the 0.10.1 APK carried v2 alone. It verified, installed on a
+ * Pixel, and installed over `adb install` on a OnePlus 13 — whose own installer
+ * then refused the same file as invalid. That an OEM installer, parsing the APK
+ * before the platform does, wants a JAR signature is the leading hypothesis
+ * rather than a measurement; whichever it is, an APK without the pair still
+ * builds, signs and verifies. `enableV2Signing` is pinned beside it because the
+ * pair is the decision, and AGP's default is not one.
+ *
+ * Read out of `create("release")` rather than out of the file, so the pair
+ * written into some other signing config — a debug one added later — cannot
+ * stand in for this one. And the build type's `signingConfig` line is asserted
+ * in the same breath because it is what makes the pair load-bearing rather than
+ * decoration — `isMinifyEnabled` is the same precondition for the keep rule —
+ * and without it a release is not signed at all: AGP writes
+ * `app-universal-release-unsigned.apk`, which `ci-release.sh` refuses on the
+ * release path rather than on a push.
+ */
+const releaseSigning = between(gradleCode, `create("release") {`, "buildTypes {");
+check("the release signing config was found to read", releaseSigning.length > 0, true);
+check(
+  "a release is signed by that config, and the config signs v1 beside v2",
+  [
+    /signingConfig = signingConfigs\.getByName\("release"\)/.test(releaseBuild),
+    /^\s*enableV1Signing = true\s*$/m.test(releaseSigning),
+    /^\s*enableV2Signing = true\s*$/m.test(releaseSigning),
+  ],
+  [true, true, true],
+);
 
 /* ── Android TLS: three halves of one fact ────────────────────────────────── */
 
