@@ -12,7 +12,7 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { WSContext } from "hono/ws";
 import type { WebSocket as RawWebSocket } from "ws";
-import { AgentUnavailableError, claudeSettingsMode, type AgentId } from "./acp/agents.js";
+import { AgentUnavailableError, claudeSettingsMode, isBuiltinAgentId, type AgentId } from "./acp/agents.js";
 import {
   hostable,
   routedModelNaming,
@@ -26,6 +26,7 @@ import { AgentAskError, type AgentCapabilityReader } from "./agentask.js";
 import type { AgentLoginSupport } from "./runtime/types.js";
 import { isAuthRequiredMessage, SystemRoutingError } from "./session.js";
 import { type AgentCredentialStore, type AgentLoginRuns } from "./agentauth.js";
+import type { AgentInstallRuns } from "./agentinstall.js";
 import { AUTH_LEEWAY_MS, hasScope, type Principal, type Scope, type TokenVerifier } from "./auth.js";
 import {
   importArchive,
@@ -699,6 +700,14 @@ export interface ServerOptions {
    */
   logins?: AgentLoginRuns;
   /**
+   * Installing a harness onto this machine, in progress.
+   *
+   * Optional exactly as `logins` is, and read by the same two shapes: the routes
+   * answer `503` without it, and `agentRowExtras` folds its absence into
+   * `installable` so a client with no route to press never draws the button.
+   */
+  installs?: AgentInstallRuns;
+  /**
    * Files staged for a prompt.
    *
    * Optional for the same reason as the two above: the offline drivers run with
@@ -738,6 +747,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const machineSettings = options.machineSettings ?? null;
   const asks = options.asks ?? null;
   const logins = options.logins ?? null;
+  const installs = options.installs ?? null;
   const uploads = options.uploads ?? null;
   const roots = options.roots ?? [homedir()];
   const plugins = options.plugins ?? null;
@@ -1241,10 +1251,26 @@ export function createApp(options: ServerOptions): AppBundle {
    * it sends no mode, so nothing else on any screen can explain a session that
    * opened in one.
    */
-  const agentRowExtras = async (): Promise<(agent: { id: AgentId }) => Record<string, unknown>> => {
+  const agentRowExtras = async (): Promise<
+    (agent: { id: AgentId; installable?: boolean }) => Record<string, unknown>
+  > => {
     const settingsMode = await claudeSettingsMode();
     return (agent) => ({
       login: loginSupportOf(agent.id),
+      /*
+       * ⚠ **Two questions folded into one field, exactly as `loginSupportOf`
+       * folds `logins === null` into `blocked`.** The runtime answers the first —
+       * is this absence one `deploy/agents.sh` repairs — and it knows nothing
+       * about whether this daemon will run one. A row that said yes to the first
+       * and no to the second is a button that answers `503`, which is the defect
+       * `loginSupported` exists to prevent, arriving a second time.
+       *
+       * ⚠ **`=== true`, so a runtime that has not learned the field yet is read
+       * as `false`.** The field is required on `AgentAvailability`, so this can
+       * only be reached by a stub; the direction to be wrong in is the one that
+       * draws no control.
+       */
+      installable: agent.installable === true && installs !== null,
       ...(agent.id === "claude" && settingsMode !== null ? { settingsMode } : {}),
     });
   };
@@ -1514,7 +1540,7 @@ export function createApp(options: ServerOptions): AppBundle {
      * requests metered through it rather than four spawns at once.
      */
     /*
-     * ⚠ **What this machine offers, not `AGENT_IDS`** — the four this repository
+     * ⚠ **What this machine offers, not `AGENT_IDS`** — the five this repository
      * ships plus whatever plugins added, and a *disabled* plugin's harness is not
      * in it. The bound on how long the sweep can get is
      * `MAX_CONTRIBUTED_HARNESSES`, refused at install rather than trimmed here:
@@ -2601,6 +2627,133 @@ export function createApp(options: ServerOptions): AppBundle {
     const cancelled = await logins.cancel(c.req.param("loginId"));
     if (!cancelled) return jsonError(c, 404, "login_not_found", "no such login");
     registry.sessionRuntime.forgetAvailability();
+    return c.json({ cancelled: true });
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Installing a harness onto this machine
+   *
+   * ⚠ **`machine:admin` on the writes, and the precedent is `POST /plugins`.**
+   * Putting new programs on somebody's computer is an act on the *machine*, and
+   * `packages/web/src/install.ts` already states the rule this follows: a grant
+   * that can drive every session on a host all day may not put code on it.
+   * Downloading and running a vendor's installer as this uid is at least that. A
+   * machine's owner holds every scope, so the button works for them; a shared
+   * grant gets `403`.
+   *
+   * ⚠ **The poll is `read`, unlike a login's.** A login transcript carries a
+   * one-time code; this one carries a vendor installer's output and a version
+   * number.
+   *
+   * ⚠ **Every handler here answers in milliseconds**, which is why none of them
+   * needs an entry in the client's `slowRoute` table: the start spawns and
+   * returns an id. A handler that held the connection for the length of an
+   * install would outlive the 15s budget, and a client abort there is a
+   * *transport* failure — which drops the route memo and draws a perfectly
+   * healthy machine as unreachable everywhere at once.
+   * ---------------------------------------------------------------- */
+
+  /** The run this daemon is holding, for a client that reloaded and has no id. */
+  app.get("/agent-install", read, (c) =>
+    c.json({ supported: installs !== null, run: installs?.live() ?? null }),
+  );
+
+  /**
+   * Start one, for the harnesses this repository ships and no others.
+   *
+   * ⚠ **`agentIdParam` is wider than the button, and that width reached the
+   * script.** It answers on `harnessState(value) === "enabled"`, and that is true
+   * of a harness a *plugin* contributed — `PluginContributions.harnessIds`
+   * returns the built-ins followed by its own — while `deploy/agents.sh` has never
+   * heard of one: it validates `--only` against its own five names and exits 2 by
+   * name for anything else. Nothing was ever injected (`spawn` takes an
+   * argv array and no shell), but the refusal landed in the wrong place and in the
+   * wrong shape. `spawnAgentsScript` maps every status but 3 to `"running"`, so
+   * `settle` went and asked the machine and reported the script's own by-name
+   * refusal as a **failed install** — a screen offering a retry for a name that
+   * can never work. And each attempt paid `onFinished` on the way out, which is
+   * `forgetAvailability()` plus a full `resumeInterrupted()` pass, so one HTTP
+   * request bought a fleet-wide cache flush and an auto-resume sweep.
+   *
+   * ⚠ **`isBuiltinAgentId` rather than the row's own `installable`, and the
+   * difference is a process.** `installable` is a fact out of `availability()`,
+   * which probes a CLI per harness; reading it here would put a spawn behind a
+   * handler this section's docblock promises answers in milliseconds, and it is
+   * `false` for a harness that is already present — so it would also refuse a
+   * deliberate re-install. The set that matters is the script's own argument list,
+   * and this predicate is exactly it.
+   *
+   * ⚠ **A `503` with a code of its own, and the three-valued discipline above is
+   * untouched.** An id nothing has heard of still earns {@link noSuchHarness}'s
+   * `400`, a plugin somebody switched off still earns its `503` naming the switch,
+   * and neither may become the other. This is the fourth state — a real, enabled
+   * harness this daemon will never install — so the `login_unsupported` /
+   * `logout_unsupported` pair under `/agent-auth/` is the precedent for both the
+   * status and the sentence shape: the request is fine and this daemon will not
+   * do it. A code distinct from `install_unsupported` because that one means the
+   * daemon installs *nothing*, and the two remedies are different sentences: run
+   * the script on that machine, against install it the way the plugin that added
+   * it says to.
+   */
+  app.post("/agent-install/:agent", admin, (c) => {
+    if (installs === null) {
+      return jsonError(
+        c,
+        503,
+        "install_unsupported",
+        "this daemon will not install agents; run deploy/agents.sh on this machine instead",
+      );
+    }
+    const agent = agentIdParam(c);
+    if (agent === null) return noSuchHarness(c);
+    if (!isBuiltinAgentId(agent)) {
+      return jsonError(
+        c,
+        503,
+        "harness_not_installable",
+        `${agent} was added by a plugin, and this daemon installs only the harnesses it ships; ` +
+          `put it on this machine the way that plugin documents`,
+      );
+    }
+    const started = installs.start(agent);
+    if (started.kind === "busy") {
+      /*
+       * ⚠ **`409` rather than `503`, and the difference is whether waiting helps.**
+       * This daemon answers `503` for "it does not do that" — `login_unsupported`,
+       * `harness_unavailable` — and `409` for a state conflict that passes on its
+       * own. One code carrying `holder` rather than two codes: the sentence differs
+       * between "the daily refresh is running" and "codex is installing", and the
+       * remedy is identical.
+       */
+      return jsonError(
+        c,
+        409,
+        "install_busy",
+        started.holder.kind === "update"
+          ? "this machine is refreshing its agents; try again in a moment"
+          : `this machine is installing ${started.holder.agent ?? "an agent"}; try again when it finishes`,
+        started.holder,
+      );
+    }
+    if (started.kind === "spawn_failed") {
+      return jsonError(c, 502, "install_failed", started.detail);
+    }
+    return c.json(started.view, 201);
+  });
+
+  app.get("/agent-install/runs/:installId", read, (c) => {
+    if (installs === null) return jsonError(c, 404, "install_not_found", "no such install");
+    const since = Number.parseInt(c.req.query("since") ?? "0", 10);
+    const chunk = installs.read(c.req.param("installId"), Number.isFinite(since) ? since : 0);
+    if (chunk === null) return jsonError(c, 404, "install_not_found", "no such install");
+    return c.json(chunk);
+  });
+
+  app.delete("/agent-install/runs/:installId", admin, (c) => {
+    if (installs === null) return jsonError(c, 404, "install_not_found", "no such install");
+    if (!installs.cancel(c.req.param("installId"))) {
+      return jsonError(c, 404, "install_not_found", "no such install");
+    }
     return c.json({ cancelled: true });
   });
 

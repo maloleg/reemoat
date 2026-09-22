@@ -50,8 +50,16 @@ const STORAGE_KEY = "reemoat.machineOrder";
  * `MAX_STRIP_ENTRIES` read one subject over: this is hand-editable storage and a
  * bound is cheaper than a validation. Two hundred is past any fleet this product
  * is shaped for — the machine limit itself defaults to fifty — so nobody reaches
- * it by using the app, and somebody who has pasted a megabyte into the key gets a
- * working list rather than a slow one.
+ * it by *having* that many machines, and somebody who has pasted a megabyte into
+ * the key gets a working list rather than a slow one.
+ *
+ * ⚠ **It is reachable by attrition rather than by fleet size, which is what makes
+ * {@link nextOrder}'s choice of what to drop load-bearing.** A slot is kept for a
+ * machine the fleet has lost and nothing ever evicts one, so this list grows with
+ * every revoke-and-enroll over the life of an install while the fleet stays at a
+ * handful. Two hundred retired grants is a long time and not an impossibility —
+ * so which end the bound is spent on decides whether the feature still works when
+ * it is hit.
  */
 export const MAX_MACHINE_ORDER = 200;
 
@@ -120,8 +128,30 @@ export function orderMachines<T extends { id: MachineId }>(
  * stored list, a slot that names something currently drawn takes the next id from
  * `drawn`, and a slot that names something absent keeps what it held.
  *
- * Truncated **from the tail**, which is the end nobody has expressed a position
- * for.
+ * ⚠ **Bounded by dropping the *stale* slots, last first, and by truncating the
+ * tail only once there are no stale ones left to drop.**
+ * `slice(0, MAX_MACHINE_ORDER)` over the whole result was exactly inverted, and
+ * the reason is the order of the two loops below: the stored walk runs first and
+ * the queue's remainder is appended *after* it, so **the tail is where the live
+ * machines land.** Reproduced while reviewing this file —
+ * `nextOrder(<200 retired ids>, ["m_b", "m_a", "m_c"])` answered two hundred
+ * entries with **none** of the three live ones among them, and feeding that back
+ * through a second drag answered no live id again. The reorder preference is then
+ * permanently inoperative and never self-clears.
+ *
+ * ⚠ **It breaks nothing on screen, which is why it had to be asserted rather than
+ * left to a report.** `orderMachines` drops an id the fleet no longer holds at
+ * draw time, so the column goes on rendering in pure name order for ever: no
+ * crash, no empty list, and no way to tell from the outside that dragging has
+ * stopped being a thing this app does. The all-live case — three hundred machines
+ * truncated to two hundred — is the shape the bound was written against, and it
+ * cannot see this at all.
+ *
+ * So the bound is spent on the slots kept **out of courtesy** rather than on the
+ * ones somebody is looking at: every id in `drawn` survives, and what room is left
+ * is filled from the stale entries in stored order. The tail is still cut when
+ * `drawn` alone is over the bound, because at that point there is nothing else
+ * left to cut.
  */
 export function nextOrder(stored: readonly string[], drawn: readonly string[]): string[] {
   const live = new Set(drawn);
@@ -142,7 +172,18 @@ export function nextOrder(stored: readonly string[], drawn: readonly string[]): 
     push(id);
   }
   for (const id of queue) push(id);
-  return out.slice(0, MAX_MACHINE_ORDER);
+  if (out.length <= MAX_MACHINE_ORDER) return out;
+  // Over the bound. Give up the stale slots from the back, so what is dropped is
+  // the oldest courtesy rather than the newest position — and only then fall back
+  // to the tail, which is reached solely when `drawn` is over the bound by itself.
+  const spare = out.length - MAX_MACHINE_ORDER;
+  const dropped = new Set<number>();
+  for (let at = out.length - 1; at >= 0 && dropped.size < spare; at -= 1) {
+    const id = out[at];
+    if (id === undefined || live.has(id)) continue;
+    dropped.add(at);
+  }
+  return out.filter((_, at) => !dropped.has(at)).slice(0, MAX_MACHINE_ORDER);
 }
 
 /**
@@ -234,5 +275,5 @@ export function setMachineOrder(drawn: readonly string[]): void {
 
 export function subscribeMachineOrder(listener: () => void): () => void {
   listeners.add(listener);
-  return () => listeners.delete(listener);
+  return () => void listeners.delete(listener);
 }

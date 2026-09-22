@@ -25,11 +25,11 @@
  * ------------------------------------------------------------------ */
 
 /**
- * The four harnesses this product ships, mirrored as a **closed** union — because
+ * The five harnesses this product ships, mirrored as a **closed** union — because
  * that is what the daemon's `AGENT_IDS` is, and it stayed closed when `AgentId`
  * did not.
  *
- * `src/acp/agents.ts` still derives this tuple from four literals, `resolveAgent`
+ * `src/acp/agents.ts` still derives this tuple from five literals, `resolveAgent`
  * still switches over it with no `default` arm, and `AGENT_LOGIN` is still a
  * `Record` keyed on it. What changed is that a *machine* may now offer more than
  * this repository ships, so the list of what exists and the list of what is
@@ -42,8 +42,8 @@
  * `startsBare`'s built-in arm is a literal. Every one of those would become
  * unsatisfiable — not merely weaker — against a list that grows at runtime.
  */
-export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode"];
-export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode";
+export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode", "grok"];
+export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode" | "grok";
 
 /**
  * A harness id, which is a string.
@@ -65,7 +65,7 @@ export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode";
  */
 export type AgentId = string;
 
-/** Whether this is one of the four this product ships. Never "does this machine have it". */
+/** Whether this is one of the five this product ships. Never "does this machine have it". */
 export function isBuiltinAgentId(value: string): value is BuiltinAgentId {
   return (AGENT_IDS as readonly string[]).includes(value);
 }
@@ -1942,7 +1942,24 @@ export interface DaemonHealth {
   protocol?: number;
 }
 
-export interface AgentInfo {
+/**
+ * One harness row as `GET /agents` answers it.
+ *
+ * ⚠ **Named `AgentAvailability` because that is what the daemon calls it, and the
+ * name is load-bearing.** It was `AgentInfo`, and nothing compared the two sides
+ * for it: `webcheck.plugin-protocol.ts` looks each mirror up **by name** in
+ * `src/`, so a mirror under a different name hits the `continue` and is never
+ * checked — the fourth occurrence of that, after `MachineSettings`/`MachineSettingsView`,
+ * `CustomAgent`/`AgentRouting` and `QueuedPromptSnapshot`/`QueuedPrompt`. This was
+ * the richest row on the wire to be uncompared, and `installable` was added to
+ * both sides while the guard was blind to it. Renaming took the sweep from 63
+ * interfaces to 64. A count floor cannot catch the next one — a skipped pair does
+ * not lower `compared`, it fails to raise it — so the rule lives here, at the
+ * declaration, where the check site structurally cannot state it: **before adding
+ * any `export interface` to this file, grep `src/` for the daemon's own name and
+ * use it.**
+ */
+export interface AgentAvailability {
   id: AgentId;
   displayName: string;
   /**
@@ -1974,7 +1991,7 @@ export interface AgentInfo {
    * whose agent works. Absent on an older daemon, which is the same as `null`.
    *
    * ⚠ **A harness with no sign-in can never answer `false` here**, however often
-   * it has refused to start — that record is {@link AgentInfo.lastStartRefusal},
+   * it has refused to start — that record is {@link AgentAvailability.lastStartRefusal},
    * which is a different question and has a different reader.
    */
   loggedIn?: boolean | null;
@@ -2012,14 +2029,36 @@ export interface AgentInfo {
    */
   login?: AgentLoginSupport;
   /**
+   * Whether this machine can put this harness on itself, from here.
+   *
+   * ⚠ **Absent means `false`, which is the opposite of `AgentRouting.pinsModel`
+   * and the same as `SystemInfo.routable`.** A daemon that has never registered
+   * the install routes answers a bare `404` with no error envelope — there is
+   * nothing to render — so a button drawn on an optimistic reading is a control
+   * that looks broken. For a *control*, "keep working against an older daemon"
+   * means not drawing it.
+   *
+   * ⚠ **Read `=== true`, never `!== false`**, and the counter-example is twelve
+   * lines away in `AgentsPanel`: `login.canSignOut !== false` is deliberate,
+   * because *that* control's refusal is a `503` carrying the route's own
+   * sentence, so offering it costs a clean error. This one's costs a dead button.
+   * Somebody will try to make the two match; they are different for a reason.
+   *
+   * ⚠ **And it is narrower than `!available`.** The daemon sets it only where
+   * `deploy/agents.sh` is the remedy — a built-in's CLI missing from PATH — never
+   * for a missing ACP adapter, an unknown harness id, or a contributed harness
+   * whose program is gone. None of those is something a download repairs.
+   */
+  installable?: boolean;
+  /**
    * What a screen calls this harness, or absent for one this product ships.
    *
-   * ⚠ **Deliberately not {@link AgentInfo.displayName}, and reaching for that
+   * ⚠ **Deliberately not {@link AgentAvailability.displayName}, and reaching for that
    * instead is the mistake this field exists to prevent.** The daemon's
    * `displayName` is a log line and a settings-list row title — literally
    * `Claude (claude-agent-acp)` and `Kimi Code CLI` — while `agentCard.ts`'s own
    * rule is that a label names neither a package nor a CLI, because it is drawn on
-   * a 96px tile. Two of the four built-ins fail that rule outright, so a client
+   * a 96px tile. Three of the five built-ins fail that rule outright, so a client
    * that used `displayName` as a label would put "Codex (codex-acp)" on a strip.
    *
    * Absent for a built-in, where `AGENT_LABEL` is the answer and is hand-written
@@ -2096,7 +2135,7 @@ export interface AgentLoginSupport {
   canSignOut?: boolean;
 }
 
-export interface AgentAuthInfo extends AgentInfo {
+export interface AgentAuthInfo extends AgentAvailability {
   credentials: AgentCredentialSlot[];
 }
 
@@ -2302,6 +2341,68 @@ export interface LoginRunView {
 export interface LoginChunk extends LoginRunView {
   chunk: string;
   /** The requested cursor pointed at output that has since been discarded. */
+  gap: boolean;
+}
+
+/** What happened to an install, once it has ended. `src/agentinstall.ts`'s own. */
+export type InstallOutcome =
+  | "running"
+  | "installed"
+  | "failed"
+  | "locked"
+  | "timeout"
+  | "cancelled"
+  | "spawn_failed";
+
+/** Where the installer has got to, as its own checkpoints report it. */
+export type InstallPhase = "start" | "download" | "install" | "link" | "done" | "failed";
+
+export interface InstallRunView {
+  installId: string;
+  agent: AgentId;
+  startedAt: number;
+  endedAt: number | null;
+  done: boolean;
+  /**
+   * ⚠ **Never derived from `exit`, on either side of the wire.** The installer
+   * exits 0 having printed that it failed — it must, because three of its four
+   * callers contract it never fails — so the daemon decides this by asking the
+   * machine again afterwards. A client that read `exit.code === 0` as success
+   * would draw "installed" over a harness that is not there.
+   */
+  outcome: InstallOutcome;
+  exit: { code: number | null; signal: string | null } | null;
+  phase: InstallPhase | null;
+  /** The tail of what the installer said, for a client that lost the transcript. */
+  detail: string | null;
+  dropped: number;
+  /** Total output produced so far. Poll with this as the next `since`. */
+  cursor: number;
+  /**
+   * Whether a Stop would be honoured right now.
+   *
+   * ⚠ **Read it, and hide the control rather than offer one that refuses.** The
+   * daemon will not signal a run whose installer is writing outside its staging
+   * directory — a killed vendor installer leaves a truncated binary that the
+   * daemon then executes as a harness — and the cancel route's only refusal is a
+   * bare `404 install_not_found`, which for a run that plainly exists is a false
+   * sentence. So the truth arrives before the press. An older daemon sends no
+   * such field, which is why this is optional here and required there.
+   */
+  cancellable?: boolean;
+}
+
+export interface InstallChunk extends InstallRunView {
+  chunk: string;
+  /**
+   * The requested cursor pointed at output that has since been discarded.
+   *
+   * ⚠ **Read here, unlike on a login.** `LoginWizard` ignores its own copy of
+   * this flag, which is survivable for a transcript that is a few lines of a
+   * device-code prompt. An installer's is far likelier to overflow the daemon's
+   * 64 KiB ceiling, and a raw pane that silently claims to be the whole record
+   * undoes the one thing the fallback rests on.
+   */
   gap: boolean;
 }
 

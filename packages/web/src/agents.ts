@@ -4,7 +4,7 @@ import {
   type AgentAuthInfo,
   type AgentCapabilities,
   type AgentId,
-  type AgentInfo,
+  type AgentAvailability,
   type CustomAgent,
   type SystemInfo,
 } from "./wire";
@@ -77,7 +77,7 @@ export function hostable(
   /**
    * What to call a harness, where one is named.
    *
-   * ⚠ **Defaulted to `agentLabel`, which can only answer for the four this product
+   * ⚠ **Defaulted to `agentLabel`, which can only answer for the five this product
    * ships** — and answers a raw id for anything else, which is `acme:gemini` in a
    * sentence somebody reads on a phone. This file is DOM-free and holds no listing,
    * so the name has to arrive from a caller that does; the default keeps every
@@ -409,6 +409,71 @@ export function adoptModels(
     }
     return added.length === 0 ? system : { ...system, models: [...system.models, ...added] };
   });
+}
+
+/**
+ * Which providers have no rows at all *because this machine could not be asked*,
+ * as one sentence — or `null` when every provider that could speak, did.
+ *
+ * ⚠ **The gap this closes is a whole provider disappearing in silence, and it was
+ * never only about one of them.** {@link allModels} builds a group from two
+ * sources, the system's own `models` table and the list its native harness
+ * publishes, and a group with no rows is not drawn — there is no heading for an
+ * empty one. **Five** of the eight systems this product ships carry an empty
+ * table on purpose, because their CLI publishes the real list — `anthropic` via
+ * claude, `openai` via codex, `xai` via grok, and `openrouter` and `zen` both via
+ * opencode, which is four harnesses covering five providers. For every one of
+ * them, a harness the daemon could not spawn is a provider that vanishes off this
+ * screen with nothing said, and the reader's only available conclusion is that
+ * the product dropped it.
+ *
+ * ⚠ **`error` and not "zero models", which are different facts.** The daemon sets
+ * `AgentCapabilities.error` only when the ask itself failed — a missing binary, a
+ * refused handshake, a harness that answered nothing inside its budget. A harness
+ * that answered honestly with an empty list is saying something true about
+ * itself, and inventing a sentence over it would be this client guessing.
+ * `AgentBuilder`'s harness rows already read the same field and draw
+ * `COULD_NOT_ASK` from it, so the two halves of the screen agree about what
+ * happened rather than each deciding for itself.
+ *
+ * ⚠ **It states the fact and names no remedy** — `openRouterNotice`'s rule, and
+ * the same reason applies: the remedy is a different screen (install the harness,
+ * or sign in to it) and naming it here would be this list explaining somebody
+ * else's job. The harness is named because it is the thing the reader would have
+ * to act on and it appears nowhere else on this screen.
+ *
+ * Takes the **substituted** list, so a provider whose rows this browser fetched
+ * for itself has a populated table by now and drops out on its own. OpenRouter is
+ * excluded by id all the same: when *that* fetch fails it has a sentence of its
+ * own, and two lines about one provider in one slot is worse than either.
+ */
+export function unreadSystemsNotice(
+  systems: readonly SystemInfo[],
+  capabilities: Readonly<Record<string, AgentCapabilities>> | null,
+  /** Whose rows come from elsewhere and carry their own sentence when they fail. */
+  exclude: readonly string[] = [],
+): string | null {
+  if (capabilities === null) return null;
+  const silent: string[] = [];
+  for (const system of systems) {
+    const harness = system.nativeHarness;
+    if (harness === null || system.models.length > 0) continue;
+    if (exclude.includes(system.id)) continue;
+    if ((capabilities[harness]?.error ?? null) === null) continue;
+    // Listed per *provider*, so a harness two of them ride — `openrouter` and
+    // `zen` both ride opencode — is named twice. That is the true shape of what
+    // happened: two groups are missing, for one reason.
+    silent.push(`${system.displayName} (${agentLabel(harness)})`);
+  }
+  if (silent.length === 0) return null;
+  /*
+   * One sentence either way rather than a singular and a plural pair: the list is
+   * the only part that varies, and `Intl.ListFormat` is what turns it into prose
+   * without this file owning a comma rule. `conjunction`, because every name in
+   * it is equally missing.
+   */
+  const names = new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(silent);
+  return `This machine couldn't check what it can run, so ${names} lists nothing here.`;
 }
 
 export function allModels(
@@ -809,7 +874,7 @@ export function groupModels(choices: readonly ModelChoice[]): ModelGroup[] {
  *
  * ⚠ **The harnesses come from the *listing*, and reading `AGENT_IDS` here was the
  * clearest way a contributed harness could have been made a second-class row.**
- * That constant is the four this product ships, so a harness a plugin added would
+ * That constant is the five this product ships, so a harness a plugin added would
  * have drawn no glyph on any model row — and a model only it can run would have
  * drawn **none at all**, silently, on a row whose whole job is to say what will run
  * it. The sentence above about "never empty" would have become false in exactly the
@@ -1308,7 +1373,7 @@ export function anyKeySet(agent: AgentAuthInfo): boolean {
   return agent.credentials.some((slot) => slot.set);
 }
 
-export function offersStripTile(candidate: AgentInfo): boolean {
+export function offersStripTile(candidate: AgentAvailability): boolean {
   return (
     // The whole row rather than its id: whether a harness is a starting point on
     // its own is a fact this repository knows about its own four and a fact the
@@ -1359,7 +1424,7 @@ export function offersStripTile(candidate: AgentInfo): boolean {
  */
 export function startableHere(
   row: { kind: "harness" | "custom"; id: string },
-  agents: readonly AgentInfo[] | null,
+  agents: readonly AgentAvailability[] | null,
   presets: readonly CustomAgent[] | null,
 ): boolean {
   if (row.kind === "harness") {

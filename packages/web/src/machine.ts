@@ -91,11 +91,12 @@ const REQUEST_TIMEOUT_MS = 15_000;
  *
  * ⚠ **One member is not fully covered by this number, and saying so is better
  * than implying otherwise.** `GET /agents/capabilities` starts an agent for each
- * of the **four** harnesses — asked all at once now and metered through
+ * of the **five** harnesses — asked all at once now and metered through
  * `MAX_CONCURRENT_ASKS` by a queue rather than run one at a time; see the entry in
  * {@link slowRoute}. Each is bounded by `agentask.ts`'s `ASK_TIMEOUT_MS` at 120s
  * and the queue by `SLOT_WAIT_MS`, so the worst case is rounds of two rather than
- * a sum of four. Ninety seconds covers what it actually costs — measured
+ * a sum of five — three rounds now that grok is the fifth, where the measurement
+ * below was taken over four. Ninety seconds covers what it actually costs — measured
  * 2026-08-28, **3061 ms** on a cold cache against 5286 ms when it was serial —
  * and a harness hung to its full budget still lands on the failure this
  * table exists to prevent, only three minutes later instead of fifteen seconds

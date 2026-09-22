@@ -17,6 +17,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { AGENT_IDS, AGENT_LOGIN, MANAGED_CLI_DIRS } from "../src/acp/agents.js";
+// The parser for the one grammar this script and `src/` share. Imported rather
+// than restated, so the emitter below is driven against the real reader.
+import { readStep } from "../src/agentinstall.js";
 import { SETTING_KEYS, envNameFor } from "../packages/control-plane/src/settings.js";
 import { tmp } from "./tmp.js";
 
@@ -799,6 +802,19 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   codex: "@openai/codex",
   opencode: "opencode-ai",
   kimi: "@moonshot-ai/kimi-code",
+  /*
+   * ⚠ **A launcher shim, not the agent, and the difference is a real install
+   * hazard.** The published tarball is ~18 kB; the platform binaries ride in
+   * `optionalDependencies` (`@xai-official/grok-{darwin,linux,win32}-{arm64,x64}`)
+   * brotli-compressed, and a postinstall decompresses one into `$GROK_HOME/bin`.
+   * So `npm i -g --no-optional` installs something that cannot run — the shim
+   * detects it and says so on stderr — and `ensure_npm` must never grow that flag.
+   * Measured 2026-09-21 on 1.0.40: even with npm 11's `allow-scripts` gate
+   * blocking the postinstall, the shim decompressed on first invocation and
+   * `~/.grok/bin/grok -> grok-1.0.40` appeared, so the door survives a blocked
+   * script — it just moves the work to the first run.
+   */
+  grok: "@xai-official/grok",
 };
 
 /*
@@ -1251,15 +1267,44 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("and neither channel is written into a command in that function", claudeCommands.filter((line) => /\b(stable|latest)\b/.test(line)), []);
   check("the channel defaults to latest, before any flag is read", lineIn("agents.sh", agentLines, "the channel default", "CHANNEL="), "CHANNEL=latest");
   const npmCalls = agentLines.filter((line) => /\bensure_npm\b/.test(line) && !/^ensure_npm\(\)/.test(line));
+  /*
+   * The harnesses that take the npm door under **either** `--source`, so they have
+   * one call site rather than two. Each is here for its own measured reason and
+   * neither is a default — see the shapes below.
+   */
+  const UNCONDITIONAL_NPM = ["kimi", "grok"] as const;
   const npmCallShapes = [
     /^\s*toolchain\) ensure_npm \S+ \S+ "[^"]*"; return 0 ;;$/,
     /^\s*if \[ "\$SOURCE" = npm \]; then ensure_npm \S+ \S+ "[^"]*"; return 0; fi$/,
     /^\s*ensure_npm kimi \S+ "[^"]*"$/,
+    /*
+     * ⚠ **The second unconditional row, and it is here for a different reason from
+     * kimi's.** kimi takes this door because its own updater lies — without a TTY
+     * `kimi upgrade` exits 0 having installed nothing. grok's vendor installer
+     * works fine; what it also does is symlink into `~/.local/bin` and append to
+     * `~/.bashrc`/`~/.zshrc`, and *this script edits no shell profile* is a
+     * property `CLAUDE.md` states about it. The npm door writes none, and it is
+     * the copy `ensure_npm` can refresh on a timer with nobody watching — which is
+     * the whole reason this row exists rather than a vendor arm.
+     *
+     * Two exceptions rather than a rule, and they stay spelled out one per line so
+     * that a third is a decision somebody makes here instead of a pattern that
+     * quietly admits it.
+     */
+    /^\s*ensure_npm grok \S+ "[^"]*"$/,
   ];
   check(
-    "every reach into the npm arm is a toolchain copy, an absent harness behind the flag, or kimi",
+    "every reach into the npm arm is a toolchain copy, an absent harness behind the flag, or one of the two that must take it",
     [npmCalls.filter((line) => !npmCallShapes.some((shape) => shape.test(line))), npmCalls.length],
-    [[], 2 * (AGENT_IDS.length - 1) + 1],
+    /*
+     * Two call sites for a harness that can take either door — the `toolchain)`
+     * refresh and the `--source npm` install — and **one** for each of the two that
+     * always take this one, kimi and grok. Derived from `AGENT_IDS` rather than
+     * written as a number so that a sixth harness fails here until somebody says
+     * which kind it is; `UNCONDITIONAL` is spelled out for the same reason the
+     * shapes above are, since it is the list that carries the argument.
+     */
+    [[], 2 * (AGENT_IDS.length - UNCONDITIONAL_NPM.length) + UNCONDITIONAL_NPM.length],
   );
 
   /*
@@ -1280,11 +1325,16 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check(
     "ensure_npm reads the same answer: absent is an install, toolchain a refresh, anything else somebody else's",
     [
-      ensureNpmLines.includes('"") _verb=install ;;'),
+      // The absent arm carries `--refresh-only`'s guard now, so it is two lines.
+      // Pinned as "the guard, then the verb, in that order" rather than as one
+      // string: a guard placed *after* `_verb=install` would still contain both
+      // substrings and would install on a run that promised not to.
+      at('"") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "$_pad"; return 0; fi') !== -1,
+      at('"") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "$_pad"; return 0; fi') < at("_verb=install ;;"),
       ensureNpmLines.includes("toolchain) _verb=refresh ;;"),
       ensureNpmLines.includes('*) outside_note "$_pad" "$_agent"; return 0 ;;'),
     ],
-    [true, true, true],
+    [true, true, true, true],
   );
   check(
     "a failure is said by what is true afterwards, and that differs by verb",
@@ -1352,10 +1402,35 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     ],
     [true, true],
   );
+  /*
+   * ⚠ **It counts `$attempted` rather than the roster, and that stopped being a
+   * style question when `--only` landed.** A one-harness run that failed reported
+   * "1 of 5 agents were not installed or refreshed", which reads as four that
+   * quietly worked and were never touched. Asserted as source text because the
+   * number is a variable now and no run can show a wrong *constant* is absent.
+   */
   check(
-    "and the summary counts against the four rather than a number retyped elsewhere",
-    agents.includes(`warn "  $failed of ${AGENT_IDS.length} agents were not installed or refreshed; the lines above say why"`),
-    true,
+    "and the summary counts the harnesses this run walked, not the roster",
+    [
+      agents.includes('warn "  $failed of $attempted agents were not installed or refreshed; the lines above say why"'),
+      agents.includes(`of ${AGENT_IDS.length} agents were not installed`),
+    ],
+    [true, false],
+  );
+  /*
+   * ⚠ **One list of harnesses, shared with `src/` and compared as a *set*.**
+   * `main` iterates `$AGENTS` and `--only` validates against it, so a sixth
+   * harness is one line there rather than three. The orders differ deliberately —
+   * the script's is cheapest-first — which is why this is membership rather than
+   * sequence. Same rule `MANAGED_CLI_DIRS` already holds for the other list these
+   * two files share, and for the same reason: two places naming the same set is
+   * how they come to disagree.
+   */
+  const scriptAgents = (agents.match(/^AGENTS="([^"]*)"/m)?.[1] ?? "").split(/\s+/).filter(Boolean);
+  check(
+    "the script's harness list is the daemon's, as a set",
+    [[...scriptAgents].sort(), scriptAgents.length],
+    [[...AGENT_IDS].sort(), AGENT_IDS.length],
   );
 
   /*
@@ -1443,6 +1518,32 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("an unknown flag is refused with 2", runAgents(["--bogus"]).status, 2);
   const bareSkip = runAgents(["--skip"]);
   check("and so is --skip with no name", [bareSkip.status, bareSkip.err.includes("--skip needs an agent name")], [2, true]);
+  const bareOnly = runAgents(["--check", "--only"]);
+  check("and --only with no name", [bareOnly.status, bareOnly.err.includes("--only needs an agent name")], [2, true]);
+  /*
+   * And a flag in the value slot is refused rather than eaten, which falls out of
+   * checking the value at all: `--only --check` cannot quietly become a run of
+   * every harness with `--check` consumed. `--skip --check` really does eat it,
+   * which is the cost of that field not being checked and is why the one whose
+   * caller is a button is.
+   */
+  const eaten = runAgents(["--only", "--check"]);
+  check("and a flag in --only's value slot is refused, not swallowed", [eaten.status, eaten.err.includes("not --check")], [2, true]);
+  /*
+   * ⚠ **`--only` checks its value where `--skip` does not, and the asymmetry is
+   * the assertion rather than an oversight somebody should tidy.** A `--skip
+   * typo` withholds a prune that was not going to matter. A `--only typo` is a
+   * run that walks no harness, prints a header, exits 0 and reports success — and
+   * the caller that passes `--only` is an install somebody pressed, which would
+   * draw exactly that as "installed". Refused by name, with the list, so the
+   * message is the fix.
+   */
+  const badOnly = runAgents(["--only", "gemini", "--check"]);
+  check(
+    "an --only naming a harness this script does not install is refused with 2, by name",
+    [badOnly.status, badOnly.err.includes("--only takes one of"), badOnly.err.includes("not gemini")],
+    [2, true, true],
+  );
   /*
    * `--source` takes two spellings and nothing else. The daemon passes it from
    * `REEMOAT_AGENT_SOURCE` after reading the same two, so a third value reaching
@@ -1804,7 +1905,174 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   );
   const heldCheck = runAgents(["--source", "npm", "--check"], { HOME: lockHome });
   check("while --check needs no lock and previews past one", [heldCheck.status, heldCheck.err, heldCheck.out.includes("nothing will be changed")], [0, "", true]);
-  const gone = spawnSync("sh", ["-c", 'echo "$$"'], { encoding: "utf8" }).stdout.trim();
+  /*
+   * ⚠ **The same contended lock, and one caller needs to be able to tell.** Three
+   * of the four contract that this script never fails, and for them `exit 0` with
+   * nothing installed really is nothing to report. The fourth is an install
+   * somebody pressed: there, an empty stdout and a clean exit cannot be told from
+   * a successful run that found nothing to do, and the screen would draw it as
+   * installed. Same sentence on stderr, same nothing changed — only the status
+   * moves, and only behind the flag, so no existing caller's contract does.
+   */
+  writeFileSync(join(lockDir, "pid"), `${process.pid}\n`);
+  const heldLoud = runAgents(["--source", "npm", "--fail-if-locked"], { HOME: lockHome, FAKE_VER: "1.0.0" });
+  check(
+    "a contended run exits 3 under --fail-if-locked, with the same sentence and nothing installed",
+    [heldLoud.status, heldLoud.err.includes("is in progress; nothing was changed"), heldLoud.out, AGENT_IDS.map((id) => buildsOf(lockHome, id))],
+    [3, true, "", AGENT_IDS.map(() => [])],
+  );
+  /* ------------------------------------------------------------------ *
+   * `--refresh-only`: what is here moves, what is not stays away
+   *
+   * ⚠ **The whole of the posture change rests on this flag holding at *five*
+   * doors**, and four of them are easy to miss: "absent" is spelled once in
+   * `ensure_npm` and three more times as a vendor `case` that had no `""` arm at
+   * all and fell through into its install path. A guard missing from one of them
+   * is a harness that still downloads on a run that promised not to — and the
+   * symptom is 200 MB and a vendor's host, on a machine nobody asked.
+   *
+   * So the assertion is an **absence over the whole transcript**: no install verb
+   * of any kind, from any of the five. That is the only shape that catches the
+   * door somebody forgot rather than the doors somebody remembered.
+   * ------------------------------------------------------------------ */
+  const bareHome = join(sandbox, "agents-bare-home");
+  mkdirSync(bareHome, { recursive: true });
+  const refreshOnly = runAgents(["--refresh-only", "--check"], { HOME: bareHome });
+  const INSTALL_VERBS = /would download|npm i -g|claude install|codex update|opencode upgrade|would install/;
+  check(
+    "--refresh-only on a machine with no harness installs nothing, from any door",
+    [
+      refreshOnly.status,
+      INSTALL_VERBS.test(refreshOnly.out),
+      INSTALL_VERBS.test(refreshOnly.err),
+      AGENT_IDS.every((id) => refreshOnly.out.includes(`${id} `) || refreshOnly.out.includes(`${id}\n`)),
+    ],
+    [0, false, false, true],
+  );
+  check(
+    "and says so per harness rather than silently doing nothing",
+    (refreshOnly.out.match(/not installed; --refresh-only fetches nothing new/g) ?? []).length,
+    AGENT_IDS.length,
+  );
+  /*
+   * ⚠ **And none of it is counted as a failure.** `$failed` means "a vendor could
+   * not be reached", which the daemon forwards to an operator as a warning. A
+   * harness nobody has installed is the ordinary state of a machine now, and
+   * warning about five of them daily is how somebody learns to ignore the one
+   * counter that does mean something. Asserted as an empty stderr, not as a
+   * count: the summary line is the thing that must not appear.
+   */
+  check("and none of it is counted as a failure", [refreshOnly.err, refreshOnly.err.includes("were not installed or refreshed")], ["", false]);
+  /*
+   * The other half, or the flag would pass by doing nothing at all: a copy that
+   * *is* there still takes its vendor's own refresh verb.
+   */
+  const refreshHome = join(sandbox, "agents-refresh-home");
+  const refreshClaude = join(refreshHome, ".local", "bin", "claude");
+  mkdirSync(dirname(refreshClaude), { recursive: true });
+  claudeStub(refreshClaude);
+  const stillRefreshes = runAgents(["--refresh-only", "--check"], { HOME: refreshHome });
+  check(
+    "while a copy that is there is still refreshed",
+    [
+      /^  claude: would run: claude install latest$/m.test(stillRefreshes.out),
+      stillRefreshes.out.includes("claude        not installed"),
+    ],
+    [true, false],
+  );
+  /* ------------------------------------------------------------------ *
+   * The step grammar, from the emitter's side
+   *
+   * ⚠ **Both ends of this grammar are in this repository, and that is the only
+   * reason it may be a grammar at all.** `ui/login.ts` parses a *vendor's*
+   * sentences, which is why it is a guess with a raw-transcript fallback. Here
+   * the script prints the lines and `readStep` reads them, so the driver imports
+   * the parser and runs the emitter — the trick `MANAGED_CLI_DIRS` already uses
+   * for the other list these two files share.
+   *
+   * ⚠ **It exists because the script is otherwise silent for minutes.** `attempt`
+   * and `ensure_npm` send every vendor installer's and npm's own output to
+   * `/dev/null`, so between the header and the first finished harness there is
+   * nothing on the wire at all.
+   * ------------------------------------------------------------------ */
+  const stepHome = join(sandbox, "agents-step-home");
+  mkdirSync(stepHome, { recursive: true });
+  const stepped = runAgents(["--only", "kimi", "--source", "npm"], { HOME: stepHome, FAKE_VER: "1.0.0" });
+  const stepLines = stepped.out.split("\n").filter((line) => line.startsWith("step:"));
+  check(
+    "a real run prints checkpoints, and every one of them parses",
+    [stepLines.length > 0, stepLines.every((line) => readStep(line) !== null)],
+    [true, true],
+  );
+  check(
+    "they are this harness's, and they run start → … → done",
+    [
+      stepLines.every((line) => readStep(line)?.agent === "kimi"),
+      readStep(stepLines[0] ?? "")?.phase,
+      readStep(stepLines.at(-1) ?? "")?.phase,
+    ],
+    [true, "start", "done"],
+  );
+  /*
+   * ⚠ **And `--check` emits none.** A `download` checkpoint under a flag that
+   * downloads nothing would be the script claiming an act it did not perform,
+   * which is what every other `--check` arm in this file is careful not to do.
+   */
+  check(
+    "while --check emits none, having performed none",
+    runAgents(["--only", "kimi", "--check"], { HOME: stepHome }).out.includes("step:"),
+    false,
+  );
+
+  /*
+   * ⚠ **`--only` and `--refresh-only` compose, and the summary counts the run.**
+   * A one-harness run that failed reporting "1 of 5" reads as four that quietly
+   * worked, which is the defect the `$attempted` assertion above pins in source
+   * text and this one drives.
+   */
+  const narrowed = runAgents(["--only", "codex", "--refresh-only", "--check"], { HOME: refreshHome });
+  check(
+    "--only narrows the walk, and the header names both modes",
+    [
+      narrowed.out.includes("codex only"),
+      narrowed.out.includes("refresh only, nothing new is installed"),
+      narrowed.out.includes("claude"),
+      // claude is not in the run, so its channel is not a choice this run made.
+      narrowed.out.includes("claude on its latest channel"),
+    ],
+    [true, true, false, false],
+  );
+
+  /*
+   * ⚠ **A pid that was never live, rather than one that has just exited.** A
+   * recycled pid reads as a live lock and fails this for a reason that is not
+   * about the script. Anything past `pid_max` is refused by `kill -0` on both
+   * platforms this deploys to.
+   *
+   * ⚠ **And that premise is asserted rather than trusted, because the case below
+   * cannot assert it.** Measured 2026-09-22 on macOS by standing `1` in for this
+   * constant: the takeover assertion stayed **green** over a pid that is
+   * unambiguously alive. The script's test is `kill -0`, and as a non-root uid
+   * `kill -0 1` exits 1 with *Operation not permitted* — so a live process this
+   * uid does not own reads to it exactly as a dead one does, and the case would
+   * have gone on reporting that a stale lock is taken over while holding a live
+   * one. Nothing else in the block can tell the two apart.
+   *
+   * So the refusal is required to be `ESRCH`, *no such process*, and never
+   * `EPERM`. `4194305` is one past Linux's own ceiling for `pid_max` and far past
+   * anything macOS issues; if a future platform starts handing the number out,
+   * this line is what says so instead of the takeover quietly changing subject.
+   */
+  const gone = "4194305";
+  const pidState = (pid: number): string => {
+    try {
+      process.kill(pid, 0);
+      return "alive";
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code ?? "unknown";
+    }
+  };
+  check("the pid this lock names is no process at all, which is what makes it stale", pidState(Number(gone)), "ESRCH");
   writeFileSync(join(lockDir, "pid"), `${gone}\n`);
   const stale = runAgents(["--source", "npm"], { HOME: lockHome, FAKE_VER: "1.0.0" });
   check(
@@ -2209,10 +2477,45 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * would otherwise be neither — every npm-installed harness "skipped: no npm to
    * install it with" on a machine that had just installed one.
    */
-  const agentsCall = bootFn("install_agents").split("\n").find((line) => line.includes("deploy/agents.sh")) ?? "";
+  const installAgentsFn = bootFn("install_agents");
+  /*
+   * ⚠ **Comments are skipped, or the finder picks up the docblock that *names*
+   * the script.** This found a prose line the moment `install_agents` grew one
+   * mentioning `deploy/agents.sh --only`, and reported the call as missing.
+   */
+  const installAgentsLines = installAgentsFn
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line));
+  const agentsCall = installAgentsLines.find((line) => line.includes("deploy/agents.sh")) ?? "";
   check(
     "install_agents runs the script with the installed node's directory in front",
-    agentsCall.trim().startsWith('( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" )'),
+    agentsCall.trim().startsWith('( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" $_only )'),
+    true,
+  );
+  /*
+   * ⚠ **And it returns before that line unless somebody named a harness**, which
+   * is the whole posture change at the one door a fresh machine comes through.
+   * This used to install all five, so a harness added to this repository arrived
+   * on every machine in the fleet by itself — offering a sign-in for a program
+   * nobody had asked for, which is the reported symptom. Asserted as an *early
+   * return placed before the call*, because a guard after it installs everything
+   * and still contains both strings.
+   */
+  const guardAt = installAgentsLines.findIndex((line) => line.includes('[ -n "$INSTALL_AGENTS" ] ||'));
+  const callAt = installAgentsLines.findIndex((line) => line.includes("deploy/agents.sh"));
+  check(
+    "and installs nothing at all unless somebody named a harness",
+    [guardAt !== -1, guardAt < callAt, installAgentsFn.includes("press Install")],
+    [true, true, true],
+  );
+  /*
+   * Each name goes through `--only`, which `deploy/agents.sh` validates against
+   * its own list — so a typo is an `exit 2` naming the five rather than a run
+   * that walks no harness, exits 0 and reports success.
+   */
+  check(
+    "each named harness is forwarded as --only, for the script to validate",
+    installAgentsFn.includes('_only="$_only --only $_one"'),
     true,
   );
 
@@ -3726,7 +4029,7 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   // `stable` host to `latest` on the way through a restart (Q4.115).
   const readsChannel = armLines.indexOf(`_agent_channel=$(file_value "$_daemon_env" REEMOAT_AGENT_CHANNEL | tr '[:upper:]' '[:lower:]')`);
   const defaultsChannel = armLines.indexOf('[ "$_agent_channel" = stable ] || _agent_channel=latest');
-  const announces = armLines.indexOf('echo "  agents ($_agent_source)"');
+  const announces = armLines.indexOf('echo "  agents ($_agent_source, refresh only)"');
   const callAt = armLines.findIndex((line) => line.startsWith('"$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel"'));
   const call = armLines[callAt] ?? "";
   const guardAt = armLines.indexOf(') || echo "  agents: the script did not finish; the daemon retries daily" >&2');
@@ -3761,6 +4064,16 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   check("says which, then runs the same script the bootstrap and the daemon run, with that source", [announces > defaults, callAt > announces], [true, true]);
   check("with node's directory in front, as the bootstrap puts it", armLines.some((line) => line.startsWith('PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"')), true);
   check("withholding every prune, since it cannot know which harnesses are live", AGENT_IDS.filter((id) => !call.includes(` --skip ${id}`)), []);
+  /*
+   * ⚠ **And installing nothing, which is the half of the posture change a deploy
+   * carries.** A deploy used to install whatever this repository had learned to
+   * install, so adding a harness here put it on every machine in the fleet on its
+   * next update — offering a sign-in nobody had asked for, on a machine that did
+   * not have it. That was the reported symptom. What a deploy does now is move
+   * the copies that are already there; a harness arrives when somebody presses a
+   * button about it.
+   */
+  check("and installing nothing that is not already there", call.includes(" --refresh-only"), true);
   check("with exactly one --skip per harness", (call.match(/ --skip /g) ?? []).length, AGENT_IDS.length);
   check("never fatal, and saying who retries", guardAt === callAt + 1, true);
   check("before the restart decision, so the copies are there when the daemon comes back", callAt !== -1 && restartAt > callAt, true);
@@ -3833,15 +4146,15 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   const npmDeploy = runArm({ REEMOAT_ENV_FILE: envSaying("npm") });
   check(
     "an env file saying npm runs the script with --source npm, the channel spelled out, and every prune withheld",
-    [npmDeploy.run.status, meaning(npmDeploy.argv), npmDeploy.run.out.includes("  agents (npm)\n"), npmDeploy.run.err],
-    [0, { source: "npm", channel: "latest", skips: everyHarness, rest: [] }, true, ""],
+    [npmDeploy.run.status, meaning(npmDeploy.argv), npmDeploy.run.out.includes("  agents (npm, refresh only)\n"), npmDeploy.run.err],
+    [0, { source: "npm", channel: "latest", skips: everyHarness, rest: ["--refresh-only"] }, true, ""],
   );
   check("and adds nothing to the restart list by itself", npmDeploy.run.out.includes("restart_list=[]\n"), true);
   const noEnv = runArm({ REEMOAT_ENV_FILE: envSaying(null) });
   check(
     "no env file at all is vendor and latest, which is what the daemon reads absent values as",
-    [noEnv.run.status, meaning(noEnv.argv), noEnv.run.out.includes("  agents (vendor)\n")],
-    [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }, true],
+    [noEnv.run.status, meaning(noEnv.argv), noEnv.run.out.includes("  agents (vendor, refresh only)\n")],
+    [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: ["--refresh-only"] }, true],
   );
   /*
    * A spelling the daemon would warn about and read as `vendor` is passed as
@@ -3850,7 +4163,7 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
    * would then report as a run that did not finish.
    */
   const bogus = runArm({ REEMOAT_ENV_FILE: envSaying("bogus") });
-  check("and a spelling that is neither is passed as vendor rather than as itself", [bogus.run.status, meaning(bogus.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }]);
+  check("and a spelling that is neither is passed as vendor rather than as itself", [bogus.run.status, meaning(bogus.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: ["--refresh-only"] }]);
   /*
    * The channel, read the way `agentChannelFrom` reads it (Q4.115): `stable`
    * however it is cased is `stable`, and a spelling that is neither is `latest`
@@ -3862,10 +4175,10 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   check(
     "an env file saying STABLE passes --channel stable, lowercased as the daemon reads it",
     [stableDeploy.run.status, meaning(stableDeploy.argv), stableDeploy.run.err],
-    [0, { source: "npm", channel: "stable", skips: everyHarness, rest: [] }, ""],
+    [0, { source: "npm", channel: "stable", skips: everyHarness, rest: ["--refresh-only"] }, ""],
   );
   const bogusChannel = runArm({ REEMOAT_ENV_FILE: envSaying("vendor", "REEMOAT_AGENT_CHANNEL='nightly'\n") });
-  check("and a channel that is neither is passed as latest rather than as itself", [bogusChannel.run.status, meaning(bogusChannel.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }]);
+  check("and a channel that is neither is passed as latest rather than as itself", [bogusChannel.run.status, meaning(bogusChannel.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: ["--refresh-only"] }]);
   const failed = runArm({ REEMOAT_ENV_FILE: envSaying("npm") }, 1);
   check(
     "a script that did not finish is a line on stderr, and the deploy goes on",
@@ -6404,6 +6717,70 @@ process.stdout.write("\nthe one-line installer\n");
     check("without installing anything on the way", existsSync(join(home, ".reemoat", "toolchain")), false);
     const goodChannel = runBootstrap(["--agent-channel", "stable"]);
     check("while stable passes the parser and fails on the control plane instead", [goodChannel.status, goodChannel.err.includes("--url"), goodChannel.err.includes("--agent-channel")], [2, true, false]);
+
+    /*
+     * ⚠ **`--install-agents ,,,` installed all five**, and every guard
+     * between that flag and the installer read as satisfied on the way.
+     * Reproduced in `sh` before it was fixed: the shape pattern refuses a
+     * character outside `[a-z,]` and a value of nothing but separators holds
+     * none, so the shape passed; the emptiness guard inside `install_agents` is
+     * satisfied by any non-empty string, so that passed too; and the loop under
+     * it then emitted **no** `--only` argument at all, which `deploy/agents.sh`
+     * documents as the flag being *absent* — meaning every harness. So the one
+     * flag that exists to be the narrow door into "nothing is installed by
+     * default" inverted that policy for a caller handing it a computed-and-empty
+     * list: ~700 MB of CLIs and a sign-in prompt for programs nobody asked for.
+     *
+     * Driven rather than read off the source, and **in both directions**, since
+     * the whole content of this refusal is *which* values reach the installer.
+     * A list that names a harness has to get past the parser, and what proves it
+     * did is the shape the two flags above already use: the run fails later, on
+     * the missing control plane, with nothing about this flag anywhere in it. An
+     * assertion on the three refusals alone would stay green under a parser that
+     * refused every value, which is the failure this driver has shipped before.
+     */
+    for (const nameless of [",,,", ",", ""]) {
+      const run = runBootstrap(["--install-agents", nameless]);
+      check(
+        `--install-agents ${JSON.stringify(nameless)} names no harness and is refused by name`,
+        [run.status, run.err.includes(`--install-agents names no agent in "${nameless}"`), run.err.includes("omit the flag to install none")],
+        [2, true, true],
+      );
+    }
+    const named = runBootstrap(["--install-agents", "claude,codex"]);
+    check("while a list that names two passes the parser and fails on the control plane instead", [named.status, named.err.includes("--url"), named.err.includes("--install-agents")], [2, true, false]);
+    /*
+     * And a stray separator *inside* a real list is still a list: the loop drops
+     * the empty field and forwards the two names, so refusing this value would
+     * refuse one that installs exactly what it says. That is the line the middle
+     * arm draws, and it is the reason the guard is "holds a name" rather than
+     * "holds no empty field".
+     */
+    const stray = runBootstrap(["--install-agents", "claude,,codex"]);
+    check("and a separator between two names is not a nameless list", [stray.status, stray.err.includes("--install-agents")], [2, false]);
+    /*
+     * The shape refusal is the arm the new one had to be added *beside* rather
+     * than in front of — a value outside the shape is still refused for its
+     * shape, and still names the value, which is what keeps the two errors
+     * telling a caller different things.
+     *
+     * ⚠ **`LC_ALL=C` on this one run, because `[!a-z,]` is a *range* and a range
+     * collates.** Measured 2026-09-22 under macOS `/bin/sh`: `case Claude in
+     * *[!a-z,]*)` matches under `LC_ALL=C` and does **not** match under
+     * `en_US.UTF-8` or `ru_RU.UTF-8`, where `A`–`Z` collate inside `a`–`z`. So
+     * this arm holds an ASCII-uppercase name out in the C locale only; under a
+     * UTF-8 one the middle arm accepts it and the refusal arrives late and soft
+     * instead — `deploy/agents.sh --only` exits 2 by name and `install_agents`
+     * downgrades that to a warning. Everything else the shape keeps out was
+     * refused under all three: a digit, a space, `;`, `/`, `.` and a non-ASCII
+     * letter, and so was the nameless list the arm above this one owns. Pinned
+     * rather than inherited: `baseEnv` carries no locale, so the child already
+     * gets C, and writing it here is what stops a locale added there later from
+     * retiring this assertion silently.
+     */
+    const badShape = runBootstrap(["--install-agents", "Claude"], { LC_ALL: "C" });
+    check("while a name outside the shape is still refused by the shape, naming it", [badShape.status, badShape.err.includes("--install-agents takes a comma-separated list of agent names, not Claude")], [2, true]);
+    check("and no harness was installed on the way to any of those", existsSync(join(home, ".reemoat", "toolchain")), false);
   }
 
   /*

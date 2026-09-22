@@ -712,7 +712,7 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
         >
           {/*
             * ⚠ **The name only where this screen can honestly have one.**
-            * `agentLabel` answers for the four this product ships and falls through
+            * `agentLabel` answers for the five this product ships and falls through
             * to the raw id for anything else — so a session on a harness a plugin
             * added would read *"Sign in to acme:gemini"*, which is wrong twice: the
             * id where a name goes, and a sign-in a contributed harness does not

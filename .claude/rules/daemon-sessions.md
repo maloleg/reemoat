@@ -34,7 +34,7 @@ left, and a fresh agent worked four minutes later. Q7.103.
 **A session reads as stopped only when somebody stopped it.** Everything else the
 daemon ended it brings back by itself, on the same conversation, at the next boot,
 over ACP's `session/resume` — which restores the agent's own context without
-replaying anything, and which all four agents advertise. Q2.1, Q2.106. opencode's
+replaying anything, and which all five agents advertise. Q2.1, Q2.106. opencode's
 is read off `initialize` (Q6.105) rather than driven with a real login, which is
 the same standing this claim had for codex before it was exercised.
 

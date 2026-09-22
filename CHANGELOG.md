@@ -27,6 +27,70 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Added
 
+- **Grok, as a fifth harness and an eighth provider.** `grok agent stdio` is xAI's
+  own ACP entry point, so this is the first agent that needs no adapter of any
+  kind — `deploy/agents.sh` installs `@xai-official/grok` from the npm registry
+  under either `REEMOAT_AGENT_SOURCE`, which is the door the daemon can refresh on
+  a timer with nobody watching. A new `xAI` provider sits beside it, reached by the
+  CLI that ships for it; a routed arm, letting Claude Code be pointed at Grok, is
+  deliberately not included until one call with a real key shows xAI's
+  `/v1/messages` answering in Anthropic's shape.
+- **ACP `authenticate` is sent, for the harnesses that need it — and only where
+  there is a key to spend.** A machine holding a pasted xAI key needs that call
+  for the key to be spent at all, so the daemon makes it once per agent process,
+  between the handshake and the first session. The method id is written down
+  rather than read off the agent, because the one the agent advertises opens a
+  browser and waits.
+
+- **Agents are installed when you ask for them, not when the daemon updates.**
+  A harness you have never used is no longer downloaded onto your machine: a fresh
+  install brings none at all — several minutes and about 700 MB lighter — and a
+  daemon update moves only the copies that are already there. To add one, open
+  Settings → Agents, press **Install**, and watch it go; signing in comes after.
+  A machine set up by a script can still name what it wants up front, with
+  `--install-agents claude,codex`.
+
+### Fixed
+
+- **A new agent appeared on machines that did not have it, offering to sign you
+  in.** Adding a coding agent to Reemoat put it on every machine in a fleet on the
+  next daemon update, and the button under it led to a screen that could only
+  report that the program was missing. Nothing installs an agent by itself any
+  more, and where one is genuinely absent the screen offers to install it rather
+  than to sign in to it.
+- **Grok could not run a turn on a machine signed in with `grok login`.** The
+  first message came back as a bare `Internal error`. The `authenticate` above was
+  being sent unconditionally, and with no API key behind it that call does not
+  fail — it *selects* an API-key sign-in, after which Grok stops consulting the
+  credential it already has and calls its own service as nobody. It is now sent
+  only when there is a key to spend, so a machine signed in the ordinary way uses
+  the credential it has.
+- **Grok's tile offered "Sign in" on a machine that was already signed in.** The
+  daemon had no way to ask Grok about its own sign-in, so every machine answered
+  "cannot check". It asks now, and tells the three states apart: signed in through
+  the browser flow, running on a saved key, or signed in nowhere.
+- **A greyed *Mode* control on Grok said the agent was "not offering this control
+  at the moment".** Grok has no modes at all and never will, so the sentence was
+  describing a permanent fact in words that promised a temporary one. The slot
+  still holds its place — the control row is the same shape on every agent, which
+  is deliberate — and now says the agent has none.
+- **A provider whose models come from a coding CLI vanished from the model picker
+  in silence when that CLI could not be reached.** Five of the eight providers get
+  their model list from the harness that ships for them, so a CLI that is missing
+  or will not start took its whole provider off the screen with nothing said, and
+  the only available conclusion was that the product had dropped it. The picker
+  now says which providers it could not read, and why.
+
+### Changed
+
+- The model and reasoning-effort controls, the permission cards, resume and every
+  other per-agent surface needed no new code for Grok: it publishes its controls
+  under the same categories the existing agents do, and they were already read by
+  category rather than by name.
+- Grok is always spawned with `--no-auto-update`. It updates itself in the
+  background otherwise, and when a build moves on a machine is this daemon's
+  decision — it deliberately keeps the build a live session is running on.
+
 - **A tag can publish the app, and the machinery is in place before any platform
   uses it.** `deploy/ci-release.sh` grows a fifth verb, `app`: it builds the
   native app for one target, refuses a target no check has built, refuses a

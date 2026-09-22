@@ -153,7 +153,8 @@ export function labelFor(option: Pick<AgentConfigOption, "category" | "name">): 
  * ⚠ **Four arms now, and the second one is a reversal rather than a gap being
  * filled.** This read "a live agent that published nothing draws nothing, because
  * an agent with no controls is a fact rather than a gap"; it goes through
- * `withUnusable([], [], false)` and gets the three `ALWAYS_DRAWN` placeholders, so
+ * `withUnusable([], [], false, false)` and gets the three `ALWAYS_DRAWN`
+ * placeholders, so
  * the strip keeps its shape. The order they are tested:
  *
  *   - a live agent that published something — drawn, plus any withdrawn slots;
@@ -183,6 +184,31 @@ export interface DrawnControls {
    * from memory keeps the slot for exactly the reason it keeps every other one.
    */
   unavailable: ReadonlySet<string>;
+  /**
+   * Of the slots in {@link unavailable}, the ones this agent will never offer.
+   *
+   * ⚠ **A strict subset, and the pair is "why is this empty" split in two.**
+   * `unavailable` says a control cannot be used right now; this says the agent has
+   * already answered with a configuration that does not contain it, so it is not
+   * coming back in this conversation. Everything here is a slot
+   * {@link placeholderFor} stood in — a control the agent published and *withdrew*
+   * is never in it, because that one genuinely may return when the model changes.
+   *
+   * ⚠ **It exists because a permanent fact was being described in transient
+   * words.** grok publishes `model` and `reasoning_effort` and no `mode` at all,
+   * measured on 1.0.40 across every session — and the mode chip's menu said *"not
+   * offering this control at the moment"*, which reads as a feature that has gone
+   * missing rather than one that was never there. `unavailableHint` takes this as
+   * its second argument and that is the only thing it decides.
+   *
+   * ⚠ **A set rather than a second id spelling.** The obvious alternative was to
+   * give the permanent placeholder a distinct id, which would have carried the
+   * fact inside the option — but `AgentConfigBar` keys each chip on `option.id`,
+   * so a slot that changed id when the agent came back remounted the chip and
+   * dropped the open menu with it. The fact belongs to the read, not to the
+   * option.
+   */
+  never: ReadonlySet<string>;
 }
 
 const NOTHING: ReadonlySet<string> = new Set();
@@ -269,7 +295,10 @@ export function drawnControls(
      */
     const liveIds = new Set(live.map((option) => option.id));
     const dropped = (held?.options ?? []).filter((option) => !liveIds.has(option.id));
-    return withUnusable(dropped.length === 0 ? live : [...live, ...dropped], dropped, false);
+    // `published: true` — this branch is reached only when the agent answered, so
+    // a slot still empty here is one it does not have rather than one it has not
+    // got to yet.
+    return withUnusable(dropped.length === 0 ? live : [...live, ...dropped], dropped, false, true);
   }
   /*
    * ⚠ **A live agent offering nothing still gets the slots, and this reverses a
@@ -282,7 +311,7 @@ export function drawnControls(
    * is the shape change the rule two tables up forbids in every other form. Drawn
    * as three unavailable slots, each says what it is and why it cannot be used.
    */
-  if (hasLiveAgent(session.status)) return withUnusable([], [], false);
+  if (hasLiveAgent(session.status)) return withUnusable([], [], false, false);
   const remembered = held?.options ?? [];
   /*
    * ⚠ **The memory gets the slot too, and leaving it out re-created the bug one
@@ -304,8 +333,16 @@ export function drawnControls(
    * is also the arm that gives each one a sentence, where `stale` has no text at
    * all and dims in silence.
    */
-  if (remembered.length === 0) return withUnusable([], [], false);
-  return withUnusable(remembered, [], held !== undefined);
+  /*
+   * `published: false` on both, and on the second it is the interesting one. A
+   * remembered configuration is what *a* daemon published, and the agent is away —
+   * so a slot missing from it is missing from a snapshot rather than from the
+   * agent, and "not at the moment" is the honest reading until the agent is back
+   * to say otherwise. The permanent sentence is reserved for the one state that
+   * has actually proved it: a live answer with the slot absent from it.
+   */
+  if (remembered.length === 0) return withUnusable([], [], false, false);
+  return withUnusable(remembered, [], held !== undefined, false);
 }
 
 /**
@@ -330,6 +367,27 @@ function withUnusable(
   options: readonly AgentConfigOption[],
   dropped: readonly AgentConfigOption[],
   stale: boolean,
+  /**
+   * Whether these options are an agent's own live answer.
+   *
+   * ⚠ **It decides which of two true sentences a missing slot gets, and never
+   * whether the slot is drawn.** The row keeps its three slots in every state —
+   * that is the rule the `hasLiveAgent` branch below argues for, and dropping a
+   * chip here would reintroduce the composer growing and shrinking between
+   * sessions. What changes is the sentence behind it: an agent that has published
+   * nothing yet may still publish this control, so *"not at the moment"* is true;
+   * an agent that has published a configuration **without** it will never offer
+   * one, and the same words are then a lie about a permanent fact. Measured
+   * 2026-09-21 on grok 1.0.40, which publishes `model` and `reasoning_effort` and
+   * no `mode` at all, in any session — the state that made this worth telling
+   * apart.
+   *
+   * A control the agent published and then *withdrew* takes neither arm: it is in
+   * `dropped`, so it is in `options`, so it fills its own category and no
+   * placeholder is appended for it at all. That is the case the transient
+   * sentence was originally written about and it is still exactly right.
+   */
+  published: boolean,
 ): DrawnControls {
   const unavailable = new Set(dropped.map((option) => option.id));
   for (const option of options) {
@@ -355,16 +413,27 @@ function withUnusable(
     filled.add(option.id);
   }
   const drawn = [...options];
+  const never = new Set<string>();
   for (const category of ALWAYS_DRAWN) {
     const stand = placeholderFor(category);
     if (filled.has(category) || filled.has(stand.id)) continue;
     drawn.push(stand);
     unavailable.add(stand.id);
+    /*
+     * ⚠ **The id is deliberately the same in both cases, and the *set* is what
+     * differs.** Spelling the permanent one `reemoat:none:<category>` was tried
+     * first and taken back out: `AgentConfigBar` draws each chip with
+     * `key={option.id}`, so a slot whose id changed when the agent came back
+     * unmounted and remounted the chip — dropping `Absent`'s own `open` state
+     * with it — over a fact that is about the sentence and nothing else.
+     */
+    if (published) never.add(stand.id);
   }
   return {
     options: drawn,
     stale,
     unavailable: unavailable.size === 0 ? NOTHING : unavailable,
+    never: never.size === 0 ? NOTHING : never,
   };
 }
 
@@ -374,17 +443,49 @@ function withUnusable(
  * Keyed on `category` like everything else here, never on an agent id — but the
  * effort case earns a sentence of its own, because "why is this empty" has a
  * specific answer there and a vague one everywhere else. The
- * specific answer is measured rather than guessed: **all four agents build this
- * list from the currently selected model's own levels.** claude, kimi and codex
- * express that by publishing the control and dropping it when there are none;
- * opencode expresses it by not publishing one, at `session/new` and in every
+ * specific answer is measured rather than guessed: **all five agents build this
+ * list from the currently selected model's own levels.** claude, kimi, codex and
+ * grok express that by publishing the control and dropping it when there are none
+ * — grok measured 2026-09-21, where `grok-4.6` offers four levels and `grok-4.5`
+ * three; opencode expresses it by not publishing one, at `session/new` and in every
  * answer after it. Same sentence, which is why {@link placeholderFor} can reuse it
  * rather than inventing a second.
  */
-export function unavailableHint(option: Pick<AgentConfigOption, "category">): string {
-  return option.category === "thought_level"
-    ? "The model in use offers no levels here. Another model may."
-    : "The agent is not offering this control at the moment.";
+export function unavailableHint(
+  option: Pick<AgentConfigOption, "category">,
+  /**
+   * Whether this agent has answered with a configuration that does not contain
+   * this control — `DrawnControls.never`, which is the only thing that knows.
+   *
+   * Required rather than defaulted, because a default is how the wrong half of
+   * this pair gets used by omission. Two call sites, both a set membership test.
+   */
+  never: boolean,
+): string {
+  /*
+   * Effort first, and it takes both arms deliberately. Its sentence is already
+   * the permanent one for every agent that reaches it: the list is built from the
+   * *selected model's* own levels on all five, so "another model may" is true
+   * whether this agent withdrew the control or never published one. opencode is
+   * the never arm and grok is the withdrawing arm, and they want the same words.
+   */
+  if (option.category === "thought_level") {
+    return "The model in use offers no levels here. Another model may.";
+  }
+  /*
+   * ⚠ **"at the moment" was a lie for one agent and nobody could tell**, which is
+   * the whole of why this branch exists. grok publishes `model` and
+   * `reasoning_effort` and no `mode` at all, in any session — so the mode chip sat
+   * greyed on every grok conversation for ever, under a sentence promising it
+   * might come back. It was reported as the agent missing a feature, which is
+   * what a permanent state described in transient words reads as.
+   */
+  if (never) {
+    return option.category === "mode"
+      ? "This agent has no modes."
+      : "This agent offers no choice here.";
+  }
+  return "The agent is not offering this control at the moment.";
 }
 
 /**

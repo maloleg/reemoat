@@ -773,7 +773,17 @@ for svc in $TARGETS; do
       # bootstrap puts it, so the script's npm arm finds an `npm` and a `node`;
       # `provenance` reads this shell's PATH, which is the daemon's only for the
       # daily run. Every prune is withheld, because this script does not know which
-      # harnesses have a live agent and the daemon's next run does. Cheap when
+      # harnesses have a live agent and the daemon's next run does.
+      #
+      # ⚠ **`--refresh-only`, and this is the half of the posture change a deploy
+      # carries.** A deploy used to *install* whatever this repository had learned
+      # to install — so adding a harness here put it on every machine in the fleet
+      # on its next update, offering a sign-in nobody had asked for. That was the
+      # reported symptom. A harness arrives on a machine when somebody presses a
+      # button about it now; what a deploy does is move the copies that are
+      # already there.
+      #
+      # Cheap when
       # everything is current, since a refresh that finds nothing newer is a no-op;
       # and a refresh with no restart is seen by nothing in the daemon, so its
       # version report lags the binary by up to ten minutes. Never fatal, for the
@@ -800,12 +810,12 @@ for svc in $TARGETS; do
           [ "$_agent_channel" = stable ] || _agent_channel=latest
           _agent_claude=$(file_value "$_daemon_env" CLAUDE_CODE_EXECUTABLE)
           _agent_codex=$(file_value "$_daemon_env" CODEX_PATH)
-          echo "  agents ($_agent_source)"
+          echo "  agents ($_agent_source, refresh only)"
           (
             PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"; export PATH
             [ -z "$_agent_claude" ] || { CLAUDE_CODE_EXECUTABLE=$_agent_claude; export CLAUDE_CODE_EXECUTABLE; }
             [ -z "$_agent_codex" ] || { CODEX_PATH=$_agent_codex; export CODEX_PATH; }
-            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel" --skip claude --skip codex --skip opencode --skip kimi
+            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel" --refresh-only --skip claude --skip codex --skip opencode --skip kimi --skip grok
           ) || echo "  agents: the script did not finish; the daemon retries daily" >&2
           ;;
       esac

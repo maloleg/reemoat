@@ -40,13 +40,21 @@
       the resource file that already exists and says why at length.
 
       Expressing the difference where it would actually work was considered and
-      is wrong on the merits rather than merely awkward: debug-overrides carries
-      trust anchors and not a cleartext permission, so the only way to make a
-      release build refuse cleartext is a second resource file under src/debug —
-      which would break the LAN control plane and the dev stand that the network
-      config's own comment names as ordinary shapes for this software, in
-      release builds specifically. nativecheck asserts the absence here and in
-      build.gradle.kts as a pair.
+      is wrong on the merits rather than merely awkward: debug-overrides has no
+      cleartext attribute at all, so the only way to make a release build refuse
+      cleartext is a second resource file under src/debug — which would break the
+      LAN control plane and the dev stand that the network config's own comment
+      names as ordinary shapes for this software, in release builds specifically.
+      nativecheck asserts the absence here and in build.gradle.kts as a pair.
+
+      ⚠ This paragraph is about cleartext and about nothing else, and reading it
+      as covering its neighbour is what made a chosen decision look like a forced
+      one. debug-overrides does carry trust anchors, so the user certificate
+      anchor sitting in that same base-config could be scoped to debuggable builds
+      with one edit and no new file. It is not, on purpose: that is the owner's
+      call about whether private CA self hosting is a release requirement, its
+      cost is named leg by leg in network_security_config.xml, and Q7.144 is the
+      argument.
     -->
     <application
         android:networkSecurityConfig="@xml/network_security_config"

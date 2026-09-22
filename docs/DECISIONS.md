@@ -59,17 +59,17 @@ bug in the file.
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
 | [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 88 | `###` |
 | [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 380 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 63 | `###` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 65 | `###` |
 | [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 113 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 68 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 146 | `###` |
-| | | **1000** | |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 71 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 147 | `###` |
+| | | **1006** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1000 rather than the 507
+dividers. So the count is over **both** depths, and it says 1006 rather than the 513
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -25114,6 +25114,172 @@ corner-curvature change alongside it makes the before and after unreadable.
 **Status.** Current. `.claude/rules/native-packaging.md` is the area.
 
 
+### Q4.125 — Which door installs grok, and why it is npm under both sources
+
+**The operator's requirement, stated directly: a binary the daemon can update at
+runtime.** That is what decided this, not tidiness.
+
+xAI ships two doors. `curl -fsSL https://x.ai/cli/install.sh | bash` is the vendor
+installer; `npm i -g @xai-official/grok` is the registry. Both land a working
+binary, and `grok update` exists and is non-interactive — so unlike kimi, whose
+`upgrade` exits 0 without installing when there is no TTY (Q4.113), grok's vendor
+arm would actually work.
+
+**It still takes the npm door under both `--source` values, and the reason is a
+property `CLAUDE.md` states about this script**: *no shell profile is edited*. Read
+2026-09-21, xAI's installer symlinks into `~/.local/bin` **and** appends to
+`~/.bashrc`/`~/.zshrc` to put `~/.grok/bin` on PATH. Taking that door would have
+made the sentence false — and the sentence is cheaper to keep than to qualify.
+
+**So grok is the second unconditional `ensure_npm` row, and the two are there for
+different reasons.** kimi's is that its own updater lies; grok's is that its own
+installer reaches outside what this script is allowed to touch. `deploycheck`
+spells both out one per line rather than admitting a pattern, so a third is a
+decision somebody makes rather than one that arrives by regex.
+
+**What the npm package actually is** is the part that bites. `@xai-official/grok`
+is an ~18 kB **launcher shim**; the platform binaries ride in
+`optionalDependencies` (`@xai-official/grok-{darwin,linux,win32}-{arm64,x64}`)
+brotli-compressed, and a postinstall decompresses one — 145 MB — into
+`$GROK_HOME/bin`, `~/.grok/bin` by default. Two consequences:
+
+- **`--no-optional` installs something that cannot run.** The shim detects it and
+  says so on stderr. `ensure_npm` does not pass it and must not grow it.
+- **`~/.grok/bin` is deliberately *not* in `MANAGED_CLI_DIRS`.** The toolchain
+  directory holds the shim, which is the copy `ensure_npm` refreshes, and the shim
+  finds its own payload. Naming the payload's directory would break the invariant
+  `deploycheck` holds that list to — *every directory the daemon searches is one
+  this script installs into* — and that invariant is the point rather than
+  bookkeeping: a directory searched but not managed is where a build nothing
+  updates gets picked up and run for ever. A machine somebody installed grok on by
+  hand is still found, because the vendor installer symlinks into `~/.local/bin`,
+  which is the first entry.
+
+Measured aside: with npm 11's `allow-scripts` gate blocking the postinstall
+entirely, the shim decompressed on **first invocation** instead and
+`~/.grok/bin/grok -> grok-1.0.40` appeared anyway. The door survives a blocked
+script; it just moves the work to the first run.
+
+**`--no-auto-update` is not set by this script**, and that is the boundary rather
+than an omission. grok checks for updates when it *runs*, so the flag belongs on
+the spawn — `resolveAgent` passes it on every ACP launch. The persistent form is
+`auto_update = false` in `~/.grok/config.toml`, a settings file under somebody's
+home, which this script writes for no other agent and will not start with this one.
+
+### Q4.126 — Nothing installs a harness but a press, and the timer became a refresher
+
+**Reported as a symptom, and the symptom named the shape.** *"xAI was added, it is
+not on the machine, and after a daemon update it shows as Sign in — and inside the
+sign-in screen it says cannot find."* Every clause of that is a different defect
+and the first one is the posture: adding a harness to this repository put it on
+every machine in the fleet, because `deploy/agents.sh` installed all five on the
+bootstrap, on every `deploy.sh`, and daily.
+
+**The owner's decision.** Installing a harness is an act somebody performs. A
+fresh machine enrols with **no** agent CLIs; a button in the app puts one there,
+with a progress indicator while it runs; sign-in comes after.
+
+**What each caller does now.**
+
+| caller | before | now |
+|---|---|---|
+| `deploy/bootstrap.sh` | installs all five, ~700 MB | installs **none**; `--install-agents a,b` for a provisioner |
+| `deploy/deploy.sh` | installs all five | `--refresh-only` |
+| `src/agentupdate.ts` | installs all five, daily | `--refresh-only`, daily |
+| `src/agentinstall.ts` | — | `--only <agent>`, on a `machine:admin` press |
+
+**`--refresh-only` needed a guard at *five* doors, and four of them were easy to
+miss.** "Absent" is spelled once in `ensure_npm` and three more times as a vendor
+`case` with no `""` arm at all, falling through into its install path. So
+`deploycheck` asserts an **absence over the whole transcript** — no install verb
+of any kind, from any door — because that is the only shape that catches the door
+somebody forgot rather than the doors somebody remembered.
+
+**`--only` validates its value where `--skip` does not**, and the asymmetry is
+written down because somebody will try to make them match. A `--skip typo`
+withholds a prune that was not going to matter. A `--only typo` is a run that
+walks no harness, prints a header, exits 0 and reports success — and the caller
+that passes `--only` is a button, which would draw that as *installed*.
+
+**Three things the install run is the inverse of a login on**, each a decision:
+
+- **One slot daemon-wide, not one per agent.** The script holds a single `mkdir`
+  lock, so a per-agent map lets five runs start of which four are answered by that
+  lock with a warning and `exit 0` — four transcripts that end, look finished, and
+  installed nothing.
+- **A second start is refused, never superseded.** A login supersedes because its
+  commonest end is a closed tab leaving a pty on stdin, and refusing there is a
+  permanent wall in front of the one person who cannot get past it. An install
+  waits on nobody, and killing a half-done `npm i -g` is the corruption the lock
+  exists to prevent.
+- **The TTL runs from `endedAt`.** `LoginRun.expired` measures from `startedAt`
+  and kills a live pty at ten minutes, which is right for a flow waiting on a
+  person; copied here it kills a legitimate download on a slow link.
+
+**⚠ The verdict is a measurement, never the exit status.** `deploy/agents.sh`
+exits 0 having printed `install failed; this machine has no copy of it until the
+next run` — it must, because three of its four callers contract that it never
+fails. So `installed` against `failed` is decided by asking the machine again, and
+`daemoncheck` asserts the **pair**: `outcome: "failed"` with `exit.code === 0`.
+⚠ **And the asking comes after the invalidation, asserted as a sequence** —
+`findOnPath` caches misses for 30 s, so probing first reads the miss recorded when
+the tile was drawn and calls a successful install a failure. A set-shaped
+assertion passes on the one ordering that is wrong.
+
+**Two layers of mutual exclusion, and neither subsumes the other.**
+`AgentScriptGate` is a field in this process, so it catches the two runs this
+daemon starts; an install wins and the daily refresh yields, because somebody is
+watching one of them. `--fail-if-locked` catches what no gate here can see: an
+orphan a previous daemon left running, since runs are spawned detached and
+shutdown deliberately does not kill one. ⚠ The gate is taken **above** `runOnce`'s
+first line, which sets `ran` and disarms `nudge()` for the process; and a refused
+tick **re-arms short**, or a refresh skipped because somebody installed for three
+minutes silently costs the fleet a day.
+
+**`agentUpdates.nudge()` is deleted from the resume pass.** Its whole purpose was
+pulling the five-minute first run forward when a pass found `agent_missing`; a
+refresh-only run installs nothing, so honouring it is a subprocess, a log line and
+a cache flush that cannot repair what the pass reported — every boot, on exactly
+the machines already missing something. What closes the loop now is a person, and
+`AgentInstallRuns` runs `resumeInterrupted` itself.
+
+**The progress indicator is a spinner, a step, and a clock — no bar.** A
+determinate one is unbuildable: `ImportCode`'s is honest because
+`XMLHttpRequest.upload.onprogress` counts bytes *this client is sending*, and
+nothing analogous exists behind `npm`. An animated indeterminate one costs a new
+`@keyframes` in `index.css`, which re-anchors `webcheck`'s slices of that
+stylesheet. ⚠ **And the label is not a guess**: `deploy/agents.sh` prints `step:
+<agent> <phase>` and `readStep` reads it, with `deploycheck` importing that parser
+to drive the emitter. `MachineInstalls`' docblock refuses a stage label on the
+ground that nothing in *its* flow is on the wire, and is right about its own case
+— this one put something on the wire first, because `attempt` and `ensure_npm`
+send every installer's output to `/dev/null` and a run is otherwise silent for
+minutes.
+
+**`installable` is a strict subset of `!available`.** `AgentUnavailableError` is
+thrown for four absences and the installer repairs one; the bit has ridden that
+error since the auto-resume pass needed it, and `availability()` threw it away.
+`server.ts` then folds in whether this daemon installs at all, as `loginSupportOf`
+folds `logins === null` into `blocked`. ⚠ **Read `=== true` on the client, never
+`!== false`** — the opposite of `login.canSignOut` twelve lines away, because that
+control's refusal is a `503` carrying the route's own sentence and this one's is a
+bare `404` with nothing to render.
+
+**Rejected: a `202 {queued}` on a contended start.** Friendlier, and it costs a
+queue whose only consumer is a rare race; the daily run's worst case is twenty
+minutes, which is too long to park an HTTP start behind. `409 install_busy` with
+`holder` names who has it, and the remedy is the same either way.
+
+**Rejected: a per-agent lock in the script.** Tempting, since `ensure_npm` stages
+per agent — but claude's and codex's vendor installers both write `~/.local/bin`,
+and the gate serialises them anyway. One lock, and the daemon is where the
+contention is answered so the script's own `exit 0` is never what a person sees.
+
+**What it costs.** A fresh machine has an empty New session strip until somebody
+presses Install, and `NewSession` owes that state its own sentence — *"No agent is
+installed on this machine yet."* — because *"not ready to start"* describes the
+ordinary first-run state as a fault.
+
 ## Invariants — rules that were defects first
 
 These are load-bearing. Each was a real defect before it was a rule, and none of
@@ -28779,6 +28945,226 @@ back from the dock, with `Reopen` handled — is a **deliberate non-goal** besid
 decided. Reversing it is not one line: it needs `prevent_exit()`, a `Reopen`
 handler, and an answer to whether the daemon survives a windowless app, which is a
 product question rather than a platform one.
+
+### Q6.109 — What Grok Build actually sends, measured against 1.0.40
+
+**The whole of why grok is the cheapest harness this repository has added.** Driven
+2026-09-21 against `grok --no-auto-update agent stdio`, both signed out and with a
+key in the environment, because a capability that appeared only for a keyed agent
+would be a fact about the key rather than about the binary.
+
+**No adapter.** `grok agent stdio` is xAI's own ACP entry point — the ACP registry
+lists `grok-build` with `distribution.npx = {package: "@xai-official/grok@1.0.40",
+args: ["agent","stdio"]}` — so `pincheck` has nothing to pin and
+`AgentCapabilities.cli` records the build, which is kimi's and opencode's
+situation. claude and codex are the two that need a `*-acp` package, and it is now
+two of five rather than two of four.
+
+**`initialize` answers `protocolVersion: 1`** with `loadSession: true`,
+`sessionCapabilities: {list:{}, resume:{}, close:{}}`, `promptCapabilities:
+{image:false, audio:false, embeddedContext:true}`, `mcpCapabilities: {http, sse}`,
+an `auth: {}` marker, and **no `providers` key at all** — so `AcpClient.routing()`
+answers `null` and `hostable` refuses every foreign system for it with *"This agent
+only runs its own models."* Nothing had to be written for that.
+
+**`session/new` publishes exactly two `configOptions`**, and both land on doors this
+daemon already drives:
+
+| `configId` | `category` | Values |
+|---|---|---|
+| `model` | **`model`** | `grok-4.6` (current), `grok-4.5` |
+| `reasoning_effort` | **`thought_level`** | `xhigh`, `high` (current), `medium`, `low` |
+
+`category: "model"` is what `pinNativeModel` looks for, and `thought_level` is the
+spelling opencode publishes — so `/model` and `/effort` work with no new arm. The
+ids are **bare** (`grok-4.6`, not `xai/grok-4.6`), which is why `SYSTEMS.xai` leaves
+`nativeModelPrefix` null. `session/load` republishes the list, so the resume path
+Q2.217 is about has something to validate against.
+
+**Drawn through this daemon's own harness**, with a deliberately bogus key, the
+whole path is one line of output each: `⚙ model = grok-4.6 [model] (2 choices)`,
+`⚙ reasoning_effort = high [thought_level] (4 choices)`, `▸ session 01a0c47b-…`,
+and then xAI's own `Incorrect API key provided` on the first turn. Everything but
+the credential is proven.
+
+**Two smaller facts.** It emits `session_info_update`, which becomes an `other`
+event exactly as codex's does (Q6.100). And it pushes `_x.ai/session/setup`
+notifications naming the phase it is in — `auth`, `resolve_workspace`,
+`folder_trust`, `plugin_registry`, `mcp_merge`, `persistence_init`,
+`spawn_session_actor` — which are unread here and harmless, but are the reason a
+`session/new` that is *going* to fail still looks busy for a moment.
+
+**What is still unmeasured**, because it needs a real key: whether
+`session/request_permission` arrives without `--always-approve` (the documentation
+says permission prompts flow over ACP and never names the method), steering
+(`_session/steering`), `session/cancel`, and whether any context usage is reported.
+
+### Q6.110 — The ACP `authenticate` call, and the method id that is not advertised
+
+**Q6.20 had stood since the first release** — *"ACP has `session/authenticate` and
+this daemon never calls it. Gemini offers four `authMethods` and expects the client
+to pick one; any future agent support has to decide whether to drive it."* grok is
+that agent, and the decision is forced rather than chosen.
+
+**Measured 2026-09-21 on 1.0.40, three ways:**
+
+| | `session/new` |
+|---|---|
+| no `authenticate`, no key | `-32000 "Authentication required"`, `data: "no auth method id provided"` |
+| no `authenticate`, **`XAI_API_KEY` set** | **the same refusal** |
+| `authenticate({methodId: "xai.api_key"})` first, key set | **succeeds** |
+
+So the pasted key is not a door by itself — which is the whole difference from the
+other four, every one of which reaches its vendor out of band and answers
+`session/new` with no `authenticate` at all.
+
+> ⚠ **All three rows were taken on a machine holding no *other* credential, and
+> generalising them was the defect.** A fourth state exists — signed in by `grok
+> login` — where `session/new` needs no `authenticate` and sending one **breaks
+> the session**. The call is gated on a key now; **Q6.111 is the measurement and
+> supersedes the three paragraphs below about it being unconditional.**
+
+**The id is not in `authMethods`, and that is the part worth writing down.**
+`initialize` advertises exactly one method: `grok.com`, *"Sign in with Grok"*.
+Calling `authenticate` with it starts a device-code flow, prints
+`https://accounts.x.ai/oauth2/device?user_code=…` to **stderr**, and blocks until
+somebody authorizes it in a browser — not a call a daemon may make on the prompt
+path. `xai.api_key` is accepted, answers `{}` at once, and is documented only in
+xAI's own headless example. Setting `XAI_API_KEY` does not add it to the advertised
+list either, measured both ways. **A client that picked from `authMethods` would
+have the blocking arm as its only option**, which is the exact inversion of this
+repository's usual rule — here reading the agent's answer is what gets it wrong.
+
+**So `ACP_AUTH_METHOD` is a written-down table, `ROUTED_MODEL_ENV`'s shape**, and
+for its reason: a per-harness measurement that cannot be read off the wire, kept as
+a table so that the *absence* of a row is what decides rather than a condition at a
+call site. An id an agent does not know is a clean `-32602 "unsupported auth
+method: <id>"`, which makes a wrong row loud.
+
+**It is called in `AcpClient.launch`, once.** Between `initialize` and the first
+`session/new` — `providers/set`'s window, for its reason: one adapter per session,
+so the process scope and the session scope line up. One place because there are
+three launch sites (`Session.start`, `Session.openResumed`, `AgentAskRuns`) and
+Q2.215 is the record of what a per-site obligation costs.
+
+**A failure is carried rather than thrown, and that is not the silent fallback
+`providers/set` forbids.** That rule exists because a skipped route runs somebody
+else's default model under our name — a failure with no symptom. There is none
+here: `session/new` is the very next call and refuses by itself, with the agent's
+own sentence, down the `agent_auth_required` path that already exists. Throwing on
+the "no key" arm would instead refuse a machine signed in by `grok login`, whose
+`~/.grok/auth.json` this daemon deliberately does not read.
+
+⚠ **It answers `{}` for a bogus key.** Validation is deferred to the first real
+request, so this call proves the shape and never the credential — the mirror of
+what `AGENT_LOGIN.codex` records from the other side. ⚠ **And that sentence is
+where Q6.111 came from**: true of the *answer*, false of the *effect*, and the
+false half is what shipped.
+
+### Q6.111 — The `authenticate` that breaks a signed-in machine, and grok's three status strings
+
+**Reported as two symptoms on one screen**: a red `Internal error` under the first
+message sent to grok, and no modes on its chip strip. Neither is what it looks
+like, and the first is this entry.
+
+**The defect.** `ACP_AUTH_METHOD.grok` was sent on every grok launch. Q6.110's
+table has three rows and every one of them was taken on a machine holding **no
+credential at all** — the state a pasted key is for. The fourth state is the
+common one: a machine signed in by `grok login`, holding an OIDC token in
+`~/.grok/auth.json` and no `XAI_API_KEY`. Measured there, 2026-09-21, 1.0.40, two
+runs differing by one JSON-RPC call:
+
+| sent | `session/prompt` |
+|---|---|
+| `authenticate({methodId: "xai.api_key"})` → `{}` | `-32603 "Internal error"`, `data:` `Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=none, …, reason=no auth context)` — with `Auth: Oidc` in the same payload |
+| nothing | `stopReason: "end_turn"`, `totalTokens: 31764`, the text came back |
+
+**So the call selects an auth mode rather than merely asserting one.** With no key
+behind it grok stops consulting the token it already has and calls its own backend
+unauthenticated. `{}` is why this looked harmless and why Q6.110 wrote it down as
+proving "the shape and never the credential": the answer really is inert, the
+*effect* is not, and the damage lands one call later in the least explicable place
+a refusal can appear — inside the transcript, as a bare `Internal error` with the
+reason only in a `data` field nothing draws (`registry.ts` already argues this
+about `Failed to authenticate`).
+
+**And Q6.20's premise falls with it.** *"grok refuses `session/new` until an
+`authenticate` has been sent"* is a fact about having no credential, not about the
+binary. Signed in, `initialize` carries `cached_token` beside `grok.com` and
+`_meta.defaultAuthMethodId` is `"cached_token"`; signed out, only `grok.com` and
+`null`. grok volunteers the distinction; nothing here was reading it.
+
+**Decision.** `ACP_AUTH_METHOD` keeps its row and changes what it means: *which id
+spends a pasted key*, not *who needs an `authenticate`*. The id is sent only when
+that harness's credential is actually in the merged spawn environment.
+
+- `SessionRuntime.authMethod(agent, routed)` is the gate, and it is on the
+  **runtime** because that is the only layer that can see the answer: `resolveAgent`
+  returns `env: agentEnv()` and `LocalRuntime.launch` merges `secrets(agent)`
+  afterwards. `routed` short-circuits first — a routed pairing withholds those
+  secrets, so an id named there would spend a variable that will not be present.
+- `LaunchOptions.authMethod` carries it the one hop, **required**, so a third
+  launch site cannot inherit the old behaviour by omission — `fileIo`'s rule.
+  `AcpClient.launch` is still the single call site; only the decision moved.
+- The two `Session` launch paths hoist `routedPairing(…)` into one local, because
+  `launch` and `authMethod` must be given the same answer and computing it twice is
+  how they come to differ.
+- **Rejected: reading `initialize._meta.defaultAuthMethodId`.** It answers this
+  exactly and needs no plumbing, and it is the second signal that made the env gate
+  verifiable — but it keys behaviour on a vendor `_meta` field, which this
+  repository writes down rather than infers. Kept as the measurement, not the
+  mechanism.
+
+**Verified through the daemon's own `Session`, not just over raw ACP**: `pnpm
+harness --agent grok` now reports `model = grok-4.7 [model] (4 choices)`,
+`reasoning_effort = high [thought_level] (4 choices)`, and `turn end end_turn`.
+
+**And the same run closed `AGENT_LOGIN.grok.status`, which had been `null` with a
+docblock saying the signed-in string had not been seen on any machine here.** It
+has now. `grok models` exits 0 with an empty stderr in every state and names the
+credential it is about to use on its first line:
+
+| state | first line |
+|---|---|
+| signed in via `grok login` | `You are logged in with grok.com.` |
+| `XAI_API_KEY` set | `You are using XAI_API_KEY.` |
+| neither | `You are not authenticated.` |
+
+`signedIn` is an alternation of the first two — both are true answers to *will a
+session open* — and the pair stays a partition, which is why it is not `You are `
+with a lookahead. ⚠ It says `using` for a **bogus** key, so the probe proves a
+credential is present and never that it works; that is `AGENT_LOGIN.codex`'s gap
+from the other side and it is the survivable direction, since `admit` refuses on
+`loggedIn === false` and a wrong key becomes `lastStartRefusal` instead. What this
+fixes on screen: with `status: null` the row answered `loggedIn: null`,
+`agentStance` returned `unchecked`, and the tile offered **Sign in** on a machine
+that was already signed in.
+
+**The second symptom was not a bug at all, and the fix is the sentence.** grok
+publishes `model` and `reasoning_effort` and no `mode` in any session, so
+`ALWAYS_DRAWN` stood a placeholder in its mode slot for ever under *"The agent is
+not offering this control at the moment."* — a permanent fact in transient words,
+read as the feature being broken. `DrawnControls.never` marks the slots filled in
+against a **live** answer and `unavailableHint` draws *"This agent has no modes."*
+for them. The slot itself stays: `agentConfig.ts` already argues that the composer
+growing and shrinking a row between sessions is the shape change it forbids
+everywhere else. ⚠ A second id spelling (`reemoat:none:<category>`) was tried first
+and taken back out — `AgentConfigBar` keys each chip on `option.id`, so a slot
+whose id changed when the agent came back remounted the chip and dropped its open
+menu, over a fact that is about the sentence and nothing else.
+
+**And a third thing fell out of it, which was never about grok.** A provider whose
+rows come only from its native harness vanishes from the model picker in silence
+when that harness cannot be asked — `allModels` produces no rows, and there is no
+heading for an empty group. **Five of the eight** systems this product ships carry
+an empty `models` table on purpose, so this is claude, codex, grok and opencode,
+not one vendor. `unreadSystemsNotice` says so, reading `AgentCapabilities.error` —
+set only when the *ask* failed, never when a harness honestly published nothing —
+which is the same field `AgentBuilder`'s harness rows already draw `COULD_NOT_ASK`
+from, so the two halves of that screen cannot disagree. `notice` became a list
+rather than a string: OpenRouter's failure is a fetch *this browser* made and this
+one is a spawn *the daemon* could not make, and joining them would claim one cause
+for two.
 
 ## Open questions and deliberate non-goals
 
@@ -34288,3 +34674,68 @@ matrix is where that change would show up first.
 
 **Status.** Open. The class is covered; the target is not.
 
+
+
+### Q7.147 — The xAI routed arm: what was probed, and the one call still missing
+
+**`SYSTEMS.xai` ships `baseUrl: null`, so Grok is reached by the CLI that ships for
+it and by nothing else.** This entry is the record of why the routed arm — Claude
+Code pointed at `api.x.ai` — is *not* in that row, and exactly what would put it
+there.
+
+**Probed 2026-09-21, no credential and a bogus one:**
+
+| Probe | Answer |
+|---|---|
+| `POST /v1/nonsense-abc` | `404`, `{"error":{"code":404,…docs.x.ai…}}` |
+| `POST /anthropic/v1/messages` | `404`, same envelope |
+| `POST /v1/messages`, no key | `401`, `{"code":"unauthenticated:no-credentials"}` |
+| `POST /v1/messages`, bogus key in `x-api-key` | `400`, `{"code":"invalid-argument","error":"Incorrect API key provided…"}` |
+| `POST /v1/messages`, bogus key in `authorization: Bearer` | **identical** `400` |
+| `GET /v1/models`, no key | `401` |
+
+So something **is** routed at `/v1/messages` and it is behind auth — a wrong path
+answers 404 in a different envelope — and both header conventions are read, as with
+OpenRouter and unlike MiniMax, whose 401 names one header in prose.
+
+**That is not enough, and the gap is the whole entry.** Every other routed row in
+`SYSTEMS` rests on the vendor *publishing* an Anthropic-compatible endpoint. xAI
+documents none: the string `anthropic` does not occur anywhere in `docs.x.ai`'s own
+`llms.txt`, and the REST reference describes the API as OpenAI-compatible
+(`/v1/responses`, `/v1/chat/completions`). A bogus key is refused **before** any
+body-shape check, so the one thing the probe cannot show is the one thing that
+matters. Naming the base on this evidence would offer a pairing the picker draws,
+`POST /custom-agents` accepts, and somebody's first turn discovers is wrong — which
+is worse than the row not existing.
+
+**What opens it is one call with a real key**: an Anthropic body to
+`api.x.ai/v1/messages` coming back with a `content` array. Then `baseUrl` becomes
+`"https://api.x.ai"` (the SDK appends `/v1/messages`, the path the `openrouter` row
+is pinned against), `authHeader` becomes `authorization`/`Bearer ` — both
+conventions read, so it follows the four rows above — and `models` gets a
+written-down starting set, because `GET /v1/models` answers 401 unauthenticated and
+so fails the browser door `openrouter` goes through, and a daemon-side fetch would
+be the fourth `fetch` in `src/` that `compatibility.md` states as a property.
+
+⚠ **`apiType: "openai"` with a `baseUrl` is never the answer here**, and the row
+says so. `hostable`'s fourth arm refuses an OpenAI-shaped routed system for every
+harness, because `ROUTED_MODEL_ENV` has no OpenAI-shaped door — it would pass the
+protocol test and die on the pinning one. That is what `zen` is `baseUrl: null`
+for, and `ROUTED_MODEL_ENV`'s own comment forbids closing it by inventing a codex
+arm: which variable codex reads for a custom-gateway model is a measurement nobody
+has taken, and guessing produces exactly the silent wrong-model failure the whole
+table exists to prevent.
+
+**Meanwhile Grok is not absent from this product.** OpenRouter serves
+`x-ai/grok-4.6`, `x-ai/grok-4.3` and `x-ai/grok-build-0.1` among others, and
+`packages/web/src/openrouter.ts` fetches that catalogue in the browser — so a
+machine with an OpenRouter key has been able to run Claude Code at Grok since
+before any of this. What the `xai` row adds is a **direct** key and grok's own
+harness.
+
+⚠ **The model ids in circulation are retired.** Per xAI's May-15 2026 notice,
+`grok-code-fast-1` redirects to `grok-build-0.1`, and `grok-4`, `grok-4-fast`,
+`grok-4-1-fast-*` and `grok-3` all redirect to `grok-4.3`. Whatever list this row
+eventually carries must be read off `docs.x.ai/developers/models` on the day it is
+written — the `moonshot` row shipped three ids that had been retired four months
+earlier and nothing noticed.

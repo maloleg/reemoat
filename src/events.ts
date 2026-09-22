@@ -361,9 +361,9 @@ export interface TextEvent {
    * So the daemon numbers what the agent did not: once a connection has been seen
    * to use message ids, a chunk arriving without one is a message of its own and
    * is given a `~`-prefixed id here. The tilde is not a value any agent can send
-   * — it is not in the id space of any of the four — so a client can tell the two
+   * — it is not in the id space of any of the five — so a client can tell the two
    * apart, and a client that does not care simply compares for equality. An agent
-   * that never numbers anything (kimi, codex, opencode) keeps `null` throughout
+   * that never numbers anything (kimi, codex, opencode; grok is unmeasured) keeps `null` throughout
    * and every chunk joins exactly as it does today.
    */
   messageId: string | null;

@@ -726,7 +726,8 @@ process.stdout.write("\nasking an agent one question, and every way that is refu
   /* ---------------------------------------------------------------- *
    * ⭐ The capability sweep queues for a slot; an ask is still refused one
    *
-   * `GET /agents/capabilities` reads every harness. With four harnesses against a
+   * `GET /agents/capabilities` reads every harness. With the four harnesses there
+   * were then against a
    * cap of two and an `admit` that **threw**, a `Promise.all` there meant the
    * third and fourth always came back "this machine is already running 2 model
    * requests" — codex permanently greyed out in the builder with a sentence about
@@ -1603,7 +1604,7 @@ process.stdout.write("\nhooks reaching a plugin\n");
    */
   class NoAgent extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);

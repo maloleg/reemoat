@@ -32,15 +32,37 @@
   the `user` entry and a control plane behind a CA somebody installed on their own
   phone is refused, while the same URL works in Chrome.
 
-  ⚠ It sits in `<base-config>`, which means every origin, and there is no
-  narrower place to put it. `<domain-config>` is the mechanism for scoping a trust
-  anchor and it takes literal hostnames at build time. This app has none:
-  `REEMOAT_DEFAULT_SERVER` is a fork's compile time seed and is unset in this
-  repository, the address is otherwise typed into the server picker at run time,
-  and the relay is learned per machine from `POST /v1/tokens` — two machines of
-  one account legitimately sit on different relays. There is no set of hostnames
-  to enumerate here, and one invented at build time would be precisely the self
-  hosted deployment this clause exists for, broken.
+  ⚠ It sits in `<base-config>`, which means every origin and every build type,
+  and those are **two** decisions rather than one. Only the first of them is
+  forced.
+
+  ⚠ **By origin there is genuinely no narrower place.** `<domain-config>` is
+  the mechanism for scoping a trust anchor and it takes literal hostnames at build
+  time. This app has none: `REEMOAT_DEFAULT_SERVER` is a fork's compile time seed
+  and is unset in this repository, the address is otherwise typed into the server
+  picker at run time, and the relay is learned per machine from
+  `POST /v1/tokens` — two machines of one account legitimately sit on different
+  relays. There is no set of hostnames to enumerate here, and one invented at
+  build time would be precisely the self hosted deployment this clause exists for,
+  broken.
+
+  ⚠ **By build type there is one, and it is deliberately not taken.**
+  `<debug-overrides>` carries trust anchors and needs no second resource file, so
+  a `<debug-overrides><trust-anchors><certificates src="user" /></trust-anchors>`
+  block would scope the widening to debuggable builds with one edit to this file
+  and nothing else. It is not done, and that is the **owner's call** rather than a
+  measurement: a private CA is the ordinary shape for a self hosted control plane,
+  and somebody installing a release build and pointing it at their own box behind
+  their own CA is the deployment this software exists for. What keeping it costs
+  is named in full below, leg by leg, and Q7.144 is where the decision was argued.
+
+  ⚠ **The cleartext argument in `AndroidManifest.xml` does not cover this
+  one.** That paragraph is about `cleartextTrafficPermitted`, which really has
+  nowhere narrower to go — `<debug-overrides>` has no such attribute at all, so
+  expressing a per build type cleartext policy needs a second resource file under
+  `src/debug`. The two clauses share `<base-config>` for different reasons and only
+  that one is actually stuck. Reading them as one argument makes the anchor look
+  forced when it is chosen.
 
   So what it loosens, named rather than implied. All three legs, because somebody
   who installs a hostile CA profile gets all three:

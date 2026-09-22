@@ -5,9 +5,10 @@
  * 2026-09-19 — is a `package` line, `import android.os.Bundle`, `import
  * androidx.activity.enableEdgeToEdge`, and a `MainActivity` whose whole
  * `onCreate` is `enableEdgeToEdge()` and then `super.onCreate`. The `Context`
- * import, the `System.loadLibrary` companion, the `external fun`, and the call
- * placed *before* `super.onCreate` are all this repository's, and an `init`
- * re-run takes every one of them back out saying nothing.
+ * import, the `System.loadLibrary` companion, the `external fun`, the call
+ * placed *before* `super.onCreate`, and the `handleBackNavigation` override are
+ * all this repository's, and an `init` re-run takes every one of them back out
+ * saying nothing.
  *
  * ⚠ **And `init` is not a thing somebody chooses to run.**
  * `gen/android/tauri.settings.gradle` holds that computer's cargo registry
@@ -17,8 +18,16 @@
  * `.claude/rules/native-packaging.md` has both.
  *
  * `nativecheck` asserts each edit named above against this file's **code**:
- * measured on a pristine copy carrying only this banner, the same three
- * patterns all matched the prose and said `ok`.
+ * measured on a pristine copy carrying only this banner, the three patterns
+ * there were then all matched the prose and said `ok`.
+ *
+ * ⚠ **The back override is the one edit here with nothing to difference it
+ * against.** The property it overrides and the Tauri override it reverses both
+ * live in `app/src/main/java/com/reemoat/app/generated/`, which
+ * `gen/android/app/.gitignore` ignores — so a `check`-job checkout does not
+ * carry them and no offline driver may read them. What catches a wry release
+ * that renamed or removed the property is the Kotlin compiler in the APK leg:
+ * an `override` of nothing does not build.
  */
 package com.reemoat.app
 
@@ -27,6 +36,41 @@ import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 
 class MainActivity : TauriActivity() {
+  /*
+   * ⚠ **Back closed the app, from the first press, on every screen.**
+   *
+   * `WryActivity` ships the behaviour this wants: an `OnBackPressedCallback`
+   * that calls `goBack()` while the webview `canGoBack()` and otherwise
+   * disables itself and lets the activity finish. `TauriActivity` overrides
+   * `handleBackNavigation` to `false`, so no callback is registered at all and
+   * the platform default runs — `finish()`. On a phone that is the app quitting
+   * instead of a session closing.
+   *
+   * ⚠ **This app is a pathname router and a Back press is a route pop.** Every
+   * pop-up in it is a real entry: `router.ts`'s `navigate` is `pushState`, and
+   * `nav.ts`'s `sheetKind` names the five routes that are drawn as panels over
+   * a screen. So the webview's history *is* the app's back stack, and one press
+   * leaving Settings — rather than the app — is what `.claude/rules/web-shell.md`
+   * is written around. The last entry still closes the app, which is the
+   * platform convention and is the `else` arm in wry's own callback.
+   *
+   * ⚠ **The override rather than a callback of our own.** A second
+   * `onBackPressedDispatcher.addCallback` here would stack ahead of wry's and
+   * the two would disagree about who finishes the activity; registering one and
+   * leaving `handleBackNavigation` false means this file owns a policy wry
+   * already implements. Reversing one `Boolean` is the whole edit.
+   *
+   * ⚠ **No `android:enableOnBackInvokedCallback` on the manifest, deliberately.**
+   * That attribute opts into the *platform* `OnBackInvokedCallback` and the
+   * predictive-back gesture from API 33 up; `OnBackPressedCallback` — which is
+   * what wry registers and what `enableEdgeToEdge` already proves this activity
+   * is `ComponentActivity` enough for — is dispatched on every level from
+   * `minSdk` 24 up without it. Opting in is a fifth manifest attribute, a
+   * gesture animation nobody has measured on this UI, and the row in
+   * `.claude/rules/native-packaging.md` growing again.
+   */
+  override val handleBackNavigation: Boolean = true
+
   companion object {
     /*
      * Loaded here rather than left to `super.onCreate`, because `initNdkContext`

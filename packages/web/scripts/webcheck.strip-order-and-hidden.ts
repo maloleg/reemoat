@@ -1038,7 +1038,7 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
      * whatever either row is gated on. What made the order worth having is that the
      * cheap question is answered while the expensive read runs, so what has to be
      * pinned is that the harness *rows* fall back rather than blocking: with the
-     * listing still in flight the picker draws the four this product ships.
+     * listing still in flight the picker draws the five this product ships.
      */
     check(
       "and the harness rows fall back rather than waiting on that listing",

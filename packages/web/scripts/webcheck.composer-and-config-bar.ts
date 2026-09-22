@@ -1111,7 +1111,7 @@ process.stdout.write("\nthe agent config bar reads categories, not ids\n");
    * said another, one tap apart.
    *
    * Narrow on purpose, and the table has exactly the entries a measurement put
-   * there. `model` is `Model` on all four agents, so there is nothing to reconcile
+   * there. `model` is `Model` on all five agents, so there is nothing to reconcile
    * and the agent's own name stands; an unknown category has no second opinion at
    * all. Overriding a name we have no better version of is how a client starts
    * inventing vocabulary.

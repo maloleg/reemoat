@@ -68,7 +68,7 @@ process.stdout.write("\nwhich tile the new-session strip may draw as chosen\n");
    * ⭐ A harness that is not a whole answer on its own
    *
    * Reported: "remove opencode from the defaults — it is not a standalone agent,
-   * you have to pick a model for it." Three of the four harnesses *are* the model
+   * you have to pick a model for it." Four of the five harnesses *are* the model
    * — Claude Code runs Claude, Kimi Code runs Kimi, Codex runs GPT — and tapping
    * one is a complete decision. opencode is a router: started bare it picks
    * `opencode/big-pickle` off its own free tier, which is a model nobody chose

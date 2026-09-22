@@ -206,10 +206,11 @@ naming the session they belong to; the **shared React** halves (`text`, `busy`,
 compares the `liveKey` ref. Ungated, a `409 turn_in_flight` from session A ran
 `update(body)` on the composer now bound to B — A's message in B's box, where Enter
 sends it to B's agent, behind a `busy` spinner that swallowed everything typed into
-B. Nothing but this paragraph enforces the split. **The optimistic echo moved from the second list to the
-first**, which is the direction to move anything else here: as a keyed map the
-write needs no guard and leaving mid-send and coming back still shows the message.
-It is drawn by the transcript — see `web-transcript.md`. **`onScreen` is only ever asked after an
+B. Nothing but this paragraph enforces the split. **Second list to first is the
+direction to move anything here**: a keyed map needs no guard, and leaving
+mid-send and coming back still shows the message — which is what the optimistic
+echo bought by moving (it is drawn by the transcript, `web-transcript.md`).
+**`onScreen` is only ever asked after an
 await, and `send`'s required `late` argument is what makes that a property rather
 than a hope** — `send` is reachable from `submit` straight off the keystroke *and*
 from `applyValue`'s callback a round trip later, and `liveKey` is written from an
@@ -284,9 +285,9 @@ in it draws a caption, and `model_config` is in the set for that reason alone.
 
 **There is no context readout in this client, and the daemon still sends one.**
 It reported how full the agent's window was, and on kimi it reported nothing for
-the life of every session — `usage_update` is a shape kimi can parse and never one
-it sends — nor on any session waiting for its agent. A control blank on most agents
-is not worth the width, so `ContextPie` and its rules are deleted. `contextUsage`
+the life of every session (`acp-agents.md`, Q7.26) — nor on any session waiting for
+its agent. A control blank on most agents is not worth the width, so `ContextPie`
+and its rules are deleted. `contextUsage`
 stays on the wire and on the daemon, where `pnpm client` prints `ctx N%`:
 `webcheck.plugin-protocol.ts` pins that field on the client's snapshot mirror, and
 with nothing in `packages/web` reading it, that is all that holds it there.
@@ -294,17 +295,16 @@ with nothing in `packages/web` reading it, that is all that holds it there.
 **A chip is as wide as what it says, bounded above by `CHIP_MAX` and by nothing
 below.** ⚠ **There was a fixed reserve and it is gone** — invisible per-category
 sizer strings that held every chip at the widest value it could show. Withdrawn on
-the owner's word; Q3.564 carries the cost Q3.402 and Q3.417 measured: a value that
-grows moves its neighbours, two agents draw two shapes, and an unavailable slot
-saying `—` is narrower than the control it stands for. What holds: `chipParts`'
-caption still does not depend on availability; the value truncates with the full
-text in the menu and the `title`; and `webcheck` asserts the sizers are **absent**
-as well as the cap present, a revert bringing the empty box back with them.
+the owner's word; the cost is Q3.402 and Q3.417, measured, and Q3.564 carries it.
+What holds: `chipParts`' caption still does not depend on availability; the value
+truncates with the full text in the menu and the `title`; and `webcheck` asserts
+the sizers are **absent** as well as the cap present, a revert bringing the empty
+box back with them.
 
 **A control never leaves the strip, and the model gate is what breaks that.** All
-**four** agents build the effort list from the **currently selected model's** own
-levels; the first three publish the control and drop it when there are none,
-opencode never publishes one — see below. `holdConfig` merges by option id rather
+**five** agents build the effort list from the **currently selected model's** own
+levels; four publish the control and drop it when there are none, opencode never
+publishes one — see below. `holdConfig` merges by option id rather
 than replacing; `drawnControls` returns the live set **plus** the slots of anything
 missing, named in `unavailable`; and `Absent` draws that slot from **`chipParts`
 and `chipInner`, the same two calls the live chip makes**. Q3.404. The menu holds one row saying there is nothing to
@@ -338,6 +338,9 @@ draws no nested sections, and nothing else reads `slots.nested` — so codex's
 already true of a *withdrawn* one and asserted nowhere. An unavailable host demotes
 `nested` to `overflow`, the answer a missing host already had. `unavailable` also carries **a select published with
 nothing in it**, the same absence with a chip in front. Q3.518.
+
+⚠ **The slot stays; the sentence under it must survive an agent that will never
+fill it** — grok publishes no `mode`, ever. `DrawnControls.never`. Q6.111.
 
 **The strip never empties while the agent is away, and now not across a reload
 either.** `holdConfig`'s memory lives in `rows`, in this tab; `configMemory.ts`

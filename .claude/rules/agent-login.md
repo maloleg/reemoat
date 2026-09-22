@@ -7,15 +7,87 @@ paths:
   - packages/web/src/ui/settings/AgentsPanel.tsx
   - packages/web/src/ui/settings/MachineSystemsSection.tsx
   - packages/web/src/ui/settings/SystemsPanel.tsx
+  - src/acp/agents.ts
+  - src/acp/client.ts
+  - src/agentinstall.ts
+  - src/agentscript.ts
+  - src/agentupdate.ts
+  - src/transcript.ts
+  - packages/web/src/ui/agentInstall.ts
+  - packages/web/src/ui/NewSession.tsx
+  - packages/web/src/ui/settings/MachineAgentsSection.tsx
+  - deploy/agents.sh
 ---
+
+## What a request may name, and what a probe must have seen
+
+- **The login command is a table lookup, never a request field.** There is no route,
+  body field or header anywhere that names a program to run — so "a caller cannot
+  run code of their choosing as the daemon" is a property of there being nothing to
+  pass. This daemon is reachable from the internet through the relay.
+- **The login probe runs with the pasted credential in its environment.** The whole
+  asymmetry rests on it: a clean `false` from `claude auth status` is believed over
+  a pasted token, and "cannot tell" falls back to it — only honest if the CLI has
+  *seen* the token. Without it a wrong token reports `loggedIn: true` and the first
+  session answers `502 agent_auth_required`. Q5.67.
+
+⚠ **And the third of these arrived with grok, which is the one agent whose
+credential is spent by neither of the doors above.** `AGENT_LOGIN[*].envNames` is a
+variable the CLI reads for itself — measured on all four — and grok's `XAI_API_KEY`
+is **not**: on a machine with no other credential, `session/new` refuses with it
+set exactly as it does without (`-32000 "Authentication required"`, `data: "no auth
+method id provided"`). What spends it is ACP's `authenticate`, sent from
+`AcpClient.launch`, and the id it sends is in `ACP_AUTH_METHOD` rather than read
+off the agent.
+
+⚠ **Reading `authMethods` to *pick* an id is how a client gets this wrong**, which
+is this repository's usual rule inverted and so is worth stating. On a signed-out
+machine `initialize` advertises exactly one method, `grok.com`: calling
+`authenticate` with it prints `https://accounts.x.ai/oauth2/device?user_code=…` to
+**stderr** and then *blocks* until somebody authorizes it in a browser — not
+something a daemon may do on the prompt path. `xai.api_key` works, answers at once,
+and is advertised nowhere; setting `XAI_API_KEY` does not add it either, measured
+both ways. So the table is written down, in `ROUTED_MODEL_ENV`'s shape, and an id
+an agent does not know is a clean `-32602` rather than a silence.
+
+⚠ **But the call is gated on there being a key, and the sentence that used to sit
+here is the defect.** It read *"it answers `{}` for a bogus key, so it proves the
+shape and never the credential"* — true of the answer, false of the effect, and
+the false half is the one that shipped. Measured 2026-09-21 on 1.0.40, on a machine
+signed in by `grok login` and holding no `XAI_API_KEY`:
+
+| sent | `session/prompt` |
+|---|---|
+| `authenticate({methodId: "xai.api_key"})` → `{}` | `-32603 "Internal error"`, `Unauthorized (401) … auth_kind=none … reason=no auth context`, with `Auth: Oidc` in the same payload |
+| nothing | `stopReason: "end_turn"` |
+
+The call **selects** an auth mode. With no key behind it grok stops reaching the
+OIDC token in `~/.grok/auth.json` and calls its own backend unauthenticated — so
+the harmless-looking `{}` is followed one call later by a refusal in the least
+explicable place there is, inside the transcript. `SessionRuntime.authMethod` is
+the gate, and it lives in the runtime because that is the only layer that can see
+the merged spawn environment. Its failure is still **carried rather than thrown**:
+`session/new` is the next call and refuses by itself. Q6.110.
+
+⚠ **Q6.20's premise was half a measurement, and the other half is the reason this
+went unnoticed.** *"grok refuses `session/new` until an `authenticate` has been
+sent"* was taken signed out and generalised. Signed in, `authMethods` carries
+`cached_token` beside `grok.com`, `_meta.defaultAuthMethodId` is `"cached_token"`,
+and `session/new` answers normally with four models and two `configOptions`. The
+refusal is a fact about *holding no credential* — which is exactly the state a
+pasted key is for, and exactly the state the gate lets the call through in.
 
 ## Logging an agent in
 
-All four agents authenticate out of band — opencode nowhere at all: it reaches its
+Four of the five authenticate out of band — opencode nowhere at all: it reaches its
 own gateway anonymously, and every other provider it knows is a key you hand it —
-and the daemon can only inherit credentials from disk; it never calls ACP's
-`session/authenticate`. So something
-has to put credentials on that disk, and from a phone there is no terminal.
+and for those four the daemon can only inherit credentials from disk. **grok is the
+exception and it is the section above**: a machine holding a *pasted* key needs
+ACP's `authenticate` for that key to be spent at all, so there the daemon does make
+the call, with an id it writes down rather than reads — and on a machine signed in
+by `grok login` it makes none, because there the credential is already on disk like
+everybody else's. Either way something has to put a credential where the agent will
+look, and from a phone there is no terminal.
 
 **Path A — paste a token.** `agent_credentials(agent, env_name, secret,
 updated_at)`, merged into the agent's environment at spawn. What a credential *is*
@@ -103,6 +175,25 @@ told from a crash or a missing binary. `readLoginAnswer` is pure and owns both
 formats, so `daemoncheck` reaches branches no CI machine could — including that
 "Logged in" is a substring of "Not logged in", which is why the negative pattern
 is tested first. Q2.206.
+
+⚠ **grok's is a third format on a third shape: one command, three answers, all on
+stdout.** `grok models` exits 0 with an empty stderr in every state and says which
+credential it is about to use on its first line — `You are logged in with
+grok.com.`, `You are using XAI_API_KEY.`, or `You are not authenticated.` — above
+the model list it prints regardless. So `signedIn` takes an alternation of the
+first two: both are true answers to the question the field asks, *will a session
+open*, and they differ only in which credential answers it. The pair must stay a
+partition, which is why it is not `You are ` plus a lookahead — `signedOut` is
+tested against the same text.
+
+⚠ **It says `using` for a key that does not work**, measured with a fabricated
+value, so this probe proves a credential is *present* and never that it is good —
+`AGENT_LOGIN.codex`'s gap arriving from the other direction. It is the survivable
+way round: `admit` refuses on `loggedIn === false` and never on a refusal record,
+so a present-but-wrong key becomes `lastStartRefusal` — *would not start* — rather
+than a harness nothing will spawn again. This row was `null` for a release with a
+docblock saying the signed-in string had not been seen on any machine here; it has
+now, and all three were taken on one machine against one binary.
 
 **No new WebSocket.** Output is polled; input is an HTTP request whose response
 confirms it landed. A login code is sent once and unrecoverable if it evaporates,
@@ -197,7 +288,7 @@ a box for somebody's OpenCode Zen account. Q3.513.
 ## A harness that would not start
 
 **Signing in is one question and *would this open a session* is another, and for
-four agents they were close enough to be the same one.** `readLoginState` answers
+four of the five agents they were close enough to be the same one.** `readLoginState` answers
 `pasted ? true : null` for every harness with no status command — opencode, and
 every harness a plugin adds — so `loggedIn` is permanently "cannot tell", and
 `agentStance` reads that as `no_login`. A tile was drawn for a harness that had

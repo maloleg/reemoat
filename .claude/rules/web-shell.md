@@ -139,6 +139,8 @@ have to enter. These are the rules a change here must not break:
   which would leave `j`/`k` walking the list behind it. Two triggers, one panel,
   state in `App`; the `usePathname()` effect is what makes Android's Back close
   it, at the cost of Back doing two things.
+  **No ✕, by the owner's call**, so VoiceOver on iOS reaches no exit — `webcheck`
+  pins the absence. Q3.628.
 - **`border-r` on the rail: the rule is the ratio**, measured in Q3.210.
 - **`visibleRows` in `groups.ts` is the single source of render order**, shared
   with `keyboard.ts` so `j` cannot land on a row nobody can see. The order is

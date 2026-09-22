@@ -216,6 +216,13 @@ export function MachineColumn({ state, onMenu }: { state: AppState; onMenu: () =
  * same letter would be one glyph twice, which is a failure the full-width pills
  * never had. `title` is the fallback for a name the 72px column cuts.
  *
+ * ⚠ **That the entry can be *moved* is said by `bind` and not here**, and the
+ * split matters: the accessible name stays the machine's name and its blocked
+ * count, while `aria-roledescription` and `aria-keyshortcuts` arrive with the drag
+ * — so `All`, which takes no `bind`, is a plain button that announces no gesture
+ * it does not have. `machineDrag.ts`'s {@link SHORTCUTS} carries the argument and
+ * the axis; the live region at the bottom of the column reports the result.
+ *
  * The blocked badge is the strip's own class string, unchanged — `bg-fg` on a count
  * is already this app's one exception and this is not the place to open it again.
  * `pointer-events-none` so the badge is not a hole in the middle of the control it

@@ -10,13 +10,15 @@ import type {
   AgentCommand,
   AgentConfig,
   AgentId,
-  AgentInfo,
+  AgentAvailability,
   AgentStripEntry,
   CustomAgent,
   SystemInfo,
   DirListing,
   ElicitationField,
   EventsPage,
+  InstallChunk,
+  InstallRunView,
   LoginChunk,
   LoginRunView,
   PermissionOptionSummary,
@@ -43,8 +45,8 @@ import type {
 export class DaemonClient {
   constructor(private readonly machine: MachineConnection) {}
 
-  agents(): Promise<{ agents: AgentInfo[] }> {
-    return this.machine.request<{ agents: AgentInfo[] }>("/agents");
+  agents(): Promise<{ agents: AgentAvailability[] }> {
+    return this.machine.request<{ agents: AgentAvailability[] }>("/agents");
   }
 
   /* ---------------------------------------------------------------- *
@@ -319,7 +321,7 @@ export class DaemonClient {
    * the only way back from a refusal is to wait for it to age out. It asks nothing
    * of the agent and takes nothing away.
    */
-  recheckAgent(agent: string): Promise<{ agent: string; rechecked: boolean; info?: AgentInfo }> {
+  recheckAgent(agent: string): Promise<{ agent: string; rechecked: boolean; info?: AgentAvailability }> {
     return this.machine.request(`/agent-auth/${encodeURIComponent(agent)}/recheck`, {
       method: "POST",
     });
@@ -329,6 +331,73 @@ export class DaemonClient {
     return this.machine.request(`/agent-auth/login/${encodeURIComponent(loginId)}`, {
       method: "DELETE",
     });
+  }
+
+  /**
+   * Put a harness on this machine.
+   *
+   * ⚠ **Not a slow route, and the reason is what the daemon does rather than how
+   * long the install takes.** The `POST` spawns a script and answers with an id —
+   * milliseconds — exactly as `startLogin` does. Putting the *install's* duration
+   * into the transport budget would be state leaking into `machine.ts`, and a
+   * 90-second budget in front of a request that answers immediately buys nothing.
+   *
+   * ⚠ **A lost answer is never resent.** `isReplayable` covers `GET` and `DELETE`
+   * only, so a `POST` whose response went missing is not retried — which is right,
+   * because a resend is a *second install*. What a lost answer costs is one run
+   * this tab never adopts, and `GET /agent-install` is how it is adopted back.
+   */
+  startInstall(agent: string): Promise<InstallRunView> {
+    return this.machine.request<InstallRunView>(`/agent-install/${encodeURIComponent(agent)}`, {
+      method: "POST",
+    });
+  }
+
+  /** `since` is a byte cursor into the whole transcript, not a line count. */
+  readInstall(installId: string, since: number): Promise<InstallChunk> {
+    const query = new URLSearchParams({ since: String(since) });
+    return this.machine.request<InstallChunk>(
+      `/agent-install/runs/${encodeURIComponent(installId)}?${query.toString()}`,
+    );
+  }
+
+  cancelInstall(installId: string): Promise<{ cancelled: boolean }> {
+    return this.machine.request(`/agent-install/runs/${encodeURIComponent(installId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  /**
+   * The run this machine is holding, or `null`.
+   *
+   * ⚠ **This is what a reload costs instead of a lost install.** There is one run
+   * daemon-wide, and a phone that came back with no id in `sessionStorage` would
+   * otherwise be looking at a machine that is busy for reasons the screen cannot
+   * name — and would offer a button that answers `409`.
+   *
+   * ⚠ **Both Install surfaces call it on mount, and for a release neither
+   * did.** This method was declared, documented in `docs/API.md` and counted in
+   * the route total with **no call site anywhere in this package** — while the
+   * two screens that draw an Install each tracked a run their own way:
+   * `AgentsPanel` in `sessionStorage` per machine *and* agent,
+   * `MachineAgentsSection` in component state that a remount threw away. So the
+   * failure this promises to prevent was the shipped behaviour, from three
+   * directions rather than one. `webcheck` asserts the callers by name, because
+   * a served route with nobody on the other end of it is invisible to every
+   * other check.
+   *
+   * ⚠ **A failure here is not an answer.** A daemon predating the route answers
+   * a bare `404` and a dropped request looks the same, so neither caller may
+   * read a rejection as *there is no run* — nothing is adopted and nothing
+   * already on screen is taken away.
+   *
+   * `supported` is the second use, and on the card it is the only one that
+   * works: `GET /agents` folds `installs !== null` into each row's
+   * `installable`, `GET /agent-auth` spreads the runtime's own value with no
+   * such fold, and `AgentsPanel` reads the second one.
+   */
+  liveInstall(): Promise<{ supported: boolean; run: InstallRunView | null }> {
+    return this.machine.request("/agent-install");
   }
 
   roots(): Promise<RootListing> {

@@ -195,8 +195,9 @@ async function connect(id: string, channels: never = fetchChannel) {
    * that nothing tries. A page served over `https:` cannot reach `http://127.0.0.1`
    * at all — mixed content, refused before a byte leaves — so a browser build that
    * probed would spend a request per route resolution to learn nothing, on the
-   * phone this client is shaped around. `inNativeShell()` is the whole gate and it
-   * lives in `localRoute.ts`, one module away from the router.
+   * phone this client is shaped around. `canHostDaemonHere()` is the whole gate
+   * and it lives in `native.ts`, behind `localDaemon()` — two modules away from
+   * the router, and with no bridge in the page it answers `false`.
    */
   removeShell();
   announced = { machineId: "m_1", base: LOCAL, instanceId: "i_x" };

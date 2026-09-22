@@ -70,6 +70,7 @@ await import("./webcheck.devices.js");
 // transport — and above `closeWss()`, which is where the socket-driving sections end.
 await import("./webcheck.native-bridge.js");
 await import("./webcheck.agent-card.js");
+await import("./webcheck.agent-install.js");
 await import("./webcheck.settings-routing.js");
 await import("./webcheck.shell-and-enrollment.js");
 await import("./webcheck.gate-and-server-settings.js");

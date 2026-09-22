@@ -34,9 +34,23 @@ home.
 | `codex-acp` 1.8.0 (1.1.9: `custom-gateway`) | `{}` | **`openai`** | `openai` |
 | `kimi` 0.29.x, 2026-08-25 | absent | — | `-32601` |
 | `opencode` 1.18.23, 2026-08-25 | absent | — | `-32601` |
+| `grok` 1.0.40, 2026-09-21 | absent | — | no method |
 
 opencode is the native side of **two** rows, publishes them in one list, and has
 no sign-in at all; `agent-catalogue.md` owns both consequences.
+
+**grok is the row that needed measuring twice** — signed out and with a key — because
+a `providers` marker that appeared only for a keyed agent would be a fact about the
+key rather than about the binary. It is absent either way, so grok reaches xAI and
+nothing else, which is why `SYSTEMS.xai` names it as a `nativeHarness` and leaves
+`baseUrl` null. ⚠ **And it needed measuring a third time, in the state neither of
+those two covered.** *"It refuses `session/new` until an `authenticate` has been
+sent"* was taken on a machine with no credential at all and read as a property of
+the binary; on one signed in by `grok login` the call is not merely unnecessary but
+**harmful**, since it selects an auth mode the machine has no key for. `ACP_AUTH_METHOD`
+answers which id spends a pasted key and `SessionRuntime.authMethod` answers whether
+there is one; `agent-login.md` carries the measurement and `acp-agents.md` the rest.
+Q6.110.
 
 **And what each publishes is a second, independent question.** Re-measured
 2026-08-26 through this daemon's own `AgentAskRuns.capabilities`, **ids and names
@@ -458,7 +472,7 @@ answered, and both conventions are read. The per-row evidence is in `SYSTEMS`.
 | `packages/web/src/agents.ts` | The client's half: the same refusals, the whole-fleet catalogue, the default name. DOM-free so `webcheck` drives it |
 | `packages/web/src/ui/AgentBuilder.tsx` | The flow: the draft, its reads, and the three screens it dispatches between. Over a stored preset it is the **edit** screen, and the preset is a third read — deliberately not a third leg of the `Promise.all`, since a daemon too old for `GET /custom-agents` would then take down the new-agent flow it runs perfectly well |
 | `packages/web/src/agentPick.ts` | The agent a pop-up assembled, held until the strip can draw it. Taken, never read twice |
-| `packages/web/src/ui/AgentIcons.tsx` | One glyph per harness. Shapes of ours, not vendor marks — exhaustive over the four this product ships, and a monogram for one a plugin added |
+| `packages/web/src/ui/AgentIcons.tsx` | One glyph per harness. Shapes of ours, not vendor marks — exhaustive over the five this product ships, and a monogram for one a plugin added |
 | `packages/web/src/openrouter.ts` | One provider's list, read by the browser. **`agent-catalogue.md` is that subject whole**: where a name comes from, and which spellings relate |
 | `packages/web/src/ui/settings/SystemsPanel.tsx` | A system's whole configuration, and `KeyOnly` — exported, and mounted twice **here**, routed and not. The builder mounted it too and no longer does: authorization is a property of the machine, so it lives where a machine is configured. Q3.497 |
 

@@ -29,7 +29,7 @@ this subject. macOS is the only full profile; every other platform ships a clien
 | macOS | built, measured, shipping | built, measured, shipping |
 | Linux | profile declared; no CI leg and no asset yet | **not in the bundle**, by decision — see below |
 | Windows | profile declared; no CI leg and no asset yet | **refused**, and the refusal is in `build-daemon.mjs` by name |
-| Android | profile declared; `gen/android` committed; no CI leg and no asset yet | impossible |
+| Android | profile declared; `gen/android` committed; **two CI legs** (`native-android` clippy, `android-apk` assemble+dex census); no asset yet | impossible |
 | iOS | profile declared; **refused at compile time** by `credential.rs`; `gen/apple` not generated | impossible |
 
 Windows is refused as a *host* rather than merely unwritten: there is no way to
@@ -251,7 +251,8 @@ Three consequences, each stated rather than worked around:
    `android-native-keyring-store`, with the NDK context handed over from
    `MainActivity.kt`), and iOS is refused by a `compile_error!` until its
    `apple-native-keyring-store` arm is written in the same change that deletes
-   the refusal. No CI job compiles either arm.
+   the refusal. `native-android` compiles Android's arm (`cargo clippy
+   --target aarch64-linux-android --lib`); no CI job compiles iOS's.
 3. **A build with no identity is unsigned**, runs locally, and is blocked by
    Gatekeeper the moment it is *downloaded*. The gap is a certificate, not code.
    ⚠ Measured on the produced bundle: `codesign -dv` reports

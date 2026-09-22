@@ -14,21 +14,32 @@
 #   deploy/agents.sh --skip <agent>  # keep that harness's previous build on disk; repeatable,
 #                                    #   and what the daemon passes for each harness with a
 #                                    #   live agent (see below for what it withholds)
+#   deploy/agents.sh --only <agent>  # restrict the run to that harness; repeatable, and what
+#                                    #   an install somebody pressed in the app passes. Its
+#                                    #   value is checked, where `--skip`'s is not — below
+#   deploy/agents.sh --refresh-only  # refresh what is here, install nothing that is not.
+#                                    #   What the timer and `deploy.sh` pass, since nothing
+#                                    #   brings a harness onto a machine but a person now
+#   deploy/agents.sh --fail-if-locked # exit 3 rather than 0 when another run holds the lock
 #
 # Exits 0 whatever the vendors answered — a failure is a line on stderr, never a
-# status, and the daemon forwards those lines as warnings — and 2 only for a flag
-# it does not know, a `--source` that is neither `vendor` nor `npm`, a `--channel`
-# that is neither `stable` nor `latest`, or a `--skip`, `--source` or `--channel`
-# with nothing after it. With no `HOME` at all it stops at its first
-# line, non-zero: a state no caller can produce, since the daemon sets `HOME`
-# itself and the other two run from a shell that has one.
+# status, and the daemon forwards those lines as warnings; 2 only for a flag it
+# does not know, a `--source` that is neither `vendor` nor `npm`, a `--channel`
+# that is neither `stable` nor `latest`, an `--only` that is not one of the five,
+# or a `--skip`, `--only`, `--source` or `--channel` with nothing after it; and
+# **3 only under `--fail-if-locked`**, for a run another run is already holding.
+# With no `HOME` at all it stops at its first line, non-zero: a state no caller
+# can produce, since the daemon sets `HOME` itself and the others run from a shell
+# that has one.
 #
-# **One script and three callers, because install and update are the same act
-# here.** `deploy/bootstrap.sh` runs it once so a fresh machine ends with working
-# agents; `deploy/deploy.sh` runs it on every daemon update, before it decides the
-# restart, with every prune withheld; `src/agentupdate.ts` runs it on a timer so
-# they do not rot. Written as install-if-absent then refresh-if-present so all
-# three take the same path and there is no second code path to keep in step.
+# **One script and four callers, because install and update are the same act
+# here.** `deploy/bootstrap.sh` runs it once, and now only when somebody asked for
+# a harness by name; `deploy/deploy.sh` runs it on every daemon update, before it
+# decides the restart, `--refresh-only` with every prune withheld;
+# `src/agentupdate.ts` runs it on a timer, also `--refresh-only`, so what is here
+# does not rot; and `src/agentinstall.ts` runs it `--only <agent>` when somebody
+# presses Install. Written as install-if-absent then refresh-if-present so all
+# four take the same path and there is no second code path to keep in step.
 # Q4.113 is the measurement and the argument; what is here is the shape.
 #
 # **Why this exists at all: not one of the four self-updates under ACP.** Measured
@@ -121,16 +132,43 @@ trap '' PIPE
 
 CHECK=0
 SKIP=" "
+ONLY=" "
+REFRESH_ONLY=0
+FAIL_IF_LOCKED=0
 SOURCE=vendor
 # claude's release channel — the header says why `latest`. The two spellings are
 # claude's own (`claude install <stable|latest>`), so a third is refused here by
 # name rather than handed to a verb that would refuse it out of sight.
 CHANNEL=latest
+
+# The five this script installs, in the order `main` runs them.
+#
+# **One list, and `deploycheck` compares it with `AGENT_IDS` as a *set*.** The
+# orders differ deliberately — this one is cheapest-first — so the assertion is
+# membership rather than sequence, and a sixth harness is one line here instead of
+# three. Same rule `MANAGED_CLI_DIRS` already holds, applied to the second list
+# this file shares with `src/`.
+AGENTS="claude codex opencode kimi grok"
+
 _want_skip=0
+_want_only=0
 _want_source=0
 _want_channel=0
 for _arg in "$@"; do
   if [ "$_want_skip" = 1 ]; then SKIP="$SKIP$_arg "; _want_skip=0; continue; fi
+  if [ "$_want_only" = 1 ]; then
+    # ⚠ **`--only` validates its value where `--skip` does not, and somebody will
+    # try to "fix" that asymmetry.** A `--skip typo` withholds a prune that was not
+    # going to matter. A `--only typo` is a run that touches nothing, prints a
+    # header, exits 0 and reports success — the silent no-op this script refuses
+    # everywhere else, and the one an install run would draw as "installed".
+    case " $AGENTS " in
+      *" $_arg "*) ONLY="$ONLY$_arg " ;;
+      *) printf -- '--only takes one of %s, not %s\n' "$AGENTS" "$_arg" >&2; exit 2 ;;
+    esac
+    _want_only=0
+    continue
+  fi
   if [ "$_want_source" = 1 ]; then
     case "$_arg" in
       vendor | npm) SOURCE=$_arg ;;
@@ -148,14 +186,18 @@ for _arg in "$@"; do
     continue
   fi
   case "$_arg" in
-    --check)   CHECK=1 ;;
-    --skip)    _want_skip=1 ;;
-    --source)  _want_source=1 ;;
-    --channel) _want_channel=1 ;;
+    --check)          CHECK=1 ;;
+    --refresh-only)   REFRESH_ONLY=1 ;;
+    --fail-if-locked) FAIL_IF_LOCKED=1 ;;
+    --skip)           _want_skip=1 ;;
+    --only)           _want_only=1 ;;
+    --source)         _want_source=1 ;;
+    --channel)        _want_channel=1 ;;
     *) printf 'unknown flag: %s\n' "$_arg" >&2; exit 2 ;;
   esac
 done
 [ "$_want_skip" = 1 ] && { printf -- '--skip needs an agent name\n' >&2; exit 2; }
+[ "$_want_only" = 1 ] && { printf -- '--only needs an agent name\n' >&2; exit 2; }
 [ "$_want_source" = 1 ] && { printf -- '--source needs vendor or npm\n' >&2; exit 2; }
 [ "$_want_channel" = 1 ] && { printf -- '--channel needs stable or latest\n' >&2; exit 2; }
 
@@ -173,6 +215,26 @@ done
 # the symlink still moves, and the previous build stays until a run with no live
 # agent on that harness.
 skipped() { case "$SKIP" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# ⚠ **`--only` and `--skip` are orthogonal and do not contradict each other**,
+# which is the reading somebody will act on. `--skip <agent>` does not exclude a
+# harness from the run — it withholds the *prune* of a build a live process may be
+# executing (see `prune_builds` and the paragraph above). So `--only kimi --skip
+# kimi` is a meaningful pair: refresh kimi, and keep the build a session is on.
+#
+# An empty `ONLY` is the flag being **absent**, never an empty set, so a run with
+# no `--only` is still every harness and the callers that never pass one are
+# unchanged.
+wanted() { case "$ONLY" in " ") return 0 ;; *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# What an absent harness gets under `--refresh-only`.
+#
+# ⚠ **Said on stdout and *not* counted in `failed`.** That counter means "a vendor
+# could not be reached", which the daemon forwards to an operator as a warning; a
+# harness nobody has installed is the ordinary state of a machine now that nothing
+# installs one by itself, and warning about it daily teaches somebody to ignore the
+# one counter that does mean something.
+not_installed() { note "$1 not installed; --refresh-only fetches nothing new"; }
 
 # Each tolerates a closed stream: with SIGPIPE ignored (above) a `printf` whose
 # reader has gone fails with `EPIPE`, and under `set -e` a failing builtin ends the
@@ -199,6 +261,31 @@ say()  { ( printf '%s\n' "$*" ) 2>/dev/null || :; }
 note() { ( printf '  %s\n' "$*" ) 2>/dev/null || :; }
 warn() { ( printf '%s\n' "$*" >&2 2>/dev/null ) || :; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# A checkpoint a reader can draw a progress step from, and the one machine-readable
+# line this script prints.
+#
+# ⚠ **Without these a run is silent for minutes.** `attempt` and `ensure_npm` send
+# every vendor installer's and npm's own output to `/dev/null` — deliberately,
+# since it is unbounded, vendor-shaped and ANSI-laden — so what reaches a reader is
+# one line per harness, printed when that harness is already *finished*. A progress
+# indicator fed by this transcript had nothing to move between the header and the
+# end, which is fine for an operator tailing a log and useless for somebody who
+# just pressed a button.
+#
+# ⚠ **A fixed vocabulary rather than a prose parse, and the difference from
+# `ui/login.ts` is who owns both ends.** There, a vendor's sentences are the only
+# thing there is, which is what licenses a guess and a raw-transcript fallback.
+# Here the emitter is in this repository: the grammar is one line, `readStep` in
+# `src/agentinstall.ts` is its only reader, and `deploycheck` imports that parser
+# and drives this emitter so the two cannot drift. Same trick `MANAGED_CLI_DIRS`
+# already uses for the other list this file shares with `src/`.
+#
+# Suppressed under `--check`, where nothing runs and a `download` step would be
+# claiming one. A subshell for `say`'s reason.
+#
+#   step: <agent> start|download|install|link|done|failed
+step() { [ "$CHECK" = 1 ] || ( printf 'step: %s %s\n' "$1" "$2" ) 2>/dev/null || :; }
 
 # **Kept in step with `MANAGED_CLI_DIRS` in `src/acp/agents.ts` by `deploycheck`,
 # which imports that constant rather than restating it.** Two files naming the same
@@ -281,6 +368,16 @@ take_lock() {
       "" | *[!0-9]*) : ;;
       *) if kill -0 "$_pid" 2>/dev/null; then
            warn "another run of deploy/agents.sh (pid $_pid) is in progress; nothing was changed"
+           # ⚠ **Three callers need `exit 0` and one needs to know the
+           # difference.** The bootstrap, `deploy.sh` and the daily timer all
+           # contract that this script never fails, and for them a contended run
+           # really is nothing to report. An install somebody pressed is the
+           # opposite: an `exit 0` with no header and nothing installed cannot be
+           # told from a successful run that found nothing to do, and a UI would
+           # draw it as "installed". `--fail-if-locked` is how the daemon's
+           # install run asks for the distinction, so no existing caller's
+           # contract moves.
+           [ "$FAIL_IF_LOCKED" = 1 ] && exit 3
            exit 0
          fi ;;
     esac
@@ -290,10 +387,16 @@ take_lock() {
     rm -rf "$LOCK"
   done
   warn "  could not take $LOCK after 3 tries; nothing was changed"
+  # Same distinction as the live-pid arm above, and for the same reason: nothing
+  # was installed either way.
+  [ "$FAIL_IF_LOCKED" = 1 ] && exit 3
   exit 0
 }
 
 failed=0
+# How many harnesses this run actually walked, which `--only` makes different from
+# the length of `$AGENTS`. Read by the summary line and nothing else.
+attempted=0
 
 # What to say after a step that reported success.
 #
@@ -314,6 +417,7 @@ attempt() {
     note "$_what: would run: $*"
     return 0
   fi
+  step "$_what" install
   if "$@" >/dev/null 2>&1; then
     return 0
   fi
@@ -397,6 +501,7 @@ vendor_copy_stays() {
 # script already knows how to say.
 download() {
   if [ "$CHECK" = 1 ]; then note "$1: would download $2"; return 0; fi
+  step "$1" download
   curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 30 --max-time 600 -o "$TMP/$1.sh" "$2" >/dev/null 2>&1
 }
 
@@ -496,7 +601,12 @@ ensure_npm() {
     _prev=${_prev%/bin/*}
   fi
   case "$(provenance "$_agent")" in
-    "") _verb=install ;;
+    # ⚠ The `--refresh-only` guard goes on *this* arm and on the fall-through of
+    # each vendor `case` below — five doors, because "absent" is spelled once here
+    # and three times as a `case` with no `""` arm. A guard missing from one of
+    # them is a harness that still downloads on a run that promised not to.
+    "") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "$_pad"; return 0; fi
+        _verb=install ;;
     toolchain) _verb=refresh ;;
     # A vendor-installed kimi lands here too, since kimi has no vendor arm of its
     # own: `kimi upgrade` lies (below), so it is left alone like any other copy.
@@ -532,6 +642,7 @@ ensure_npm() {
   fi
   mkdir -p "$TOOLCHAIN/bin"
   _stage=$(mktemp -d "$TOOLCHAIN/$_agent.stage.XXXXXX") || { warn "  $_pad install failed; cannot stage under $TOOLCHAIN"; failed=$((failed + 1)); return 0; }
+  step "$_agent" install
   if ! "$_npm" i -g --prefix "$_stage" "$_pkg@latest" >/dev/null 2>&1 || [ ! -x "$_stage/bin/$_agent" ]; then
     rm -rf "$_stage"
     # Said by what is true afterwards: a failed refresh leaves the previous build
@@ -567,6 +678,7 @@ ensure_npm() {
   # `ln` fail and the `mv` never happen, with the note below still claiming a
   # refresh; cleared first, and every stale one swept with the builds.
   rm -f "$TOOLCHAIN/bin/$_agent.new.$$"
+  step "$_agent" link
   if ! { ln -s "$_build/bin/$_agent" "$TOOLCHAIN/bin/$_agent.new.$$" && mv -f "$TOOLCHAIN/bin/$_agent.new.$$" "$TOOLCHAIN/bin/$_agent"; }; then
     warn "  $_pad could not repoint $TOOLCHAIN/bin/$_agent; the build that ran before still does"
     failed=$((failed + 1))
@@ -582,6 +694,10 @@ ensure_claude() {
   # override — a copy refreshed beside it would be a download nothing runs.
   [ -z "${CLAUDE_CODE_EXECUTABLE:-}" ] || { note "claude        left alone: CLAUDE_CODE_EXECUTABLE names the build that runs"; return 0; }
   case "$(provenance claude)" in
+    # An arm whose body is a false `if` with no `else` exits 0, so the
+    # fall-through to the install path below is preserved and `set -e` is not
+    # armed. That is why this is a `""` arm rather than a guard before the `case`.
+    "") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "claude       "; return 0; fi ;;
     toolchain) ensure_npm claude @anthropic-ai/claude-code "claude       "; return 0 ;;
     outside) outside_note "claude       " claude; return 0 ;;
     vendor)
@@ -648,6 +764,10 @@ ensure_claude() {
 ensure_codex() {
   [ -z "${CODEX_PATH:-}" ] || { note "codex         left alone: CODEX_PATH names the build that runs"; return 0; }
   case "$(provenance codex)" in
+    # An arm whose body is a false `if` with no `else` exits 0, so the
+    # fall-through to the install path below is preserved and `set -e` is not
+    # armed. That is why this is a `""` arm rather than a guard before the `case`.
+    "") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "codex        "; return 0; fi ;;
     toolchain) ensure_npm codex @openai/codex "codex        "; return 0 ;;
     outside) outside_note "codex        " codex; return 0 ;;
     vendor)
@@ -672,6 +792,10 @@ ensure_codex() {
 
 ensure_opencode() {
   case "$(provenance opencode)" in
+    # An arm whose body is a false `if` with no `else` exits 0, so the
+    # fall-through to the install path below is preserved and `set -e` is not
+    # armed. That is why this is a `""` arm rather than a guard before the `case`.
+    "") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "opencode     "; return 0; fi ;;
     toolchain) ensure_npm opencode opencode-ai "opencode     "; return 0 ;;
     outside) outside_note "opencode     " opencode; return 0 ;;
     vendor)
@@ -703,28 +827,82 @@ ensure_kimi() {
   ensure_npm kimi @moonshot-ai/kimi-code "kimi         "
 }
 
+ensure_grok() {
+  # ⚠ **npm under either `--source`, and unlike kimi's row that is not because the
+  # vendor's updater is broken — it is because the *operator* asked for a binary
+  # this daemon can move.** The vendor installer works and `grok update` exists,
+  # but the installer symlinks into `~/.local/bin` and edits shell profiles
+  # (`.bashrc`/`.zshrc`), and `CLAUDE.md` states as a property of this script that
+  # no shell profile is edited. The npm door writes no profile, lands the binary in
+  # `~/.grok/bin` — which `MANAGED_CLI_DIRS` names — and is refreshed by exactly
+  # the mechanism every other toolchain copy is.
+  #
+  # ⚠ **Never `--no-optional`.** `@xai-official/grok` is an ~18 kB launcher shim;
+  # the platform binaries ride in `optionalDependencies` and a postinstall
+  # decompresses one into `$GROK_HOME/bin`. `ensure_npm` does not pass that flag
+  # and must not grow it — the result is a command that installs cleanly and
+  # cannot run.
+  #
+  # ⚠ **`--no-auto-update` is not set here**, because it is not this script's to
+  # set: grok checks for updates when it *runs*, and what runs it is
+  # `resolveAgent`, which passes the flag on every ACP spawn. Setting
+  # `auto_update = false` in `~/.grok/config.toml` from here would be this script
+  # writing a settings file under somebody's home, which it does for no other agent.
+  ensure_npm grok @xai-official/grok "grok         "
+}
+
 main() {
   take_lock
   # The channel is said beside the door, and only for the door that reads it: under
   # `npm` no arm looks at it, and a header that named it there would claim a choice
   # nothing made.
-  if [ "$SOURCE" = npm ]; then _how="from the npm registry"; else _how="with each vendor's own installer, claude on its $CHANNEL channel"; fi
+  #
+  # ⚠ **And only when claude is in the run at all.** `--only kimi` naming claude's
+  # channel is the same silent lie one clause down, from the other direction: a
+  # choice announced by a run that makes none.
+  if [ "$SOURCE" = npm ]; then _how="from the npm registry"
+  elif wanted claude; then _how="with each vendor's own installer, claude on its $CHANNEL channel"
+  else _how="with each vendor's own installer"; fi
   # A channel the registry cannot honour is said rather than swallowed: under `npm`
   # every copy is `@latest`, so `--channel stable` there would otherwise look set and
   # do nothing, which is the silent lie the flag exists to end (Q4.115). The default
   # says nothing, since `latest` is what the registry gives anyway.
   if [ "$SOURCE" = npm ] && [ "$CHANNEL" != latest ]; then note "claude        --channel $CHANNEL does not apply under --source npm: the registry has no channels, so @latest is what is installed"; fi
-  if [ "$CHECK" = 1 ]; then say "agents (--check: nothing will be changed; $_how)"; else say "agents ($_how)"; fi
-  ensure_claude
-  ensure_codex
-  ensure_opencode
-  ensure_kimi
+  # Each mode names itself, for the reason above: a run that installs nothing and
+  # says nothing about it reads as a run that found nothing to do.
+  _mode=""
+  if [ "$REFRESH_ONLY" = 1 ]; then _mode="refresh only, nothing new is installed; "; fi
+  # Both ends: `ONLY` is built as " a b " so a bare `${ONLY# }` leaves the trailing
+  # space and the header reads "kimi  only".
+  if [ "$ONLY" != " " ]; then _named=${ONLY# }; _mode="$_mode${_named% } only; "; fi
+  if [ "$CHECK" = 1 ]; then _mode="--check: nothing will be changed; $_mode"; fi
+  say "agents ($_mode$_how)"
+  # ⚠ **The loop variable is `_which` and not `_agent`, which `ensure_npm` uses as
+  # a global and would clobber under us.**
+  for _which in $AGENTS; do
+    wanted "$_which" || continue
+    attempted=$((attempted + 1))
+    _was=$failed
+    step "$_which" start
+    case "$_which" in
+      claude)   ensure_claude ;;
+      codex)    ensure_codex ;;
+      opencode) ensure_opencode ;;
+      kimi)     ensure_kimi ;;
+      grok)     ensure_grok ;;
+    esac
+    if [ "$failed" = "$_was" ]; then step "$_which" done; else step "$_which" failed; fi
+  done
   # Exit 0 whatever happened. The caller is an installer that must not abort over a
   # vendor being down, a deploy that must not either, or a timer whose failure mode
   # is a warning; the first two print the stderr lines above, and the daemon
-  # forwards them.
+  # forwards them. (`--fail-if-locked`'s `exit 3` is not this arm: that run never
+  # reached here, having installed nothing at all.)
+  #
+  # ⚠ **`$attempted` rather than 5, or a one-harness run that failed reports "1 of
+  # 5 agents" and reads as four that quietly worked.**
   if [ "$failed" -gt 0 ]; then
-    warn "  $failed of 4 agents were not installed or refreshed; the lines above say why"
+    warn "  $failed of $attempted agents were not installed or refreshed; the lines above say why"
   fi
   return 0
 }

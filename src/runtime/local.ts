@@ -5,7 +5,9 @@ import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import {
+  ACP_AUTH_METHOD,
   AGENT_LOGIN,
+  AgentUnavailableError,
   agentEnv,
   findOnPath,
   forgetPathHits,
@@ -680,6 +682,20 @@ export class LocalRuntime implements SessionRuntime {
             displayName: contributed?.name ?? id,
             available: false,
             hint: describeError(error),
+            /*
+             * ⚠ **Read off the error rather than inferred from `available`**, and
+             * `AgentUnavailableError` has carried it since the auto-resume pass
+             * needed it — this method simply dropped it. Only the five CLI-missing
+             * refusals set it, so a missing adapter, an unknown id and a
+             * contributed harness whose program is gone all answer `false`: none
+             * of those is something `deploy/agents.sh` can put right.
+             *
+             * `instanceof` and not a duck test: a `catch` here can receive
+             * anything, and an object that happens to carry a truthy
+             * `installable` would otherwise offer a download for a failure nobody
+             * measured.
+             */
+            installable: error instanceof AgentUnavailableError && error.installable,
             loggedIn: null,
             lastStartRefusal: this.startRefusal(id),
             ...extra,
@@ -690,6 +706,9 @@ export class LocalRuntime implements SessionRuntime {
           id,
           displayName: config.displayName,
           available: true,
+          // Nothing to install: the harness resolved. Deliberately not "offer a
+          // reinstall", which is a different control with a different argument.
+          installable: false,
           ...extra,
           // The hint is what to *do*, and "cannot tell" needs one too.
           //
@@ -1014,6 +1033,41 @@ export class LocalRuntime implements SessionRuntime {
     // 'error' is fatal to the whole daemon.
     child.stdin.on("error", () => {});
     return new LocalAgentProcess(child);
+  }
+
+  /**
+   * {@inheritDoc SessionRuntime.authMethod}
+   *
+   * ⚠ **Two questions, and both have to be yes.** `ACP_AUTH_METHOD` answers the
+   * first — *is there an id that spends a key for this harness* — and it is a
+   * table rather than a read of the agent's own `authMethods`, for the reason
+   * `agent-login.md` records: grok advertises exactly one method on a signed-out
+   * machine, `grok.com`, whose `authenticate` prints a device URL to stderr and
+   * blocks on a browser. The second is whether there is a key, and it is asked of
+   * the same `secrets(agent)` that {@link launch} is about to merge, so the id and
+   * the environment cannot disagree.
+   *
+   * ⚠ **`routed` short-circuits, and it has to be first.** A routed pairing has
+   * {@link launch} withhold `secrets(agent)` entirely, so asking the second
+   * question against a store that still holds a key would name an id for a
+   * variable that will not be in the environment. grok reaches no foreign system
+   * today — `hostable` refuses it every one — so this arm is unreachable for the
+   * only populated row; it is written because the table is the thing that grows.
+   *
+   * ⚠ **`length > 0` rather than a test for the id's own variable, and that is
+   * `readLoginState`'s existing rule rather than a shortcut.** `secrets(agent)`
+   * only ever returns what was pasted *for this harness*, keyed by the names
+   * `AGENT_LOGIN[agent].envNames` allows, so "non-empty" and "the key this method
+   * spends" are the same set for every row that exists. A harness whose login row
+   * grows a second variable that this method does *not* spend is what would
+   * separate them, and that is the moment to narrow this — not before, because a
+   * narrower test written now would have to name a variable twice.
+   */
+  authMethod(agent: AgentId, routed = false): string | null {
+    if (routed) return null;
+    const method = ACP_AUTH_METHOD[agent];
+    if (method === undefined) return null;
+    return Object.keys(this.secrets(agent)).length > 0 ? method : null;
   }
 
   /** git as a child of this daemon, against the repository where it lives. */

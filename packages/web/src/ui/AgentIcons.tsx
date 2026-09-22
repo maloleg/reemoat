@@ -80,6 +80,35 @@ function OpencodeGlyph({ size }: { size: number }): ReactNode {
 }
 
 /**
+ * Grok. A rhombus — a closed angular figure, at the one weight the others use.
+ *
+ * Chosen against the four already here rather than for itself, which is the rule
+ * this file keeps: the asterisk is radial, the chevron is an open pointer, the
+ * crescent is a *curved* closed shape and the brackets are two uprights. A
+ * four-sided closed outline is none of those at 20px, and it is the one gap left
+ * in that set.
+ *
+ * ⚠ **Not an X, and that is the whole of why this is a rhombus.** The obvious
+ * shape for this vendor is the one it actually uses as its mark, and every glyph
+ * in this file is deliberately a shape *of ours* standing for a program whose mark
+ * we may not draw. An X would also have read as the asterisk's cousin — both are
+ * strokes crossing a centre — which is the test the other four were chosen by.
+ */
+function GrokGlyph({ size }: { size: number }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={true}>
+      <path
+        d="M12 3 21 12 12 21 3 12Z"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
  * A harness a plugin added, drawn as a monogram.
  *
  * ⚠ **A letter rather than a fifth shape, and the choice is the opposite of the
@@ -130,8 +159,8 @@ function MonogramGlyph({ agent, size }: { agent: string; size: number }): ReactN
 /**
  * The harness's glyph.
  *
- * ⚠ **Exhaustive over the four this product *ships*, with no `default` arm** —
- * which is the rule every per-harness table in this fleet keeps: a fifth built-in
+ * ⚠ **Exhaustive over the five this product *ships*, with no `default` arm** —
+ * which is the rule every per-harness table in this fleet keeps: a sixth built-in
  * is a compile error here rather than a tile that silently draws nothing.
  * `wire.ts`'s `AGENT_IDS` is a hand mirror and is the one seam with no compiler
  * help, so this is one of the places that makes adding to it loud.
@@ -155,6 +184,8 @@ export function AgentGlyph({ agent, size = 20 }: { agent: AgentId; size?: number
       return <KimiGlyph size={size} />;
     case "opencode":
       return <OpencodeGlyph size={size} />;
+    case "grok":
+      return <GrokGlyph size={size} />;
     default:
       return unglyphed(agent);
   }
@@ -169,8 +200,9 @@ export function AgentGlyph({ agent, size = 20 }: { agent: AgentId; size?: number
  * fourth harness would have drawn a blank tile and compiled clean — the failure
  * the comment was written to prevent, undetectable by the thing it named.
  *
- * `never` is what actually holds it. A fifth harness fails here, in this file,
- * naming the union it was added to.
+ * `never` is what actually holds it, and it has since been paid for: `grok` was
+ * added to the union and this is one of the files that refused to compile until it
+ * had an arm. A sixth harness fails here too, naming the union it was added to.
  */
 function unglyphed(agent: never): ReactNode {
   void agent;

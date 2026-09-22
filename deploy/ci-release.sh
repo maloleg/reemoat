@@ -350,9 +350,17 @@ notes=$(extract_notes)
 # had already walked away.
 #
 # So `pending` is now its own verdict and it is waited on, bounded by
-# `RELEASE_CHECK_WAIT_SECONDS` (default 420 — three times a `check` run, and well
-# under `release.yml`'s `timeout-minutes: 10`, so the deadline is this script's
-# sentence rather than a runner kill with no explanation).
+# `RELEASE_CHECK_WAIT_SECONDS` (default 2700, under `release.yml`'s
+# `timeout-minutes: 45`, so the deadline is this script's sentence rather than a
+# runner kill with no explanation).
+#
+# ⚠ **The number is a multiple of the SLOWEST leg, not of the fastest.** It was
+# 420 — "three times a `check` run" — written when `check` was five quick jobs.
+# `check` now carries `native-android` and `android-apk`, which run an NDK
+# toolchain and a full Gradle assemble, so 420 would refuse an ordinary tag
+# *after* the image and manifest jobs had already pushed: the half-done release
+# state `publish`-is-last exists to prevent, arriving through the gate instead.
+# A leg added to `check` moves this number in the same change.
 #
 # ⚠ **`none` is deliberately NOT waited on.** A commit with no `check` run at all
 # is the shape a missing `actions: read` produces — `release.yml` says so at the
@@ -370,7 +378,7 @@ else
   # Both injectable so `deploycheck` can drive the wait, the deadline and the
   # green-after-pending path in milliseconds. A wait of 0 is the old read-once
   # behaviour exactly, which is how the driver asserts what that used to cost.
-  check_wait=${RELEASE_CHECK_WAIT_SECONDS:-420}
+  check_wait=${RELEASE_CHECK_WAIT_SECONDS:-2700}
   check_poll=${RELEASE_CHECK_POLL_SECONDS:-15}
   waited=0
   while :; do

@@ -1611,7 +1611,38 @@ process.stdout.write("\na sign-in that is not offered\n");
   check("and a different BSD gets its own name", osName("freebsd"), "FreeBSD");
   check("while a daemon that does not say names nothing", osName(undefined), "This machine");
   check("a wizard that can run says nothing at all", stanceLine({ id: "claude" }, "signed_out", true, "darwin"), null);
-  check("and the panel passes the platform through", /stanceLine\(agent, stance, canSignIn, os\)/.test(panel), true);
+  // The fifth argument arrived with the install button: `installable` decides
+  // which of two true sentences the not-installed arm draws, and absent it is
+  // the old one byte for byte. Pinned together, so a call that dropped either
+  // fails here rather than silently telling somebody to press a button that is
+  // not there.
+  /*
+   * ⚠ **The fifth argument is asserted as a PROPERTY, not as a spelling.** This
+   * pinned the literal `agent.installable === true` inline at the call, and went
+   * red the day that expression was lifted into a named `canInstall` that is
+   * *stronger* — `installable === true && !noInstallRoute`, so the sentence no
+   * longer promises a button on a daemon whose install route answers `supported:
+   * false`. A pin on the spelling reports an improvement as a regression, and the
+   * improvement is the thing this check exists to protect. So: the call passes
+   * the decision through, and the decision is the conjunction.
+   */
+  const installDecision = /const canInstall = agent\.installable === true && !noInstallRoute;/.test(panel);
+  check(
+    "and the panel passes the platform through, and whether it can install",
+    [/stanceLine\(agent, stance, canSignIn, os, canInstall\)/.test(panel), installDecision],
+    [true, true],
+  );
+  check(
+    "an older daemon that sends no such field keeps the sentence it always had",
+    [
+      stanceLine({ id: "claude" }, "not_installed", false, "darwin"),
+      stanceLine({ id: "claude" }, "not_installed", false, "darwin", true),
+    ],
+    [
+      "Claude Code isn't installed. Install it on the machine itself.",
+      "Claude Code isn't installed on this machine.",
+    ],
+  );
 
   /*
    * **The command sits on the field it fills.** It was a paragraph above the

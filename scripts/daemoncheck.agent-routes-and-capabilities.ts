@@ -125,7 +125,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
   ];
 
   const listed = await call(withSystems, "GET", "/systems");
-  check("every system is listed", listed.body.systems.length, 7);
+  check("every system is listed", listed.body.systems.length, SYSTEM_IDS.length);
   /*
    * ⚠ **The secret sweep is *below*, on the listing taken after a key is saved,
    * and it stood here for a release where it could not fail.** Nothing has been
@@ -494,6 +494,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "claude x anthropic: saved",
     "claude x openai: incompatible_pairing",
     "claude x openrouter: saved",
+    "claude x xai: incompatible_pairing",
     "claude x moonshot: saved",
     "claude x zhipu: saved",
     "claude x minimax: saved",
@@ -501,6 +502,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "kimi x anthropic: incompatible_pairing",
     "kimi x openai: incompatible_pairing",
     "kimi x openrouter: incompatible_pairing",
+    "kimi x xai: incompatible_pairing",
     "kimi x moonshot: saved",
     "kimi x zhipu: incompatible_pairing",
     "kimi x minimax: incompatible_pairing",
@@ -508,6 +510,7 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     "codex x anthropic: incompatible_pairing",
     "codex x openai: saved",
     "codex x openrouter: incompatible_pairing",
+    "codex x xai: incompatible_pairing",
     "codex x moonshot: incompatible_pairing",
     "codex x zhipu: incompatible_pairing",
     "codex x minimax: incompatible_pairing",
@@ -519,10 +522,25 @@ process.stdout.write("\nthe system and assembled-agent routes\n");
     // `asks.capabilities` before it weighs the pairing, and opencode's honest
     // answer there is `routing: null` — which the native arm never consults.
     "opencode x openrouter: saved",
+    "opencode x xai: incompatible_pairing",
     "opencode x moonshot: incompatible_pairing",
     "opencode x zhipu: incompatible_pairing",
     "opencode x minimax: incompatible_pairing",
     "opencode x zen: saved",
+    /*
+     * The same row the pure `hostable` sweep asserts, driven through the **route**
+     * instead — which is the half that matters, since a preset is what a saved row
+     * becomes and `readAssembledAgent` is what refuses one. `grok x xai` is native,
+     * so it is the only cell here that saves.
+     */
+    "grok x anthropic: incompatible_pairing",
+    "grok x openai: incompatible_pairing",
+    "grok x openrouter: incompatible_pairing",
+    "grok x xai: saved",
+    "grok x moonshot: incompatible_pairing",
+    "grok x zhipu: incompatible_pairing",
+    "grok x minimax: incompatible_pairing",
+    "grok x zen: incompatible_pairing",
   ]);
 
   // Twenty-eight edits later, with nine of them landing, the two fields the wire never
@@ -1336,5 +1354,154 @@ process.stdout.write("\nwhere a claude session's opening mode comes from\n");
     "and neither of them spreads login by hand",
     (serverSrc.match(/login: loginSupportOf\(/g) ?? []).length,
     2,
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Which names may reach the installer script
+ *
+ * ⚠ **`POST /agent-install/:agent` was as wide as `agentIdParam`, and
+ * `agentIdParam` is as wide as the *catalogue*.** It answers on
+ * `harnessState(id) === "enabled"`, which a harness a plugin contributed
+ * satisfies, and `deploy/agents.sh` has never heard of one — it validates
+ * `--only` against its own five names and exits 2. The exit was then *read as an
+ * install*: `spawnAgentsScript` maps every status but 3 to `"running"`, so
+ * `settle` asked the machine and settled the run as `failed`, offering a retry
+ * for a name that can never work. And the way out ran `onFinished`, i.e.
+ * `forgetAvailability()` plus a whole `resumeInterrupted()` pass, so one HTTP
+ * request from a `machine:admin` grant bought a cache flush and an auto-resume
+ * sweep.
+ *
+ * Driven on the route rather than on `AgentInstallRuns`, because the route is
+ * where the gate had to go: the run registry takes an `AgentId`, which is a
+ * `string`, so nothing about this is a compile error anywhere.
+ *
+ * ⚠ **The accepting row is not decoration, it is the negative control.** Three
+ * refusals and nothing else is exactly the shape this repository has shipped
+ * green over dead code twice: a `return jsonError(…)` at the top of the handler
+ * satisfies every one of them. So a harness this repository ships is asked for
+ * in the same table and has to come back `201` with the script actually
+ * reached, and the census at the end differences the per-row booleans against
+ * the list of names the stub was handed.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhich names may reach the installer script\n");
+{
+  const { createApp: build } = await import("../src/server.js");
+  const { BUILTIN_CATALOGUE } = await import("../src/acp/systems.js");
+
+  /*
+   * The script, as the daemon's own port. It answers `ok` for anything, which is
+   * the point: what is under assertion is which names get this far, so a stub
+   * that refused on its own would hide exactly the defect being driven.
+   */
+  const asked: string[] = [];
+  const installs = {
+    start: (agent: string) => {
+      asked.push(agent);
+      return { kind: "ok", view: { installId: "in_stub", agent, done: false, outcome: "running" } };
+    },
+    live: () => null,
+    read: () => null,
+    cancel: () => false,
+  };
+
+  /*
+   * ⚠ **Two contributed harnesses, one *enabled* and one switched off**, because
+   * the route owes them different sentences and `agentIdParam` collapses both to
+   * `null`. The enabled one is the case the route used to spawn for; the disabled
+   * one is the state that may never be answered with a `400`, which is
+   * `noSuchHarness`'s whole reason for existing.
+   */
+  const contributed = (id: string): unknown => ({
+    id,
+    pluginId: "acme",
+    pluginName: "Acme",
+    name: "Gemini",
+    command: "a-binary-that-is-not-here",
+    args: [],
+    envNames: [],
+    routedModelEnv: [] as readonly string[],
+    authHint: null,
+  });
+  const catalogue = {
+    harness: (id: string) => (id.startsWith("acme:") ? contributed(id) : BUILTIN_CATALOGUE.harness(id)),
+    harnessIds: () => ["claude", "kimi", "acme:gemini"],
+    harnessState: (id: string) =>
+      id === "acme:gemini" ? "enabled" : id === "acme:off" ? "disabled" : BUILTIN_CATALOGUE.harnessState(id),
+    system: (id: string) => BUILTIN_CATALOGUE.system(id),
+    systemIds: () => BUILTIN_CATALOGUE.systemIds(),
+    systemState: (id: string) => BUILTIN_CATALOGUE.systemState(id),
+  };
+
+  const registry = new SessionRegistry(new MemoryEventStore());
+  registry.setMachineCatalogue(catalogue as never);
+  const app = build({
+    registry,
+    verifier,
+    instanceId: "i_installgate",
+    startedAt: now,
+    installs: installs as never,
+    roots: [users],
+  }).app;
+
+  /**
+   * One press, as `[status, code, did the script get asked]`.
+   *
+   * The third cell is the half with teeth. A route that answers the right
+   * refusal *after* spawning has paid the cache flush and the auto-resume sweep
+   * already, and the status alone cannot see it.
+   */
+  const press = async (agent: string): Promise<[number, string | null, boolean]> => {
+    const before = asked.length;
+    const response = await app.fetch(
+      new Request(`http://d/agent-install/${encodeURIComponent(agent)}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tokenFor("u_alice")}` },
+      }),
+    );
+    const text = await response.text();
+    // Read defensively for `answered`'s reason above: reaching into `.error`
+    // throws out of the driver the moment a refusal becomes an acceptance, which
+    // is the regression this section reports.
+    const body = (text.length > 0 ? JSON.parse(text) : null) as { error?: { code?: string } } | null;
+    return [response.status, body?.error?.code ?? null, asked.length > before];
+  };
+
+  const table: [string, string, [number, string | null, boolean]][] = [
+    [
+      "a harness this repository ships reaches the script",
+      "kimi",
+      [201, null, true],
+    ],
+    [
+      "a harness a plugin added is refused here rather than by a script that will call it a failed install",
+      "acme:gemini",
+      [503, "harness_not_installable", false],
+    ],
+    [
+      "while a plugin somebody switched off keeps its own sentence, and never the new one",
+      "acme:off",
+      [503, "harness_unavailable", false],
+    ],
+    [
+      "and an id nothing has heard of is still the caller's mistake",
+      "not-an-agent",
+      [400, "invalid_agent", false],
+    ],
+  ];
+  for (const [what, agent, expected] of table) check(what, await press(agent), expected);
+
+  /*
+   * The census. The booleans above are read off a length that the list below
+   * holds the names for, so the two derivations of "what got spawned" have to
+   * agree — and a fifth row added to the table without a decided answer cannot
+   * pass by failing to raise a floor.
+   */
+  check("and exactly one of the four names got that far", asked, ["kimi"]);
+  report(
+    "the install gate was driven over a catalogue wider than the five",
+    catalogue.harnessIds().some((id) => id.includes(":")),
+    `${catalogue.harnessIds().length} harnesses offered, ${table.length} pressed`,
   );
 }

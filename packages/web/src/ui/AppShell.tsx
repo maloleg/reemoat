@@ -334,7 +334,18 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
 }
 
 /**
- * The divider you can drag, and the three ways to move it.
+ * The divider you can drag — and what is left here is *where it sits*, nothing
+ * about the gesture.
+ *
+ * ⚠ **`PaneHandle` owns the drag, and this file may not carry a second copy of
+ * it.** Four paragraphs describing the capture, the commit, the cancel and the
+ * keyboard stayed behind when the mechanism was extracted, over a wrapper that has
+ * no state, no handlers and no capture — and one of them was the *pre-correction*
+ * version of a measurement: it said a captured drag leaves "nothing to leak when
+ * this unmounts mid-drag", which `PaneHandle`'s unmount effect records as measured
+ * wrong and repairs. A reader who found this copy first would have believed a
+ * mid-drag unmount was safe, and it is not. The corrected measurement is therefore
+ * deliberately **not** restated here: read it at the effect that acts on it.
  *
  * **Out of flow entirely, anchored on `--rail-w`.** It straddles the rail's own
  * `border-r` instead of displacing it, so the rail keeps the geometry it had and
@@ -360,35 +371,6 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
  * wins, which is what puts it above both without reaching `LAYER.menu` and
  * painting over an open dropdown. Out of flow is what makes the DOM move free: the
  * position comes from `left: var(--rail-w)`, not from where it sits in the row.
- *
- * **A drag writes the custom property and nothing else.** No React state moves
- * while the pointer does — not width, not a "dragging" transform — because
- * `AppShell` re-renders on the four-second poll and on every streamed event, and a
- * width owned by `style={{ width }}` would be reset to where the drag *started*
- * every time one landed. `dragging` is React state, but it is set once at
- * `pointerdown` and once at `pointerup`, never in between.
- *
- * **`setPointerCapture`, not listeners on `window`.** A pointer moving faster than
- * the layout follows leaves the 8px strip on the first frame, so the element's own
- * handlers are only enough once the capture redirects every later event for that
- * `pointerId` back to it. The first draft used `window` listeners instead, which
- * covers the fast pointer and *not* the case that strands the drag: release the
- * button outside the browser window and no `pointerup` is delivered to the
- * document at all, so the strip stays armed, the next click anywhere resizes the
- * rail, and nothing looks wrong until it happens. Capture also makes teardown
- * structural — there is nothing to remove, so there is nothing to leak when this
- * unmounts mid-drag.
- *
- * `pointercancel` is a real outcome rather than defensive: on a touch laptop the
- * browser can decide mid-gesture that this was a scroll. It reverts to the
- * committed width rather than keeping wherever the finger was when the gesture was
- * taken away, because a cancelled gesture is not a smaller one.
- *
- * **Keyboard and double-click are not decoration.** A separator that only answers
- * to a pointer is one nobody on a keyboard can move, and `aria-valuenow` would be
- * announcing a number with no way to change it. Home resets, which is also the
- * answer to "I have dragged this somewhere silly" that does not require finding the
- * default by feel.
  */
 function RailHandle(): ReactNode {
   return (

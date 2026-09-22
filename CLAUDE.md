@@ -29,8 +29,8 @@ server and run what it just wrote. Multi-user moved to the control plane: severa
 people, each with their own machine and a grant on it. The daemon accepts any
 token whose `aud` is its own machine id and stops asking who the subject is.
 
-It spawns `claude`, `kimi`, `codex` or `opencode` over ACP (Agent Client
-Protocol), normalizes all four into one event union, and puts that behind a network layer built on the
+It spawns `claude`, `kimi`, `codex`, `opencode` or `grok` over ACP (Agent Client
+Protocol), normalizes all five into one event union, and puts that behind a network layer built on the
 assumption that **clients are unreliable**: a laptop lid closes, a phone drops to
 LTE, a tab is discarded. The daemon is the source of truth and the agent must
 never notice a client leaving.
@@ -76,7 +76,7 @@ context never carried it), and missing from the Dockerfile it fails later with
 
 Deploying is a *separate* act from checking, and nothing does it on a push.
 
-> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1000 entries
+> **Why any of this is the way it is lives in `docs/DECISIONS.md`** — 1006 entries
 > as question → decision, with the measurement behind each and the alternatives
 > that were tried and taken back out. **The count is asserted by `docscheck`
 > rather than restated here from memory**, which is the whole reason it is right:
@@ -98,7 +98,8 @@ pnpm authcheck                       # token verification and enrollment
 pnpm daemoncheck                     # the daemon's HTTP surface and durable state: routes,
                                      #   the v6 migration, the login pty, the WS, subagent lineage,
                                      #   permissions, stopping a turn, the SQLite log, changes/diff,
-                                     #   uploads, and letting an idle agent go — the refusals one
+                                     #   uploads, installing a harness on a press, and letting an idle
+                                     #   agent go — the refusals one
                                      #   at a time, that a released session reads as neither
                                      #   stopped nor interrupted, and the sweep on a fake clock —
                                      #   and the bounds an agent can push against,
@@ -263,8 +264,9 @@ deploy/ci-freshness.sh               # the adapter pins against the npm registry
                                      #   the registry no longer serves. NOT offline; changes nothing
 pnpm daemon                          # needs REEMOAT_TOKEN; see .env.example
 deploy/agents.sh --check             # what the agent CLIs would install or refresh, changing nothing.
-                                     #   Run for real by the installer once, by `deploy.sh` on every
-                                     #   daemon update, and by the daemon daily
+                                     #   `--only <agent>` is what a press in the app runs;
+                                     #   `--refresh-only` is what `deploy.sh` and the daily timer run.
+                                     #   **Nothing installs a harness but a press**
 curl -fsSL 'https://<control-plane>/install.sh' | sh   # a machine, from nothing to enrolled.
                                      #   `deploy/bootstrap.sh` served by `GET /install.sh` with the
                                      #   requesting origin quoted in — so an instance hands out an
@@ -386,32 +388,43 @@ a description and the app draws it, so the origin holding `reemoat.credential`
 runs nothing a plugin author wrote. `docs/PLUGINS.md` is the author's document;
 Q1.612 is the argument.
 
-**This daemon downloads and executes third-party installer scripts, as you, on a
-timer, by default.** `src/agentupdate.ts` runs `deploy/agents.sh` five minutes after
-start and then daily; that script installs three of them with each vendor's own
-installer into the vendors' own directories and kimi from the npm registry into
-`~/.reemoat/toolchain`, and refreshes what is there through the door it came in by
-— a copy installed outside both is named and not moved. It is on by default because the requirement is that somebody who ran
-one install script never thinks about agents again, and it is here rather than in a
-footnote because it is a real change in posture: three named hosts run code as this
-uid with nobody pressing anything. What bounds it is narrow: no `sudo` and no
+**This daemon downloads and executes third-party installer scripts, as you — but
+a harness arrives on a machine only when somebody presses Install, and the timer
+only *refreshes*.** That is the narrower posture, and it is narrower than it was:
+`deploy/agents.sh` used to install all five on the bootstrap, on every
+`deploy.sh`, and daily — so a harness added to this repository landed on every
+machine in the fleet by itself, offering a sign-in for a program nobody asked
+for. Now `deploy/bootstrap.sh` installs **none** (`--install-agents a,b` is the
+door for a provisioner with nobody to press anything), `deploy/deploy.sh` and
+`src/agentupdate.ts` pass `--refresh-only`, and `src/agentinstall.ts` runs
+`--only <agent>` behind a `machine:admin` press. A refresh moves what is there
+through the door it came in by — a copy installed outside both is named and not
+moved — and fetches nothing new. What bounds the download is unchanged and
+narrow: no `sudo` and no
 system package manager (`deploycheck` asserts the first over the script), no shell
 profile is edited, the script runs under `agentEnv()`, not this daemon's
 environment, an installer is downloaded whole before running, a build a live
 session may be on is kept, and a failure is a warning rather than a stop. Nothing
 is vendored under it any more (Q4.114): a harness with no CLI is refused with a
-sentence rather than started; `REEMOAT_AGENT_SOURCE=npm`, all four from the npm
+sentence rather than started, and `AgentAvailability.installable` is what puts a
+button under that sentence; `REEMOAT_AGENT_SOURCE=npm`, all five from the npm
 registry into that toolchain, is a firewalled machine's choice, never a fallback,
-and decides only how an absent CLI is installed; `REEMOAT_AGENT_CHANNEL` is which
+and decides only how an absent CLI is installed — **two take that door under either
+value**, kimi because its own updater exits 0 having installed nothing without a
+TTY, and grok because its vendor installer edits shell profiles and this script
+edits none (Q4.125); `REEMOAT_AGENT_CHANNEL` is which
 of claude's release channels the fleet follows, `latest` by default, and unlike the
 source it moves a copy that is already there: re-applied on every refresh (Q4.115).
-`REEMOAT_AGENT_UPDATES=off` (or `0`) switches it off. What runs is
+`REEMOAT_AGENT_UPDATES=off` (or `0`) switches off both the timer and the button.
+What runs is
 `CLAUDE_CODE_EXECUTABLE`/`CODEX_PATH` outright, else the **first** copy on PATH,
 then in the directories the script installs into — so a file an agent drops into
 `~/.local/bin` is the build the daemon runs within ten minutes, as the same uid
 (Q6.106). **Why it exists at all is a measurement, not a preference**: none of the
-four self-updates when a *daemon* drives it, every updater being gated on a
-terminal an ACP-spawned agent never has (Q4.113).
+five self-updates when a *daemon* drives it, every updater being gated on a
+terminal an ACP-spawned agent never has (Q4.113) — grok is the one that *would*,
+in the background, which is why it is spawned with `--no-auto-update`: when a
+build moves on this fleet is `src/agentupdate.ts`'s decision, not the agent's.
 
 **`~/.claude/settings.json` can bypass the permission machinery entirely.** Where
 it blanket-allows `Bash`, `Edit` or `Write`, the inner CLI decides for itself and
@@ -454,6 +467,7 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `mid-turn-messages.md` | `src/registry.ts`, `src/session.ts`, `src/acp/client.ts`, `packages/web/src/ui/Composer.tsx`, `packages/web/src/attach.ts`, `packages/web/src/wire.ts` | Sending while the agent is working · which door a message goes through, and who decides · what an injection does to the turn, measured · what the queue costs and what a stop does to it · Stop or Send, and what whitespace is worth |
 | `acp-agents.md` | `src/acp/`, `src/session.ts`, `packages/web/src/ui/tail.ts` | What claude, kimi and codex actually send, measured · asking you a question · ultracode · subagents, commands and the snapshot · every gotcha that is a fact about an agent |
 | `agent-login.md` | `src/agentauth.ts`, `src/runtime/`, `packages/web/src/ui/login.ts` | How a credential reaches the host with no terminal · the pty and the two `script`s · what each CLI's status probe prints and on which stream |
+| `agent-install.md` | `src/agentinstall.ts`, `agentscript.ts`, `transcript.ts`, `packages/web/src/ui/agentInstall.ts`, `settings/AgentsPanel.tsx`, `deploy/agents.sh` | Why nothing puts a CLI on a machine but a press · `installable` against `!available` · why the verdict is a measurement and never an exit status · one run daemon-wide, and the two phases a Stop may not signal into · the two lock layers, and which one is first come, first served |
 | `files-paths-git.md` | `src/changes.ts`, `src/worktree.ts`, `src/uploads.ts`, `src/stall.ts`, `src/paths.ts`, `src/git.ts` | Attachments in, files out · containment, symlinks and the one `rmSync` · why no synchronous filesystem call may touch a path this daemon did not create · how git is parsed |
 | `code-import.md` | `src/archive.ts`, `packages/web/src/ui/ImportCode.tsx`, `packages/web/src/importSkill.ts` | Bringing a codebase onto a machine · why containment had to be rebuilt for a path somebody else wrote · what each archive format costs, measured · the one thing the target may not notice |
 | `relay.md` | `src/relay/`, `src/server.ts`, `packages/control-plane/src/relay/`, `packages/web/src/stream.ts`, `machine.ts`, `localRoute.ts`, `src/announce.ts` | Why there is no direct path in, and the one exception · what bounds it, and how a daemon says where it is · what the tunnel carries and what it must never parse · a socket's lifetime, rotation and cursor · the h2 and flow-control measurements |
@@ -473,6 +487,9 @@ was a real defect before it was a rule, and **none is enforced by the compiler**
 | `native-shell.md` | `packages/native/src-tauri/`, `packages/web/src/native.ts`, `cp.ts`, `ui/ChooseServer.tsx`, `scripts/nativecheck.ts` | Which one leg of this client leaves the webview, and the four reasons the others may not · what crosses the bridge and what a join does not check · why a credential is keyed on a server's origin · the synchronous read, and the two answers that were refused · why the server picker is a phase rather than a route · one rule, three copies, and what compares them · the one workspace line three deploy behaviours depend on |
 | `native-packaging.md` | `packages/native/src-tauri/tauri.*.conf.json`, `packages/native/scripts/`, `deploy/ci-release.sh` | Which platforms carry a daemon inside them and which carry a client · the one JSON file a profile is, and the measurement that made it one rather than a cargo feature · what an overlay may say, and why the list is that short · why the staging script refuses a Windows triple by name |
 | `web-typography.md` | `packages/web/src/index.css`, `ui/bits.tsx`, `paths.ts`, `ui/settings/` | Which strings are monospace and which are prose · the one surface where a path is a name instead · the scale, and the single arbitrary size that is allowed to exist · one caps idiom, three constants, and why the choice between them is a colour · what the landing page shares and what nothing can check |
+| `docked-panels.md` | `packages/web/src/ui/paneWidth.ts`, `rail.ts`, `taskWidth.ts`, `PaneHandle.tsx`, `leaving.ts`, `TaskPanel.tsx` | How wide a draggable pane is, and which custom property the panel actually spends · who owns the separator's keyboard path · how a layer leaves |
+| `machine-gestures.md` | `packages/web/src/machineOrder.ts`, `ui/machineDrag.ts`, `machineSwipe.ts`, `MachineColumn.tsx`, `SessionBrowser.tsx` | What orders the machines until a reader drags one · why the reorder is a hook and not a component · where the merge is applied and which memo is load-bearing · swiping between machines, on the list and not on the strip · the tabs' own numbers |
+| `native-panels.md` | `packages/web/src/ui/NewSession.tsx`, `download.ts`, `packages/web/src/native.ts`, `packages/native/src-tauri/src/commands.rs`, `packages/web/scripts/webcheck.native-bridge.ts`, `local-route.ts` | Why a cancel is neither a failure nor an answer · `(async)` as a rule and now a mechanism · why the folder panel is the one thing here that is per *machine* · what this loosens and what it does not · the browser arm, which is not a gap |
 | `plugins.md` | `src/plugins/`, `plugins/`, `packages/web/src/wire.ts` | What a plugin may add and where it may appear · the two axes of authorization, and which applies inside a hook · what an update keeps and what a failed one puts back · why `src/` now holds three `fetch` calls |
 | `plugin-contributions.md` | `src/plugins/contributions.ts`, `manifest.ts`, `src/acp/`, `src/runtime/local.ts`, `packages/web/src/ui/agentCard.ts` | A plugin that adds an *agent* or a *provider* · which id is checked for membership and which only for shape, and what each costs to get wrong · where a base URL may point now · what a machine's ceiling is and why it is a refusal |
 | `plugin-ui.md` | `packages/web/src/plugins.ts`, `catalogue.ts`, `install.ts`, `ui/plugins/`, `PluginView.tsx` | What the browser draws for a plugin and what it refuses to draw · where a plugin is installed from and what somebody agreed to · the one client that fails *closed* · what a draft of a fleet is |
@@ -535,7 +552,7 @@ short version of what is knowingly not built: no sandbox (the seam is
 `SessionRuntime`), no fleet rollout, no access log on the control plane, and
 no `@file` mentions, and **a background task's end is on the wire for one agent
 only** — claude reports it behind a declared capability, which is what stops the
-sweep releasing an agent mid-build; the other three still say nothing, and so does
+sweep releasing an agent mid-build; the other four still say nothing, and so does
 claude about a backgrounded *subagent*, which was the measured case (Q2.228,
 Q7.113).
 **The daemon still has no registry** — it discovers nothing and polls
@@ -548,7 +565,7 @@ declined a registry for and named as the only case that would justify one — an
 binary this repository does not vendor and cannot measure. It arrives as two
 declarative blocks in `plugin.json` rather than as `REEMOAT_AGENTS`, so it is chosen
 by a person, disclosed before it is sent, and switched off with one control;
-`AGENT_IDS` and `SYSTEMS` are still the four and the seven this repository *ships*,
+`AGENT_IDS` and `SYSTEMS` are still the five and the eight this repository *ships*,
 and what a machine *offers* is those merged with what is installed on it. And no plugin draws in the
 transcript or adds a slash command, both with their seams written down rather than
 half-built (Q7.105). **CD stops half-way on purpose**: nothing deploys on a push,
@@ -581,16 +598,30 @@ exists and reads stdin, closes the gap recorded at `AGENT_LOGIN.codex`, where a
 pasted `CODEX_API_KEY` reaches the model's API and still leaves `session/new`
 answering -32000 (Q7.65).
 
-Agents are a **four**-member union now, and the fourth met the precondition Q7.31
+Agents are a **five**-member union now, and the fourth met the precondition Q7.31
 set for itself — *"a fourth agent, to show the pattern is a pattern rather than two
 coincidences"* — and left the answer unchanged. opencode cost the five edits codex
 cost (`resolveAgent`, `AGENT_LOGIN`, the vendored-CLI resolver (gone),
 `wire.ts`'s hand-mirrored union, `pincheck`'s list) plus one the compiler was *claiming* to force and was
 not: `AgentGlyph` answers `ReactNode`, `undefined` inhabits it, and a `switch`
 falling off the end returns exactly that — so a blank tile would have compiled
-clean for four releases. It ends in a `never` arm now. Everything else — questions,
-permissions, commands, config, resume, context usage — arrived through capabilities
-already read by `category` and by shape rather than by name.
+clean for four releases. It ends in a `never` arm now — and grok is what paid for
+it, the first harness added since.
+
+**The fifth is a different shape rather than a fifth coincidence, and it is the
+cheapest yet.** `grok agent stdio` is xAI's own ACP entry point, so it is the first
+built-in with **no adapter this repository pins** — `pincheck` has nothing to add,
+and `AgentCapabilities.cli` records the build as it does for kimi and opencode. Its
+two controls are doors already driven (`category: "model"`, and `thought_level` in
+opencode's spelling), and it declares no `providers`, so `hostable` refuses it every
+foreign system with nothing written. What it *did* cost is **Q6.20, open since the
+first release**: grok refuses `session/new` until ACP's `authenticate` has been sent
+— with a key in its environment too — and the method id that works is advertised
+nowhere, while the only advertised one blocks on a browser. So `ACP_AUTH_METHOD` is
+written down and `AcpClient.launch` is the one call site. Q6.109, Q6.110.
+Everything else — questions, permissions, commands, config, resume, context usage —
+arrived through capabilities already read by `category` and by shape rather than by
+name.
 
 What each new agent *does* cost is the measuring, and opencode is the sharpest case
 yet (Q6.105): the upstream issue closing "per-session model selection" as **not

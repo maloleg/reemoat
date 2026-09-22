@@ -53,13 +53,23 @@ export interface RunOutcome {
 
 export interface AgentUpdateOptions {
   /**
+   * The gate this run has to take before it may spawn the script.
+   *
+   * ⚠ **An install wins and this yields**, which is the asymmetry: somebody is
+   * watching an install, nothing is watching a timer, and this run's work will
+   * still be there in a day. Optional so every existing driver keeps working
+   * ungated — with no gate there is no second caller, which is exactly the state
+   * every one of them is in.
+   */
+  gate?: { tryHold: (kind: "update") => boolean; release: (kind: "update") => void };
+  /**
    * Which harnesses have a live agent right now.
    *
    * ⚠ **Read at the moment of the run rather than captured**, because the answer is
    * whatever is happening when the timer fires. What the script does with each name
    * is its own decision — what a name withholds is the pruning of the previous
-   * versioned build of any harness that arrived through npm, which is kimi always
-   * and all four under `--source npm`, while the three native installers swap by
+   * versioned build of any harness that arrived through npm, which is kimi and
+   * grok always and all five under `--source npm`, while the three native installers swap by
    * rename and have nothing to withhold (Q4.114) — but the daemon has no business
    * knowing which, so it reports them all.
    */
@@ -138,10 +148,14 @@ export interface AgentUpdateOptions {
  *
  * ⚠ **Not at boot, and five minutes rather than one.** `restore()` and `autoResume`
  * are already starting an agent per interrupted session at that moment, and a
- * download of the order of 700 MB — four CLIs, on a machine that has none — racing
- * them would make the slowest part of a restart slower still.
- * It is also the window in which somebody who has just installed reemoat is watching:
- * a machine that spends its first minute pulling four CLIs looks stuck.
+ * refresh racing them would make the slowest part of a restart slower still.
+ *
+ * ⚠ **The 700 MB first-run download this paragraph used to cite is gone, and the
+ * delay is not.** This run passes `--refresh-only`, so a machine holding no CLI
+ * fetches nothing at all and the old worst case — five CLIs onto an empty machine
+ * while `restore()` works — cannot happen. What is left is real and smaller: a
+ * refresh still replaces every build that *is* there, and it is still the window
+ * in which somebody who has just installed reemoat is watching.
  */
 export const FIRST_RUN_DELAY_MS = 5 * 60_000;
 
@@ -160,10 +174,19 @@ export const UPDATE_JITTER = 0.1;
 /** How much of the script's output is kept to explain a failure. */
 const MAX_DETAIL_CHARS = 2000;
 
-/** How long one run may take before it is abandoned. */
-const RUN_TIMEOUT_MS = 20 * 60_000;
+/**
+ * How long one run may take before it is abandoned.
+ *
+ * Exported because `src/agentinstall.ts` spawns the same script and must not
+ * choose a second number for it: "how long one run of `deploy/agents.sh` may
+ * take" is one fact about the script, and two constants for it is how a machine
+ * comes to allow twenty minutes for the timer's run and something else for the
+ * one somebody is watching.
+ */
+export const RUN_TIMEOUT_MS = 20 * 60_000;
 
-const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+/** This checkout's root, and the one place `deploy/agents.sh` is resolved from. */
+export const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export class AgentUpdates {
   private timer: { cancel: () => void } | null = null;
@@ -280,13 +303,38 @@ export class AgentUpdates {
      * is an injected `schedule` that fires a callback twice, where the second
      * would otherwise start a second installer under the first.
      */
+    /*
+     * ⚠ **The gate is taken here rather than inside `runOnce`, and that placement
+     * is the whole of it.** `runOnce` sets `this.ran` on its first line, which is
+     * what disarms {@link nudge} for the life of the process — so a run refused by
+     * the gate that had already entered `runOnce` would have spent the one nudge a
+     * machine gets, for a run that never happened.
+     */
+    const gate = this.options.gate;
+    const held = gate === undefined || gate.tryHold("update");
+    if (!held) {
+      /*
+       * ⚠ **Re-armed short, not a day.** The line below arms `nextDelay()` — 24 h
+       * ± 10 % — after every tick, so a run skipped because somebody spent three
+       * minutes installing would silently cost the whole fleet a day's refresh,
+       * with nothing on any screen saying so. Five minutes is
+       * {@link FIRST_RUN_DELAY_MS}, the number this class already uses for "soon,
+       * but not racing whatever is happening right now".
+       */
+      this.arm(FIRST_RUN_DELAY_MS);
+      return;
+    }
     if (!this.running) {
       this.running = true;
       try {
         await this.runOnce();
       } finally {
         this.running = false;
+        gate?.release("update");
       }
+    } else {
+      // The guard below refused this tick; the gate it just took is not its to keep.
+      gate?.release("update");
     }
     this.arm(this.nextDelay());
   }
@@ -300,6 +348,15 @@ export class AgentUpdates {
     // differ on that. After the source and before the skips, so the flags that
     // describe the run precede the list that describes the machine.
     args.push("--channel", this.options.channel ?? "latest");
+    /*
+     * ⚠ **Always, and this is the posture change.** Nothing puts a harness on a
+     * machine but a person now: the bootstrap installs none and this timer only
+     * moves what is already here. Unconditional rather than an option, because
+     * there is no longer a choice to configure — a timer that could install would
+     * be the thing that made a new harness appear on every machine in the fleet by
+     * itself, which is exactly what was reported.
+     */
+    args.push("--refresh-only");
     for (const agent of this.options.busy()) args.push("--skip", agent);
     const run = this.options.run ?? runScript;
     let answer: RunOutcome;

@@ -108,7 +108,7 @@
  */
 
 import { useCallback, useRef } from "react";
-import { PRESS_SLOP } from "./rowDrag";
+import { PRESS_SLOP, useTouchGesture } from "./rowDrag";
 import { selectMachine, type MachineTab } from "./groups";
 
 /** Where a gesture stops being undecided. `rowDrag`'s number, on purpose. */
@@ -123,6 +123,10 @@ const COMMIT = 56;
 const CAP = 96;
 /** What it follows by at either end, where there is nothing to move to. */
 const RUBBER = 0.35;
+/** How long the release takes to slide back to nothing. */
+const SETTLE_MS = 160;
+/** When the transition is taken back off the node, past the end of the slide. */
+const SETTLE_CLEAR_MS = 180;
 
 export interface MachineSwipe {
   /** Put this on the list's own scroller, composed with whatever else wants it. */
@@ -147,7 +151,6 @@ export function useMachineSwipe({
   /** True while the row drag on this same scroller owns the touch. */
   armed: () => boolean;
 }): MachineSwipe {
-  const scroller = useRef<HTMLElement | null>(null);
   const strip = useRef<HTMLElement | null>(null);
   const wrap = useRef<HTMLElement | null>(null);
   const live = useRef<{ x: number; y: number; axis: "x" | "y" | null; still: boolean; dx: number } | null>(null);
@@ -156,21 +159,55 @@ export function useMachineSwipe({
   const busy = useRef(armed);
   busy.current = armed;
 
+  /**
+   * The settle's own timer, kept so a second flick can take it back.
+   *
+   * ⚠ **It was a bare `window.setTimeout` with no handle and nothing cancelling
+   * it, and the cost was the common case rather than an edge.** Flicking twice in
+   * quick succession is the ordinary way somebody moves two machines along, and
+   * the second flick began inside the first settle's 180ms window — so the follow
+   * was **interpolated** instead of pinned to the finger, and the list crawled
+   * behind the thumb for the first {@link SETTLE_MS}. This file's own standing
+   * rule is that the follow is written straight onto the wrapper node, once per
+   * `touchmove`, precisely so that nothing sits between the finger and the
+   * transform; a `transition` left on the node is exactly that something. And the
+   * queued timers each wrote to whatever node `wrap.current` happened to hold by
+   * the time they fired, which after a remount is a different node.
+   */
+  const settling = useRef<number | null>(null);
+
+  /** Take the settle off the node: its timer, and the transition it left behind. */
+  const unsettle = (node: HTMLElement): void => {
+    if (settling.current !== null) window.clearTimeout(settling.current);
+    settling.current = null;
+    // Guarded rather than written blind: this runs once per `touchmove`, and an
+    // inline-style read costs no layout while a write dirties the element's style.
+    if (node.style.transition !== "") node.style.transition = "";
+  };
+
   const slide = (by: number): void => {
     const node = wrap.current;
     if (node === null) return;
+    // ⚠ **A live follow is never transitioned**, whatever a settle left on the
+    // node — see {@link settling}.
+    unsettle(node);
     node.style.transform = by === 0 ? "" : `translate3d(${String(by)}px, 0, 0)`;
   };
 
   const settle = (): void => {
     const node = wrap.current;
     if (node === null) return;
+    // Nothing to slide back. A settle already in flight owns the node and its own
+    // timer will clear the transition, so this may not cancel it — doing so would
+    // strand the transition on the node for ever.
     if (node.style.transform === "") return;
-    node.style.transition = "transform 160ms ease-out";
+    if (settling.current !== null) window.clearTimeout(settling.current);
+    node.style.transition = `transform ${String(SETTLE_MS)}ms ease-out`;
     node.style.transform = "";
-    window.setTimeout(() => {
+    settling.current = window.setTimeout(() => {
+      settling.current = null;
       if (wrap.current !== null) wrap.current.style.transition = "";
-    }, 180);
+    }, SETTLE_CLEAR_MS);
   };
 
   const onStart = (event: TouchEvent): void => {
@@ -252,40 +289,26 @@ export function useMachineSwipe({
     if (tab !== undefined) selectMachine(tab.id);
   };
 
-  const ops = useRef({ start: onStart, move: onMove, end: onEnd });
-  ops.current = { start: onStart, move: onMove, end: onEnd };
-  const relay = useRef({
-    start: (event: TouchEvent): void => ops.current.start(event),
-    move: (event: TouchEvent): void => ops.current.move(event),
-    end: (): void => ops.current.end(),
-  });
-
   /*
-   * ⚠ **On in the ref callback, not in an effect**, for `rowDrag.ts`'s reason:
-   * they have to exist before the first `touchstart` the node can receive, and a
-   * callback ref runs during the commit that puts the node in the document.
+   * ⚠ **The plumbing is `rowDrag.ts`'s {@link useTouchGesture}, and it is one copy
+   * on purpose.** This block stood here as the same block in `rowDrag` and
+   * `machineDrag` with `end` where those two say `stop`, each under its own copy
+   * of the same two ⚠ paragraphs — one about registering in the ref callback
+   * rather than an effect, one about being non-passive on the scroller. Both are
+   * on that hook now, and this gesture reads nothing off the node, so it keeps no
+   * handle on it either.
    */
-  const scrollerRef = useCallback((node: HTMLElement | null): void => {
-    const going = relay.current;
-    const previous = scroller.current;
-    if (previous !== null) {
-      previous.removeEventListener("touchstart", going.start);
-      previous.removeEventListener("touchmove", going.move);
-      previous.removeEventListener("touchend", going.end);
-      previous.removeEventListener("touchcancel", going.end);
-    }
-    scroller.current = node;
-    if (node === null) return;
-    node.addEventListener("touchstart", going.start, { passive: false });
-    node.addEventListener("touchmove", going.move, { passive: false });
-    node.addEventListener("touchend", going.end);
-    node.addEventListener("touchcancel", going.end);
-  }, []);
+  const scrollerRef = useTouchGesture<HTMLElement>({ start: onStart, move: onMove, stop: onEnd });
 
   const stripRef = useCallback((node: HTMLElement | null): void => {
     strip.current = node;
   }, []);
   const wrapRef = useCallback((node: HTMLElement | null): void => {
+    // ⚠ **The node is going, and the settle's pending clear has to go with it** —
+    // otherwise it fires against whatever lands in this ref next, which is the
+    // half of {@link settling} a remount is responsible for.
+    if (settling.current !== null) window.clearTimeout(settling.current);
+    settling.current = null;
     wrap.current = node;
   }, []);
 

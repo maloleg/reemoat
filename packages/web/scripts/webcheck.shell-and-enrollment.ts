@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { check, report, storage } from "./webcheck.env.js";
-import { stripComments } from "./webcheck.source.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 
 /* ------------------------------------------------------------------ *
  * What the tab says to somebody who is not looking at it
@@ -1874,6 +1874,59 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [true, true],
   );
   /*
+   * ⚠ **The absence is a decision now, so the decision is pinned and not only the
+   * absence.** The sweep above goes green over three different states — the
+   * owner's call, an accidental deletion, and a refactor that dropped the control
+   * on the way past — and nothing here could tell them apart. What separates them
+   * is the paragraph at the head of the panel that records the call, enumerates
+   * the exits that remain and names the one population left with none of them. So
+   * that paragraph is read as source text: deleting the explanation is what turns
+   * this red, which is the only thing standing between a recorded gap and a gap.
+   *
+   * ⚠ **Read *un-stripped*, and that is the mechanism rather than an oversight.**
+   * Every other sweep in this block runs over `stripComments` output because this
+   * repository restates code facts in prose; this one is *about* the prose, so it
+   * is the one read here that must not be stripped. Hence the pair: each member
+   * present in the raw file **and** absent from the stripped one. The day somebody
+   * tidies this onto `drawer` the first check goes red rather than silently
+   * passing on a file with no explanation left in it, and the day the record is
+   * smuggled into a string literal the second one does.
+   *
+   * ⚠ **Matched over unwrapped prose, because a comment wraps.** The sentence
+   * naming the population spans a line break with a ` * ` in the middle of it, so
+   * the first draft of this check was red on the file it was written against.
+   * `prose` joins continuation lines, which also means a reflow of the paragraph
+   * does not redden a check that is about what it says.
+   *
+   * A census with a required-member list rather than a count: a fifth thing worth
+   * recording fails as "found, not listed" instead of failing to raise a floor.
+   * The `Q3.628` member is deliberately file-wide — the scrim's own paragraph
+   * cites it too, and either citation is a route to the entry.
+   */
+  const drawerRaw = readFileSync(new URL("../src/ui/MenuDrawer.tsx", import.meta.url), "utf8");
+  const prose = (text: string): string => text.replace(/\n[ \t]*\*?/g, " ").replace(/\s+/g, " ");
+  const RECORDED: Array<[string, RegExp]> = [
+    ["the call that deleted it", /There was a ✕ here and it is gone by the owner's call/],
+    ["the exits that remain", /the ways out are now: Escape/],
+    ["the population left with none of them", /leaves without one is a screen-reader user on \*\*iOS\*\*/],
+    ["the entry that argues both", /Q3\.628/],
+  ];
+  report(
+    "the drawer was read a second time with its comments intact",
+    drawerRaw.length > drawer.length,
+    `${drawerRaw.length} raw against ${drawer.length} stripped`,
+  );
+  check(
+    "the head records the call, the exits that remain and who is left with none",
+    RECORDED.filter(([, re]) => !re.test(prose(drawerRaw))).map(([what]) => what),
+    [],
+  );
+  check(
+    "and every one of those is prose, which is why this one read is not stripped",
+    RECORDED.filter(([, re]) => re.test(prose(drawer))).map(([what]) => what),
+    [],
+  );
+  /*
    * `aria-modal` beside `role="dialog"`, which is `Sheet`'s idiom. It is a
    * description rather than a claim here: the `"sheet"` layer really does inert
    * the rest of the document, so without the attribute the announcement and the
@@ -2382,13 +2435,74 @@ process.stdout.write("\nthe menu, the machines and the build\n");
    * copies drifting is a hold and a swipe both arming on one finger.
    */
   check(
-    "a finger's gesture begins on touchstart and refuses the scroll only while live",
+    "a finger's gesture refuses the scroll only while a drag is live",
+    /if \(event\.cancelable\) event\.preventDefault\(\);/.test(machineDrag),
+    true,
+  );
+  /*
+   * ⚠ **The touch plumbing is one copy now, and a census is what says so.** The
+   * `relay`-over-`ops` double indirection plus the four add/remove pairs stood
+   * byte-for-byte in `rowDrag.ts` and `machineDrag.ts` and, with `end` where those
+   * two said `stop`, in `machineSwipe.ts` — each under its own copy of the same two
+   * ⚠ paragraphs, one about registering in the ref callback rather than an effect
+   * and one about being non-passive on the scroller. Three copies of a measurement
+   * is two that will be missed.
+   *
+   * ⚠ **Differenced rather than counted, and the population is swept rather than
+   * written down.** A count of registrations cannot see a fourth copy growing back
+   * in a file nobody wrote down — and neither could the first draft of this, whose
+   * population *was* the three gesture files, so a copy anywhere else was outside
+   * what it looked at. Every sweep below runs over every `.ts`/`.tsx` under `src`
+   * and only the *answer* is written down. A set equality is also what cannot be
+   * kept green by a predicate that always says the same thing: an always-true one
+   * hands over the whole client, an always-false one hands over nothing.
+   *
+   * ⚠ **The second name in that answer is not a copy.** `MachineAgentsSection`
+   * registers one non-passive `touchmove` for the component's life, to
+   * `preventDefault` while its own *pointer* drag is live; it has no start, no end
+   * and nothing to relay. It is listed because the sweep can see it, and the check
+   * under it is what keeps it that rather than a fourth gesture — beginning one is
+   * the plumbing's alone.
+   */
+  const gestureSrc = (file: string): string => stripComments(srcFile(`ui/${file}`));
+  const plumbing = gestureSrc("rowDrag.ts");
+  const client = srcFiles().map((rel) => [rel, stripComments(srcFile(rel))] as const);
+  report("every sweep here is over the whole client", client.length > 100, `${client.length} files`);
+  const sweptFor = (hit: RegExp): string[] => client.filter(([, body]) => hit.test(body)).map(([rel]) => rel).sort();
+  check(
+    "the files that put a touch listener on a node themselves are the two that may",
+    sweptFor(/addEventListener\("touch/),
+    ["ui/rowDrag.ts", "ui/settings/MachineAgentsSection.tsx"].sort(),
+  );
+  check("and beginning a gesture is the plumbing's alone", sweptFor(/addEventListener\("touchstart/), ["ui/rowDrag.ts"]);
+  check(
+    "every gesture reaches it through the one hook, and no screen that draws one mounts it",
+    sweptFor(/useTouchGesture[(<]/),
+    ["ui/machineDrag.ts", "ui/machineSwipe.ts", "ui/rowDrag.ts"].sort(),
+  );
+  check(
+    "which registers both halves non-passive, on the node, from the ref callback",
     [
-      /addEventListener\("touchstart", going\.start, \{ passive: false \}\)/.test(machineDrag),
-      /addEventListener\("touchmove", going\.move, \{ passive: false \}\)/.test(machineDrag),
-      /if \(event\.cancelable\) event\.preventDefault\(\);/.test(machineDrag),
+      /export function useTouchGesture</.test(plumbing),
+      /node\.addEventListener\("touchstart", going\.start, \{ passive: false \}\)/.test(plumbing),
+      /node\.addEventListener\("touchmove", going\.move, \{ passive: false \}\)/.test(plumbing),
+      /const scrollerRef = useCallback\([\s\S]{0,400}previous\.removeEventListener\("touchstart"/.test(plumbing),
     ],
-    [true, true, true],
+    [true, true, true, true],
+  );
+  /*
+   * And the tick that says a hold has armed. It was the literal `12` in two files,
+   * so two gestures on one screen could come to feel different at the same moment
+   * — the same drift `PRESS_SLOP` is imported to prevent one line down.
+   */
+  check(
+    "the haptic is one number, named once and imported rather than re-typed",
+    [
+      /export const HAPTIC_MS = \d+;/.test(plumbing),
+      /navigator\.vibrate\?\.\(HAPTIC_MS\)/.test(machineDrag),
+      /vibrate\?\.\(\d/.test(machineDrag + plumbing),
+    ],
+    [true, true, false],
   );
   check("and the pointer is taken at arm rather than at the press", /setPointerCapture/.test(machineDrag.slice(machineDrag.indexOf("const arm"))), true);
   check("while the press itself captures nothing", /setPointerCapture/.test(machineDrag.slice(0, machineDrag.indexOf("const arm"))), false);
@@ -2399,6 +2513,35 @@ process.stdout.write("\nthe menu, the machines and the build\n");
    * also selects the tab it just moved.
    */
   check("a drop may not also select the machine it dropped", /onClickCapture/.test(machineDrag), true);
+  /*
+   * ⚠ **Both of these are about a four-second poll landing inside one gesture,
+   * and both are asserted over comment-STRIPPED source** — the file's own
+   * docblocks quote `going.from`, `latest.current` and `getBoundingClientRect()`
+   * verbatim, so a raw regex here would pass on the prose that explains the rule.
+   *
+   * The write guard: `going.from` is measured when the drag arms, `latest.current`
+   * is reassigned on every render, and a machine arriving or leaving between the
+   * press and the drop made that index name a different row — so the drop moved
+   * the wrong machine and persisted it. The drop must re-check the row's id.
+   */
+  const endBody = machineDrag.slice(machineDrag.indexOf("const end = useCallback"));
+  report("the drop's own body was isolated", endBody.length > 0, `${String(endBody.length)} chars`);
+  check(
+    "a drop checks the row is still where it armed before writing an order",
+    [/settled\[going\.from\]\?\.id !== going\.id/.test(endBody), /setMachineOrder\(moveRow\(settled,/.test(endBody)],
+    [true, true],
+  );
+  /*
+   * And the other half: nothing ends a drag whose row unmounted. Touch events go
+   * to a detached node, and `PaneHandle.tsx` measured the mouse path on Chrome
+   * 151 — no `pointerup`, no `pointercancel`, not even `lostpointercapture`. The
+   * effect keyed on `tabs` is the only thing that can notice.
+   */
+  check(
+    "and a drag whose row left the list is ended rather than left running",
+    [/!tabs\.some\(\(tab\) => tab\.id === going\.id\)\) end\(\)/.test(machineDrag), /\}, \[tabs, end\]\)/.test(machineDrag)],
+    [true, true],
+  );
   check("All is refused rather than being absent by luck", /id === ALL_MACHINES/.test(machineDrag), true);
   check("and the class that would take scrolling from the list is never used", /touch-none/.test(machineDrag), false);
   /*
@@ -2544,11 +2687,124 @@ process.stdout.write("\nthe menu, the machines and the build\n");
     [true, true, true, true],
   );
   /*
+   * ⚠ **Reachable is not discoverable, and the gesture only ever had the first.**
+   * The entry is a `<button>` whose accessible name is the machine's name and whose
+   * state is `aria-pressed`; the reorder hid behind `event.altKey` with no
+   * attribute, no visible hint and no `sr-only` one — so `machine-gestures.md`'s
+   * *"keyboard parity is owed, not offered"* was satisfied mechanically and not in
+   * practice: nobody reading this column with a screen reader had any way to learn
+   * an entry could be moved. The sibling list one screen over names the gesture on
+   * a handle (`Move <name>`) and this surface has no handle by design, so the
+   * naming has to sit on the entry itself.
+   *
+   * Drawn by `bind` so the two axes cannot disagree, and the axis-dependent half is
+   * pinned as a *pair* — one spelling read out of the file would let the column
+   * ship the strip's arrows.
+   */
+  // Bounded at `} as const`, not at the first `};` — that one is the `bind` return
+  // type two screens down, and the wide capture let `x: "…"` be found anywhere.
+  const shortcuts = /const SHORTCUTS = \{([\s\S]*?)\} as const;/.exec(machineDrag)?.[1] ?? "";
+  report("the shortcut table was found", shortcuts.length > 0, shortcuts.replace(/\s+/g, " ").trim());
+  check(
+    "the reorder names itself, and names the keys it takes",
+    [
+      /"aria-keyshortcuts": SHORTCUTS\[axis\]/.test(machineDrag),
+      /"aria-roledescription": MOVABLE/.test(machineDrag),
+      /\by: "Alt\+/.test(shortcuts),
+      /\bx: "Alt\+/.test(shortcuts),
+    ],
+    [true, true, true, true],
+  );
+  /*
+   * ⚠ **And the keys it *names* are the keys it *takes*.** The attribute is a
+   * second copy of `onKey`'s own branch, so it is compared against that branch
+   * rather than against a hand-typed list — a shortcut naming an arrow the handler
+   * ignores is worse than naming none, and it is the half that cannot be seen by
+   * reading either line on its own.
+   */
+  const branch = /const back = vertical \? "(\w+)" : "(\w+)";[\s\S]{0,80}const on = vertical \? "(\w+)" : "(\w+)";/.exec(machineDrag);
+  report("the handler's own arrow branch was found", branch !== null, branch?.[0].replace(/\s+/g, " ") ?? "not found");
+  const named = (axis: "x" | "y"): string[] =>
+    (new RegExp(`\\b${axis}: "([^"]+)"`).exec(shortcuts)?.[1] ?? "")
+      .split(" ")
+      .map((one) => one.replace("Alt+", ""))
+      .sort();
+  const taken = (vertical: boolean): string[] =>
+    [branch?.[vertical ? 1 : 2] ?? "", branch?.[vertical ? 3 : 4] ?? "", "Home", "End"].sort();
+  check("the vertical axis names the keys its own handler takes", named("y"), taken(true));
+  check("and so does the horizontal one, which is the half a single spelling would hide", named("x"), taken(false));
+  check(
+    "and the two it names on both axes are keys the handler reads",
+    [/event\.key === "Home"/.test(machineDrag), /event\.key === "End"/.test(machineDrag)],
+    [true, true],
+  );
+  check(
+    "neither surface re-types either attribute, so there is one answer to draw",
+    [
+      /aria-keyshortcuts/.test(column),
+      /aria-keyshortcuts/.test(browser),
+      /aria-roledescription/.test(column),
+      /aria-roledescription/.test(browser),
+    ],
+    [false, false, false, false],
+  );
+  /*
    * Neither axis re-derives the order. It is `store.ts`'s, merged there so both
    * inherit one answer and `machineTabs` still adds no sort of its own.
    */
   for (const [what, code] of [["the phone's tab strip", browser], ["the desktop column", column]] as const) {
     check(`${what} draws the order it is handed and sorts nothing itself`, [/localeCompare/.test(code), /machineOrder\(/.test(code)], [false, false]);
+  }
+
+  /*
+   * ⚠ **The order budget was truncating the *live* machines.** `nextOrder` keeps a
+   * slot for a machine the fleet has lost — deliberate, and argued in its own
+   * docblock — and bounded the result with `slice(0, MAX_MACHINE_ORDER)`, whose
+   * comment called the tail *"the end nobody has expressed a position for"*. That
+   * is exactly inverted: the stored walk runs first and the queue's remainder is
+   * appended **after** it, so the tail is where the live machines land, while a
+   * stale slot is only ever added and never evicted. With the stored list saturated
+   * by retired ids, the write-back answered a full list with **none** of the drawn
+   * machines in it, and feeding that back through a second drag answered no live id
+   * again — a reorder preference permanently inoperative, never self-clearing.
+   *
+   * ⚠ **Nothing on screen breaks, which is why this needs a driver rather than a
+   * bug report.** `orderMachines` drops an id the fleet no longer holds at draw
+   * time, so the column goes on rendering in pure name order for ever: no crash, no
+   * empty list, and nothing visible to notice.
+   *
+   * And the bound's existing case cannot see it. That one is the all-live shape —
+   * three hundred machines cut to two hundred, asserted one section file over — and
+   * a stale slot does not *lower* a count, it fills it. So the saturated case is
+   * asserted here as its own rule, in both directions: every drawn id survives, and
+   * the stale slots given up are the **last** ones rather than the first.
+   */
+  {
+    const { MAX_MACHINE_ORDER, nextOrder } = await import("../src/machineOrder.js");
+    const stale = Array.from({ length: MAX_MACHINE_ORDER }, (_, at) => `m_gone_${String(at)}`);
+    const drawn = ["m_b", "m_a", "m_c"];
+    const next = nextOrder(stale, drawn);
+    check("a saturated order still holds every machine that is drawn", next.slice(-drawn.length), drawn);
+    check("and it is still inside the bound", next.length, MAX_MACHINE_ORDER);
+    check(
+      "the slots it gave up are the last stale ones, not the first",
+      [next.includes("m_gone_0"), next.includes(`m_gone_${String(MAX_MACHINE_ORDER - drawn.length - 1)}`), next.includes(`m_gone_${String(MAX_MACHINE_ORDER - 1)}`)],
+      [true, true, false],
+    );
+    check(
+      "so a second drag on that list answers the live ids rather than none",
+      nextOrder(next, ["m_c", "m_b", "m_a"]).slice(-3),
+      ["m_c", "m_b", "m_a"],
+    );
+    /*
+     * And the fallback the tail still has: when `drawn` alone is over the bound
+     * there is no stale slot left to give up, so the cut lands where it always did.
+     */
+    check(
+      "with nothing stale to give up, the tail is cut after all",
+      nextOrder([], Array.from({ length: MAX_MACHINE_ORDER + 5 }, (_, at) => `m_${String(at)}`)).length,
+      MAX_MACHINE_ORDER,
+    );
   }
 
   /*
@@ -2617,10 +2873,62 @@ process.stdout.write("\nthe menu, the machines and the build\n");
    */
   check("a follow that CSS cannot reach asks about reduced motion itself", /prefers-reduced-motion/.test(swipe), true);
   check(
-    "it begins on touchstart, non-passive, like every touch gesture here",
-    [/addEventListener\("touchstart", going\.start, \{ passive: false \}\)/.test(swipe), /addEventListener\("touchmove", going\.move, \{ passive: false \}\)/.test(swipe)],
-    [true, true],
+    "it begins on touchstart, non-passive, through the one hook the census above pins",
+    [/useTouchGesture</.test(swipe), /addEventListener\("touch/.test(swipe)],
+    [true, false],
   );
+  /*
+   * ⚠ **A second flick begun inside the settle's own window was interpolated
+   * rather than pinned to the finger, and that is the common case rather than an
+   * edge** — flicking twice in quick succession is the ordinary way somebody moves
+   * two machines along. `settle` wrote `transition` onto the wrapper and cleared it
+   * from a bare `window.setTimeout` with no handle kept: nothing cancelled it,
+   * neither `onStart` nor `slide` cleared the property, and the list crawled behind
+   * the thumb for the length of the slide. This file's own standing rule is that
+   * the follow is written straight onto the wrapper node once per `touchmove`
+   * *precisely* so that nothing sits between the finger and the transform, and a
+   * transition left on the node is exactly that something.
+   *
+   * Three facts, because each is silent on its own: the follow clears it, the timer
+   * is a handle rather than fire-and-forget, and the node leaving takes the pending
+   * clear with it — the last because repeated flicks otherwise queued writes
+   * against whatever node the ref happened to hold when they fired.
+   */
+  check(
+    "a live follow is never transitioned, and the settle's timer can be taken back",
+    [
+      /const slide = \(by: number\): void => \{[\s\S]{0,200}unsettle\(node\)/.test(swipe),
+      /const settling = useRef<number \| null>\(null\);/.test(swipe),
+      /window\.clearTimeout\(settling\.current\)/.test(swipe),
+      /settling\.current = window\.setTimeout\(/.test(swipe),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "and the node going takes the pending clear with it",
+    /const wrapRef = useCallback\([\s\S]{0,300}window\.clearTimeout\(settling\.current\)/.test(swipe),
+    true,
+  );
+  /*
+   * ⚠ **A census rather than a ban**, because the defect was a timer with nobody
+   * holding it: the two counts are every timer this file starts against every one
+   * whose id it keeps. A bare `window.setTimeout` added later raises the first and
+   * not the second, which a regex forbidding one cannot express without also
+   * forbidding the one that is correct.
+   */
+  const timers = (swipe.match(/window\.setTimeout\(/g) ?? []).length;
+  const held = (swipe.match(/settling\.current = window\.setTimeout\(/g) ?? []).length;
+  check("every timer the swipe starts is one it can cancel", [timers, held], [1, 1]);
+  /*
+   * And the two durations were a pair agreeing by hand: the clear has to land
+   * *past* the slide or it snaps the settle it exists to tidy up after. Asserted as
+   * the relation rather than as either literal, which is the `inset-x`/`px` idiom
+   * two screens up read on a second subject.
+   */
+  const slideMs = Number(/const SETTLE_MS = (\d+);/.exec(swipe)?.[1] ?? "0");
+  const clearMs = Number(/const SETTLE_CLEAR_MS = (\d+);/.exec(swipe)?.[1] ?? "0");
+  report("both settle durations were found", slideMs > 0 && clearMs > 0, `slide ${String(slideMs)}ms, clear ${String(clearMs)}ms`);
+  check("the transition comes off after the slide it animates, not during it", clearMs > slideMs, true);
   /*
    * ⚠ **One number, two gestures, and exactly one of them is ever live.**
    * `rowDrag` abandons an unarmed hold past `PRESS_SLOP` in *any* direction, and

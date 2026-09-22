@@ -134,7 +134,7 @@ process.stdout.write("\nwhat the agent says after its turn has ended\n");
 
   class TalkativeRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -291,7 +291,7 @@ process.stdout.write("\nwho owns a session's events\n");
 
   class HeldRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -758,7 +758,7 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
 
   class ModalRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "claude", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "claude", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -1125,7 +1125,7 @@ process.stdout.write("\ntwo config changes at once\n");
 
   class PairRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -1274,7 +1274,7 @@ process.stdout.write("\na long model list, cut and whole\n");
 
   class LongRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -1460,7 +1460,7 @@ process.stdout.write("\na config list nothing bounded\n");
 
   class WideRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);

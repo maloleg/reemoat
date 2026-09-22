@@ -35,10 +35,12 @@
  * ⚠ **A finger never touches the pointer stream.** `touchstart`/`touchmove` are
  * `addEventListener`ed non-passive on the scroller, in the **ref callback** rather
  * than an effect — they must exist before the first `touchstart` the node can
- * receive, and they must survive the node being replaced. `bind`'s pointer
- * handlers return unless `pointerType === "mouse"`. `rowDrag.ts` carries the
- * measurement: an engine that dispatches `touchstart` before `pointerdown` has
- * already decided what the gesture is for by the time a pointer handler runs.
+ * receive, and they must survive the node being replaced. That plumbing is
+ * `rowDrag.ts`'s `useTouchGesture` and is one copy for the three gestures that
+ * need it; both ⚠ paragraphs about it live there. `bind`'s pointer handlers return
+ * unless `pointerType === "mouse"`. `rowDrag.ts` also carries the measurement: an
+ * engine that dispatches `touchstart` before `pointerdown` has already decided
+ * what the gesture is for by the time a pointer handler runs.
  *
  * ⚠ **The pointer is captured at `arm`, never at the press.** The entry is a
  * `<button>` whose `onClick` selects the machine, and capture retargets the
@@ -78,8 +80,43 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isTypingInto } from "../keys";
 import { moveRow } from "../agentStrip";
 import { setMachineOrder, dropSlot } from "../machineOrder";
-import { MOUSE_SLOP, PRESS_MS, PRESS_SLOP, driftFor } from "./rowDrag";
+import { HAPTIC_MS, MOUSE_SLOP, PRESS_MS, PRESS_SLOP, driftFor, useTouchGesture } from "./rowDrag";
 import { ALL_MACHINES, type MachineTab, type MachineTabId } from "./groups";
+
+/**
+ * Which keys move an entry, said out loud rather than only handled.
+ *
+ * ⚠ **The reorder was keyboard-reachable and neither discoverable nor named.**
+ * The entry is a `<button>` whose accessible name is the machine's name and whose
+ * state is `aria-pressed`; the reorder hid behind `event.altKey` with nothing
+ * anywhere — visible, `sr-only` or in an attribute — saying the entry could be
+ * moved at all. `machine-gestures.md`'s *"keyboard parity is owed, not offered"*
+ * was satisfied mechanically and not in practice: a keyboard or screen-reader
+ * reader had no way to learn the gesture exists. The sibling list one screen over
+ * gets it right by hanging the gesture on a handle whose accessible name is
+ * `Move <name>`, and this surface deliberately has no handle to name — which is
+ * why the naming has to happen on the entry itself.
+ *
+ * `bind` draws both halves on both axes, from here, so the sentence and the keys
+ * cannot disagree with the branch in `onKey` that implements them:
+ *
+ * - **`aria-keyshortcuts`** is the one attribute that answers *what keys does this
+ *   control take*, and it is axis-appropriate because the handler is.
+ * - **`aria-roledescription`** is what makes it discoverable rather than merely
+ *   discoverable-on-request: nothing announces `aria-keyshortcuts` unprompted. ⚠
+ *   It is spent knowingly — it *replaces* how the role is announced, so an entry
+ *   reads as "<name>, movable machine, pressed" rather than "<name>, button,
+ *   pressed" — and it is the only way to say *movable* without composing an
+ *   `aria-label` over the name and the blocked count, which is the one thing this
+ *   column's own docblock says the label is for.
+ */
+const SHORTCUTS = {
+  y: "Alt+ArrowUp Alt+ArrowDown Alt+Home Alt+End",
+  x: "Alt+ArrowLeft Alt+ArrowRight Alt+Home Alt+End",
+} as const;
+
+/** What an entry is, once it can be carried. Read in place of "button". */
+const MOVABLE = "movable machine";
 
 /** What the drag as every *other* entry sees it. */
 interface Move {
@@ -110,6 +147,10 @@ export interface MachineDrag {
   announcement: string;
   bind: (id: MachineTabId, index: number) => {
     "data-machine": MachineTabId;
+    /** {@link SHORTCUTS} for this axis, so the keys are named where they are taken. */
+    "aria-keyshortcuts": string;
+    /** {@link MOVABLE}, which is how the entry says it can be carried at all. */
+    "aria-roledescription": string;
     onPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
     onPointerMove: (event: React.PointerEvent<HTMLElement>) => void;
     onPointerUp: (event: React.PointerEvent<HTMLElement>) => void;
@@ -151,6 +192,16 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
   /** Set when a drag armed, so the `click` the pointer leaves behind is eaten. */
   const suppress = useRef(false);
   /**
+   * Whether the follow needs re-writing on a frame where the pointer has not moved.
+   *
+   * ⚠ **The only thing that can set it is a change this gesture did not cause**,
+   * which in practice is the four-second poll replacing `tabs` underneath a held
+   * drag: the entry may have been re-laid-out, and `place`'s whole
+   * self-correcting-base argument is about answering exactly that. A pointer event
+   * needs no flag — it calls `place` itself, which clears this.
+   */
+  const dirty = useRef(false);
+  /**
    * The current render's tabs, for the touch listeners.
    *
    * They are registered once for the component's life, so they cannot close over
@@ -166,13 +217,28 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
   const across = (event: { clientX: number; clientY: number }): number =>
     axisRef.current === "y" ? event.clientX : event.clientY;
 
-  /** A client coordinate, in the scroller's own content coordinates. */
-  const content = (at: number): number => {
+  /**
+   * The scroller, read once per frame: its box and its scroll offset together.
+   *
+   * ⚠ **A frame must be read-read-write, and it was read-write-read.** `place`
+   * wrote the dragged node's `transform` and *then* asked
+   * `scroller.getBoundingClientRect()` for the content coordinate — a style write
+   * followed by a layout read, which is a forced synchronous reflow of the whole
+   * document, on every `touchmove` and on every rAF tick of `roll`. With the whole
+   * session rail and, at `lg`, the whole transcript in that document, that was
+   * three rects and two writes per frame at ~120 forced layouts a second of held
+   * drag. Both reads happen here, before the one write, and `roll` hands down the
+   * rect it has already taken rather than causing a second.
+   */
+  const frameOf = (): { rect: DOMRect; scroll: number } | null => {
     const box = scroller.current;
-    if (box === null) return at;
-    const rect = box.getBoundingClientRect();
-    return axisRef.current === "y" ? at - rect.top + box.scrollTop : at - rect.left + box.scrollLeft;
+    if (box === null) return null;
+    return { rect: box.getBoundingClientRect(), scroll: axisRef.current === "y" ? box.scrollTop : box.scrollLeft };
   };
+
+  /** A client coordinate, in the scroller's own content coordinates. */
+  const content = (frame: { rect: DOMRect; scroll: number } | null, at: number): number =>
+    frame === null ? at : at - (axisRef.current === "y" ? frame.rect.top : frame.rect.left) + frame.scroll;
 
   const clearTimer = (): void => {
     if (timer.current !== null) clearTimeout(timer.current);
@@ -211,27 +277,46 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
    * Follow the pointer, and answer where the entry would land.
    *
    * ⚠ **Anchored to where the entry actually is, not to where it was when the drag
-   * armed.** The base is recovered from the live rect every frame, which is
+   * armed.** The base is recovered from the live rect on every call, which is
    * `rowDrag.ts`'s fix and is self-correcting against the scroller moving under an
    * auto-scroll and against a poll adding a tab — so, unlike the agent strip, this
    * needs no `startY` fixup inside the scroll loop.
+   *
+   * `frame` is the scroller as {@link frameOf} read it. `roll` passes the one it
+   * already holds; an event handler passes nothing and this takes its own.
    */
-  const place = (at: number): void => {
+  const place = (at: number, frame?: { rect: DOMRect; scroll: number } | null): void => {
     const going = live.current;
     if (going === null || !going.armed) return;
+    dirty.current = false;
     const vertical = axisRef.current === "y";
+    /* Both reads, then the write. See {@link frameOf}. */
+    const where = frame === undefined ? frameOf() : frame;
     const rect = going.node.getBoundingClientRect();
     const base = (vertical ? rect.top : rect.left) - going.applied;
     const offset = at - going.grab - base;
+    const to = dropSlot(going.middles, going.from, content(where, at));
     going.applied = offset;
     going.node.style.transform = vertical ? `translateY(${offset}px)` : `translateX(${offset}px)`;
-    const to = dropSlot(going.middles, going.from, content(at));
     if (to === going.to) return;
     going.to = to;
     setMove({ from: going.from, to, size: going.size });
   };
 
-  /** Scroll the list while a drag is held against one of its edges. */
+  /**
+   * Scroll the list while a drag is held against one of its edges.
+   *
+   * ⚠ **The rAF loop re-arms for the whole life of the drag, and that is the point
+   * rather than an oversight**: `place` recovers the entry's base from its live
+   * rect, so a frame that runs while nothing has happened is what makes the follow
+   * self-correcting against the scroller moving underneath it. What it may not do
+   * is *work* on such a frame — every `place` is a layout read and a style write,
+   * and re-placing a stationary entry against an unchanged list was ~120 forced
+   * layouts a second for no movement at all. So a frame does something only when
+   * the drift is non-zero or something marked the follow stale, and the list
+   * changing under the gesture is exactly what marks it (the effect keyed on
+   * `tabs`, below).
+   */
   const roll = (): void => {
     rolling.current = null;
     const going = live.current;
@@ -239,12 +324,19 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
     if (going === null || !going.armed || box === null) return;
     const vertical = axisRef.current === "y";
     const rect = box.getBoundingClientRect();
+    const scroll = vertical ? box.scrollTop : box.scrollLeft;
     const drift = driftFor(vertical ? rect.top : rect.left, vertical ? rect.bottom : rect.right, last.current);
     if (drift !== 0) {
-      if (vertical) box.scrollTop += drift;
-      else box.scrollLeft += drift;
+      // Written from the offset read above rather than with `+=`, so the frame's
+      // two reads stay together at the top of it.
+      if (vertical) box.scrollTop = scroll + drift;
+      else box.scrollLeft = scroll + drift;
+      // Read back rather than assumed: the engine clamps at either end, and an
+      // over-run offset would put the pointer's content coordinate past the list.
+      place(last.current, { rect, scroll: vertical ? box.scrollTop : box.scrollLeft });
+    } else if (dirty.current) {
+      place(last.current, { rect, scroll });
     }
-    place(last.current);
     rolling.current = requestAnimationFrame(roll);
   };
 
@@ -278,8 +370,9 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
     place(last.current);
     if (rolling.current === null) rolling.current = requestAnimationFrame(roll);
     // The one channel a thumb covering the screen leaves open; `rowDrag.ts` argues
-    // it at length. Optional on the type and guarded at the call.
-    if (!going.byMove) navigator.vibrate?.(12);
+    // it at length, and {@link HAPTIC_MS} is its duration rather than a second copy
+    // of the number. Optional on the type and guarded at the call.
+    if (!going.byMove) navigator.vibrate?.(HAPTIC_MS);
   };
 
   /** Put the entry down, and write the order if it moved. */
@@ -305,20 +398,68 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
       }
     }
     if (!going.armed || going.to === going.from) return;
-    setMachineOrder(moveRow(latest.current, going.from, going.to).map((tab) => tab.id));
+    /*
+     * ⚠ **The list is checked against the drag before the write, because
+     * `going.from` was measured when the drag armed and this rail re-renders on
+     * the four-second poll.** `latest.current` is reassigned every render, so a
+     * machine arriving or leaving between the press and the drop made
+     * `going.from` name a *different* row — and the drop then moved that row
+     * instead, persisting the wrong order to storage with nothing said. `arm`
+     * already derives the index by id one function up; this is the same
+     * derivation at the other end of the gesture.
+     *
+     * A list that moved abandons the write rather than guessing. `going.to` is a
+     * slot measured over the arm-time list, so once that list has changed there
+     * is no honest reading of it left — and a reorder is a preference somebody
+     * can simply repeat, which makes dropping it strictly better than writing an
+     * order they did not ask for.
+     */
+    const settled = latest.current;
+    if (settled.length !== going.middles.length || settled[going.from]?.id !== going.id) return;
+    setMachineOrder(moveRow(settled, going.from, going.to).map((tab) => tab.id));
   }, []);
 
   useEffect(() => end, [end]);
 
+  /*
+   * ⚠ **A drag whose row left the list is ended here, because no event will do
+   * it.** `SessionBrowser` and `MachineColumn` both key each entry on `tab.id`, so
+   * a machine leaving `tabs` on the poll unmounts the node the gesture owns.
+   * Nothing arrives after that: touch events dispatch to a detached element and
+   * never reach the scroller's `touchend`, and for a mouse `PaneHandle.tsx`
+   * measured the rest on Chrome 151 — removing the element that holds the capture
+   * releases it implicitly and delivers **no** `pointerup`, `pointercancel` or
+   * even `lostpointercapture`.
+   *
+   * So `end` never ran: `roll` kept scrolling the list to its edge and writing an
+   * ever-growing transform onto a node no longer in the document (its
+   * `getBoundingClientRect()` is all zeros, so the offset grows without bound),
+   * `armed()` stayed true so the swipe stayed dead, and `suppress.current` stayed
+   * true so the next click on any machine was eaten — with no recovery on the
+   * desktop path short of a reload.
+   */
+  useEffect(() => {
+    const going = live.current;
+    if (going === null) return;
+    if (!tabs.some((tab) => tab.id === going.id)) end();
+    // It is still there, but the list around it moved — which is the one thing
+    // `roll` cannot see for itself and the only reason it re-places a stationary
+    // entry at all. `place`'s ⚠ is the argument.
+    else dirty.current = true;
+  }, [tabs, end]);
+
   const begin = (id: MachineTabId, node: HTMLElement, at: number, byMove: boolean, pointerId: number): void => {
     suppress.current = false;
+    // One rect for both axes: it was `getBoundingClientRect()` twice in one
+    // expression, which is two layouts for one measurement.
+    const box = node.getBoundingClientRect();
     live.current = {
       id,
       node,
       pointerId,
       start: at,
       startOff: lastOff.current,
-      grab: at - (axisRef.current === "y" ? node.getBoundingClientRect().top : node.getBoundingClientRect().left),
+      grab: at - (axisRef.current === "y" ? box.top : box.left),
       applied: 0,
       byMove,
       armed: false,
@@ -331,17 +472,6 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
   };
 
   /* ---- the finger's whole gesture, on the touch stream and nowhere else ---- */
-
-  const touchOps = useRef({
-    start: (_event: TouchEvent): void => {},
-    move: (_event: TouchEvent): void => {},
-    stop: (): void => {},
-  });
-  const relay = useRef({
-    start: (event: TouchEvent): void => touchOps.current.start(event),
-    move: (event: TouchEvent): void => touchOps.current.move(event),
-    stop: (): void => touchOps.current.stop(),
-  });
 
   const onTouchStart = (event: TouchEvent): void => {
     if (event.touches.length !== 1) {
@@ -394,24 +524,19 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
     if (Math.hypot(at - going.start, off - going.startOff) > PRESS_SLOP) end();
   };
 
-  touchOps.current = { start: onTouchStart, move: onTouchMove, stop: () => end() };
-
-  const scrollerRef = useCallback((node: HTMLElement | null): void => {
-    const going = relay.current;
-    const previous = scroller.current;
-    if (previous !== null) {
-      previous.removeEventListener("touchstart", going.start);
-      previous.removeEventListener("touchmove", going.move);
-      previous.removeEventListener("touchend", going.stop);
-      previous.removeEventListener("touchcancel", going.stop);
-    }
-    scroller.current = node;
-    if (node === null) return;
-    node.addEventListener("touchstart", going.start, { passive: false });
-    node.addEventListener("touchmove", going.move, { passive: false });
-    node.addEventListener("touchend", going.stop);
-    node.addEventListener("touchcancel", going.stop);
-  }, []);
+  /*
+   * ⚠ **The plumbing is `rowDrag.ts`'s {@link useTouchGesture}, and it is one copy
+   * on purpose.** This block stood here byte-for-byte as it stands in `rowDrag`
+   * and in `machineSwipe`, each preceded by the same two ⚠ paragraphs about
+   * registering in the ref callback and about being non-passive on the scroller —
+   * a measurement in three places to keep in step. Those paragraphs are on that
+   * hook now; this is only the composition, because the drag also measures against
+   * the node and so keeps its own handle on it.
+   */
+  const scrollerRef = useTouchGesture<HTMLElement>(
+    { start: onTouchStart, move: onTouchMove, stop: () => end() },
+    scroller,
+  );
 
   /* ---- the shift every other entry takes ---- */
 
@@ -429,9 +554,33 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
    * control a keyboard cannot reach at all."* There is no handle here to hang
    * arrows on, so the entry takes them held with `Alt` — the bare ones belong to
    * the list, and `keyboard.ts`'s bare-key rules therefore need no edit.
+   * {@link SHORTCUTS} is the same list as an attribute, which is how anybody
+   * learns it is here.
    *
-   * `preventDefault` before the bounds test, or an arrow at either end of the list
-   * scrolls the page instead of doing nothing.
+   * ⚠ **On the horizontal axis this takes the platform's own Back and Forward,
+   * and the exception is stated here rather than left to be found.**
+   * `Alt+ArrowLeft`/`Alt+ArrowRight` are Back and Forward on Windows and Linux,
+   * and the horizontal mount is the `lg:hidden` strip — so on a narrow window on
+   * those platforms, holding `Alt` and pressing Left while a machine tab has focus
+   * moves the tab instead of going back. That is the *opposite* of the call the
+   * touch half of this same gesture makes twenty lines into `machineSwipe`, where
+   * the platform's edge swipe keeps a 24px band at each viewport edge because *"it
+   * is the browser's and must stay the browser's"*.
+   *
+   * It is kept, and the two are not in conflict, because the two gestures are not
+   * comparable at the moment they are claimed. An edge swipe is indistinguishable
+   * from the platform's own at its first pixel and there is nothing focused to
+   * disambiguate it with; a key press arrives on an element somebody deliberately
+   * focused, which is a member of a list this control reorders, and a focused
+   * widget preempting a browser accelerator is ordinary practice. What is paid for
+   * it is real and worth writing down: a reader who tabs to a machine tab and then
+   * wants to go back has no `Alt+Left` until they focus something else. `Alt+Home`
+   * and `Alt+End` are free on both axes and cost nothing.
+   *
+   * `preventDefault` before the bounds test, so a key this control claims does
+   * **nothing** at either end of the list rather than being handed back to the
+   * platform half the time — an entry at index 0 taking `Alt+Left` would otherwise
+   * navigate, which is the same bite applied unpredictably.
    */
   const onKey = (index: number, event: React.KeyboardEvent<HTMLElement>): void => {
     if (!event.altKey || isTypingInto(event.target)) return;
@@ -456,6 +605,8 @@ export function useMachineDrag({ axis, tabs }: { axis: "x" | "y"; tabs: readonly
 
   const bind = (id: MachineTabId, index: number): ReturnType<MachineDrag["bind"]> => ({
     "data-machine": id,
+    "aria-keyshortcuts": SHORTCUTS[axis],
+    "aria-roledescription": MOVABLE,
     onPointerDown: (event) => {
       if (event.pointerType !== "mouse" || event.button !== 0) return;
       lastOff.current = across(event);

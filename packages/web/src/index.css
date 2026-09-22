@@ -48,8 +48,8 @@
    *
    * `ui/taskWidth.ts` owns the bounds, `AppShell` writes a *chosen* width onto
    * `documentElement` from the same effect, and `TaskPanel` spends this through
-   * `md:w-[var(--task-w)]` with `SessionView` opening
-   * `md:pr-[calc(var(--task-w)+0.75rem)]` beside it — the panel's width plus the
+   * `md:w-[var(--task-fit)]` with `SessionView` opening
+   * `md:pr-[calc(var(--task-fit)+0.75rem)]` beside it — the panel's width plus the
    * 12px it stands off the edge, which is the subtraction that used to be two
    * literals in two files.
    *
@@ -881,8 +881,17 @@ body {
 }
 
 /*
- * **Nothing in this client changes the mouse, and the rule that used to is gone
- * by the owner's call.**
+ * **Nothing in this client changes the mouse but one named control, and the
+ * rule that used to is gone by the owner's call.**
+ *
+ * The exception is the column-resize shape on `ui/PaneHandle.tsx`'s separator,
+ * whose whole affordance is the shape. `webcheck`'s `CURSOR_ALLOWED` is the
+ * list, and it holds that one file — so this is an allow-list of one rather
+ * than a total absence, and a reader here must not delete it as an offender.
+ *
+ * ⚠ **The class is not spelled here on purpose.** That sweep reads comments
+ * too, so naming it in prose *about* it puts this file on the offenders list —
+ * measured, by writing it and watching the check go red.
  *
  * There was an `@layer base` block here setting the hand shape on every enabled
  * `button`, every `[role="button"]` and the one `<summary>` — restored on purpose

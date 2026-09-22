@@ -1016,6 +1016,150 @@ check(
   [true, false, false],
 );
 
+/* ── the second declared capability, which nothing forced into existence ──── */
+
+/*
+ * ⚠ **The block above exists because an APK failed to compile. This one exists
+ * because the same argument was left standing one field away.**
+ *
+ * `blocking_pick_folder` does not exist on Android, so the folder panel *had* to
+ * become a declared capability — somebody was made to decide something. The five
+ * daemon commands had the identical problem and no such pressure: `mod daemon`
+ * and `mod local` compile for every target, so all five exist on a phone, are
+ * registered, and answer `"unsupported"` or `None` only because
+ * `Payload::locate` finds nothing staged and `~/.reemoat/daemon.json` is not
+ * there. That is word for word the *"true today and is luck, not a rule"* the
+ * folder capability's own docblock refuses, and it was carrying the whole setup
+ * flow, the log screen and `localRoute.ts`'s probe.
+ *
+ * ⚠ **A census plus a required-member list, never a count.** A sixth daemon
+ * command must be gated too, and a count cannot see one that was skipped. So the
+ * members are derived from `declared` — the command census above, which reads
+ * both forms of the attribute — and differenced against the five this capability
+ * was written for. Adding one is red here until it is named.
+ */
+const canHostDaemon = /pub const CAN_HOST_DAEMON: bool = cfg!\(([\s\S]*?)\);/.exec(commandsCode)?.[1] ?? "";
+report("the daemon-hosting capability is declared as a constant", canHostDaemon.length > 0, canHostDaemon);
+check(
+  "and it is false on the two platforms where a daemon on this computer is impossible",
+  [canHostDaemon.startsWith("not("), canHostDaemon.includes('target_os = "android"'), canHostDaemon.includes('target_os = "ios"')],
+  [true, true, true],
+);
+check(
+  "and the field the page reads is filled from the constant rather than from a literal",
+  /can_host_daemon: CAN_HOST_DAEMON,/.test(commandsCode),
+  true,
+);
+const DAEMON_COMMANDS = ["host_daemon_log", "host_daemon_start", "host_daemon_state", "host_daemon_stop", "host_local_daemon"];
+check(
+  "the host's commands about a daemon on this computer are the five this capability is about",
+  declared.filter((name) => /^host_(?:daemon_|local_daemon)/.test(name)),
+  DAEMON_COMMANDS,
+);
+
+/*
+ * ⚠ **And the page's side, comment-stripped.** `rustCode` is the reader rather
+ * than a sixth copy of the same three lines: TypeScript's comment layer is the
+ * same two forms Rust's is, and this is a file whose docblocks name every one of
+ * the five commands and the gate itself — read raw, the prose about the rule
+ * satisfies every pattern below with no code between them.
+ */
+const bridgeRaw = read("packages/web/src/native.ts");
+const bridge = rustCode(bridgeRaw);
+report(
+  "the bridge's code survived the comment strip",
+  bridgeRaw.length > bridge.length && bridge.includes("host_boot"),
+  `${String(bridgeRaw.length - bridge.length)} characters of prose removed`,
+);
+/*
+ * Split at each function declaration, so "does this call ask first" is answered
+ * inside the function that makes the call. A file-wide pattern is green over one
+ * gate and four unguarded `invoke`s, which is exactly the state this found.
+ */
+const bridgeFns = bridge.split(/(?=^(?:export )?(?:async )?function )/m);
+report("the bridge was read as functions", bridgeFns.length > 1, `${String(bridgeFns.length - 1)} functions`);
+const DAEMON_GATE = "canHostDaemonHere()";
+const holders = DAEMON_COMMANDS.map((name) => ({ name, block: bridgeFns.find((block) => block.includes(`"${name}"`)) }));
+check(
+  "every one of them is invoked from a function that file declares",
+  holders.filter((held) => held.block === undefined).map((held) => held.name),
+  [],
+);
+check(
+  "and every one of those functions asks the shell before it reaches the bridge",
+  holders.filter((held) => held.block !== undefined && !held.block.includes(DAEMON_GATE)).map((held) => held.name),
+  [],
+);
+/*
+ * ⚠ **And the call is inside the declaration that heads its block rather than
+ * merely somewhere in it**, because the split above only breaks at `function`. A
+ * wrapper written `export const daemonLog = async () => { … }` is absorbed into
+ * the *preceding* function's block and would read as gated by that function's
+ * `canHostDaemonHere()` — the file-wide-pattern failure the split exists to
+ * avoid, one declaration form further in. Every top-level declaration in that
+ * file closes on a brace at column zero, so the command's literal has to appear
+ * above the first one; the predicate is named so the fixtures below can exercise
+ * it rather than a pattern written inside the assertion.
+ */
+const headDeclares = (block: string, command: string): boolean => {
+  if (!/^(?:export )?(?:async )?function \w+/.test(block)) return false;
+  const closes = block.indexOf("\n}");
+  const at = block.indexOf(`"${command}"`);
+  return at >= 0 && closes > 0 && at < closes;
+};
+check(
+  "the block-heads-the-call predicate bites on a binding below the declaration and nowhere else",
+  [
+    headDeclares('export async function a(): Promise<void> {\n  await invoke("host_x");\n}\n', "host_x"),
+    headDeclares('export async function a(): Promise<void> {\n  gate();\n}\n\nexport const b = async () => {\n  await invoke("host_x");\n};\n', "host_x"),
+    headDeclares('const b = async () => {\n  await invoke("host_x");\n};\n', "host_x"),
+  ],
+  [true, false, false],
+);
+check(
+  "and every daemon command is called inside the function its block declares",
+  holders.filter((held) => held.block !== undefined && !headDeclares(held.block, held.name)).map((held) => held.name),
+  [],
+);
+/*
+ * ⚠ **And the gate reads the declared capability rather than deriving one, on
+ * the settled payload rather than the cached one.** `hostPlatform()` narrows
+ * `"android"` to `"other"` along with every future desktop target, and
+ * `nativeBoot()` answers `null` until the one `host_boot` call lands — so a
+ * synchronous read would answer "this device cannot" for every call made in the
+ * frames before it, and `localRoute.ts` resolves a route on a wake, which is
+ * precisely then. Both wrong answers are asserted absent, because either one
+ * leaves every assertion above it green.
+ */
+const gateBody = bridgeFns.find((block) => /function canHostDaemonHere\b/.test(block)) ?? "";
+check("the gate was found to read", gateBody.length > 0, true);
+check(
+  "and it reads the capability the shell declared, awaiting the one boot call",
+  [
+    /\bcanHostDaemon\b/.test(gateBody),
+    /await hostReady/.test(gateBody),
+    /hostPlatform\(/.test(gateBody),
+    /nativeBoot\(\)/.test(gateBody),
+  ],
+  [true, true, false, false],
+);
+/*
+ * ⚠ **And that silence is not a refusal, which is the third wrong answer and the
+ * one that shipped.** The gate first read `?.canHostDaemon === true`, folding a
+ * browser, an explicit `false` and *an unsettled payload* into one `no`. The
+ * third is silence, and treating it as a refusal costs the whole local route:
+ * measured, `webcheck.local-route.ts` went to eight failures, because its
+ * `hostReady` settles at import before the driver installs its shell, so the
+ * payload is `null` for its entire run — a fact that file pins about itself. Only
+ * an explicit `false` means *no daemon can be on this device*, and it is the one
+ * Android sends. Asserted as the pair so neither half can be dropped.
+ */
+check(
+  "while an unsettled payload falls back rather than refusing",
+  [/boot === null/.test(gateBody), /inNativeShell\(\)/.test(gateBody), /\?\.canHostDaemon === true/.test(gateBody)],
+  [true, true, false],
+);
+
 /*
  * ⚠ **The `(async)` rule for a platform panel, which that file's own header
  * states and nothing held it to.**
@@ -1370,14 +1514,58 @@ check("and it is gitignored under its new name", /^packages\/native\/src-tauri\/
  * a cache that never hits.
  */
 const checkWorkflow = read(".github/workflows/check.yml");
+/**
+ * `check.yml` with its comments taken out.
+ *
+ * ⚠ **Every derivation over this file must read the stripped copy.** A comment
+ * naming a toolchain triple satisfied the census that comment was explaining,
+ * and the quiet direction is the one that matters: delete the real
+ * `aarch64-linux-android<n>-clang` and leave a comment mentioning it, and both
+ * the count below and the minSdk agreement beside it stay green over a CI leg
+ * that names no toolchain at all. `deploycheck` states the same two rules over
+ * the same file — a whole-line `#`, and the first `#` preceded by whitespace
+ * outside a quoted scalar.
+ */
+/**
+ * `check.yml` with its comments taken out, as a NAMED function.
+ *
+ * ⚠ **Named rather than applied inline, because the control below has to be
+ * able to reach it.** It was an immediately-applied arrow, so the non-counting
+ * control was written against a second, simpler regex declared inside the
+ * assertion — which exercised that throwaway and never this stripper, and could
+ * not go red whatever this did. Two rules, the same two `deploycheck` states
+ * over the same file: a whole-line `#`, and the first `#` preceded by
+ * whitespace outside a quoted scalar.
+ */
+function yamlCode(yaml: string): string {
+  return yaml
+    .split("\n")
+    .map((line) => {
+      if (/^\s*#/.test(line)) return "";
+      let quote: string | null = null;
+      for (let i = 0; i < line.length; i += 1) {
+        const c = line[i] as string;
+        if (quote !== null) {
+          if (c === quote) quote = null;
+        } else if (c === '"' || c === "'") {
+          quote = c;
+        } else if (c === "#" && /\s/.test(line[i - 1] ?? " ")) {
+          return line.slice(0, i).replace(/\s+$/, "");
+        }
+      }
+      return line;
+    })
+    .join("\n");
+}
+const checkWorkflowCode = yamlCode(checkWorkflow);
 check(
   "the workflow caches the directory the staging script writes to",
-  /path: packages\/native\/src-tauri\/\.node-cache/.test(checkWorkflow),
+  /path: packages\/native\/src-tauri\/\.node-cache/.test(checkWorkflowCode),
   true,
 );
 check(
   "and keys that cache on the pinned runtime version",
-  /steps\.node-runtime\.outputs\.version/.test(checkWorkflow),
+  /steps\.node-runtime\.outputs\.version/.test(checkWorkflowCode),
   true,
 );
 /*
@@ -2432,6 +2620,29 @@ report(
   declaredExternals.length > 0,
   `${declaredExternals.length}: ${declaredExternals.join(", ")}`,
 );
+/*
+ * ⚠ **And the imports those signatures need, which was the one edit in that
+ * file's banner with nothing behind it.** `external fun initNdkContext(context:
+ * Context)` does not compile without `import android.content.Context`, and the
+ * template has no use for it — so an `init` re-run, or a tidy-up of an import
+ * the rest of the file never mentions, lands as a Kotlin error in the APK leg
+ * rather than here, where nothing compiles Kotlin at all. Derived from the
+ * signatures rather than written down as a literal, so a sixth native method
+ * naming another platform type is held to the same rule. The types found are
+ * pinned beside the absence: an empty list is the passing answer for the
+ * difference, so the regex silently matching nothing would read as `ok`.
+ */
+const signatureTypes = [
+  ...activity.matchAll(/^\s*(?:private |internal |public |protected )?external fun \w+\(([^)]*)\)/gm),
+].flatMap((m) => [...(m[1] ?? "").matchAll(/:\s*([A-Z]\w*)/g)].map((found) => found[1] ?? ""));
+check(
+  "and every platform type they name is imported, Context among them",
+  [
+    [...new Set(signatureTypes)],
+    [...new Set(signatureTypes)].filter((type) => !new RegExp(`^import [\\w.]+\\.${type}$`, "m").test(activity)),
+  ],
+  [["Context"], []],
+);
 
 /**
  * Every `Java_` export this crate carries, swept over the whole of `src/`.
@@ -2517,6 +2728,45 @@ check(
   (capture(cargoCode, /crate-type = \[([^\]]*)\]/) ?? "").includes(`"cdylib"`),
   true,
 );
+
+/*
+ * ⚠ **And Back, which closed the app on the first press.**
+ *
+ * `WryActivity` — in the gitignored `generated/` tree — registers an
+ * `OnBackPressedCallback` that calls `goBack()` while the webview `canGoBack()`
+ * and otherwise finishes the activity, but only when `handleBackNavigation` is
+ * true. `TauriActivity` overrides it to `false`, so nothing is registered and
+ * the platform default runs: `finish()`. This app is a pathname router whose
+ * five pop-up routes are real history entries (`router.ts`'s `navigate` is
+ * `pushState`), so one press was leaving the *app* where it should have been
+ * leaving a panel.
+ *
+ * ⚠ **Nothing offline could see it and nothing offline can derive it.** This
+ * driver runs no cargo and compiles no Kotlin; `cargo clippy` compiles Rust; the
+ * APK leg reads `classes.dex` for one class name. And the property's two other
+ * copies are both in the `generated` package under `app/src/main`, which
+ * `gen/android/app/.gitignore` ignores by a glob this paragraph deliberately
+ * does not spell — a double star followed by a slash closes a block comment, and
+ * `kotlinCode`'s own docblock is where that is already written down. A
+ * `check`-job checkout does not carry those two files, so this is the one edit
+ * in this file with no second copy to difference against. What catches a wry
+ * release that renamed the property is the Kotlin compiler in the APK leg: an
+ * `override` of nothing does not build.
+ *
+ * ⚠ **The count is the half that makes the comment strip load-bearing.** That
+ * file's banner and the paragraph above the override both name the property in
+ * prose — four occurrences raw, one in code — so a pattern over the raw text
+ * would pass over a file where the override had been deleted and only the
+ * explanation left. The count also refuses a second copy: an
+ * `onBackPressedDispatcher.addCallback` added here would stack ahead of wry's
+ * and the two would disagree about who finishes the activity.
+ */
+check(
+  "the activity takes back navigation back from Tauri's override",
+  /override val handleBackNavigation: Boolean = true/.test(activity),
+  true,
+);
+check("and the property is written down exactly once, in code", (activity.match(/handleBackNavigation/g) ?? []).length, 1);
 /*
  * ⚠ **And the package, in the three other places it is written down.**
  * `namespace` is what Gradle compiles the Kotlin under, `applicationId` is what
@@ -2739,11 +2989,34 @@ for (const crate of ["rustls-platform-verifier", "rustls-platform-verifier-andro
  */
 const ndkApiLevels = [
   ...new Set(
-    [...checkWorkflow.matchAll(/aarch64-linux-android(\d+)-clang/g)]
+    [...checkWorkflowCode.matchAll(/aarch64-linux-android(\d+)-clang/g)]
       .map((match) => match[1])
       .filter((level): level is string => level !== undefined),
   ),
 ];
+report(
+  "the workflow had comments to take out before the triple was counted",
+  checkWorkflowCode.length < checkWorkflow.length,
+  `${String(checkWorkflow.length - checkWorkflowCode.length)} chars of prose`,
+);
+/*
+ * The controls, without which the count below is a fact about the corpus rather
+ * than about the stripper. Both directions, and both through `yamlCode` itself:
+ * a comment naming a triple must contribute nothing, and a real key carrying a
+ * trailing comment must still contribute its triple.
+ */
+check(
+  "a comment naming a triple is not counted as one",
+  [...yamlCode("      # aarch64-linux-android21-clang\n").matchAll(/aarch64-linux-android(\d+)-clang/g)].length,
+  0,
+);
+check(
+  "while a real one survives its own trailing comment",
+  [...yamlCode("      clang: aarch64-linux-android24-clang  # the pinned triple\n").matchAll(/aarch64-linux-android(\d+)-clang/g)].map(
+    (m) => m[1],
+  ),
+  ["24"],
+);
 check("the Android CI leg names exactly one API level", ndkApiLevels.length, 1);
 check("and it is the minSdk Gradle declares", ndkApiLevels[0], capture(gradleCode, /^\s*minSdk = (\d+)\s*$/m));
 
@@ -2907,7 +3180,7 @@ check(
     /usesCleartextTraffic/.test(manifest),
     /manifestPlaceholders\[\"usesCleartextTraffic\"\]/.test(gradleCode),
     /android:networkSecurityConfig="@xml\/network_security_config"/.test(application),
-    (capture(gradleCode, /minSdk = (\d+)/) ?? "0") >= "24",
+    Number(capture(gradleCode, /minSdk = (\d+)/) ?? 0) >= 24,
   ],
   [false, false, true, true],
 );
@@ -2927,6 +3200,56 @@ check(
     /android:networkSecurityConfig="@xml\/network_security_config"/.test(application),
   ],
   [true, true, true, true],
+);
+
+/*
+ * ⚠ **And the file that last attribute names, which a committed comment already
+ * claimed was checked here and which nothing read.**
+ *
+ * `network_security_config.xml`'s own banner says *"`nativecheck` asserts the
+ * attribute and this file as a **pair**, against comment-stripped source"*. A
+ * grep for the resource name in this driver returned the two manifest patterns
+ * above and nothing else — so what was asserted was that somebody typed a
+ * policy, never that the policy says anything. That is the same shape as the
+ * `dataExtractionRules` attribute one section up, which is why that one is
+ * resolved by name and read: an attribute pointing at a file that excludes
+ * nothing is not a build failure.
+ *
+ * The quiet direction is the one to fear here. An `init` re-run does not touch
+ * this file — it removes the attribute that reaches it — and a later edit
+ * dropping either clause would leave a build that simply cannot talk to a LAN
+ * control plane or to one behind a private CA, reported as the server being down.
+ *
+ * ⚠ **Both clauses, and the user anchor is pinned as the deliberate decision it
+ * is.** Q7.144 is the argument and that file carries the cost leg by leg — the
+ * sharpest being `proxy.rs`'s `/v1` calls, which carry the account bearer in an
+ * authorization header. It *could* be narrowed to `<debug-overrides>` with one
+ * edit and no new resource file, which is the owner's call rather than a
+ * measurement; this line is the second edit that call takes, deliberately,
+ * because a widening this broad may not change silently in either direction.
+ * Comment-stripped, because that file is mostly prose and the prose quotes both
+ * clauses at length — including the `<debug-overrides>` block it is not using.
+ */
+const netsecName = capture(application, /android:networkSecurityConfig="@xml\/(\w+)"/) ?? "";
+const netsecPath = `${ANDROID_DIR}/app/src/main/res/xml/${netsecName}.xml`;
+check("the network policy the manifest names is a file that is there", existsSync(join(ROOT, netsecPath)), true);
+const netsecXml = existsSync(join(ROOT, netsecPath)) ? read(netsecPath) : "";
+const netsec = xmlCode(netsecXml);
+report(
+  "the network policy's markup survived the comment strip",
+  netsecXml.length > netsec.length && netsec.includes("<network-security-config>"),
+  `${String(netsecXml.length - netsec.length)} characters of prose removed`,
+);
+const baseConfig = between(netsec, "<base-config", "</base-config>");
+check("the base config was found to read", baseConfig.length > 0, true);
+check(
+  "and it permits cleartext and trusts a user-installed CA, both on purpose",
+  [
+    /cleartextTrafficPermitted="true"/.test(baseConfig),
+    /<certificates\s+src="system"\s*\/>/.test(baseConfig),
+    /<certificates\s+src="user"\s*\/>/.test(baseConfig),
+  ],
+  [true, true, true],
 );
 /*
  * ⚠ **And everything `tauri android init` rewrites is ignored rather than
@@ -2957,33 +3280,121 @@ check(
  * committed at all: a path into somebody's home directory is a file that builds on
  * one machine. Swept over the text files rather than asserted of the four known
  * ones, so a fifth arriving is caught.
+ *
+ * ⚠ **The exempt set is one of *paths*, built per `.gitignore` with the prefix
+ * that file's entries are relative to. It used to be one of bare names too, and
+ * the second half was the hole.** `app/.gitignore`'s entries are anchored to
+ * `app/`, so `app/tauri.properties` and `app/tauri.build.gradle.kts` matched only
+ * through a basename fallback — and a fallback keyed on the basename exempts
+ * every file of that name **at any depth**, which is a file somebody adds three
+ * directories down inheriting an exemption written for a different file. Anchored
+ * per ignore file instead, and the fallback is deleted.
  */
+const IGNORE_FILES = [
+  [`${ANDROID_DIR}/.gitignore`, ""],
+  [`${ANDROID_DIR}/app/.gitignore`, "app/"],
+] as const;
 const ignoredHere = new Set(
-  genIgnore
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("/") && !line.includes("*"))
-    .map((line) => line.slice(1)),
+  IGNORE_FILES.flatMap(([file, prefix]) =>
+    read(file)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("/") && !line.includes("*"))
+      .map((line) => `${prefix}${line.slice(1)}`),
+  ),
 );
+report("the exempt set was read as anchored paths", ignoredHere.size > 0, `${String(ignoredHere.size)} paths`);
+check(
+  "and an ignored basename no longer exempts a file of that name at another depth",
+  [ignoredHere.has("app/tauri.properties"), ignoredHere.has("tauri.properties")],
+  [true, false],
+);
+
+/*
+ * The predicate, named so it can be exercised rather than written inline. The two
+ * home roots it looks for are spelled in it and deliberately nowhere in this
+ * paragraph: the sweep below reads *this repository's own files*, and a comment
+ * about a sweep that quotes the swept token is how a file lands on its own
+ * offenders list.
+ */
+const writesAbsolutePath = (text: string): boolean => /\/Users\/|\/home\/[a-z]/.test(text);
+/*
+ * ⚠ **And the control for it, because an empty list is the passing answer.** A
+ * predicate that stopped matching anything reads exactly like a clean tree —
+ * "nothing was found" and "nothing can be found" are the same line of output,
+ * which is the shape this file's `report` helper exists for everywhere else.
+ * Both roots are driven positively and two non-paths negatively, so a widened,
+ * narrowed or inverted pattern is red before the walk starts.
+ */
+check(
+  "the absolute-path predicate bites where a path is present and nowhere else",
+  [
+    writesAbsolutePath('new File("/Users/somebody/.cargo/registry/src")'),
+    writesAbsolutePath('new File("/home/somebody/.cargo/registry/src")'),
+    writesAbsolutePath("apply from: 'tauri.settings.gradle'"),
+    writesAbsolutePath(""),
+  ],
+  [true, true, false, false],
+);
+
 const absolutePaths: string[] = [];
+const swept: string[] = [];
+const skippedDirs: string[] = [];
 const sweepAndroid = (dir: string, within: string): void => {
   for (const name of readdirSync(join(ROOT, dir))) {
     const rel = `${dir}/${name}`;
     const here = within === "" ? name : `${within}/${name}`;
     if (statSync(join(ROOT, rel)).isDirectory()) {
       // Gradle's own output, and the `generated` package `init` rewrites.
-      if (!/^(build|\.gradle|\.kotlin|\.cxx|generated)$/.test(name)) sweepAndroid(rel, here);
+      if (/^(build|\.gradle|\.kotlin|\.cxx|generated)$/.test(name)) skippedDirs.push(here);
+      else sweepAndroid(rel, here);
       continue;
     }
     if (!/\.(kt|kts|gradle|pro|xml|properties)$/.test(name)) continue;
     // Anchored `.gitignore` entries name what a clone regenerates; those are
     // allowed the machine's own paths, and `tauri.settings.gradle` is the reason
     // this distinction exists at all.
-    if (ignoredHere.has(here) || ignoredHere.has(name)) continue;
-    if (/\/Users\/|\/home\/[a-z]/.test(read(rel))) absolutePaths.push(rel);
+    if (ignoredHere.has(here)) continue;
+    swept.push(here);
+    if (writesAbsolutePath(read(rel))) absolutePaths.push(rel);
   }
 };
 sweepAndroid(ANDROID_DIR, "");
+/*
+ * ⚠ **The corpus, reported beside the answer, because every filter above this is
+ * silent when it narrows.** The assertion below is an equality against the empty
+ * list, so a widened exempt set, an extension dropped from the list, or a
+ * directory name added to the skip set each lowers what was looked at without
+ * lowering the answer — three edits that read as `ok` and one of which is a
+ * one-character change. The three numbers are what makes that visible.
+ *
+ * ⚠ **And a required-member list beside the count, because a floor cannot see a
+ * skipped item.** The members are the files *this driver already reads by
+ * literal path* — the manifest, the Gradle script, the keep file, the activity,
+ * the wrapper properties, `settings.gradle` and both resources it resolves by
+ * name — so they are a second derivation of "what is committed and is text
+ * here", written down in the sections above rather than invented for this line.
+ * A narrowing that reaches one of them is red here; one that only drops
+ * non-members — a directory added to the skip set that holds none of them, an
+ * exemption widened past these eight — is visible in the corpus report's three
+ * numbers and nowhere else.
+ */
+const SWEPT_MEMBERS = [
+  "app/build.gradle.kts",
+  "app/proguard-rules.pro",
+  "app/src/main/AndroidManifest.xml",
+  "app/src/main/java/com/reemoat/app/MainActivity.kt",
+  "app/src/main/res/xml/data_extraction_rules.xml",
+  "app/src/main/res/xml/network_security_config.xml",
+  "gradle/wrapper/gradle-wrapper.properties",
+  "settings.gradle",
+];
+report(
+  "the sweep read a corpus rather than nothing",
+  swept.length > 0,
+  `${String(swept.length)} files, ${String(skippedDirs.length)} directories skipped, ${String(ignoredHere.size)} paths exempt`,
+);
+check("and every file this driver asserts about by name is in it", SWEPT_MEMBERS.filter((one) => !swept.includes(one)), []);
 check("no committed file under gen/android writes an absolute path down", absolutePaths, []);
 
 /* ------------------------------------------------------------------ *

@@ -785,7 +785,7 @@ export class Session {
    * nothing. The guard has to be a clause about the set, not a side effect of
    * writing to a log, and keeping this out of band is what makes that true.
    *
-   * Empty until the agent says, and empty for ever on three of the four agents.
+   * Empty until the agent says, and empty for ever on four of the five agents.
    * `AcpClient.supportsAsyncTasks` is what tells those two states apart.
    */
   private readonly asyncTasks = new Map<string, BackgroundTask>();
@@ -1184,13 +1184,31 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options), routedPairing(options.agent, options.system ?? null, options.machine ?? BUILTIN_CATALOGUE)), {
-      fileIo: runtime.clientFileIo,
-      // Derived rather than configured: a question with nobody to answer it has
-      // no default, so "no resolver" and "do not tell the agent it can ask" are
-      // one fact. See `SessionOptions.elicitations`.
-      elicitation: options.elicitations != null,
-    });
+    /*
+     * Hoisted because two calls below need the *same* answer, and computing it
+     * twice is how they come to differ. `launch` spends it by withholding this
+     * harness's pasted credentials; `authMethod` spends it by refusing to name an
+     * id for a key that will not be in the environment. A pairing that was routed
+     * for one and not the other would send `authenticate` for a variable
+     * `launch` had just left out.
+     */
+    const pairing = routedPairing(
+      options.agent,
+      options.system ?? null,
+      options.machine ?? BUILTIN_CATALOGUE,
+    );
+    const client = await AcpClient.launch(
+      config,
+      await runtime.launch(options.agent, spawnEnvOf(options), pairing),
+      {
+        fileIo: runtime.clientFileIo,
+        // Derived rather than configured: a question with nobody to answer it has
+        // no default, so "no resolver" and "do not tell the agent it can ask" are
+        // one fact. See `SessionOptions.elicitations`.
+        elicitation: options.elicitations != null,
+        authMethod: runtime.authMethod(options.agent, pairing),
+      },
+    );
 
     let routed: boolean;
     try {
@@ -1307,10 +1325,21 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options), routedPairing(options.agent, options.system ?? null, options.machine ?? BUILTIN_CATALOGUE)), {
-      fileIo,
-      elicitation: options.elicitations != null,
-    });
+    // Hoisted for `Session.start`'s reason: two calls, one answer.
+    const pairing = routedPairing(
+      options.agent,
+      options.system ?? null,
+      options.machine ?? BUILTIN_CATALOGUE,
+    );
+    const client = await AcpClient.launch(
+      config,
+      await runtime.launch(options.agent, spawnEnvOf(options), pairing),
+      {
+        fileIo,
+        elicitation: options.elicitations != null,
+        authMethod: runtime.authMethod(options.agent, pairing),
+      },
+    );
 
     // Re-applied on every resume, and it has to be: routing lives in the agent
     // *process*, and a resume is a new one. A session that came back unrouted
@@ -1766,7 +1795,7 @@ export class Session {
    * `messageId` indicates a new message has started."* Everything else about a
    * streamed fragment and a whole message is identical on the wire.
    *
-   * ⚠ **Two of the four agents send nothing here, and one of them sends nothing
+   * ⚠ **Two of the four agents measured for it send nothing here, and one of them sends nothing
    * on some of its messages, which is the case this function exists for.**
    * Measured in `claude-agent-acp` 0.73.0 and recorded at Q3.604, which quotes
    * the output: every path through `toAcpNotifications` calls `applyMessageId`,

@@ -2,13 +2,20 @@ import { randomBytes } from "node:crypto";
 
 import type { AgentId } from "./acp/agents.js";
 import type { LoginProcess, SessionRuntime } from "./runtime/types.js";
+import { readFrom } from "./transcript.js";
 
 /**
  * Driving an agent's own login flow from a browser.
  *
  * Every agent authenticates out of band and reads its credentials from disk, and
- * the daemon can only inherit what is there — it never calls ACP's
- * `session/authenticate`. So something has to put credentials on that disk.
+ * for four of the five the daemon can only inherit what is there. So something
+ * has to put credentials on that disk.
+ *
+ * ⚠ **The fifth spends a *pasted* key through ACP's `authenticate`** — one call,
+ * from `AcpClient.launch`, gated on there being a key to spend. That is the whole
+ * of what this file's old header meant by "never calls it", and the gate is why
+ * the sentence above is still true of a machine signed in the ordinary way:
+ * `agent-login.md`, Q6.111.
  *
  * This exists because **the person doing that is holding a phone.** On a machine
  * you are sitting at, `claude auth login` in a terminal is the whole answer and
@@ -108,28 +115,15 @@ export interface LoginChunk extends LoginRunView {
   gap: boolean;
 }
 
-/**
- * Where a client's cursor lands in a transcript that may have lost its front.
- *
- * Pure and exported so `webcheck` can assert *this* rather than a transcription
- * of it. It was asserting a copy: the driver defined its own `read` closure with
- * the same three lines and checked that, under a comment about a login transcript
- * being "exactly where a lost line is the one with the code in it". The two were
- * identical, which is precisely what made the drift undetectable — the section
- * would have stayed green with this function deleted.
- *
- * `since` below `dropped` is a gap, not an error: the caller asked for output
- * that has been discarded, and the honest answer is the oldest that survives plus
- * a flag saying something is missing.
+/*
+ * ⚠ **`readFrom` lives in `src/transcript.ts` now and is re-exported from here.**
+ * An install run reads its transcript through the same cursor, and the reason it
+ * was exported in the first place — that an asserted *copy* is drift nothing can
+ * see — applies just as hard to a second implementation as to a driver's model of
+ * one. Re-exported rather than moved outright so `daemoncheck.git-pty-and-fs.ts`,
+ * whose subject is this file, keeps importing it from the file it is about.
  */
-export function readFrom(
-  buffer: string,
-  dropped: number,
-  since: number,
-): { chunk: string; gap: boolean } {
-  const from = Math.max(since, dropped);
-  return { chunk: buffer.slice(from - dropped), gap: since < dropped };
-}
+export { readFrom };
 
 class LoginRun {
   private buffer = "";

@@ -1,6 +1,7 @@
 import {
   ChevronRight,
   CornerLeftUp,
+  Download,
   FileArchive,
   Folder,
   FolderPlus,
@@ -9,6 +10,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { agentDoor, doorLabel, type AgentDoor } from "./agentInstall";
 import { ApiError, errorText } from "../http";
 import { forgetPick, heldPick, keepPick, takePick, takeRemoval } from "../agentPick";
 import { refOf, sessionId, type MachineId } from "../ids";
@@ -18,7 +20,7 @@ import { nativeBoot, pickFolderNative } from "../native";
 import { agentStripPath, settingsPath } from "../settings";
 import { navigate, newPath, sessionPath, type Route } from "../router";
 import { store, type AppState } from "../store";
-import type { AgentInfo, AgentStripEntry, CustomAgent, DirEntry, Me, SystemInfo } from "../wire";
+import type { AgentAvailability, AgentStripEntry, CustomAgent, DirEntry, Me, SystemInfo } from "../wire";
 import { customAgentSubline, harnessSubline, offersStripTile, startableHere } from "../agents";
 import { defaultRow, orderStrip, stripKey } from "../agentStrip";
 import { AgentGlyph } from "./AgentIcons";
@@ -392,7 +394,7 @@ function NewSession({
     if (selected === null) return;
     onPick(selected, next);
   };
-  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
+  const [agents, setAgents] = useState<AgentAvailability[] | null>(null);
   /**
    * Why `GET /agents` came back with nothing, when it came back with nothing
    * because it failed.
@@ -1122,10 +1124,22 @@ const shownHere = offersStripTile;
  * nothing saying why — which is the state hiding signed-out tiles would otherwise
  * have created on a machine where nothing is signed in.
  */
-function signInOffered(candidate: AgentInfo): boolean {
-  return (
-    candidate.login?.blocked !== "no_flow" && (!candidate.available || candidate.loggedIn === false)
-  );
+/*
+ * ⚠ **This is `agentDoor` now, in `ui/agentInstall.ts`, and the move is a repair
+ * rather than a tidy.** The predicate that stood here answered `true` for
+ * `!available` — so a machine without a harness drew **"Sign in to Grok"**, which
+ * opened a card whose control slot computes `login.supported && agent.available`
+ * and therefore rendered nothing at all. What was left on screen was the daemon's
+ * hint: *"grok not found on this daemon's PATH…"*. A door onto one true sentence
+ * and no control, which is exactly the state the block below says it was written
+ * to prevent — the fix had landed on the `no_flow` arm alone, which covers
+ * opencode and nothing else.
+ *
+ * Kept as a named re-export so both readers below still call one binding, which
+ * is the property the old function was extracted for.
+ */
+function doorFor(candidate: AgentAvailability): AgentDoor {
+  return agentDoor(candidate);
 }
 
 /**
@@ -1155,7 +1169,7 @@ function signInOffered(candidate: AgentInfo): boolean {
  */
 export function offeredHere(
   pick: Picked | null,
-  agents: AgentInfo[] | null,
+  agents: AgentAvailability[] | null,
   customAgents: CustomAgent[] | null,
   /**
    * What the machine's strip has been told to leave out.
@@ -1281,7 +1295,7 @@ function AgentStrip({
   machineId,
   onChanged,
 }: {
-  agents: AgentInfo[];
+  agents: AgentAvailability[];
   /**
    * The assembled agents, or `null` while that read is still out.
    *
@@ -1523,7 +1537,7 @@ function AgentStrip({
     value?.kind === "harness"
       ? (agents.find((candidate) => candidate.id === value.id) ?? null)
       : value === null && !agents.some(shownHere)
-        ? (agents.find(signInOffered) ?? agents[0] ?? null)
+        ? (agents.find((one) => doorFor(one) !== null) ?? agents[0] ?? null)
         : null;
   const presets = customAgents ?? [];
   /*
@@ -2014,7 +2028,17 @@ function AgentStrip({
               harness on it is a CLI installed there — so this is a machine to go
               and look at rather than a screen to fix.
             </>
-          ) : harness !== null && signInOffered(harness) ? (
+          ) : harness !== null && doorFor(harness) === "install" ? (
+            /*
+             * ⚠ **A third arm, and `webcheck` tells these states apart by the
+             * quoted strings and by nothing else** — so a third one needs a third
+             * pinned literal in the same change. It exists because nothing puts a
+             * harness on a machine by itself any more: a freshly enrolled machine
+             * has no agents at all, and *"not ready to start"* describes that as a
+             * fault when it is the ordinary first-run state with a button under it.
+             */
+            "No agent is installed on this machine yet."
+          ) : harness !== null && doorFor(harness) !== null ? (
             "No agent on this machine is ready to start."
           ) : (
             /*
@@ -2127,7 +2151,7 @@ function AgentStrip({
           draws are reachable for opencode in one way only (not installed), and the
           panel that opened for it held one true sentence and no controls, under a
           button offering a sign-in that does not exist. */}
-      {harness !== null && signInOffered(harness) && machineId !== null && (
+      {harness !== null && doorFor(harness) !== null && machineId !== null && (
         <div>
           <button
             type="button"
@@ -2135,8 +2159,13 @@ function AgentStrip({
             aria-expanded={signingIn === harness.id}
             className="tap press -my-2 inline-flex min-h-11 items-center gap-1 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg"
           >
-            <Icon as={LogIn} size={12} />
-            {signingIn === harness.id ? "Hide sign-in" : `Sign in to ${harnessName(harness)}`}
+            {/* ⚠ **The glyph follows the door, and so does the label.** A button
+                saying "Sign in" over a harness that is not on the machine is the
+                reported defect: it opened a card that could draw no control,
+                leaving the daemon's own "not found on this daemon's PATH" as the
+                whole of what was on screen. */}
+            <Icon as={doorFor(harness) === "install" ? Download : LogIn} size={12} />
+            {doorLabel(doorFor(harness) ?? "sign_in", harnessName(harness), signingIn === harness.id)}
           </button>
           {/* `bg-raised/50` — the quiet grade, the one a tool card uses. This is
               a container for the wizard rather than a value to read. */}

@@ -566,6 +566,30 @@ fn exe_path() -> std::path::PathBuf {
 /// strings for exactly that reason.
 pub const PICKS_FOLDER: bool = cfg!(not(any(target_os = "android", target_os = "ios")));
 
+/// Whether a daemon could be on *this* computer at all.
+///
+/// ⚠ **A declared capability rather than an accident, and the accident is what
+/// it replaces.** `mod daemon` and `mod local` compile for Android, so all five of
+/// the daemon commands exist there, are registered, and answer `"unsupported"` or
+/// `None` — `Payload::locate` finds nothing staged and `~/.reemoat/daemon.json` is
+/// not on a phone. Both are true today and both are luck: the first is a property
+/// of the *bundle* rather than of the platform, and the second is the very
+/// inference {@link Boot::picks_folder}'s own docblock refuses in so many words.
+///
+/// ⚠ **No `#[cfg]` counterpart, unlike {@link PICKS_FOLDER}, and the asymmetry
+/// is the whole reason this had to be written down rather than discovered.** The
+/// folder panel got its constant for free: `blocking_pick_folder` does not exist
+/// on Android, so an APK failed to compile and somebody had to decide something.
+/// Nothing here fails to compile — there is no desktop-only call in these five
+/// — so the page went on asking a phone to set itself up as a machine and
+/// reading a plausible answer.
+///
+/// The condition is the same string as {@link PICKS_FOLDER}'s and they are
+/// deliberately two constants: they answer different questions, and the day
+/// Android grows a Storage Access Framework folder picker that one becomes `true`
+/// while this one cannot.
+pub const CAN_HOST_DAEMON: bool = cfg!(not(any(target_os = "android", target_os = "ios")));
+
 /// What the first paint needs, in one round trip.
 ///
 /// One call rather than four, because the webview cannot draw anything honest
@@ -615,16 +639,6 @@ pub struct Boot {
     ///
     /// It comes from `config.rs` rather than the keyring, and that is what makes
     /// it survive a machine whose credential store silently discards writes.
-    /// Whether this shell can open a folder panel — see {@link PICKS_FOLDER}.
-    ///
-    /// **A declared capability rather than something the page infers.** The page
-    /// could have keyed the panel on `platform`, but `HostPlatform` narrows
-    /// `"android"` to `"other"` along with every future desktop target, so that
-    /// would be a guess that reads as a fact. It could also have relied on the
-    /// accident that a phone has no local daemon and therefore never matches
-    /// `localMachineId` — which is true today and is luck, not a rule.
-    #[serde(rename = "picksFolder")]
-    pub picks_folder: bool,
     #[serde(rename = "deviceId")]
     pub device_id: Option<String>,
     /// This installation's X25519 public key on that server, base64url.
@@ -650,6 +664,42 @@ pub struct Boot {
     /// setting.
     #[serde(rename = "deviceKeyAtRest")]
     pub device_key_at_rest: Option<String>,
+    /// Whether this shell can open a folder panel — see {@link PICKS_FOLDER}.
+    ///
+    /// **A declared capability rather than something the page infers.** The page
+    /// could have keyed the panel on `platform`, but `HostPlatform` narrows
+    /// `"android"` to `"other"` along with every future desktop target, so that
+    /// would be a guess that reads as a fact. It could also have relied on the
+    /// accident that a phone has no local daemon and therefore never matches
+    /// `localMachineId` — which is true today and is luck, not a rule.
+    ///
+    /// ⚠ **This field and these paragraphs were spliced into the middle of
+    /// `device_id`'s docblock**, so the ⚠ about the load-bearing `rename` read as
+    /// documentation for the folder panel and `device_id` — the field that
+    /// `rename` protects and that the census below exists for — carried no
+    /// docblock at all. Nothing can catch that: a doc comment binds to whatever
+    /// follows it, both fields kept their attributes, and every driver stayed
+    /// green. Moved rather than reworded, and the two declared capabilities sit
+    /// together now so the next one has an obvious home.
+    #[serde(rename = "picksFolder")]
+    pub picks_folder: bool,
+    /// Whether a daemon could be on *this* computer at all — see
+    /// {@link CAN_HOST_DAEMON}.
+    ///
+    /// **What the page does with it is refuse to ask.** The five wrappers in
+    /// `native.ts` answer `null`, `[]` or a sentence without reaching the bridge,
+    /// so the setup flow, the log screen and `localRoute.ts`'s probe are all off
+    /// on a platform where none of them can end anywhere.
+    ///
+    /// ⚠ **The host's `"unsupported"` is still underneath and is not what this
+    /// replaces.** That one is a fact about the *bundle* — `Payload::locate`
+    /// finding nothing staged — so it is per build and per overlay and could
+    /// never be a compile-time constant. This one is a fact about the *platform*.
+    /// A desktop client build keeps answering `true` here and `"unsupported"`
+    /// there, which is what leaves `host_local_daemon` reaching a daemon
+    /// `deploy/install.sh` put on a Linux box.
+    #[serde(rename = "canHostDaemon")]
+    pub can_host_daemon: bool,
     /// The address this build suggests, for the setup screen's field to open on.
     ///
     /// ⚠ **A suggestion, and never `server`.** They are different questions —
@@ -689,6 +739,7 @@ pub fn host_boot(app: AppHandle, host: State<'_, Host>) -> Boot {
         app_version: app.package_info().version.to_string(),
         durable: host.durable,
         picks_folder: PICKS_FOLDER,
+        can_host_daemon: CAN_HOST_DAEMON,
         device_id,
         device_public_key: device_key.as_ref().map(|k| k.public_key.clone()),
         device_key_at_rest: device_key.as_ref().map(|k| k.at_rest.clone()),

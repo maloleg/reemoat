@@ -123,6 +123,26 @@ export interface NativeBoot {
    */
   picksFolder: boolean;
   /**
+   * Whether a daemon could be on *this* computer at all.
+   *
+   * ⚠ **Declared by the host for the reason {@link NativeBoot.picksFolder} is,
+   * and it is the case that docblock names without covering.** The inference it
+   * refuses — a phone having no local daemon and therefore never matching
+   * `localMachineId`, *"true today and is luck rather than a rule"* — was carrying
+   * all five of the daemon wrappers below at the same time.
+   * `mod daemon` and `mod local` compile for Android, so those commands exist
+   * there and answer `"unsupported"` or `null` only because `Payload::locate`
+   * finds nothing staged and `~/.reemoat/daemon.json` is not on a phone. The
+   * folder panel was forced into a declared capability by an APK that failed to
+   * compile; nothing forced these, so nothing wrote them down.
+   *
+   * `false` on Android and iOS. **Not the same question as the host's
+   * `"unsupported"`**, which is about the *bundle* — a desktop client build
+   * carries no payload and still reaches a daemon `deploy/install.sh` put on that
+   * computer, which is why that one stays a run-time answer.
+   */
+  canHostDaemon: boolean;
+  /**
    * What this computer is called, for naming the machine it becomes.
    *
    * ⚠ **Not {@link NativeBoot.platform}.** That is the operating system — the
@@ -465,6 +485,50 @@ export async function hostDeviceKeyReset(): Promise<{ publicKey: string; atRest:
 }
 
 /**
+ * Whether anything below is worth asking, as the **shell** declared it.
+ *
+ * ⚠ **One reader rather than five, and it reads a capability rather than a
+ * platform.** {@link NativeBoot.canHostDaemon} carries the argument in full: the
+ * five wrappers under this one were relying on a phone having no payload staged
+ * and no `~/.reemoat/daemon.json`, which is the inference `picksFolder` exists to
+ * refuse. Keyed on `hostPlatform()` instead it would be wrong in the other
+ * direction, that function narrowing `"android"` to `"other"` along with every
+ * future desktop target.
+ *
+ * ⚠ **`await hostReady` rather than `nativeBoot()`, and the difference is a
+ * race.** The cached payload is `null` until the one `host_boot` call settles, so
+ * a synchronous read would answer "this device cannot" for every call made in
+ * the frames before it lands — and `localRoute.ts` resolves a route on a wake,
+ * which is exactly then. Awaiting an already-settled promise costs a microtask.
+ *
+ * ⚠ **Only an explicit `false` refuses, and the asymmetry is what a refusal
+ * costs.** This read `?.canHostDaemon === true`, which folds three different
+ * states into one `no`: a browser, a shell that answered `false`, and a shell
+ * whose `host_boot` never settled. The third is not a refusal — it is silence —
+ * and treating it as one costs the **whole local route**, so the app reaches a
+ * daemon on its own computer over the relay instead. Measured: with that reading,
+ * `webcheck.local-route.ts` went to eight failures, because `hostReady` is a
+ * module-level `const` settled at import and that driver installs its shell
+ * afterwards, so the payload is `null` for its entire run (the driver pins that
+ * fact about itself at its own line 533). An explicit `false` is the only answer
+ * that means *no daemon can be on this device*, and it is the one Android sends.
+ *
+ * What silence costs the other way is one wasted loopback probe that answers
+ * nothing — which is the same trade `installable` decides in the opposite
+ * direction, and for the stated reason: there a refusal is a bare `404` with
+ * nothing to render, here it is a slower path that still works. `webcheck`'s
+ * `installable !== false` sweep is scoped to that field and does not reach this
+ * one.
+ */
+async function canHostDaemonHere(): Promise<boolean> {
+  const boot = await hostReady;
+  // Silence, not a refusal: fall back to whether a shell is there at all, which
+  // is the inference this field narrows rather than replaces.
+  if (boot === null) return inNativeShell();
+  return boot.canHostDaemon;
+}
+
+/**
  * A daemon running on *this computer*, as the host process found it.
  *
  * The daemon writes `~/.reemoat/daemon.json` from its own listening callback
@@ -492,7 +556,10 @@ export interface LocalDaemon {
 }
 
 export async function localDaemon(): Promise<LocalDaemon | null> {
-  if (!inNativeShell()) return null;
+  // Not `inNativeShell()` alone: see {@link canHostDaemonHere}. On a platform
+  // where no daemon can be here, "there is none" is the answer by rule rather
+  // than because a file happened to be missing.
+  if (!(await canHostDaemonHere())) return null;
   try {
     return (await invoke<LocalDaemon | null>("host_local_daemon")) ?? null;
   } catch {
@@ -597,7 +664,10 @@ export const DAEMON_CONFIG = {
 } as const;
 
 export async function daemonState(): Promise<DaemonState | null> {
-  if (!inNativeShell()) return null;
+  // `null` rather than a synthesised `"unsupported"`: `store.ts` already treats
+  // the two as one state, and inventing a status here would be this module
+  // answering for the host. See {@link canHostDaemonHere}.
+  if (!(await canHostDaemonHere())) return null;
   try {
     return (await invoke<DaemonState | null>("host_daemon_state")) ?? null;
   } catch {
@@ -627,7 +697,9 @@ export async function daemonState(): Promise<DaemonState | null> {
  * being a second, weaker copy of `~/Library/Logs`.
  */
 export async function daemonLog(): Promise<readonly string[]> {
-  if (!inNativeShell()) return [];
+  // The same `[]` every other absence answers — see the docblock, and
+  // {@link canHostDaemonHere} for why the platform is asked rather than assumed.
+  if (!(await canHostDaemonHere())) return [];
   try {
     return (await invoke<string[]>("host_daemon_log")) ?? [];
   } catch {
@@ -659,6 +731,17 @@ export async function daemonLog(): Promise<readonly string[]> {
  */
 export async function startLocalDaemon(enrollCode: string, machineId: string): Promise<DaemonState> {
   /*
+   * ⚠ **A rejection rather than a `null`, because this one has a return type
+   * somebody is waiting on.** The other three wrappers answer an absence; this
+   * answers a state, and there is no state meaning "nothing was attempted". The
+   * host says `this build carries no daemon` for the same shape one layer down,
+   * and `store.ts` puts whichever sentence it gets on the setup screen. Nothing
+   * reaches this on a phone anyway — {@link daemonState} answered `null` and
+   * `setUpThisComputer` returned — which is what makes this the backstop and not
+   * the gate. See {@link canHostDaemonHere}.
+   */
+  if (!(await canHostDaemonHere())) throw new Error("this device cannot run a Reemoat daemon");
+  /*
    * ⚠ **Both empty is adoption, and is a real call rather than a mistake.**
    * The host then starts what `~/.reemoat/daemon.env` already configures and
    * creates nothing — which is what a machine set up by `deploy/install.sh`, or by
@@ -676,6 +759,9 @@ export async function startLocalDaemon(enrollCode: string, machineId: string): P
  * pid is reused and `~/.reemoat` is shared with whatever else set one up.
  */
 export async function stopLocalDaemon(): Promise<void> {
+  // Nothing to stop, and silence is the honest answer: stopping a daemon that
+  // cannot exist has already succeeded. See {@link canHostDaemonHere}.
+  if (!(await canHostDaemonHere())) return;
   await invoke<void>("host_daemon_stop");
 }
 

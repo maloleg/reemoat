@@ -30,6 +30,12 @@ import type { PaneWidth } from "./paneWidth";
  * there is nothing to remove, so there is nothing to leak when this unmounts
  * mid-drag, which the background panel's separator does every time it is closed.
  *
+ * ⚠ **That last clause is about the *listener*, and it is false of the custom
+ * property** — read the unmount effect below before relying on it. The clause is
+ * kept rather than corrected in place because the correction is the lesson, and it
+ * is stated once, at the effect that acts on it; `AppShell`'s `RailHandle` sends
+ * readers here for the same reason.
+ *
  * `pointercancel` is a real outcome rather than defensive: on a touch laptop the
  * browser can decide mid-gesture that this was a scroll. It reverts to the
  * committed width rather than keeping wherever the finger was when the gesture was
@@ -93,22 +99,95 @@ export function PaneHandle({
   /**
    * What a drag starts from when nobody has chosen a width yet.
    *
-   * ⚠ **The DOM's own answer for the property, read once per gesture** — never a
-   * measurement of the element and never a breakpoint. The background panel has
-   * two declared widths and no stored one until somebody drags, so without this
-   * the first drag at `xl` would begin from 20rem and jump 96px under the pointer.
-   * `getComputedStyle` on `documentElement` hands back whichever of the two media
-   * blocks won, which is CSS answering rather than JavaScript deciding — the same
-   * distinction `machineSwipe`'s `offsetParent` read is granted, and the reason
-   * this is not the `matchMedia` those files ban. It is not state: nothing is
-   * stored, subscribed or re-rendered, so it cannot go stale or disagree with the
-   * stylesheet.
+   * ⚠ **The DOM's own answer for the property** — never a measurement of the
+   * element and never a breakpoint. The background panel has two declared widths
+   * and no stored one until somebody drags, so without this the first drag at `xl`
+   * would begin from 20rem and jump 96px under the pointer. `getComputedStyle` on
+   * `documentElement` hands back whichever of the two media blocks won, which is
+   * CSS answering rather than JavaScript deciding — the same distinction
+   * `machineSwipe`'s `offsetParent` read is granted, and the reason this is not the
+   * `matchMedia` those files ban.
    */
-  const declared = (): number =>
+  const resolve = (): number =>
     pane.clamp(Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue(pane.prop)));
+  /**
+   * The same answer, held until something can have changed it.
+   *
+   * ⚠ **This used to be resolved inside the JSX, once per render, and the render
+   * it was in is the transcript's.** `aria-valuenow` falls back to it and
+   * `announced` is `null` for every reader who has never dragged — which is the
+   * default state, not an edge — so while the panel was open a computed-style
+   * resolution on the root element sat in the path of every arriving chunk:
+   * `TaskPanel` is rendered from `EventList`'s own body with no `memo` between
+   * them, and that component re-renders on every streamed token against a
+   * transcript that draws all its events with no render window. A computed-style
+   * read flushes whatever style invalidation is pending. The rail never reached it
+   * at all, its `unset` being a number.
+   *
+   * So it is `??=` on a ref, and the three things that drop it are the whole of
+   * what makes that safe rather than merely cheaper:
+   *
+   * 1. **A change to the committed width**, because `AppShell` writes that onto
+   *    `documentElement` and `getComputedStyle` would then hand back the inline
+   *    value rather than the stylesheet's. The case is a reset: the render in which
+   *    `announced` turns `null` still sees the old inline number — as it did
+   *    uncached — and the effect below is what makes the render after it read the
+   *    stylesheet again instead of announcing the width that was just given up.
+   * 2. **A resize**, which is the only thing that can move the breakpoint. The
+   *    listener reads nothing and decides nothing; it drops an answer so that the
+   *    next render asks CSS again, which is why it is not the kind of
+   *    breakpoint-in-JavaScript this file is banned from by literal.
+   * 3. **`pointerdown`**, so a gesture still begins from a reading taken for it.
+   *    Redundant given 2 wherever a resize is delivered — and what is *not*
+   *    measured here is which events a change to the browser's own font size
+   *    delivers, while `@media (min-width: 80rem)` is in `rem` and therefore
+   *    answers to it. One line keeps the 96px jump above impossible either way.
+   */
+  const cached = useRef<number | null>(null);
+  const declared = (): number => (cached.current ??= resolve());
+  /*
+   * Reason 1 above, and it is an effect rather than a derive-during-render on
+   * purpose: the render that sees `announced` change still sees the inline
+   * property `AppShell` has not removed yet, so clearing the cache *there* would
+   * cache the same stale number one render earlier. Cleared after the commit, the
+   * next render is the first one that can read the stylesheet — which is exactly
+   * where the uncached version got the right answer too.
+   */
+  useEffect(() => {
+    cached.current = null;
+  }, [announced]);
+  /*
+   * Reason 2. `resize` rather than a `matchMedia` listener, which this file is
+   * banned from by literal and would be a second statement of a breakpoint; and
+   * the handler is deliberately not a reader — it drops the held answer and the
+   * next render asks CSS for a new one.
+   */
+  useEffect(() => {
+    const forget = (): void => {
+      cached.current = null;
+    };
+    window.addEventListener("resize", forget);
+    return () => void window.removeEventListener("resize", forget);
+  }, []);
 
-  /** Where this drag began, and `null` whenever one is not in flight. */
-  const from = useRef<{ x: number; width: number } | null>(null);
+  /**
+   * Where this drag began, **which pointer it belongs to**, and `null` whenever one
+   * is not in flight.
+   *
+   * ⚠ **The `id` is not bookkeeping — without it a *second* pointer ends the
+   * first's drag.** The press is refused entry by the guard in `onPointerDown`, but
+   * the finger is still on the strip, so its own `pointerup` arrives here and
+   * committed and ended the gesture that was in flight. After that the first
+   * pointer went on moving with `from.current === null`, i.e. the pane frozen under
+   * a button that is still held, until it was lifted.
+   */
+  const from = useRef<{ id: number; x: number; width: number } | null>(null);
+  /**
+   * Whether an event belongs to the gesture in flight — the whole of the fix above,
+   * read by the three handlers that *end* a drag. `pointerdown` has its own guard
+   * (there is no gesture yet to own it) and `pointermove` narrows `from` itself.
+   */
+  const owns = (event: React.PointerEvent<HTMLDivElement>): boolean => from.current?.id === event.pointerId;
   /**
    * ⚠ **Whether the pointer ever moved, because a bare click must commit
    * nothing.** `pointerup` fires for a press that travelled zero pixels, and
@@ -131,12 +210,16 @@ export function PaneHandle({
     // One pointer at a time. A second one landing on the strip mid-drag would
     // rebase `from` onto the committed width — the width as it was *before* the
     // drag started, since nothing commits until `pointerup` — and the pane would
-    // jump by however far the first finger had already travelled.
+    // jump by however far the first finger had already travelled. Refusing entry
+    // is only half of it: the refused pointer is still on the strip and its own
+    // release still arrives here, which is what `owns` is for.
     if (from.current !== null) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
+    // Reason 3 above: a gesture begins from a reading taken for it.
+    cached.current = null;
     const start = pane.width() ?? declared();
-    from.current = { x: event.clientX, width: start };
+    from.current = { id: event.pointerId, x: event.clientX, width: start };
     latest.current = start;
     moved.current = false;
     setDragging(true);
@@ -144,7 +227,9 @@ export function PaneHandle({
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
     const origin = from.current;
-    if (origin === null) return;
+    // `owns` in the shape that also narrows `origin`, which is the only reason
+    // this one is spelled out rather than calling it.
+    if (origin === null || origin.id !== event.pointerId) return;
     moved.current = true;
     latest.current = pane.clamp(origin.width + sign * (event.clientX - origin.x));
     apply(latest.current);
@@ -204,6 +289,35 @@ export function PaneHandle({
     [pane],
   );
 
+  const onPointerUp = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (owns(event)) finish(true);
+  };
+  const onPointerCancel = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (owns(event)) finish(false);
+  };
+  /*
+   * ⚠ **A capture can be lost without a `pointerup` or a `pointercancel`, and the
+   * cost of not hearing it is the separator for the rest of the session.** Another
+   * element taking the same `pointerId`, or a `releasePointerCapture` from
+   * anywhere, ends the redirection with no terminal pointer event on this element:
+   * `from` stays set, and `onPointerDown`'s one-pointer-at-a-time guard then
+   * refuses **every** later press. The strip goes on drawing, hovering and
+   * focusing, and moves nothing ever again.
+   *
+   * A cancel rather than a commit, which is `pointercancel`'s rule: a gesture
+   * taken away is not a smaller pane. On an ordinary release it is a no-op, and
+   * `from` is what makes it one rather than the ordering: Pointer Events has the
+   * implicit release firing this *after* `pointerup`, by which time `finish` has
+   * cleared `from` and `owns` answers false — so an engine that fired it the other
+   * way round would revert the drag instead of doubling it, which is the harmless
+   * direction of the two. It is emphatically **not** the mid-drag unmount, which
+   * the effect above exists for: measured on Chrome 151, that delivers this event
+   * no more than it delivers the other two.
+   */
+  const onLostPointerCapture = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (owns(event)) finish(false);
+  };
+
   const step = (by: number): void => {
     pane.setWidth((pane.width() ?? declared()) + by);
   };
@@ -240,10 +354,20 @@ export function PaneHandle({
        * `declared()` is the honest number and it is already what
        * `onPointerDown` and `step()` treat as "where this pane is" when nothing is
        * stored — CSS answering with whichever media block won, not a width decided
-       * here. The cost is one custom-property read per render while the panel is
-       * open **and** undragged, which is a computed-style lookup on
-       * `documentElement` rather than a layout measurement; the rail never reaches
-       * it at all, its `unset` being a number.
+       * here. It is held rather than resolved here: this is the render the
+       * background panel makes on every streamed token, and `declared()`'s own
+       * docblock carries what that cost and the three things that drop the held
+       * answer.
+       *
+       * ⚠ **It announces the *stored* number, which is `--task-w` and not the
+       * `--task-fit` the panel spends** — `index.css` and `taskWidth.ts` both say
+       * so, and it is deliberate rather than overlooked: a reader's choice is what
+       * a separator is a position in, and the viewport clamp beside it belongs to
+       * CSS. What it costs is honest to state: where the clamp binds, this
+       * announces a width wider than the pane is drawn at, and a keyboard step
+       * above the clamp moves no pixel. Closing that needs the clamped value to
+       * have a name JavaScript can read, which is a change to `PaneWidth` rather
+       * than to this element.
        */
       aria-valuenow={announced ?? declared()}
       aria-valuemin={pane.min}
@@ -251,8 +375,9 @@ export function PaneHandle({
       tabIndex={0}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
-      onPointerUp={() => finish(true)}
-      onPointerCancel={() => finish(false)}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onLostPointerCapture={onLostPointerCapture}
       onDoubleClick={() => pane.reset()}
       onKeyDown={onKeyDown}
       /*

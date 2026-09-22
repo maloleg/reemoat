@@ -625,7 +625,7 @@ const cliPackages = new Map<string, string>();
 for (const m of agentsSh.matchAll(/\bensure_npm ([a-z]+) (\S+) "/g)) {
   if (m[1] !== undefined && m[2] !== undefined) cliPackages.set(m[1], m[2]);
 }
-check("deploy/agents.sh names an npm package for each of the four", [...cliPackages.keys()].sort(), [...AGENT_IDS].sort());
+check("deploy/agents.sh names an npm package for each of the five", [...cliPackages.keys()].sort(), [...AGENT_IDS].sort());
 const manifest = JSON.parse(packageJson) as Record<string, Record<string, string> | undefined>;
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
 check(

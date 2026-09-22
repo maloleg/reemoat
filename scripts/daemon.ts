@@ -16,6 +16,8 @@ import type { AgentId } from "../src/acp/agents.js";
 import { systemSecretFor } from "../src/acp/systems.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
+import { AgentInstallRuns } from "../src/agentinstall.js";
+import { AgentScriptGate } from "../src/agentscript.js";
 import { AgentUpdates, agentChannelFrom, agentSourceFrom } from "../src/agentupdate.js";
 import { removeAnnounce, writeAnnounce, ANNOUNCE_VERSION } from "../src/announce.js";
 import { IdleParking } from "../src/idlepark.js";
@@ -686,7 +688,52 @@ const AGENT_UPDATES_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no
  * this names is only a live process. The script decides what each name means:
  * Q4.113.
  */
+/**
+ * Everything that has to forget what it knew about a harness whose binary moved.
+ *
+ * ⚠ **One function and two callers, because the list is an *order* rather than a
+ * set and a second copy would drift out of it.** The daily refresh and an install
+ * somebody pressed both change which build is on disk, and the block below was
+ * written out inside `onUpdated` when `onUpdated` was the only caller.
+ *
+ * `agent` narrows it where the caller knows: an install is about one harness, a
+ * refresh may have moved any of them.
+ */
+const afterAgentsChanged = (agent?: string): void => {
+  // Or the daemon's *report* goes on naming the build it resolved before this ran,
+  // for the length of that cache: the spawn already runs the new one, because the
+  // held path is the symlink the script repointed — see `LocalRuntime.agentCli`.
+  // This is also what clears `findOnPath`'s 30s miss, which is why every verdict
+  // about "is it there now" has to come after it rather than before.
+  runtime.forgetAvailability();
+  /*
+   * And the capability cache, which `forgetAvailability` cannot reach: it holds
+   * the model list *and* the build that published it for `MODELS_TTL_MS`, so a
+   * picker opened just before the run would name the old build over the old list
+   * for ten minutes after the binary moved — the exact pairing `cli` rides that
+   * route to keep honest.
+   */
+  agentAsks.forget(agent);
+  /*
+   * And the sessions that were waiting for exactly this: a harness with no CLI
+   * on the machine costs a resume no attempt (`agent_missing`), so the pass is
+   * run again now that one may have arrived. Queued behind a boot pass still in
+   * flight, by `autoResume` itself.
+   */
+  resumeInterrupted(agent === undefined ? "after the agent update" : `after installing ${agent}`);
+};
+
+/**
+ * Who may run `deploy/agents.sh`, between the two things in this process that do.
+ *
+ * The script's own `mkdir` lock catches an orphan a previous daemon left behind;
+ * this catches the two runs *this* daemon starts, which that lock can only answer
+ * with `exit 0` and a warning. Neither subsumes the other.
+ */
+const agentScriptGate = new AgentScriptGate();
+
 const agentUpdates = AgentUpdates.start({
+  gate: agentScriptGate,
   busy: () => [
     ...new Set(
       registry
@@ -701,25 +748,7 @@ const agentUpdates = AgentUpdates.start({
     // no line in the log was measured as invisible, and the script's own notes
     // are the only record of which build each harness is on now.
     console.log(`agent update: ran deploy/agents.sh${report === null ? "" : `\n${report.replace(/^/gm, "    ")}`}`);
-    // Or the daemon's *report* goes on naming the build it resolved before this ran,
-    // for the length of that cache: the spawn already runs the new one, because the
-    // held path is the symlink the script repointed — see `LocalRuntime.agentCli`.
-    runtime.forgetAvailability();
-    /*
-     * And the capability cache, which `forgetAvailability` cannot reach: it holds
-     * the model list *and* the build that published it for `MODELS_TTL_MS`, so a
-     * picker opened just before the run would name the old build over the old list
-     * for ten minutes after the binary moved — the exact pairing `cli` rides that
-     * route to keep honest.
-     */
-    agentAsks.forget();
-    /*
-     * And the sessions that were waiting for exactly this: a harness with no CLI
-     * on the machine costs a resume no attempt (`agent_missing`), so the pass is
-     * run again now that one may have arrived. Queued behind a boot pass still in
-     * flight, by `autoResume` itself.
-     */
-    resumeInterrupted("after the agent update");
+    afterAgentsChanged();
   },
   /*
    * On by default, and that is the decision rather than an oversight: the whole
@@ -740,6 +769,37 @@ const agentUpdates = AgentUpdates.start({
   // env file is what decides, not the script's default (Q4.115).
   channel: agentChannelFrom(process.env["REEMOAT_AGENT_CHANNEL"], (detail: string) => console.error(`agent update: ${detail}`)),
 });
+
+/**
+ * Putting a harness on this machine, because somebody asked for it.
+ *
+ * ⚠ **The gate is shared with the updater and an install wins it**, which is the
+ * one ordering decision between them: somebody is watching this, and the daily
+ * refresh's work will still be there in a day.
+ *
+ * ⚠ **`verify` is what decides whether the install worked, and it runs *after*
+ * `afterAgentsChanged`.** `deploy/agents.sh` exits 0 having printed `install
+ * failed; this machine has no copy of it until the next run` — it must, because
+ * three of its four callers contract it never fails — so the exit code answers
+ * nothing. Asking the machine is the answer, and asking it before the caches are
+ * dropped reads `findOnPath`'s 30-second miss and calls a successful install a
+ * failure.
+ *
+ * ⚠ **Switched off by the same variable the updater reads**, because they are one
+ * posture: a machine whose CLIs somebody else manages does not want a button that
+ * downloads one either, and `installable` folds that in so no such button is drawn.
+ */
+const agentInstalls =
+  AGENT_UPDATES_OFF.has((process.env["REEMOAT_AGENT_UPDATES"] ?? "").trim().toLowerCase())
+    ? undefined
+    : new AgentInstallRuns({
+        gate: agentScriptGate,
+        verify: async (agent: string) => (await runtime.agentCli(agent)) !== null,
+        onFinished: (agent: string) => afterAgentsChanged(agent),
+        onWarning: (detail: string) => console.error(`agent install: ${detail}`),
+        source: agentSourceFrom(process.env["REEMOAT_AGENT_SOURCE"], () => {}),
+        channel: agentChannelFrom(process.env["REEMOAT_AGENT_CHANNEL"], () => {}),
+      });
 
 /*
  * Plugins, if this machine wants them.
@@ -828,6 +888,7 @@ const { app, injectWebSocket } = createApp({
   machineSettings: stores.machineSettings,
   asks: agentAsks,
   logins: agentLogins,
+  installs: agentInstalls,
   uploads,
   roots,
   plugins: pluginHost,
@@ -997,13 +1058,13 @@ resumeInterrupted("at boot");
 /**
  * One pass of the registry's auto-resume, with its outcomes on the log.
  *
- * A function because it has two callers now: boot, and the completion of every
- * agent update — the second being what brings back a session whose harness had
- * no CLI on the machine when the first ran (`agent_missing`, which spends no
- * attempt). `autoResume` queues the second pass behind a first still in flight.
+ * A function because it has three callers now: boot, the completion of every
+ * agent refresh, and the completion of an install somebody pressed — the last
+ * being what brings back a session whose harness had no CLI on the machine when
+ * the first ran (`agent_missing`, which spends no attempt). `autoResume` queues a
+ * second pass behind a first still in flight.
  */
 function resumeInterrupted(when: string): void {
-  let missing = 0;
   void registry
     .autoResume({
       enabled: autoResume,
@@ -1012,7 +1073,6 @@ function resumeInterrupted(when: string): void {
         // fill the log with the same sentence three times per session per boot,
         // and the interesting line is the one that says it stopped trying.
         if (outcome.result === "resumed" || outcome.result === "failed") return;
-        if (outcome.result === "agent_missing") missing += 1;
         console.error(
           `auto-resume ${outcome.sessionId}: ${outcome.result}` +
             (outcome.detail === null ? "" : ` — ${outcome.detail}`),
@@ -1025,20 +1085,28 @@ function resumeInterrupted(when: string): void {
         `auto-resume ${when}: ${report.resumed}/${report.considered} session(s) reattached` +
           (report.skipped > 0 ? `, ${report.skipped} skipped` : "") +
           (report.failed > 0 ? `, ${report.failed} failed` : "") +
-          (report.deferred > 0 ? `, ${report.deferred} waiting for an agent CLI to be installed` : ""),
+          (report.deferred > 0
+            ? `, ${report.deferred} waiting for an agent CLI — install it under Settings → Agents`
+            : ""),
       );
       /*
-       * The install that the waiting sessions need is already scheduled — five
-       * minutes after start, so it does not race this very pass — and with this
-       * pass over and sessions waiting on it, the wait is the whole cost. Run it
-       * now; its completion starts the next pass. A no-op when updates are off,
-       * and then the sentence above is the operator's cue — and a no-op once any
-       * run has happened, because that next pass lands here too: with a harness
-       * the script cannot install, honouring every nudge ran the installers
-       * back-to-back for the daemon's life. After the first run the day's timer
-       * is the retry.
+       * ⚠ **This used to call `agentUpdates.nudge()`, and that stopped meaning
+       * anything when the timer became a refresher.** The nudge existed to pull
+       * the five-minute first run forward when a resume pass found a harness with
+       * no CLI on the machine: the install those sessions needed was already
+       * scheduled, so running it now closed the loop. A `--refresh-only` run
+       * installs nothing, so honouring the nudge would be a subprocess, a log
+       * line and a cache flush that cannot possibly repair what the pass
+       * reported — every boot, on exactly the machines that are already missing
+       * something.
+       *
+       * What closes the loop now is a person: `deferResume` keeps those sessions
+       * waiting with no attempt spent, the line above names where to go, and
+       * `AgentInstallRuns` runs `resumeInterrupted` itself when an install
+       * finishes. The `missing` counter that fed the nudge went with it —
+       * `report.deferred` is what decides whether that clause is printed, and
+       * always was.
        */
-      if (missing > 0) agentUpdates.nudge();
     })
     .catch((error: unknown) => {
       // The pass swallows per-session failures itself, so reaching here means the
@@ -1234,6 +1302,13 @@ async function shutdown(signal: string): Promise<void> {
   // this daemon is gone. Stopped before the sessions because it is cheap and
   // unconditional, and because it is not on the 20s session budget.
   await agentLogins.shutdown();
+  /*
+   * ⚠ **A run in flight is deliberately not killed**, which is `AgentUpdates`'
+   * argument verbatim: it writes outside this repository, into the vendors' own
+   * directories, and a SIGKILL partway through an `npm i -g` leaves a tree the
+   * next run has to repair. What this stops is the sweep and any new run.
+   */
+  agentInstalls?.shutdown();
   // Disarms the schedule; a run already in flight is deliberately left alone rather
   // than killed — see `AgentUpdates.doShutdown`.
   await agentUpdates.shutdown();

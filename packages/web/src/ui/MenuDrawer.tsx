@@ -136,15 +136,21 @@ const DRAWER_HEADING = "px-3 py-1.5 text-2xs font-semibold tracking-wider text-f
  * about which `LayerKind`; this is about when it is on the stack, and the wrong
  * answer to either produces the same `j`/`k` failure.
  *
- * ⚠ **There is a ✕ in the head, and it is not redundant with the scrim.** `inert`
- * makes "the rows behind it" — `Sheet`'s stated accessible way out, quoted at the
- * scrim below — the one thing that cannot be reached, and the scrim is a
- * `aria-hidden` `<div>` by the same argument that keeps it from being a phantom tab
- * stop. Escape works through `useDismissible`, so the gap was exactly one
- * population: a screen-reader user on a touch device, who had no dismiss control at
- * all. `aria-modal="true"` sits beside `role="dialog"` for the matching reason —
- * the rest of the document really is out of play, so saying so is a description
- * rather than a claim.
+ * ⚠ **There is no ✕ in the head, and this paragraph used to say there was.** It
+ * argued the control as non-redundant with the scrim, in the present tense, for as
+ * long as the control was already gone — which is the one class of comment this
+ * repository treats as a defect rather than a nit. ⚠ It also mis-quoted `Sheet` as
+ * calling "the rows behind it" the accessible way out, and that sentence is not in
+ * that file: what `Sheet` says is **the ✕** is, which is the whole reason its
+ * argument cannot be borrowed here. What survives the deletion is why the gap
+ * exists at all — `inert` lands on `#root`, so the rows behind this panel are
+ * precisely what cannot be reached, and nothing stands in for the control that
+ * used to. Escape works through `useDismissible` and the scrim takes a tap, so the
+ * population left with no exit is narrow; it is named, with the whole list of exits
+ * and the owner's call behind the state, at the head `<div>` below and in Q3.628 —
+ * once each, not a third time here. `aria-modal="true"` sits beside
+ * `role="dialog"` for a reason of its own: the rest of the document really is out
+ * of play, so saying so is a description rather than a claim.
  *
  * ⚠ **Portaled to `document.body`, and that is not tidiness either.** `inert` lands
  * on `#root`; a drawer rendered inside it inerts *itself* — visible, scrimmed and
@@ -260,18 +266,19 @@ export function MenuDrawer({
     <>
       {/*
        * A `<div>`, never a `<button>`. `Sheet` argues it: a viewport-sized button
-       * is a phantom tab stop, and the ✕ in the head is the accessible way out.
-       * `touch-manipulation` because `index.css` grants the 300ms
-       * double-tap-to-zoom removal to `button` alone.
+       * is a phantom tab stop. `touch-manipulation` because `index.css` grants the
+       * 300ms double-tap-to-zoom removal to `button` alone.
        *
-       * ⚠ **It read "the rows behind it are the accessible way out", and that was
-       * false here rather than merely imprecise.** `Sheet` can say it because it
-       * draws a real ✕; this panel registers `useDismissible("sheet")`, which puts
-       * `inert` on `#root` — so the rows behind it are precisely the things that
-       * cannot be reached. The ✕ is what makes the sentence true again, and the
-       * population it was false for is narrow and real: Escape already worked, so
-       * a keyboard user was fine, while a screen-reader user on a touch device had
-       * no control that dismissed this panel at all.
+       * ⚠ **`Sheet` states that in one breath with "and the ✕ is the accessible
+       * way out", and only the first half of its sentence carries over here.**
+       * `Sheet` draws one; this panel does not, by the owner's call recorded in the
+       * head. What is left, then, is a scrim that is a way out for a *finger* and
+       * for nothing else: it is `aria-hidden`, so a screen reader's navigation
+       * never stops on it, and it is not a tab stop by the paragraph above. Escape is unaffected
+       * and still arrives through `useDismissible`. The whole list of exits, the
+       * population left with none of them, and the call that produced that state
+       * are stated once at the head of the panel rather than argued a second time
+       * here. Q3.628.
        *
        * ⚠ **The exiting scrim stops taking taps the instant it starts leaving.**
        * `--animate-scrim-out` ends at `opacity: 0` while the element lives on, so

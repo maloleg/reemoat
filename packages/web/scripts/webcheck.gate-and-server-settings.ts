@@ -751,6 +751,23 @@ process.stdout.write("\nthe gate: registration, confirmation and recovery\n");
    * evaluated in a program. That is a claim about these two closures and nothing
    * else, and for a while it was a claim with no check under it.
    */
+  /*
+   * ⚠ **And the Install control is the app's, never the gate's** — asked directly
+   * because it was asked directly. The transport sweep below already makes it
+   * structurally impossible (the agents panel needs `store.ts` and `daemon.ts`,
+   * both of which the gate is held away from), but that is an argument and this
+   * is a name: `dist-gate` is a registration form, four mailed-link screens,
+   * three legal documents and a handoff page, and a control that downloads a
+   * coding-agent CLI onto a machine has no business in any of them. Finding this
+   * module in the control plane's image would be a defect rather than a
+   * reassurance, which is the one thing a grep for it cannot tell you on its own.
+   */
+  check(
+    "the Install control ships in the app and not in the gate",
+    [appClosure.has("ui/agentInstall.ts"), gateClosure.has("ui/agentInstall.ts")],
+    [true, false],
+  );
+
   const TRANSPORT = ["e2ee.ts", "machine.ts", "stream.ts", "daemon.ts", "store.ts"];
   const gateValues = closure("gate-main.tsx", true);
   const appValues = closure("main.tsx", true);

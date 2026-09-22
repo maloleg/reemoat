@@ -380,7 +380,7 @@ export function SessionBrowser({
                     * self-hosted instance prints its own.
                     */}
                   {/*
-                    * Below `lg` only. At `lg` the rail is 280px and the pane beside
+                    * Below `lg` only. At `lg` the rail is `RAIL_DEFAULT` (384px) and the pane beside
                     * it is empty, so `NothingSelected` draws the command there at a
                     * width it can be read at; here it is the whole screen and the
                     * command takes the rail's width rather than a `max-w-xs` it

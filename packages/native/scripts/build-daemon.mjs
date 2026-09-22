@@ -605,10 +605,10 @@ function regenerateShims() {
  * The coding-agent CLIs, which this payload deliberately does not ship.
  *
  * `AGENT_LOGIN[*].command` in `src/acp/agents.ts` is the list; `nativecheck`
- * reads both and asserts they are the same set, because a fifth agent added
- * there and not here is this whole defect back on the fifth agent.
+ * reads both and asserts they are the same set, because a sixth agent added
+ * there and not here is this whole defect back on the sixth agent.
  */
-const AGENT_CLIS = ["claude", "kimi", "codex", "opencode"];
+const AGENT_CLIS = ["claude", "kimi", "codex", "opencode", "grok"];
 
 /**
  * Take the agent CLIs' shims back out of `.bin`.

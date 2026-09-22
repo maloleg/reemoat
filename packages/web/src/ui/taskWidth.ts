@@ -10,7 +10,7 @@ import { createPaneWidth } from "./paneWidth";
  * ⚠ **The declared widths are `index.css`'s, and these are the driver's copy of
  * them.** A Tailwind class only exists if it survives a scan of the source *as a
  * literal*, so the panel's width cannot be built from a number in TypeScript —
- * which is why it is `md:w-[var(--task-w)]` and the two defaults are declared in
+ * which is why it is `md:w-[var(--task-fit)]` and the two defaults are declared in
  * the stylesheet, where a breakpoint belongs. These constants exist so `webcheck`
  * can read the stylesheet and assert the two agree, which is the same pin
  * `--rail-w`/`RAIL_DEFAULT` carries and for the same measured reason: `19.5rem`

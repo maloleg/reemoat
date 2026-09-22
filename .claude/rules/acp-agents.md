@@ -222,15 +222,9 @@ handed the tool. Q2.28.
   prose is charged a flat 192 bytes against the byte budget and never truncated,
   silently and with the compiler agreeing. Do not reintroduce a `default` to quiet
   the error that adding a member causes; add the arm. Q5.65.
-- **The login command is a table lookup, never a request field.** There is no route,
-  body field or header anywhere that names a program to run — so "a caller cannot
-  run code of their choosing as the daemon" is a property of there being nothing to
-  pass. This daemon is reachable from the internet through the relay.
-- **The login probe runs with the pasted credential in its environment.** The whole
-  asymmetry rests on it: a clean `false` from `claude auth status` is believed over
-  a pasted token, and "cannot tell" falls back to it — only honest if the CLI has
-  *seen* the token. Without it a wrong token reports `loggedIn: true` and the first
-  session answers `502 agent_auth_required`. Q5.67.
+- **The login command is a table lookup, never a request field**, and **the probe
+  runs with the pasted credential in its environment**. Both moved to
+  `agent-login.md`, which owns how a credential reaches an agent. Q5.67.
 
 **The client**
 
@@ -408,13 +402,27 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
 - **kimi intercepts an unknown slash command; claude forwards it.** This client does
   not paper over it: an unmatched `/foo` is sent as typed, because the cached list
   can lag what the agent accepts. Q6.19.
-- **ACP has `session/authenticate` and this daemon never calls it.** Gemini offers
-  four `authMethods` and expects the client to pick one; any future agent support
-  has to decide whether to drive it. Q6.20. opencode advertises one too
-  (`opencode-login`, described as "Run `opencode auth login` in the terminal"),
-  and ⚠ **is not signed in at all** — `AGENT_LOGIN.opencode.args` is `null` and no
-  pty is ever allocated for it, which this line claimed the opposite of for two
-  releases. Q6.105 is the measurement: it completes a turn with no credential.
+- **ACP's `authenticate` is called now, for one harness — and only when there is a
+  key to spend.** Sending it with none does not merely fail: it **selects** an
+  API-key auth mode, so a machine signed in by `grok login` answers the first
+  prompt `-32603 "Internal error"` with `auth_kind=none`. `ACP_AUTH_METHOD` names
+  *which id spends a pasted key*; `SessionRuntime.authMethod` answers *whether
+  there is one*, and sits there because only the layer that builds the environment
+  can see it. `AcpClient.launch` is still the single call site, so none of the
+  three launch paths can drop it (Q2.215). The measurement, and why Q6.20's premise
+  was half of one, is `agent-login.md`'s. Q6.110, Q6.111.
+- **grok publishes two controls and both are doors this daemon already drives** —
+  `model` under `category: "model"`, `reasoning_effort` under `thought_level`,
+  opencode's spelling — with **bare** ids, so `SYSTEMS.xai` needs no
+  `nativeModelPrefix`. `session/load` republishes them. ⚠ **It must never be spawned
+  with `--always-approve`** (alias `--yolo`, also `_meta.yoloMode`): it runs every
+  tool without asking, so every permission card would stop appearing with nothing
+  failing. ⚠ **`--no-auto-update` is not optional either** — it updates itself in the
+  background when it runs, and `src/agentupdate.ts` owns when a build moves here.
+  ⚠ **And it publishes no `mode` at all, in any session** — `configOptions` is those
+  two and `modes` is absent. What the composer does with that is
+  `web-composer.md`'s. Q6.109, Q6.111.
+  Q6.109.
 - **`session/set_config` and `session/set_config_option` are different methods,
   and only the second is this daemon's.** opencode answers `-32601` to the first
   and implements the second — so an upstream issue closing "per-session model
@@ -422,21 +430,13 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
   instead of running the binary would have bought a whole new environment-based
   model door that is not needed. Q6.105.
 - **⚠ opencode's options do *not* arrive in two waves, and the note that said so
-  was an inference from one model.** `thought_level` is published for a model that
-  has levels and omitted for one that does not — at `session/new` exactly as in
-  every answer after it. Re-measured 2026-08-27 on 1.18.23 with one OpenRouter key,
-  three probes: `set_config_option` on the **mode** of a session running
-  `openai/gpt-5` returns `thought_level` untouched beside it, so an answer is a
-  full option list rather than a delta about the option that was set; with a
-  project `opencode.json` naming that model, **`session/new` itself carries the
-  control**; and `openai/gpt-5` answers `Minimal/Low/Medium/High` while
-  `minimax/minimax-m3`, `deepseek/deepseek-r1` and opencode's own default
-  `opencode/big-pickle` answer with no effort control at all. So the model decides,
-  exactly as it does on claude — the only difference is that opencode never
-  publishes the control rather than withdrawing it. **The old wording matters
-  because a client cannot tell "wave one is incomplete" from "this model has no
-  levels", and it would have to refuse to say anything if the first were true.**
-  Q3.518 is what the strip does with the answer. Q6.105.
+  was an inference from one model.** An answer is a **full option list**, never a
+  delta about the option that was set, and `thought_level` is published for a model
+  that has levels and omitted for one that does not — at `session/new` exactly as
+  in every answer after it. So the model decides, exactly as on claude; the only
+  difference is that opencode never publishes the control rather than withdrawing
+  it. The three probes that settle it, and why the old wording would have made the
+  effort slot a lie, are in Q6.105; Q3.518 is what the strip does with the answer.
 - **opencode is the one agent whose control vocabulary needs reconciling twice.**
   It calls the mode control `Session Mode` where the other three call it `Mode`,
   and it publishes its mode *choices* in lower case (`build`, `plan`) where the

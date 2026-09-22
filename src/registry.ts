@@ -1427,7 +1427,7 @@ export interface SessionSnapshot {
    * on a session with no agent, and empty for ever on an agent that does not
    * report: {@link reportsBackgroundTasks} is what tells the two apart, and a
    * client that draws this list without reading that field is claiming *nothing is
-   * running* on three agents out of four.
+   * running* on four agents out of five.
    */
   backgroundTasks: BackgroundTask[];
   /**

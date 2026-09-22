@@ -1138,7 +1138,7 @@ export class PluginHost {
    *
    * ⚠ **Detached, and that is the whole reason it can be here at all.** An install
    * runs under `exclusive()`, and a spawn plus a handshake is seconds per harness —
-   * 627 ms to 2260 ms measured across the four built-ins. Awaited, `POST /plugins`
+   * 627 ms to 2260 ms measured across the four built-ins there were then. Awaited, `POST /plugins`
    * would hold its answer for the length of somebody else's binary starting up,
    * and a plugin that never completes its handshake would hold the mutex with it.
    *
@@ -2865,9 +2865,10 @@ export type { LivePlugin };
  * ⚠ **The sum, where `manifest.ts` bounds one plugin — and the sum is the number
  * that costs something.** `GET /agents/capabilities` spawns one agent process per
  * harness, fanned with `Promise.all` under `MAX_CONCURRENT_ASKS` of 2. Measured
- * 2026-08-28, the four built-ins take 2531 ms overlapped (627–2260 ms each), so a
- * sweep is roughly `(N + 4) / 2 × 1.3 s` and the builder opens it on every visit.
- * At eight contributed that is twelve harnesses and about eight seconds.
+ * 2026-08-28 over the four built-ins there were then, 2531 ms overlapped
+ * (627–2260 ms each), so a sweep is roughly `(N + 5) / 2 × 1.3 s` and the builder
+ * opens it on every visit. At eight contributed that is thirteen harnesses and
+ * something over eight seconds; grok joined after that run and is unmeasured here.
  *
  * ⚠ **And the wait is not the whole cost.** A sweep holds *both* ask slots for its
  * length, while `model.complete` and `model.list` deliberately do not queue —

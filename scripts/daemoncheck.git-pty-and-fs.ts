@@ -106,6 +106,33 @@ process.stdout.write("\nwhere a login client's cursor lands\n");
   // Once the 64 KiB cap has trimmed the front, an old cursor is behind the window.
   check("a cursor behind the discarded prefix is a gap", readFrom("tail", 100, 40).gap, true);
   check("and is served the oldest output that survives", readFrom("tail", 100, 40).chunk, "tail");
+  /*
+   * ⚠ **`since === dropped` is the one value where `since < dropped` flips**, and
+   * the boundary is what the three cells above cannot see. A client whose cursor
+   * sits on the oldest surviving byte lost nothing, and telling it otherwise puts
+   * the transcript's "something is missing" notice over a transcript that is
+   * whole; one byte behind it, the notice is the truth. So the pair pins **where**
+   * the flip is and not merely that one exists.
+   *
+   * The reach was worked out by mutating this function rather than assumed, which
+   * matters because the obvious mutation is the one that proves least. Flipping to
+   * `since <= dropped` reddens the new `(100, 100)` cell *and* the pre-existing
+   * `(0, 0)` one — but `(0, 0)` is the case where nothing has been dropped at all,
+   * so on its own it says the flag is right when there is no window, never where a
+   * window's front is. The two cells with reach nothing else has are the
+   * neighbour's: a boundary moved one byte, `since < dropped - 1`, survives every
+   * older cell and fails only on `(100, 99).gap`, and dropping the `Math.max` so
+   * the slice takes a negative offset survives them too — `"tail".slice(-60)` is
+   * still `"tail"` — and fails only on `(100, 99).chunk`.
+   *
+   * Worth the lines now that the login run and the install run read through this
+   * one function rather than a copy each, which is the whole reason it was lifted
+   * out of `agentauth.ts`.
+   */
+  check("a cursor on the oldest surviving byte is not a gap", readFrom("tail", 100, 100).gap, false);
+  check("and is served the whole of what survives", readFrom("tail", 100, 100).chunk, "tail");
+  check("while one byte behind it is a gap", readFrom("tail", 100, 99).gap, true);
+  check("and that cursor reads the same surviving bytes", readFrom("tail", 100, 99).chunk, "tail");
   check("a cursor inside the window is not a gap", readFrom("tail", 100, 102).gap, false);
   check("and reads only what follows it", readFrom("tail", 100, 102).chunk, "il");
 }
@@ -204,7 +231,11 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
     const client = await AcpClient.launch(
       { id: "kimi", displayName: "fake", command: "fake", args: [], env: {}, authHint: "" },
       agent.process as never,
-      options,
+      // `authMethod: null` because this section's subject is the two capability
+      // flags. A non-null id would put an `authenticate` on the wire that the
+      // fake agent never answers, and the launch would sit on
+      // `AUTHENTICATE_TIMEOUT_MS` before every assertion below.
+      { ...options, authMethod: null },
     );
 
     // Both sent regardless of what was advertised — which is the entire point.

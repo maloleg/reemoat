@@ -91,6 +91,35 @@ export interface LaunchOptions {
    * nothing can fall back to a person's opinion.
    */
   elicitation: boolean;
+  /**
+   * The ACP `authenticate` method id to send before the first `session/new`, or
+   * `null` to send none.
+   *
+   * ⚠ **Resolved by the runtime rather than looked up here, because the answer
+   * depends on the environment this file cannot see.** `ACP_AUTH_METHOD`
+   * names *which id spends a pasted key*, and `resolveAgent` returns
+   * `env: agentEnv()` with the credential merged afterwards by the runtime — so
+   * the only place that can tell whether there is a key to spend is the one that
+   * builds the environment. `SessionRuntime.authMethod` is that place, and this
+   * field is its answer travelling the one hop to the call.
+   *
+   * ⚠ **Sending an id with no credential behind it is worse than sending
+   * nothing, and that is a measurement rather than a caution.** Measured
+   * 2026-09-21 on grok 1.0.40, on a machine signed in with `grok login` and
+   * holding no `XAI_API_KEY`: `authenticate({methodId: "xai.api_key"})` answers
+   * `{}` — and the *next* `session/prompt` comes back `-32603 "Internal error"`
+   * carrying `Unauthorized (401) … auth_kind=none … reason=no auth context`.
+   * The call does not merely fail to prove a credential; it **selects** an
+   * API-key auth mode, and grok then never reaches the OIDC token in
+   * `~/.grok/auth.json`. The identical session with no `authenticate` at all
+   * answers `stopReason: "end_turn"`. So the absence of a key is a reason to
+   * stay silent, not a reason to try anyway.
+   *
+   * Required rather than optional, so a third launch site cannot acquire the
+   * old behaviour by omission — the reason `fileIo` and `elicitation` above are
+   * required too.
+   */
+  authMethod: string | null;
 }
 
 const HANDSHAKE_TIMEOUT_MS = 30_000;
@@ -115,6 +144,24 @@ const HANDSHAKE_TIMEOUT_MS = 30_000;
  * dependency runs `session` → `acp/*`, never back.
  */
 const LIST_PROVIDERS_TIMEOUT_MS = 15_000;
+
+/**
+ * How long an agent has to answer `authenticate` before the launch gives up on it.
+ *
+ * ⚠ **It needs one for a reason the other two do not share: one real method on one
+ * real agent blocks on a human.** grok's advertised `grok.com` prints a device URL
+ * and waits for a browser — indefinitely. This daemon never sends that id, but the
+ * id it does send comes from `ACP_AUTH_METHOD` in `acp/agents.ts`, a table somebody
+ * edits, and the cost of getting that wrong without a deadline is a `launch` that never
+ * returns and a session that never appears. Every other await in this function is
+ * bounded; this one was not, which is the only kind of hang that is invisible from
+ * both ends.
+ *
+ * Shorter than the handshake, because this is one round trip against an agent that
+ * has already answered `initialize` — it is alive, and the question is whether it
+ * will answer *this*.
+ */
+const AUTHENTICATE_TIMEOUT_MS = 15_000;
 const EXIT_GRACE_MS = 3_000;
 const STDERR_RING_SIZE = 20;
 
@@ -460,6 +507,77 @@ export class AcpClient {
         );
       }
 
+      /*
+       * ⚠ **`authenticate`, and it is here rather than at a call site on purpose.**
+       * `LaunchOptions.authMethod` names the id, or `null` for the four harnesses
+       * — and the fifth with no key — that need none. It sits between
+       * `initialize` and the first `session/new` — `providers/set`'s window, and
+       * for the same reason: one adapter per session, so the process scope and the
+       * session scope line up and nothing has to be undone.
+       *
+       * ⚠ **One place, because there are three launch sites and a guard on a door
+       * it does not sit on is not a guard.** `Session.start`, `Session.openResumed`
+       * and `AgentAskRuns` all reach `session/new` through this client, and Q2.215
+       * is the record of what a per-site obligation costs: `applySystem` was
+       * dropped by one of them for every unprompted session and every guard passed
+       * it straight through. The *decision* moved out to the runtime because only
+       * the runtime can see the environment (see `LaunchOptions.authMethod`); the
+       * call did not, so there is still one door.
+       *
+       * ⚠ **The old version of this comment claimed this call "proves the shape
+       * and never the credential", and that was measured wrong on the half that
+       * mattered.** It answers `{}` for a bogus key, which is where that reading
+       * came from — but it also *selects* an auth mode, so sending it with no key
+       * on a machine signed in by `grok login` puts `auth_kind=none` on the wire
+       * and the first prompt comes back `-32603 "Internal error"`. That is why the
+       * id is now gated on there being a credential to spend rather than sent
+       * unconditionally, and why `null` here is a decision rather than a default.
+       * Q6.110.
+       *
+       * ⚠ **A failure is still carried rather than thrown, and that is not the
+       * silent fallback `providers/set` forbids.** That rule exists because a
+       * skipped route runs *somebody else's default model under our name* — a
+       * failure with no symptom. There is no such state here: whatever goes wrong,
+       * `session/new` is the very next call and refuses by itself, with the agent's
+       * own sentence, down the `agent_auth_required` path that already exists.
+       *
+       * The error is put where the agent's own stderr goes, so it is on the
+       * failure row if the start does fail, and invisible if it does not.
+       */
+      const authMethod = options.authMethod;
+      if (authMethod !== null) {
+        let authTimer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            connection.agent.request(acp.methods.agent.authenticate, {
+              methodId: authMethod,
+              // grok's own headless example sends this, and it is what keeps the
+              // call from falling back to anything interactive.
+              _meta: { headless: true },
+            }),
+            new Promise<never>((_, reject) => {
+              authTimer = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `${config.displayName} did not answer authenticate within ` +
+                        `${AUTHENTICATE_TIMEOUT_MS / 1000}s`,
+                    ),
+                  ),
+                AUTHENTICATE_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } catch (error) {
+          router.recentStderr.push(
+            `authenticate(${authMethod}) failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          if (router.recentStderr.length > STDERR_RING_SIZE) router.recentStderr.shift();
+        } finally {
+          clearTimeout(authTimer);
+        }
+      }
+
       return new AcpClient(config, child, connection, router, initializeResult);
     } catch (error) {
       // A handshake can time out 30s in, by which point the adapter has long
@@ -782,7 +900,7 @@ const MAX_STDERR_LINE_CHARS = 64 * 1024;
 /**
  * The longest single JSON-RPC frame an agent may write to stdout.
  *
- * ⚠ **`carry` below had no ceiling, and it sits under every byte all four agents
+ * ⚠ **`carry` below had no ceiling, and it sits under every byte all five agents
  * write.** The shape that grows without stopping is a *live* agent whose single
  * frame never terminates — a stuck encoder, a frame being streamed faster than any
  * newline arrives, a hostile child writing `"y"` for ever — and agent stdout is

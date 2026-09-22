@@ -1,4 +1,4 @@
-import { Check, Copy, ExternalLink, LogIn, LogOut, RefreshCw, X } from "lucide-react";
+import { Check, Copy, Download, ExternalLink, LogIn, LogOut, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient } from "../../daemon";
 import type { CredentialWritten } from "../../wire";
@@ -11,10 +11,21 @@ import type {
   AgentCredentialSlot,
   AgentId,
   AgentLoginSupport,
+  InstallRunView,
 } from "../../wire";
 import { Badge, Button, DangerButton, Empty, FIELD, Icon, IconButton, Spinner, TwoStep } from "../bits";
 import { copyText } from "../clipboard";
 import { CommandLine } from "../CommandLine";
+import {
+  installElapsed,
+  installFailure,
+  installResult,
+  installResultLine,
+  installStep,
+  keepInstallTail,
+  primaryControl,
+  rawInstallIsOpen,
+} from "../agentInstall";
 import { loginOutcome, rawTranscriptIsOpen, readLoginTranscript, type LoginOutcome } from "../login";
 import {
   harnessName,
@@ -388,6 +399,101 @@ function SignIn({
       return false;
     }
   });
+  // The same reattach, for the same reason, on the other flow. An install runs
+  // longer than a login, so surviving a reload matters here at least as much.
+  const [installing, setInstalling] = useState(() => heldInstall(machineId, agent.id) !== null);
+  /**
+   * This daemon has said it installs nothing at all.
+   *
+   * ⚠ **A second source for the same suppression, and on *this* card it is the
+   * only one that works.** `GET /agents` folds `installs !== null` into
+   * `installable` per row — the daemon's own docblock says a row that says yes
+   * to one and no to the other is a button that answers `503` — but this card
+   * reads `GET /agent-auth`, which spreads the runtime's `installable` **with
+   * no such fold**. So on a machine running `REEMOAT_AGENT_UPDATES=off` the
+   * strip screen draws no Install and this one drew a button whose `POST`
+   * answers `503 install_unsupported`.
+   *
+   * ⚠ **A flag that only ever rises, never a tri-state.** `false` is "nothing
+   * heard", which is what an older daemon's `404` and a dropped request both
+   * are, and neither may take away a control the listing offered.
+   */
+  const [noInstallRoute, setNoInstallRoute] = useState(false);
+  /*
+   * ⚠ **What the daemon is already running, adopted rather than guessed at.**
+   * There is one install run daemon-wide and the seed above is per tab and per
+   * agent, so it was silent about three real states: a run started from the
+   * machine's agent list one screen over, a reload in a private window, and a
+   * key left behind by a run the daemon has since swept — that last one opening
+   * the pane onto a dead id. One read answers all three, and its negative arm is
+   * the one that clears a stale key before anything polls it.
+   *
+   * **Unconditional, and that is one small `GET` per card opened.** It could be
+   * narrowed to the states that draw an Install — but a live run outranks every
+   * stance in `primaryControl` on purpose, precisely so that re-installing a
+   * working harness is visible, and a gate on the stance would make the one
+   * state this cannot see the one the field was added for. This card already
+   * spends a listing read on every open; the run is the other half of what it
+   * needs to draw a control that is true.
+   */
+  useEffect(() => {
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) return;
+    /*
+     * Read before the request rather than inside the answer, so the arm below
+     * can tell a pane *seeded from storage* — whose id this machine may have
+     * forgotten — from one somebody has pressed Install on while the read was in
+     * the air, which has no id written down yet and must not be taken away.
+     */
+    const held = heldInstall(machineId, agent.id);
+    let cancelled = false;
+    void daemon
+      .liveInstall()
+      .then((live) => {
+        if (cancelled) return;
+        if (!live.supported) setNoInstallRoute(true);
+        const running = live.run;
+        if (running !== null && running.agent === agent.id) {
+          /*
+           * ⚠ **A *finished* run of this agent's is left alone, and that is what
+           * keeps the two answers from racing.** The daemon retains one for ten
+           * minutes, and the pane's own poll is what draws its result line and
+           * removes the key — clearing it from here as well would mean whichever
+           * response landed first decided whether somebody saw the outcome of
+           * the install they had just run. The id is written down before the
+           * pane is opened, so the pane adopts rather than starting anything.
+           */
+          if (!running.done) {
+            rememberInstall(machineId, agent.id, running.installId);
+            setInstalling(true);
+          }
+          return;
+        }
+        /*
+         * Nothing running here, so a stored id names a run this machine has
+         * swept or one belonging to another agent entirely. Cleared *before* the
+         * pane polls it, which is the confusing press this closes.
+         *
+         * ⚠ **Against the id read before the request, which is the other half of
+         * that ordering.** `held !== null` alone says only that *something* was
+         * stored; a press made while this read was in the air writes its own id,
+         * and this arm would then clear a run that is live.
+         * {@link forgetInstallIf} is the comparison, and the pane stays open
+         * where it refuses.
+         */
+        if (held !== null && forgetInstallIf(machineId, agent.id, held)) {
+          setInstalling(false);
+        }
+      })
+      .catch(() => {
+        // An older daemon answers `404` here and a dropped request looks the
+        // same. Neither is evidence about a run or about the route, so nothing
+        // is adopted and nothing is withdrawn.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [machineId, agent.id]);
 
   // The wire type says `credentials` is required, but a daemon predating the
   // field would take this whole panel down on a `.filter` of undefined.
@@ -416,7 +522,18 @@ function SignIn({
   // Every one of these is a sentence about the *harness*, so a card scoped to one
   // of its keys draws none of them: the box's own label and note say what the key
   // is for, and that is the whole of what somebody opened this screen to read.
-  const line = wholeAgent ? stanceLine(agent, stance, canSignIn, os) : null;
+  /*
+   * ⚠ **One binding, read by the sentence and by the button.** `stanceLine`'s
+   * `not_installed` arm names the control eight pixels below it when this is
+   * true and sends somebody to the machine itself when it is not, so the two
+   * disagreeing is a card telling a person to press a button that is not drawn.
+   * `=== true` and never `!== false`, which is `login.canSignOut` a dozen lines
+   * down and deliberately the opposite call: that refusal is a `503` carrying
+   * the route's own sentence, this one could be a bare `404` with nothing to
+   * render.
+   */
+  const canInstall = agent.installable === true && !noInstallRoute;
+  const line = wholeAgent ? stanceLine(agent, stance, canSignIn, os, canInstall) : null;
   // Stays true while the wizard runs, or the divider would flip to "Sign in with
   // a key instead" beside a live sign-in.
   const signInAbove = canSignIn && stance !== "signed_in";
@@ -435,45 +552,99 @@ function SignIn({
     <div>
       {line !== null && <p className="text-xs text-muted">{line}</p>}
 
-      {wizard ? (
-        <LoginWizard
-          machineId={machineId}
-          agent={agent.id}
-          displayName={harnessName(agent)}
-          needsInput={login.needsInput}
-          loggedIn={agent.loggedIn}
-          checking={checking}
-          checkFailed={checkFailed}
-          onDone={onChanged}
-          onClose={() => {
-            setWizard(false);
-            onChanged();
-          }}
-        />
-      ) : stance === "signed_in" ? (
-        /*
-         * **Signed in, so the card holds one control and it is centred.**
-         *
-         * "✓ Signed in" is deleted: it repeated the badge 40px above it, and
-         * deleting it is what frees the box to be centred at all.
-         *
-         * `canSignOut !== false` and not `=== true`: an older daemon sends no
-         * `login` object, so the field is `undefined`, and the old test sent
-         * claude and codex down kimi's "no sign-out command" sentence — false for
-         * two of the three, in the arm nobody tests. Offer the button and let the
-         * route answer `503` with its own correct sentence.
-         */
-        login.canSignOut !== false ? (
-          <SignOutButton machineId={machineId} agent={agent} onChanged={onChanged} />
-        ) : (
-          <p className="mt-2 text-xs text-muted">{signOutSentence(agent.id, stored)}</p>
-        )
-      ) : canSignIn ? (
-        <Button tone="primary" className="mt-2 w-full" onClick={() => setWizard(true)}>
-          <Icon as={LogIn} size={14} />
-          Sign in to {harnessName(agent)}
-        </Button>
-      ) : null}
+      {/*
+       * ⚠ **One call decides this slot**, where it was a three-way ternary that
+       * read `stance` and `canSignIn` inline. The fourth arm is what made that
+       * untenable: `canSignIn` is `login.supported && agent.available`, so a
+       * harness that is not on the machine reached the final `: null` and the card
+       * drew **nothing at all** under a sentence saying it was not installed. The
+       * ordering that fixes it — `not_installed` above the credential axis — is a
+       * rule with a `never` arm in `agentInstall.ts` rather than a ladder written
+       * out here, because a ladder in JSX is what nothing can sweep.
+       */}
+      {(() => {
+        switch (
+          primaryControl({
+            stance,
+            installRunning: installing,
+            wizardOpen: wizard,
+            installable: canInstall,
+            canSignIn,
+            // `!== false` on purpose, and the one flag here that is read that
+            // way — `canInstall` above is `=== true`, and somebody will try to
+            // make the two match: this control's refusal is a 503 carrying the
+            // route's own sentence, so offering it costs a clean error. See the
+            // field's own docblock.
+            canSignOut: login.canSignOut !== false,
+          })
+        ) {
+          case "installing":
+            return (
+              <InstallPane
+                machineId={machineId}
+                agent={agent.id}
+                displayName={harnessName(agent)}
+                available={agent.available}
+                checking={checking}
+                checkFailed={checkFailed}
+                onDone={onChanged}
+                onClose={() => {
+                  setInstalling(false);
+                  onChanged();
+                }}
+              />
+            );
+          case "wizard":
+            return (
+              <LoginWizard
+                machineId={machineId}
+                agent={agent.id}
+                displayName={harnessName(agent)}
+                needsInput={login.needsInput}
+                loggedIn={agent.loggedIn}
+                checking={checking}
+                checkFailed={checkFailed}
+                onDone={onChanged}
+                onClose={() => {
+                  setWizard(false);
+                  onChanged();
+                }}
+              />
+            );
+          case "install":
+            return (
+              <Button tone="primary" className="mt-2 w-full" onClick={() => setInstalling(true)}>
+                <Icon as={Download} size={14} />
+                Install {harnessName(agent)}
+              </Button>
+            );
+          case "sign_out":
+            /*
+             * **Signed in, so the card holds one control and it is centred.**
+             *
+             * "✓ Signed in" is deleted: it repeated the badge 40px above it, and
+             * deleting it is what frees the box to be centred at all.
+             */
+            return <SignOutButton machineId={machineId} agent={agent} onChanged={onChanged} />;
+          case "sign_in":
+            return (
+              <Button tone="primary" className="mt-2 w-full" onClick={() => setWizard(true)}>
+                <Icon as={LogIn} size={14} />
+                Sign in to {harnessName(agent)}
+              </Button>
+            );
+          case "none":
+            /*
+             * The one sentence this slot still owes: a harness signed in with no
+             * sign-out command has a control nothing can draw, and the reason has
+             * to be somewhere. Every other `none` is a state `stanceLine` above
+             * has already explained.
+             */
+            return stance === "signed_in" ? (
+              <p className="mt-2 text-xs text-muted">{signOutSentence(agent.id, stored)}</p>
+            ) : null;
+        }
+      })()}
 
       {/*
        * ⚠ **The card that *states* the refusal is where the control for it has to
@@ -890,9 +1061,143 @@ function CredentialSlot({
   );
 }
 
+/**
+ * How often a live run is re-read, in both flows, and what their backoff
+ * multiplies.
+ *
+ * ⚠ **It was the bare literal `700` in four places** — each poll body and each
+ * of their two backoffs — so changing the cadence was a four-site edit with
+ * nothing to say the fourth had been missed. 700ms is a transcript being read as
+ * it arrives against one `GET` on a daemon that already holds the bytes.
+ *
+ * ⚠ **Two loops, and deliberately not one hook.** They share this number, a
+ * `cancelled` flag, a cursor and a failure count — and they differ in the thing
+ * that matters: a vanished *login* is restarted up to three times, and a
+ * vanished *install* must never be, because an install restart is a second
+ * `npm i -g` that may race the first one still running. Folding them would leave
+ * a hook with one callback per difference — the 404 policy, the storage key, the
+ * sentences, the run view, the tail cap — which is this structure again with an
+ * indirection in front of it. The shared number was the part that could actually
+ * drift, so that is the part that is shared.
+ */
+const POLL_MS = 700;
+
 /** Scoped per machine and agent, so two wizards cannot adopt each other's run. */
 function loginKey(machineId: MachineId, agent: string): string {
   return `reemoat.login.${machineId}.${agent}`;
+}
+
+/**
+ * The same, for an install.
+ *
+ * ⚠ **A different prefix, and that is not tidiness.** A login run id and an
+ * install run id are two id spaces on the daemon, and the two `DELETE` routes are
+ * different routes — so a key one flow wrote and the other read would cancel the
+ * wrong run, with the right-looking id in the request.
+ */
+function installKey(machineId: MachineId, agent: string): string {
+  return `reemoat.install.${machineId}.${agent}`;
+}
+
+/**
+ * The install id this tab last saw for one (machine, agent), or `null`.
+ *
+ * ⚠ **The install key is handed to `sessionStorage` here and in the two writers
+ * below it, and nowhere else, so the `try` is written once.** `webcheck` sweeps
+ * this file for a fourth place that touches it, which is the shape of claim that
+ * survives: the count of readers and writers that used to stand in this sentence
+ * was wrong about both halves one release after it was written.
+ * `sessionStorage` *throws* rather than answering in a private window, and the
+ * seeded-closed pane, the pane's own reattach, the live-run check and every
+ * clearing arm each have to survive that — without storage the flow still works,
+ * it simply will not survive a reload.
+ */
+function heldInstall(machineId: MachineId, agent: string): string | null {
+  try {
+    return window.sessionStorage.getItem(installKey(machineId, agent));
+  } catch {
+    // Private mode, or storage disabled. Only reattachment is lost.
+    return null;
+  }
+}
+
+function rememberInstall(machineId: MachineId, agent: string, installId: string): void {
+  try {
+    window.sessionStorage.setItem(installKey(machineId, agent), installId);
+  } catch {
+    // As above: the run is live either way, it just will not reattach.
+  }
+}
+
+function forgetInstall(machineId: MachineId, agent: string): void {
+  try {
+    window.sessionStorage.removeItem(installKey(machineId, agent));
+  } catch {
+    // As above; nothing was stored, so there is nothing to remove.
+  }
+}
+
+/**
+ * The same, but only where the key still names the run the caller was watching.
+ * Answers whether it did.
+ *
+ * ⚠ **One slot per (machine, agent) and more than one writer, so a clear that
+ * does not compare can delete a *live* run's id.** The card's live-run adoption
+ * and the install pane's two writes — its own start, and its adoption of a run it
+ * did not start — are the three that write the
+ * same key. So a pane seeded from a **stale** key — Hide while a run was going,
+ * then the daemon's ten-minute sweep — polls an id that 404s, and by then the
+ * key may hold a *newer* run's id that the adoption has just written down. A
+ * clear by (machine, agent) at that moment throws away the only thing a later
+ * mount could reattach to, and the next press meets `409 install_busy` about a
+ * run nothing is watching. Every clearing arm goes through here; `forgetInstall`
+ * above has no other caller, and `webcheck` pins that.
+ */
+function forgetInstallIf(machineId: MachineId, agent: string, installId: string | null): boolean {
+  if (heldInstall(machineId, agent) !== installId) return false;
+  forgetInstall(machineId, agent);
+  return true;
+}
+
+/**
+ * `POST /agent-install` calls that have been made and not yet answered, by
+ * {@link installKey}.
+ *
+ * ⚠ **Because the effect that makes one runs twice.** React's development
+ * `StrictMode` mounts, unmounts and remounts, and the remount is immediate: the
+ * first `POST` has not answered, so the second run finds no id in
+ * `sessionStorage`, and the live-run read it makes instead is too early to be
+ * told about one either — so it falls through to a `POST` of its own. There is
+ * one install run daemon-wide, so that second `POST` is refused with `409
+ * install_busy` and the pane draws *Couldn't start the install* over a run that
+ * is live and that it is about to adopt. Joining the promise instead means one
+ * `POST` and one id for both mounts. The same map is what stops a double tap on
+ * a slow link asking for two installs. **What it is no longer answerable for is
+ * the id surviving a close** — `start()` writes it down above its own
+ * `cancelled` test, which is where that fix lives.
+ *
+ * Module scope rather than a ref, because the two mounts share no component
+ * instance. **Dropped as soon as it settles**: by the time anything could ask
+ * again the id is in `sessionStorage`, `GET /agent-install` is the durable answer
+ * regardless, and a promise held past its run would be a later press adopting a
+ * finished install.
+ */
+const pendingInstalls = new Map<string, Promise<InstallRunView>>();
+
+/** One `POST` per (machine, agent) in flight, whatever asks for it. */
+function startInstall(
+  daemon: DaemonClient,
+  machineId: MachineId,
+  agent: string,
+): Promise<InstallRunView> {
+  const key = installKey(machineId, agent);
+  const inFlight = pendingInstalls.get(key);
+  if (inFlight !== undefined) return inFlight;
+  const started = daemon.startInstall(agent).finally(() => {
+    pendingInstalls.delete(key);
+  });
+  pendingInstalls.set(key, started);
+  return started;
 }
 
 /**
@@ -1029,7 +1334,7 @@ function LoginWizard({
             finish();
             return;
           }
-          timer = setTimeout(poll, 700);
+          timer = setTimeout(poll, POLL_MS);
         })
         .catch((cause: unknown) => {
           if (cancelled) return;
@@ -1078,7 +1383,7 @@ function LoginWizard({
           // Kept alive across a transient failure. Backed off a little so a
           // daemon that is genuinely struggling is not polled harder for it, and
           // given up on only after several in a row.
-          if (failures < MAX_FAILURES) timer = setTimeout(poll, 700 * failures);
+          if (failures < MAX_FAILURES) timer = setTimeout(poll, POLL_MS * failures);
         });
     };
 
@@ -1401,6 +1706,338 @@ function LoginWizard({
         {outcome === "unreachable" && <Button onClick={onDone}>Check again</Button>}
         <Button tone="ghost" onClick={() => close(!done)}>
           {done ? "Close" : "Cancel"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Putting a harness on a machine, with its own run attached.
+ *
+ * ⚠ **Beside `LoginWizard` rather than inside `src/install.ts`'s world**, because
+ * it is the same *shape* of thing: one card, one machine, one agent, a run id in
+ * `sessionStorage` and a cursor transcript. What it deliberately does not copy
+ * from that wizard is its restart, below.
+ */
+function InstallPane({
+  machineId,
+  agent,
+  displayName,
+  available,
+  checking,
+  checkFailed,
+  onDone,
+  onClose,
+}: {
+  machineId: MachineId;
+  agent: string;
+  displayName: string;
+  available: boolean;
+  checking: boolean;
+  checkFailed: boolean;
+  onDone: () => void;
+  onClose: () => void;
+}): ReactNode {
+  const [run, setRun] = useState<InstallRunView | null>(null);
+  const [output, setOutput] = useState("");
+  const [gap, setGap] = useState(false);
+  const [trouble, setTrouble] = useState<Trouble | null>(null);
+  const [now, setNow] = useState(0);
+  // `LoginWizard`'s reason verbatim: listing it would restart the run on every
+  // render of the section above.
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
+  /*
+   * The same, for the one arm that hands the slot back rather than reporting on
+   * it: a run this pane adopted and the daemon has never heard of. See the 404
+   * branch below.
+   */
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) {
+      setTrouble({ text: "That machine is not reachable.", retrying: false });
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let id: string | null = null;
+    let cursor = 0;
+    let failures = 0;
+    const MAX_FAILURES = 5;
+    /**
+     * The transcript, held beside the state rather than only in it.
+     *
+     * ⚠ **So the drop and the notice are decided in one place.** The cap is on
+     * the string this pane keeps, and *whether anything was dropped* is
+     * {@link keepInstallTail} having answered a shorter one — which a `setOutput`
+     * updater may not report, because an updater that sets other state is a
+     * side effect React is free to run twice. A local per effect run also means
+     * a reattach replaying from cursor 0 rebuilds it exactly.
+     */
+    let text = "";
+    /**
+     * Whether any read has come back, which is what the 404 arm branches on.
+     */
+    let seen = false;
+
+    const poll = (): void => {
+      if (cancelled || id === null) return;
+      void daemon
+        .readInstall(id, cursor)
+        .then((chunk) => {
+          if (cancelled) return;
+          failures = 0;
+          seen = true;
+          setTrouble(null);
+          cursor = chunk.cursor;
+          if (chunk.chunk.length > 0) {
+            const grown = text + chunk.chunk;
+            text = keepInstallTail(grown);
+            /*
+             * ⚠ **A drop on this side is the same claim as a drop on the
+             * daemon's, and owes the same sentence.** The raw pane's whole
+             * licence is that it is the complete record, so the notice is not
+             * `gap`'s alone: the daemon front-drops past its own 64 KiB and so
+             * does this, and a reader cannot tell — nor should have to.
+             */
+            if (text.length < grown.length) setGap(true);
+            setOutput(text);
+          }
+          if (chunk.gap) setGap(true);
+          setRun(chunk);
+          if (chunk.done) {
+            /*
+             * Immediately, not on dismissal — `LoginWizard.finish`'s measured
+             * rule: the result line saying it worked, over a badge two lines up
+             * still reading "not installed", reads as it not having worked.
+             */
+            onDoneRef.current();
+            forgetInstallIf(machineId, agent, id);
+            return;
+          }
+          timer = setTimeout(poll, POLL_MS);
+        })
+        .catch((cause: unknown) => {
+          if (cancelled) return;
+          /*
+           * ⚠ **A vanished run is not restarted, and this is the one place this
+           * pane must not copy the login wizard.** That one restarts up to three
+           * times because a lost pty costs nothing and restarting is how it
+           * recovers from an expired run. An install restart is a *second* `npm
+           * i -g`, which may race a first one still running on the daemon. So:
+           * stop, drop the key if it is still this run's, and let the re-read say
+           * what actually happened — `installResult` has a definite answer either
+           * way.
+           */
+          if (ApiError.isApiError(cause) && cause.status === 404) {
+            // By the id this poll was made with, never by (machine, agent):
+            // `forgetInstallIf` is the whole of why.
+            forgetInstallIf(machineId, agent, id);
+            id = null;
+            /*
+             * ⚠ **A run this pane never saw a byte of is not news, and the
+             * Install button is the honest answer.** "Hide" leaves the stored id
+             * in place on purpose — a run somebody walked away from is still
+             * there when they come back — so ten minutes later the daemon has
+             * swept the run and the key names nothing. The pane then opened
+             * straight onto *That machine stopped reporting the install*, where
+             * the truth was that there was nothing to report. Handing the slot
+             * back draws the button instead. Where a read **has** landed the
+             * sentence is right and stays: that run existed, this tab watched
+             * it, and it went away mid-flight.
+             */
+            if (!seen) {
+              onCloseRef.current();
+              return;
+            }
+            onDoneRef.current();
+            setTrouble({ text: `That machine stopped reporting the install.`, retrying: false });
+            return;
+          }
+          failures += 1;
+          setTrouble({ text: errorText(cause), retrying: failures < MAX_FAILURES });
+          if (failures < MAX_FAILURES) timer = setTimeout(poll, POLL_MS * failures);
+        });
+    };
+
+    const follow = (installId: string): void => {
+      id = installId;
+      poll();
+    };
+
+    const start = (): void => {
+      void startInstall(daemon, machineId, agent)
+        .then((view) => {
+          /*
+           * ⚠ **Written down before the `cancelled` test, and that order is the
+           * fix.** The run is on the daemon either way, so a pane closed before
+           * the `POST` answered used to drop the only id anybody had — and there
+           * is one run daemon-wide, so the next press met `409 install_busy`
+           * about a run nothing was watching. Now the id survives the close and
+           * the next mount adopts it.
+           */
+          rememberInstall(machineId, agent, view.installId);
+          if (cancelled) return;
+          setRun(view);
+          follow(view.installId);
+        })
+        .catch((cause: unknown) => {
+          if (cancelled) return;
+          // Never reached a transcript, so it is framed rather than forwarded —
+          // `SignOutButton`'s rule, which every write on this card follows.
+          setTrouble({ text: `Couldn't start the install — ${errorText(cause)}.`, retrying: false });
+        });
+    };
+
+    const held = heldInstall(machineId, agent);
+    if (held !== null) {
+      follow(held);
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+      };
+    }
+    /*
+     * ⚠ **The daemon is asked what it is already running before anything is
+     * started.** There is one install run daemon-wide and the stored id is per
+     * tab and per agent, so three real cases reached this pane with nothing to
+     * reattach to: a reload where storage is unavailable, a run started from the
+     * machine's agent list one screen over, and a run this tab never learned the
+     * id of. Each of them pressed Install and got `409 install_busy` about a run
+     * it could have been watching instead. `GET /agent-install` names it, and the
+     * id it answers with is the id `DELETE` takes — so Stop works on an adopted
+     * run exactly as on one this pane started.
+     *
+     * ⚠ **`run.agent` is checked, and `done` with it.** The daemon retains a
+     * finished run for ten minutes to answer a late poll, and adopting one would
+     * be this pane reporting on somebody else's install — or replaying a result
+     * for an agent whose card this is not.
+     */
+    void daemon
+      .liveInstall()
+      .then((live) => {
+        if (cancelled) return;
+        const running = live.run;
+        if (running !== null && running.agent === agent && !running.done) {
+          rememberInstall(machineId, agent, running.installId);
+          setRun(running);
+          follow(running.installId);
+          return;
+        }
+        start();
+      })
+      .catch(() => {
+        /*
+         * An older daemon has no such route and answers a bare `404`, and a
+         * dropped request looks the same. Neither is evidence about a run, so
+         * this falls through to the press somebody actually made — which is the
+         * behaviour this whole branch replaced, and `409` is still a sentence
+         * `errorText` can draw.
+         */
+        if (!cancelled) start();
+      });
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [machineId, agent]);
+
+  const running = run !== null && !run.done;
+  /*
+   * ⚠ **One interval, re-reading `Date.now()` rather than counting ticks** —
+   * `MachineInstalls`' measured shape, so a phone that slept through half an
+   * install comes back with the true elapsed time. Torn down the moment nothing
+   * is running.
+   */
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const clock = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(clock);
+  }, [running]);
+
+  const result = run?.done === true ? installResult(checking, checkFailed, available) : null;
+  const failure = run?.done === true ? installFailure(run.outcome, displayName) : null;
+  const elapsed = run === null ? null : installElapsed(run.startedAt, now);
+  const step = installStep(run?.phase ?? null);
+
+  return (
+    <div className="mt-2">
+      {running && (
+        <>
+          <p className="flex items-center gap-2 text-xs text-muted">
+            <Spinner />
+            <span className="min-w-0 flex-1 truncate">
+              {step ?? `Installing ${displayName}…`}
+              {elapsed === null ? "" : ` · ${elapsed}`}
+            </span>
+          </p>
+          {/* An `sr-only` live region, because the line above changes under a
+              spinner nobody reading by ear can see. `polite` and one sentence:
+              this must not chatter once a second. */}
+          <p className="sr-only" role="status" aria-live="polite">
+            {step ?? `Installing ${displayName}`}
+          </p>
+        </>
+      )}
+      {failure !== null && <p className="mt-2 text-xs wrap-anywhere text-danger">{failure}</p>}
+      {result !== null && failure === null && (
+        <p className={`mt-2 text-xs ${result === "unreachable" ? "text-danger" : "text-muted"}`}>
+          {result === "checking" ? (
+            <span className="flex items-center gap-2">
+              <Spinner /> Checking with your machine…
+            </span>
+          ) : (
+            installResultLine(result, displayName)
+          )}
+        </p>
+      )}
+      {trouble !== null && (
+        <p className={`mt-2 text-xs ${trouble.retrying ? "text-muted" : "text-danger"}`}>
+          {trouble.retrying ? `${trouble.text} — still trying` : trouble.text}
+        </p>
+      )}
+      {output.length > 0 && (
+        <details className="mt-2" open={rawInstallIsOpen(run)}>
+          {/* The same class string the login transcript's summary carries, and
+              `tap list-none` rather than a cursor: only `PaneHandle` may set one,
+              because a pointer shape claiming ordinary text is pressable is the
+              thing that ban is about. `webcheck` sweeps every file for it. */}
+          <summary className="tap list-none text-2xs text-muted hover:text-fg">
+            What the installer said
+          </summary>
+          {gap && (
+            // The one thing the raw pane's whole licence rests on is that it is
+            // the complete record; when it is not, it has to say so.
+            <p className="mt-1 text-2xs text-muted">Some earlier output was dropped.</p>
+          )}
+          <pre className="mt-1 max-h-56 overflow-auto rounded-sm bg-surface p-2 font-mono text-2xs whitespace-pre-wrap wrap-anywhere text-fg/80">
+            {output}
+          </pre>
+        </details>
+      )}
+      <div className="mt-2 flex justify-end gap-2">
+        {running && (
+          <Button
+            tone="ghost"
+            onClick={() => {
+              const daemon = store.daemonFor(machineId);
+              const id = run?.installId;
+              if (daemon === undefined || id === undefined) return;
+              void daemon
+                .cancelInstall(id)
+                .catch((cause: unknown) => setTrouble({ text: errorText(cause), retrying: false }));
+            }}
+          >
+            Stop
+          </Button>
+        )}
+        <Button tone="ghost" onClick={onClose}>
+          {running ? "Hide" : "Close"}
         </Button>
       </div>
     </div>

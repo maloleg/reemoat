@@ -602,6 +602,16 @@ jobs:
         env:
           NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
 
+      # The second half of `native-packaging.md`'s recipe, and the half its own
+      # text calls "the one that gets forgotten". `init` writes both halves; this
+      # puts the committed half back and leaves the ignored, machine-specific one.
+      # Without it this leg assembles a tree with the six hand-edits reverted —
+      # the R8 keep rule and the rustls context handover among them — so the dex
+      # census below would be reading a build nobody ships. `release.yml` runs no
+      # `init` at all, which is what made the two paths disagree.
+      - name: put the committed half of gen/android back
+        run: git checkout -- packages/native/src-tauri/gen/android
+
       - name: assemble the release APK
         run: pnpm --dir packages/native exec tauri android build --apk --target aarch64
         env:

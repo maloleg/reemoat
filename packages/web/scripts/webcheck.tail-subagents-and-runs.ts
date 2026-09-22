@@ -1098,14 +1098,13 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
      * rather than assumed: spending `--task-w` here is the revert, and it looks
      * like a simplification.
      */
+    const paneHandleSrc = stripComments(readFileSync(new URL("../src/ui/PaneHandle.tsx", import.meta.url), "utf8"));
     check(
       "and what it spends is clamped against the room there actually is",
       [
         /--task-fit:\s*min\(var\(--task-w\), calc\(var\(--task-room\) - [\d.]+rem\)\)/.test(taskCssEarly),
         /@media \(min-width: 64rem\) \{\s*:root \{\s*--task-room: calc\(100vw - var\(--rail-w\)\)/.test(taskCssEarly),
-        /getPropertyValue\(pane\.prop\)/.test(
-          stripComments(readFileSync(new URL("../src/ui/PaneHandle.tsx", import.meta.url), "utf8")),
-        ),
+        /getPropertyValue\(pane\.prop\)/.test(paneHandleSrc),
       ],
       [true, true, true],
     );
@@ -1137,7 +1136,7 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
      * and correct.
      */
     const taskCss = taskCssEarly;
-    const { TASK_DEFAULT, TASK_MAX, TASK_MIN, TASK_WIDE } = await import("../src/ui/taskWidth.js");
+    const { TASK_DEFAULT, TASK_MAX, TASK_MIN, TASK_WIDE, taskPane } = await import("../src/ui/taskWidth.js");
     const baseAt = taskCss.indexOf(`--task-w: ${String(TASK_DEFAULT)}px`);
     const wideAt = taskCss.search(/@media \(min-width: 80rem\) \{\s*:root \{\s*--task-w:/);
     check("both declared widths are the ones the module names", [baseAt >= 0, wideAt >= 0], [true, true]);
@@ -1154,6 +1153,222 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       "and no breakpoint is read in JavaScript",
       /matchMedia|innerWidth|clientWidth/.test(panelSrc),
       false,
+    );
+
+    /*
+     * ⭐ **Two names for one pane, and the join between them was asserted
+     * nowhere.**
+     *
+     * The stored number and the spent one are both pinned above — the `min()` read
+     * out of the stylesheet, the separator's read of `pane.prop` read out of
+     * `PaneHandle` — and *which* property that second one is was left to a
+     * reviewer. `getPropertyValue(pane.prop)` says the separator spends **its
+     * pane's** property without saying which of the two that is.
+     *
+     * ⚠ **So `prop: "--task-fit"` in `taskWidth.ts` is a one-token edit that every
+     * check on this screen survives**, and it reads like removing an indirection.
+     * What it does is point the drag at the clamped variable: the separator would
+     * write it inline onto `documentElement`, where a declaration beats the `:root`
+     * `min()` outright, and the conversation's 240px floor would be gone — the
+     * floor whose absence was measured as a 0px content box with the card 52px over
+     * the session rail. The drag would keep working perfectly.
+     *
+     * Derived in one direction only: the clamped name is read back out of the
+     * stylesheet as *the property declared from the stored one*, so it is not typed
+     * here a third time, and the stored one is the single literal this pair rests
+     * on.
+     */
+    const widthClass = /TASK_PANEL_WIDTH = "([^"]+)"/.exec(panelSrc)?.[1] ?? "";
+    const gutterClass = /TASK_PANEL_GUTTER = "([^"]+)"/.exec(panelSrc)?.[1] ?? "";
+    const spentProp = new RegExp(String.raw`(--[a-z-]+):\s*min\(var\(${taskPane.prop}\)`).exec(taskCssEarly)?.[1] ?? "";
+    report(
+      "both class strings and the clamped property were found",
+      widthClass.length > 0 && gutterClass.length > 0 && spentProp.length > 0,
+      `${widthClass} / ${gutterClass} / ${spentProp} from ${taskPane.prop}`,
+    );
+    check(
+      "the separator writes the stored property and the stylesheet clamps a second one from it",
+      [taskPane.prop, spentProp.length > 0, spentProp === taskPane.prop],
+      ["--task-w", true, false],
+    );
+    check(
+      "and the clamped one is what the panel and the gutter spend, never the one a drag writes",
+      [
+        widthClass.includes(`var(${spentProp})`),
+        gutterClass.includes(`var(${spentProp})`),
+        widthClass.includes(`var(${taskPane.prop})`),
+        gutterClass.includes(`var(${taskPane.prop})`),
+      ],
+      [true, true, false, false],
+    );
+    /*
+     * ⭐ **And the separator's own fallback was a computed-style resolution per
+     * render, on the one screen where a render is per streamed token.**
+     *
+     * `aria-valuenow` falls back to the DOM's answer for the stored property, and
+     * it falls back for every reader who has never dragged — which is the default
+     * state rather than an edge. `TaskPanel` is rendered from `EventList`'s own
+     * body with no `memo` between them, so an open panel put
+     * `getComputedStyle(documentElement)` in the path of every arriving chunk. The
+     * rail never reached it at all, its unset state being a number.
+     *
+     * The first check below has **two** arms saying different things, and neither
+     * is the other's control: the count pins that `getComputedStyle(` appears
+     * **once**, so a second resolution added beside the cached one fails it while
+     * the `??=` stays true; the `??=` pins that the one site is the cached one, so
+     * a read that went back to resolving per render fails that arm while the count
+     * stays at 1.
+     *
+     * ⚠ **A cache is only safe if what drops it is complete, so it is a census of
+     * droppers rather than a check that one exists.** Three things can change the
+     * answer: a committed width, because that is written inline onto
+     * `documentElement` and is then what a computed read hands back; a resize,
+     * which is the only thing that moves the breakpoint; and `pointerdown`, so a
+     * gesture still begins from a reading taken for it — the read whose absence was
+     * measured as a 96px jump under the pointer on the panel's first drag at `xl`.
+     * A fourth dropper fails this as found-and-not-listed and a deleted one as
+     * listed-and-not-found; a count alone could see neither.
+     */
+    check(
+      "the separator holds the DOM's answer rather than resolving it once per streamed token",
+      [(paneHandleSrc.match(/getComputedStyle\(/g) ?? []).length, /cached\.current \?\?= resolve\(\)/.test(paneHandleSrc)],
+      [1, true],
+    );
+    check(
+      "and each of the three things that can change that answer drops it",
+      [
+        (paneHandleSrc.match(/cached\.current = null/g) ?? []).length,
+        /\}, \[announced\]\);/.test(paneHandleSrc),
+        /window\.addEventListener\("resize", forget\)/.test(paneHandleSrc),
+        /setPointerCapture\(event\.pointerId\);\s*cached\.current = null;/.test(paneHandleSrc),
+      ],
+      [3, true, true, true],
+    );
+    /*
+     * ⭐ **And every pointer event the separator answers belongs to the gesture in
+     * flight, which is a sweep rather than a spot check.**
+     *
+     * A second finger landing on the strip is refused entry by the one-at-a-time
+     * guard — and was refused entry only: the finger is still on an 8px strip, so
+     * its own `pointerup` arrived at this element and committed and ended the
+     * *first* pointer's drag, after which the first went on moving with no gesture
+     * recorded and the pane was frozen under a button still held down. A capture
+     * lost with no release at all — another element taking the same id — left the
+     * gesture recorded for ever, and the one-at-a-time guard then refused every
+     * later press: a separator that draws, hovers and focuses and moves nothing
+     * again for the rest of the session.
+     *
+     * ⚠ **The census is the attribute list differenced against the guard count**,
+     * because the failure is a handler somebody adds rather than a value somebody
+     * changes. A sixth pointer handler with no ownership test fails as a count that
+     * no longer matches; a guard deleted from one of the three fails the same
+     * comparison from the other side. The equality against a written-down member
+     * list is also this sweep's floor: a pattern that stopped matching answers the
+     * empty list, which is not the list.
+     */
+    const pointerAttrs = [...paneHandleSrc.matchAll(/\bon(?:Pointer\w+|LostPointerCapture)=/g)].map((m) => m[0].slice(0, -1)).sort();
+    check(
+      "the separator answers exactly these five pointer events",
+      pointerAttrs,
+      ["onLostPointerCapture", "onPointerCancel", "onPointerDown", "onPointerMove", "onPointerUp"],
+    );
+    const terminal = pointerAttrs.filter((name) => name !== "onPointerDown" && name !== "onPointerMove");
+    check(
+      "and every one of them that ends a drag asks first whether the pointer is the one that started it",
+      [
+        terminal.length,
+        (paneHandleSrc.match(/if \(owns\(event\)\)/g) ?? []).length,
+        /const owns = \(event: React\.PointerEvent<HTMLDivElement>\): boolean => from\.current\?\.id === event\.pointerId/.test(paneHandleSrc),
+        /from\.current = \{ id: event\.pointerId,/.test(paneHandleSrc),
+        /origin === null \|\| origin\.id !== event\.pointerId/.test(paneHandleSrc),
+      ],
+      [3, 3, true, true, true],
+    );
+    /*
+     * ⚠ **A capture lost with no release is a cancel, never a commit** —
+     * `pointercancel`'s own rule, a gesture taken away not being a smaller pane.
+     * `finish(true)` here is the plausible edit: it would commit a width nobody
+     * finished asking for, and on an ordinary release — where this fires after
+     * `pointerup` — it would commit a second time.
+     */
+    check(
+      "and a lost capture ends the gesture without committing it",
+      /const onLostPointerCapture = \(event: React\.PointerEvent<HTMLDivElement>\): void => \{\s*if \(owns\(event\)\) finish\(false\);/.test(paneHandleSrc),
+      true,
+    );
+    /*
+     * ⭐ **One copy of the gesture, and this is the half every other driver here
+     * is blind to by construction.**
+     *
+     * `AppShell`'s `RailHandle` is a two-line wrapper with no state, no handlers
+     * and no capture, and it kept **four** paragraphs describing all of them after
+     * the mechanism moved into `PaneHandle` — including the *pre-correction*
+     * version of the Chrome 151 measurement, which said a captured drag leaves
+     * nothing to leak when the element holding it is removed. That is precisely the
+     * claim `PaneHandle`'s unmount effect exists to repair, so a reader who found
+     * the wrapper's copy first was told the opposite of what was measured, in the
+     * file a reviewer opens to check where the strip sits.
+     *
+     * ⚠ **Read raw rather than through `stripComments`, because here the comments
+     * are the subject.** Every other assertion about this file strips them for the
+     * opposite reason. The sweep is the mechanism's own vocabulary rather than any
+     * sentence: a wrapper that only positions an element has no business naming a
+     * pointer verb, and the prose cannot be copied back without one of these words.
+     * It carries a positive control for the reason `webcheck.env.ts` records as a
+     * skip reading like a pass — a sweep whose predicate stopped matching answers
+     * the empty list, and the empty list is what passing looks like here. The
+     * control runs the **same** `includes` over `PaneHandle.tsx` read raw, the one
+     * file that has to name all six, and compares the result against those six
+     * written out a second time as a **literal**: an emptied, misspelled or
+     * reordered `GESTURE_WORDS` fails there instead of passing here. The literal
+     * is the whole of it, and this control was itself the defect once: the first
+     * version searched a string it had interpolated the word into and compared the
+     * count against `GESTURE_WORDS.length`, so both sides moved together and it
+     * answered `ok` for any list, `[]` included.
+     */
+    const shellRaw = readFileSync(new URL("../src/ui/AppShell.tsx", import.meta.url), "utf8");
+    const handleRaw = readFileSync(new URL("../src/ui/PaneHandle.tsx", import.meta.url), "utf8");
+    const GESTURE_WORDS = ["setPointerCapture", "releasePointerCapture", "pointerdown", "pointerup", "pointercancel", "aria-valuenow"];
+    report("the shell was read whole, comments and all", shellRaw.includes("function RailHandle"), `${String(shellRaw.length)} bytes`);
+    check(
+      "the sweep's own predicate finds every one of these words in the file that does implement the gesture",
+      GESTURE_WORDS.filter((word) => handleRaw.includes(word)),
+      ["setPointerCapture", "releasePointerCapture", "pointerdown", "pointerup", "pointercancel", "aria-valuenow"],
+    );
+    check(
+      "and the shell's wrapper names no part of a gesture it does not implement",
+      GESTURE_WORDS.filter((word) => shellRaw.includes(word)),
+      [],
+    );
+    /*
+     * ⚠ **And the sentence a reader sent here from that wrapper lands on first.**
+     * The clause the unmount effect repairs is still in `PaneHandle`'s opening
+     * docblock, uncorrected, two hundred lines above the effect — kept on purpose,
+     * because this repository states a correction once, at the code that acts on
+     * it, and `AppShell` deliberately no longer restates the measurement. What the
+     * clause may not be is *unmarked*: with the wrapper's copy gone, an unmarked
+     * one is the only thing a reader who follows that pointer would read, and the
+     * mark beside it is a shortening pass away from being tidied off as
+     * commentary-about-commentary.
+     *
+     * Raw for the sweep's own reason, and the stripped half is asserted with it:
+     * all three of these are comments, so a copy read through `stripComments` must
+     * find none of them. That is what stops this passing over code that happens to
+     * quote itself.
+     */
+    const leakAt = handleRaw.indexOf("nothing to leak when this unmounts");
+    const fixAt = handleRaw.indexOf("Unmounting mid-drag is not a `pointercancel`");
+    check(
+      "the uncorrected clause carries a mark forward to the correction it is wrong about",
+      [
+        leakAt >= 0,
+        fixAt > leakAt,
+        /read the unmount effect below/.test(handleRaw.slice(leakAt, fixAt)),
+        paneHandleSrc.includes("nothing to leak when this unmounts"),
+        paneHandleSrc.includes("Unmounting mid-drag is not a `pointercancel`"),
+        paneHandleSrc.includes("read the unmount effect below"),
+      ],
+      [true, true, true, false, false, false],
     );
     /*
      * ⚠ **One surface lists them, and the transcript's foot is a way in rather

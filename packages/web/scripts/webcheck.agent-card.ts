@@ -2,6 +2,18 @@ import { readFileSync } from "node:fs";
 import { check } from "./webcheck.env.js";
 import { stripComments } from "./webcheck.source.js";
 
+/**
+ * The vocabulary this app's own sentences may not use.
+ *
+ * ⚠ **At module scope and exported, so a second flow's sentences go through
+ * *this* regex rather than a copy that agrees with it today.** The install flow
+ * is precisely where `npm `, `PATH` and `CLI` are the natural things to reach
+ * for, and a driver that assembled its own list would forbid a different set
+ * without anybody noticing the two had parted.
+ */
+export const JARGON_WORDS =
+  /\bPATH\b|_KEY|_TOKEN|session\/new|-32000|~\/|\.json\b|daemon|adapter|CLI\b|stdin|env\b|API key from the|npm |pnpm /;
+
 /* ------------------------------------------------------------------ *
  * What one agent's card says
  *
@@ -50,7 +62,14 @@ process.stdout.write("\nwhat one agent's card says\n");
     // touched. Here it is read as a word, at the start of sentences and in a row
     // beside three product names, and it was the only entry that looked like an
     // unformatted id.
-    ["Claude Code", "Kimi Code", "Codex", "Opencode"],
+    //
+    // ⚠ **`Grok` is the *word*, and the vendor's product name is "Grok Build"** —
+    // the split the line above makes, one vendor over. What ships is `grok` the
+    // binary and "Grok Build" the product; what starts a sentence here is "Grok",
+    // and the daemon's own `displayName` carries `Grok Build CLI` for a log. It is
+    // also the second entry whose chosen label differs from the `?? id` fallback
+    // only in case, which is what the next check is for.
+    ["Claude Code", "Kimi Code", "Codex", "Opencode", "Grok"],
   );
   /*
    * ⚠ **And none of them falls through to the id.** `AGENT_LABEL` is a
@@ -73,7 +92,7 @@ process.stdout.write("\nwhat one agent's card says\n");
    * ⚠ **A harness a plugin added is named from the *listing*, and never from the
    * daemon's `displayName`** — which is the trap this pair exists to close. That
    * field is a log line and carries the program: it is literally
-   * `Claude (claude-agent-acp)` and `Kimi Code CLI`, and two of the four built-ins
+   * `Claude (claude-agent-acp)`, `Kimi Code CLI` and `Grok Build CLI`, and three of the five built-ins
    * would fail this file's own rule against a label naming a package or ending in
    * `CLI`. A client that reached for it when `AGENT_LABEL` had no row would have
    * put the adapter's package name on a 96px tile the first time a harness arrived
@@ -395,6 +414,8 @@ process.stdout.write("\nwhat one agent's card says\n");
    * predicate *is* the shared one, by name.
    */
   const newSessionRaw = readFileSync(new URL("../src/ui/NewSession.tsx", import.meta.url), "utf8");
+  const agentInstallRaw = readFileSync(new URL("../src/ui/agentInstall.ts", import.meta.url), "utf8");
+  const { agentDoor } = await import("../src/ui/agentInstall.js");
   const agentsRaw = readFileSync(new URL("../src/agents.ts", import.meta.url), "utf8");
   check(
     "the New session tiles hold no vocabulary of their own",
@@ -458,14 +479,32 @@ process.stdout.write("\nwhat one agent's card says\n");
    * fallback that names an agent the gate declines to draw for is an empty row, no
    * door, and nothing saying why.
    */
+  /*
+   * ⚠ **`agentDoor` now, and the move is what fixed a door onto nothing.** The
+   * predicate this replaces tested `!available` and therefore answered `true` for
+   * a harness that is not on the machine — so the button read **"Sign in to
+   * Grok"**, opened a card whose control slot computes `login.supported &&
+   * agent.available`, and drew no control at all. The comment above the block
+   * described that exact failure and said it was fixed; the fix had landed on the
+   * `no_flow` arm alone, which covers opencode and nothing else.
+   *
+   * Both halves still read **one binding**, which is the property the extraction
+   * was for. `doorFor` is the local name; `agentDoor` is where the rule lives.
+   */
   check(
     "and it offers no sign-in to an agent that has none",
     [
-      /candidate\.login\?\.blocked !== "no_flow"/.test(newSessionRaw),
-      newSessionRaw.includes("{harness !== null && signInOffered(harness) && machineId !== null && ("),
-      newSessionRaw.includes("(agents.find(signInOffered) ?? agents[0] ?? null)"),
+      /candidate\.login\?\.blocked === "no_flow"/.test(stripComments(agentInstallRaw)),
+      newSessionRaw.includes("{harness !== null && doorFor(harness) !== null && machineId !== null && ("),
+      newSessionRaw.includes("(agents.find((one) => doorFor(one) !== null) ?? agents[0] ?? null)"),
+      // `available` before `blocked`, which is `agentStance`'s own ordering and
+      // the whole of the repair. Driven as a value beside the placement.
+      agentDoor({ available: false, login: { blocked: "no_flow" }, installable: true }),
+      // And an older daemon, which sends no `installable`: no button rather than
+      // one that answers a bare 404.
+      agentDoor({ available: false }),
     ],
-    [true, true, true],
+    [true, true, true, "install", null],
   );
 
   /*
@@ -554,8 +593,7 @@ process.stdout.write("\nwhat one agent's card says\n");
    * vocabulary the deleted wall was made of. A reader who has never seen an env
    * var must not meet one here.
    */
-  const JARGON =
-    /\bPATH\b|_KEY|_TOKEN|session\/new|-32000|~\/|\.json\b|daemon|adapter|CLI\b|stdin|env\b|API key from the|npm |pnpm /;
+  const JARGON = JARGON_WORDS;
   const sentences: string[] = [];
   /*
    * Every agent, not the three that existed when this was written: the newest

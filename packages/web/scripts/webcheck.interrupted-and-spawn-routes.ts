@@ -1244,8 +1244,20 @@ process.stdout.write("\nthe routes that spawn a process\n");
     );
     check(
       "and it says the one thing that is true about it",
-      unavailableHint(opencode.options.at(-1) as never),
+      // The `never` flag read off the same answer rather than written in: this
+      // fixture is a live published config, so the slot really is one opencode
+      // will not offer, and the sentence must be the same either way. Passing a
+      // literal would assert this arm against a value the read never produces.
+      unavailableHint(
+        opencode.options.at(-1) as never,
+        opencode.never.has(opencode.options.at(-1)?.id ?? ""),
+      ),
       "The model in use offers no levels here. Another model may.",
+    );
+    check(
+      "and this machine knows it is never coming back",
+      opencode.never.has(opencode.options.at(-1)?.id ?? ""),
+      true,
     );
     /*
      * It has to be *empty*, and that is what keeps it out of the `/` menu:
@@ -1586,10 +1598,39 @@ process.stdout.write("\nthe routes that spawn a process\n");
 
     check(
       "the hint names the kind of control it is about",
-      [unavailableHint({ category: "thought_level" }), unavailableHint({ category: "mode" })],
+      [
+        unavailableHint({ category: "thought_level" }, false),
+        unavailableHint({ category: "mode" }, false),
+      ],
       [
         "The model in use offers no levels here. Another model may.",
         "The agent is not offering this control at the moment.",
+      ],
+    );
+    /*
+     * ⚠ **The same three categories again with `never`, because "at the moment"
+     * is a claim about time and one agent disproves it.** grok publishes `model`
+     * and `reasoning_effort` and no `mode` in any session (1.0.40, measured
+     * 2026-09-21), so its mode chip sat greyed for ever under a sentence saying
+     * the control might come back — read, correctly, as the feature being broken.
+     *
+     * Effort is in this list precisely because it must **not** move: its sentence
+     * is already permanent for every agent that reaches it, since all five build
+     * that list from the selected model. A pair that changed all three would mean
+     * the flag was being read as "say something different" rather than as the one
+     * fact it carries.
+     */
+    check(
+      "and a control the agent has answered without says so permanently",
+      [
+        unavailableHint({ category: "thought_level" }, true),
+        unavailableHint({ category: "mode" }, true),
+        unavailableHint({ category: "model" }, true),
+      ],
+      [
+        "The model in use offers no levels here. Another model may.",
+        "This agent has no modes.",
+        "This agent offers no choice here.",
       ],
     );
 
@@ -1795,14 +1836,23 @@ process.stdout.write("\nthe routes that spawn a process\n");
   }
 
   /*
-   * `drawnControls` answers three keys and no more, which is worth pinning
-   * because a fourth is how a fact about the *agent* would get smuggled onto a
+   * `drawnControls` answers these keys and no more, which is worth pinning
+   * because one more is how a fact about the *agent* would get smuggled onto a
    * memory of the agent's controls. It carried no usage even when there was a
    * context readout to feed — "a dead agent's window occupancy is not a fact
    * about anything" — and now there is no readout in this client at all, so the
    * shape is the whole of the claim.
+   *
+   * ⚠ **`never` was the fourth and it is admitted on the same terms the rule
+   * states, not as an exception to it.** It is a fact about *these controls* —
+   * which of the slots in `unavailable` this agent has already answered without —
+   * and it is empty on every arm that draws from memory, which is exactly the
+   * fixture below. What the rule forbids is a fact about the agent's *state*
+   * riding along; this is a fact about the read, and it goes to nothing but a
+   * sentence.
    */
   check("nothing about usage rides the controls", Object.keys(drawnFrom("interrupted", [], ["mode"])).sort(), [
+    "never",
     "options",
     "stale",
     "unavailable",

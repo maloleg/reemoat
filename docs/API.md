@@ -74,7 +74,7 @@ auth gate.
 
 ---
 
-## The daemon — 58 routes
+## The daemon — 62 routes
 
 Runs on your machine, reachable through the relay's encrypted channel.
 
@@ -97,7 +97,7 @@ is the app.
 
 | | |
 |---|---|
-| `GET /agents` | What is installed, which are signed in, and which have a sign-in at all. **Every harness this machine offers**, which is the four this repository ships plus any a plugin added and has not been switched off |
+| `GET /agents` | What is installed, which are signed in, and which have a sign-in at all. **Every harness this machine offers**, which is the five this repository ships plus any a plugin added and has not been switched off. `installable` says which of the absent ones this daemon can fetch |
 | `GET /agent-auth` | Where each agent's credentials go |
 | `PUT /agent-auth/:agent` · `DELETE /agent-auth/:agent` | Set or clear a pasted credential |
 | `POST /agent-auth/:agent/login` | Start a device-code login on a pty |
@@ -106,6 +106,31 @@ is the app.
 | `GET /agent-auth/login/:loginId` | What the pty has printed so far |
 | `POST /agent-auth/login/:loginId/input` | Type into it |
 | `DELETE /agent-auth/login/:loginId` | Abandon it |
+
+### Installing a harness
+
+**Nothing puts a coding-agent CLI on a machine but a press here.** The bootstrap
+installs none, and the daemon's daily run is a *refresh* — it moves the copies
+that are already there and fetches nothing new. A harness added to this
+repository therefore does not arrive on every machine in the fleet by itself.
+
+The writes are **`machine:admin`**, not `session:write`: putting new programs on
+somebody's computer is an act on the machine, which is the rule `POST /plugins`
+already follows. The poll is `session:read` — unlike a login transcript, this one
+carries no one-time code.
+
+| Route | What it is |
+|---|---|
+| `GET /agent-install` | Whether this daemon installs at all, and the one run it is holding — for a client that reloaded and has no id |
+| `POST /agent-install/:agent` | Start one. `409 install_busy` while another run or the daily refresh holds the machine, naming which; `503 install_unsupported` where the daemon installs nothing |
+| `GET /agent-install/runs/:installId` | The transcript from a cursor, plus `phase` and `outcome` |
+| `DELETE /agent-install/runs/:installId` | Stop it |
+
+⚠ **`outcome` is never derived from `exit`, on either side.** `deploy/agents.sh`
+exits 0 having printed that an install failed — it must, because three of its
+four callers contract that it never fails — so the daemon decides by asking the
+machine again afterwards. A client reading `exit.code === 0` as success would
+draw *installed* over a harness that is not there.
 
 ### Systems, and the agents assembled out of them
 

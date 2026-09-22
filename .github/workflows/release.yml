@@ -63,7 +63,9 @@ jobs:
   # costs seconds here and never gets as far as a build.
   plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Above `RELEASE_CHECK_WAIT_SECONDS` (2700), so a check gate that times out
+    # is this script's sentence rather than a runner kill with no explanation.
+    timeout-minutes: 45
     permissions:
       contents: read
       # The check gate reads workflow runs through `gh run list`. Without this the
