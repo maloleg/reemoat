@@ -12,7 +12,7 @@ import type { Me } from "./wire";
  * reach is a decision nothing asserts.
  */
 
-export type SettingsSection = "account" | "keys" | "machines" | "server" | "email" | "users";
+export type SettingsSection = "account" | "devices" | "keys" | "machines" | "logs" | "server" | "email" | "users";
 
 /**
  * The band a section belongs to, or `null` for the first.
@@ -144,21 +144,34 @@ export interface SectionSpec {
  * The sections, in the order they are drawn.
  *
  * Settings was one flat scroll with two headings and no navigation, which is what
- * made "change my password" and "sign an agent in" the same screen. Six now,
+ * made "change my password" and "sign an agent in" the same screen. Eight now,
  * three of them admin-only — and the split is by *what you came here to do*
- * rather than by which service answers. The two newest are splits of the same
- * kind: API keys left Account because minting one for `cpctl` is not "my
- * account", and Email left Server because the SMTP form was nine fields on a
- * scroll that also held registration and the machine limit. Q3.219's "own keys"
- * list is that section now.
+ * rather than by which service answers. Three are splits of the same kind: API keys
+ * left Account because minting one for `cpctl` is not "my account", Email left
+ * Server because the SMTP form was nine fields on a scroll that also held
+ * registration and the machine limit, and **Devices** is the newest for a reason
+ * of its own — it is not a split at all but a thing that did not exist, and it is
+ * beside the sign-in list rather than inside it because a device survives a
+ * sign-out. Q3.219's "own keys" list is that section now.
  *
- * **The three sections everybody sees carry no blurb; the admin three do.** The
+ * **The newest is Logs, and it is here because a listing left a screen rather than
+ * because a screen needed one** (owner's call, 2026-09-15). The setup notice in
+ * the session rail drew the daemon's last two hundred lines verbatim, which is
+ * program output in the one place somebody is trying to read a sentence. The
+ * sentence stayed there and the output came here — so the rail says what happened
+ * and this says what was printed. It is deliberately *not* the answer to "show me
+ * my fleet's logs": it is one ring, from the daemon this app started on this
+ * computer, and the screen says so rather than drawing an empty scroller anywhere
+ * else.
+ *
+ * **The five sections everybody sees carry no blurb; the admin three do.** The
  * owner's call (2026-09-04): "Account", "API keys" and "Machines" say what they
- * are, and a second line under each was the rail explaining the obvious. The
- * admin rows keep theirs because "Server" and "Email" are not self-describing —
- * one is registration and limits, the other is SMTP. Where a blurb exists it is
- * at most five words: the rail truncates past about 28 characters. Held in review
- * rather than by a driver (9B); which rows carry one is pinned.
+ * are, and a second line under each was the rail explaining the obvious. "Logs"
+ * and "Devices" join them for the same reason. The admin rows keep theirs because "Server" and
+ * "Email" are not self-describing — one is registration and limits, the other is
+ * SMTP. Where a blurb exists it is at most five words: the rail truncates past
+ * about 28 characters. Held in review rather than by a driver (9B); which rows
+ * carry one is pinned.
  *
  * **Account leads, and it leads because it is the one the pane opens on.** There
  * is no neutral state at `sm` and above any more — the rail highlights
@@ -171,6 +184,26 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
   {
     id: "account",
     title: "Account",
+    blurb: null,
+    adminOnly: false,
+    group: null,
+  },
+  {
+    id: "devices",
+    // Directly under Account, because the two answer adjacent questions and this
+    // is the one somebody arrives at in a hurry: *which computers can reach my
+    // account, and how do I stop one of them.*
+    //
+    // ⚠ **Its own section rather than a block inside Account**, which is the
+    // opposite of where the sign-in list sits — and the two are different things
+    // rather than the same thing filed twice. That list's verbs are all sign-out
+    // and its whole content for an API-key credential is one sentence, which is
+    // the argument for keeping it inside Account. A device **survives** a sign-out,
+    // retiring one is a decision about a computer rather than about a tab, and the
+    // list has its own retired rows and its own limit to report. The sign-in list
+    // is named "Signed in" now, because two things called Devices on one settings
+    // screen is the collision that gets tidied the wrong way.
+    title: "Devices",
     blurb: null,
     adminOnly: false,
     group: null,
@@ -190,6 +223,17 @@ export const SECTION_SPECS: readonly SectionSpec[] = [
     // picker. It is gone: an agent is signed in *on a machine*, so it is reached
     // from that machine's row rather than from a list that has to ask which one.
     title: "Machines",
+    blurb: null,
+    adminOnly: false,
+    group: null,
+  },
+  {
+    id: "logs",
+    // Under Machines, because it is about one of them — and not *inside* Machines,
+    // because it is about the one this app is running on rather than about a row
+    // somebody picked. A machine's own screen answers what that machine is doing;
+    // this answers what the process on this computer printed.
+    title: "Logs",
     blurb: null,
     adminOnly: false,
     group: null,

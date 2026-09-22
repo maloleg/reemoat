@@ -6,6 +6,12 @@ paths:
   # `web-shell.md`: the three heading constants live there, and a change to one
   # of them is a typography change before it is a shell change.
   - packages/web/src/index.css
+  # The two judgement-call sites for the cursor ban below: the app's only
+  # `<summary>`, and the two resize separators. A rule scoped away from the file
+  # it governs is the one `docscheck` failure with no symptom.
+  - packages/web/src/ui/AppShell.tsx
+  - packages/web/src/ui/PaneHandle.tsx
+  - packages/web/src/ui/settings/AgentsPanel.tsx
   - packages/web/src/ui/bits.tsx
   - packages/web/src/paths.ts
   - packages/web/src/ui/EventList.tsx
@@ -135,6 +141,59 @@ oversight.
   pixel that is genuinely the subject rather than a restatement of the scale: the
   16px zoom threshold above is a fact about iOS Safari, not about `--text-sm`.
 
+## Nothing in this client changes the mouse
+
+**There is no `cursor` declaration and no `cursor-*` utility anywhere in
+`packages/web/src`, with exactly one named exception.** `index.css` carried an
+`@layer base` rule putting the hand shape on every enabled `button`, every
+`[role="button"]` and the one `<summary>` — restored on purpose after Tailwind v4's
+preflight dropped it, on the argument that with the accent colour gone an unfilled
+button is drawn in the colour of what it sits on, so the pointer's shape was the
+one thing left separating a control from a caption. **That argument was true and it
+is not the decision.** The owner's rule is that no module here changes the mouse
+from its default and nothing is to make it react. Q3.627.
+
+**Everywhere else the control answers, not the pointer.** `.tap` carries a 120ms
+colour transition, rows take `hover:bg-raised`, captions take `hover:text-fg`. The
+cost is real and unassertable: a `text-muted hover:text-fg` caption button at rest is now identified
+by nothing, and no driver in this repository can see that.
+
+⚠ **The ban is a sweep over `src/`, never the absence of a rule in one file.**
+Three different wrong states satisfy a regex on `index.css` alone: the declaration
+written unlayered, the same one with other whitespace, a utility class in a `.tsx` —
+which Tailwind emits from *source text*, so it never reaches the stylesheet to be
+found there — and `style={{ cursor: … }}`, the form React code actually reaches for,
+which the first version of the pattern could not see at all. `webcheck` walks the one file list that takes `.css` as well as
+`.tsx`; `srcFiles()` is `.ts`/`.tsx` only, so a sweep built on it would leave the
+stylesheet unread and the rule could survive behind a green check.
+
+⚠ **The class spelling may not appear even in a comment, and that is the sharper
+half.** This repository keeps its history in its docblocks, so the natural way to
+record a deleted utility is to name it — and Tailwind's scanner does **not** strip
+comments, and reads every file under `packages/web`, `scripts/` included. Measured:
+the driver's own positive control, written out as a literal, compiled the banned
+rule into both shipped stylesheets while printing `ok`. So describe the *value*
+(`col-resize`, `pointer`) and never the class; the utility arm is run a second time
+over **raw** source across both authored trees to enforce it, while the declaration
+arm stays comment-stripped so this paragraph is not itself an offender.
+
+⚠ **The declaration arm is anchored on a cursor *value*, never on `cursor:`
+alone** — `wire.ts` declares `cursor: number` for the transcript's byte cursor, and
+a bare colon makes the wire protocol an offender, which is a red gate whose only
+available repair is loosening the pattern. A control asserts that it does not.
+
+⚠ **`col-resize` on the two separators is *in* the sweep rather than exempt from
+it.** The instruction is about the mouse, not about which control earns an
+exception — and the resize handles arrived in the same change, so carving them out
+would have been adding the second violation while removing the first. Naming a file
+in the allow-list is how a shape comes back: a diff somebody writes rather than a
+precedent they find.
+
+**Anchors are out of scope and cannot be in it.** The eight real `<a>` elements take
+the hand from every user-agent stylesheet, and reclaiming it would mean this app
+setting a cursor — the thing being banned — on the only elements whose shape is
+universally understood. The claim is about what this app sets.
+
 ## A long document, and the measure it is set to
 
 `COLUMN` (`ui/bits.tsx`) is the app's **only reading measure** and the transcript
@@ -177,27 +236,67 @@ constants, two of them byte-identical local `const label` declarations in two fi
 that never imported from each other. Nothing had ever swept for the idiom, so the
 second wave was invisible until somebody counted. Q5.115.
 
-Four sites spend the idiom outside the constants **on purpose**, and every one of
-them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
+**Six** sites spend the idiom outside the constants **on purpose**, and every one
+of them says so at the code: `SessionBrowser`'s waiting-elsewhere band (`text-fg`,
 louder than its rows), `MachineSection`'s `RETIRE_HEADING` (`text-danger`),
 `MachineOffer`'s `or` (no `font-semibold` — the word between two doors is not a
-heading), and `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
-rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why).
-`webcheck.typography.ts` already names the last two in the same breath. The sweep
-that finds them is `grep -rn 'tracking-wider' packages/web/src` less `ui/bits.tsx`;
+heading), `AgentBuilder`'s `HIDDEN_PROVIDER_HEADING` (`text-faint`, written out
+rather than `` `${SETTINGS_HEADING} text-faint` `` and saying why), `MenuDrawer`'s `DRAWER_HEADING` (`text-faint` at that panel's own `px-3`, because
+`MENU_HEADING` carries `px-2.5` and put the word 2px inboard of the rows it heads),
+and `TaskPanel`'s `FINISHED_HEADING` (`text-faint`, spent by **both** arms of the
+finished band — every other heading in that panel names work that is *going*, and
+splitting the tone across the fold and its empty form would change the band's
+colour at the one moment nothing about it has changed).
+`webcheck.typography.ts` names `RETIRE_HEADING` and `HIDDEN_PROVIDER_HEADING` in
+the same breath, as the two spelled out to avoid appending a colour. The sweep that
+finds them all is `grep -rn 'tracking-wider' packages/web/src` less `ui/bits.tsx`;
 `SettingField`'s hit is `FIELD_LABEL`, i.e. one of the three constants rather than
-an exception to them.
+an exception to them — the third constant, and the one that does not live in
+`bits.tsx`.
+
+⚠ **This said *four* for a release, and nothing could see that it had stopped being
+true** — it has since said *five*, and the same thing happened again. `DRAWER_HEADING` arrived with its own docblock arguing for itself, and the
+only sweep that existed was for a *colour appended to a constant*, which this is
+not — so the number was the whole record of the set and the record was wrong. It is
+not prose any more: `webcheck.typography.ts` carries the **census**, a table of
+every file that spends the idiom with its hit count, differenced against the sweep
+above over comment-stripped source. A sixth site fails it as *found, not listed*; a
+deleted one fails it as *listed, not found*. A count could do neither, which is the
+general shape — a census, never a `length === N`. It also requires a comment to
+close immediately above each of the five, which is what makes the "says so at the
+code" clause above enforced rather than asserted.
+
+**The background panel's head is spelled out at its own height, and composing the
+sheet's was a measured no-op.** `SHEET_HEAD` is 56px — a height argued for a
+`text-lg` `<h1>` beside a 32px control — and this head carries a `text-xs` `<h2>`
+and a 24px one. ⚠ **`` `${SHEET_HEAD} min-h-11` `` cannot shorten it**: two
+`min-h-*` utilities on one element are resolved by the sheet's emission order,
+which is numeric and ascending, so composition only ever adds. Inverting
+`SHEET_HEAD` to 44 and letting `Sheet` compose 56 back **would** work — upward is
+the direction that order permits — and is refused by name for that reason: it makes
+a height depend on which of two numbers is larger, and hands the next person a
+revert that fails in silence. 44 rather than 40 because every `ICON_BUTTON_SIZE`
+entry reaches this app's floor through a positioned `::after`, and the panel's
+`<aside>` is `overflow-hidden`, which clips hit-testing along with paint. ⚠ That
+`::after` is `[@media(pointer:coarse)]:` now — a pad extends `:hover` exactly as far
+as it extends hit-testing, and the ✕ in this head lit up 10px early because of it
+(Q3.634) — so the clipping argument holds under a finger and there is nothing to
+clip under a mouse.
 
 **The background panel carries three heading treatments at once, and exactly one
 of them is a constant.** `PanelHeading` — `Agents (2)`, `Dynamic workflows (1)`,
 `Shells (10)`, `Completed (3)` — is `SETTINGS_HEADING`, because a band naming a
 section over the rows it holds is the whole of what that constant is for, and
 `text-muted` is the right tone for a label a reader scans past to reach a card.
-The panel's own `Background` is a dialog title and takes `text-lg font-semibold`,
-the step every other sheet head draws (`Sheet.tsx`'s `<h1>`), not a caps band — it
-was `text-sm` once, two steps under it, and `TaskPanel`'s `PanelHead` docblock
-records why that was wrong: a quieter title is a claim that this pop-up is a lesser
-one, which was not argued anywhere and is not true of it. And `Phases` is not an exception to
+The panel's own `Background` is `text-xs`, and it is the one title in this app
+asserted as a **comparison** rather than at a size: strictly quieter than
+`SessionTitle`, whatever either becomes. ⚠ **That reverses what this said**, which
+was `text-lg` on the argument that a quieter title claims this pop-up is a lesser
+one. It is not a lesser pop-up — it is a *nested* one, a sub-window inside the
+screen whose name is right beside it, and at `text-lg` it announced itself more
+loudly than the conversation it is about. The claim that moved is which question
+the size answers: not "is this pop-up important" but "is this the name of the
+screen". And `Phases` is not an exception to
 the constants at all — it is outside the **idiom**: `text-2xs font-medium text-fg`,
 with no `tracking-wider` and no `uppercase`, so the sweep above does not even reach
 it. It is louder than the box beneath it and sits over a frame rather than at the

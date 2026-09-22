@@ -1,4 +1,4 @@
-import { lstat, open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { lstat, open, readFile, realpath, stat, type FileHandle } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { mountFor, readMounts, type MountEntry } from "./mounts.js";
@@ -456,6 +456,37 @@ export async function probeFile(path: string, options: ProbeOptions = {}): Promi
       // Missing, unreadable, or a component that is not a directory. All of them
       // are "not a regular file we can serve", and the route says so the same way.
       (): FileProbe => ({ kind: "other" }),
+    ),
+  );
+  return answer.answered ? answer.value : null;
+}
+
+/**
+ * A file's text, through the same deadline, or `null` for "could not tell".
+ *
+ * ⚠ **The only reader in this repository of a file somebody *else*'s tool
+ * writes**, and that is why it is here rather than a `readFile` at the call site.
+ * `~/.claude/settings.json` is on the home directory, which is a network mount on
+ * plenty of machines and exactly the case the rule at the top of this file is
+ * about — and it is read from an HTTP handler, so an unbounded `readFile` there
+ * would hold `GET /agents` open for as long as the mount is asleep and spend a
+ * libuv slot for the life of the process. `attempt` bounds the first one and
+ * remembers it, so the second asks nothing at all.
+ *
+ * Bounded in *bytes* as well as in time: the caller wants one small settings file
+ * and a path that turns out to name a 2 GB log must not be read into memory to
+ * find that out. `probeFile` answers the size first, through the same gate.
+ */
+export async function probeText(path: string, maxBytes: number, options: ProbeOptions = {}): Promise<string | null> {
+  const stat = await probeFile(path, options);
+  if (stat === null || stat.kind !== "file" || stat.size > maxBytes) return null;
+  const ctx = await probeContext(options);
+  const answer = await attempt(stallKeyFor(resolve(path), ctx.mounts), ctx, () =>
+    readFile(path, "utf8").then(
+      (text): string | null => text,
+      // Unreadable is the same answer as absent to every caller here: there is
+      // nothing to report, which is what `null` already means.
+      (): string | null => null,
     ),
   );
   return answer.answered ? answer.value : null;

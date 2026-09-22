@@ -41,7 +41,7 @@
  * carrying `pinned` and `rank` together, because two would half-apply.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { isTypingInto } from "../keys";
 import { canReorder, rankForMove, resolveDrop, type Placement } from "../sessionOrder";
 import type { SessionKey } from "../ids";
@@ -57,6 +57,18 @@ import { toast } from "./Toast";
  * is a list you also scroll.
  */
 export const PRESS_MS = 400;
+
+/**
+ * How long the tick is that says a hold has armed.
+ *
+ * ⚠ **Named here rather than written `12` at each `navigator.vibrate` call**, and
+ * the reason is the same one {@link PRESS_SLOP} gives: it was the literal in two
+ * gestures on one screen — this rail's hold and the machine folders' — so the two
+ * could drift into two different-feeling answers to the same moment. The ⭐
+ * paragraph beside `arm` is the argument for there being a tick at all; this is
+ * only its duration, and both call sites import it.
+ */
+export const HAPTIC_MS = 12;
 
 /**
  * How far a **mouse** travels with the button down before the drag is on.
@@ -110,17 +122,96 @@ const UNREACHABLE = "That machine is not reachable right now, so the row was not
 const PART_MOVED = "Some rows beside it did not move, so this group is not in the order you asked for.";
 
 /** Pixels from an edge of the scroller at which a live drag starts scrolling it. */
-const SCROLL_EDGE = 60;
+export const SCROLL_EDGE = 60;
 /** The fastest that scroll goes, per frame. */
-const SCROLL_MAX = 14;
+export const SCROLL_MAX = 14;
 
-/** How fast to scroll, given how far into the edge band the pointer is. */
-function driftFor(box: { top: number; bottom: number }, y: number): number {
-  const intoTop = SCROLL_EDGE - (y - box.top);
-  if (intoTop > 0) return -Math.min(SCROLL_MAX, (intoTop / SCROLL_EDGE) * SCROLL_MAX);
-  const intoBottom = SCROLL_EDGE - (box.bottom - y);
-  if (intoBottom > 0) return Math.min(SCROLL_MAX, (intoBottom / SCROLL_EDGE) * SCROLL_MAX);
+/**
+ * How fast to scroll, given how far into the edge band the pointer is.
+ *
+ * **Axis-free, because the machine folders drag on both.** It was
+ * `({top, bottom}, y)` here and a near-copy in `MachineAgentsSection`; a third
+ * copy for a horizontal strip would have been the point at which the two constants
+ * above started disagreeing with each other. `near`/`far` are the scroller's
+ * leading and trailing edges along whichever axis is being dragged.
+ */
+export function driftFor(near: number, far: number, at: number): number {
+  const intoNear = SCROLL_EDGE - (at - near);
+  if (intoNear > 0) return -Math.min(SCROLL_MAX, (intoNear / SCROLL_EDGE) * SCROLL_MAX);
+  const intoFar = SCROLL_EDGE - (far - at);
+  if (intoFar > 0) return Math.min(SCROLL_MAX, (intoFar / SCROLL_EDGE) * SCROLL_MAX);
   return 0;
+}
+
+/** The three moments a touch gesture on a scroller is built out of. */
+export interface TouchOps {
+  start: (event: TouchEvent) => void;
+  move: (event: TouchEvent) => void;
+  stop: () => void;
+}
+
+/**
+ * Put a finger's whole gesture on a scroller, and take it off the node it went on.
+ *
+ * ⚠ **The listeners go on in the ref callback, not in an effect.** They have to
+ * exist before the first `touchstart` the node can receive, and a callback ref
+ * runs during the commit that puts the node in the document rather than after it.
+ * It also answers the node being *replaced* — a route change remounting the rail —
+ * which an effect with an empty dependency list never would.
+ *
+ * ⚠ **Non-passive, and attached to the scroller rather than to the document.**
+ * React attaches `onTouchStart`/`onTouchMove` passively, so `preventDefault` from
+ * a JSX handler is ignored — that is why these are `addEventListener` at all. A
+ * touch's target is *latched* at `touchstart`, so the scroller is in the path of
+ * every event of the gesture including the ones delivered after the finger has
+ * left it, and being an ordinary element it is clear of the passive-by-default
+ * treatment `window`, `document` and `body` get. Some engines also decide at
+ * `touchstart` whether a gesture can be refused at all, from whether such a
+ * listener exists — so both are registered for the component's life rather than
+ * for the gesture's.
+ *
+ * ⚠ **One copy, three callers, and the duplication was the defect.** This block
+ * stood byte-for-byte identical in `rowDrag`, `machineDrag` and `machineSwipe` —
+ * three copies of the two paragraphs above included, which is three places to
+ * keep a measurement in step and two of them certain to be missed. The `relay`
+ * indirection is what makes one copy possible: the handlers change identity on
+ * every render (they close over `tabs`, over `state`, over a list that moves on
+ * the four-second poll) while `addEventListener`/`removeEventListener` need the
+ * *same* function object, so a stable pair of trampolines is registered once and
+ * `ops` is re-pointed underneath them.
+ *
+ * `held` is the caller's own handle on the node, for the two callers that measure
+ * against it; it is written here so there is one place the current node is known.
+ */
+export function useTouchGesture<T extends HTMLElement>(ops: TouchOps, held?: RefObject<T | null>): (node: T | null) => void {
+  const latest = useRef(ops);
+  latest.current = ops;
+  /* Stable identities, so the listeners can be taken off the node they went on. */
+  const relay = useRef({
+    start: (event: TouchEvent): void => latest.current.start(event),
+    move: (event: TouchEvent): void => latest.current.move(event),
+    stop: (): void => latest.current.stop(),
+  });
+  const own = useRef<T | null>(null);
+  const kept = useRef<RefObject<T | null>>(held ?? own);
+  kept.current = held ?? own;
+  const scrollerRef = useCallback((node: T | null): void => {
+    const going = relay.current;
+    const previous = kept.current.current;
+    if (previous !== null) {
+      previous.removeEventListener("touchstart", going.start);
+      previous.removeEventListener("touchmove", going.move);
+      previous.removeEventListener("touchend", going.stop);
+      previous.removeEventListener("touchcancel", going.stop);
+    }
+    kept.current.current = node;
+    if (node === null) return;
+    node.addEventListener("touchstart", going.start, { passive: false });
+    node.addEventListener("touchmove", going.move, { passive: false });
+    node.addEventListener("touchend", going.stop);
+    node.addEventListener("touchcancel", going.stop);
+  }, []);
+  return scrollerRef;
 }
 
 /**
@@ -162,6 +253,18 @@ export interface RowDrag {
   pressing: string | null;
   /** True while any drag is live, which is when a shift is worth animating. */
   sliding: boolean;
+  /**
+   * Whether a drag has armed and owns the touch, asked synchronously.
+   *
+   * **A function over a ref, not the `dragging` state beside it**, and the two are
+   * not interchangeable. This is read inside a `touchmove` handler by the swipe
+   * that shares this scroller — a per-frame decision, on the standing rule that
+   * per-frame work does not go through React. `dragging` is a render behind by
+   * construction, and a render behind is a whole gesture here: the hold arms on a
+   * timer, so the frame in which a swipe must decide to stand down is precisely
+   * the frame in which React has not yet been told.
+   */
+  armed: () => boolean;
   /**
    * Put this on the thing that follows the pointer while a drag is live.
    *
@@ -455,7 +558,8 @@ export function useRowDrag(state: AppState): RowDrag {
       rolling.current = null;
       return;
     }
-    const drift = driftFor(box.getBoundingClientRect(), lastY.current);
+    const seen = box.getBoundingClientRect();
+    const drift = driftFor(seen.top, seen.bottom, lastY.current);
     if (drift !== 0) box.scrollTop += drift;
     // Every frame, not only when the scroll moved: the space a group reserves
     // animates in over 150ms, so the row's own base is still travelling while the
@@ -570,7 +674,7 @@ export function useRowDrag(state: AppState): RowDrag {
      * implements it, iOS implements nothing here at all, and a missing method may
      * not be the reason a drag does not start.
      */
-    if (!going.byMove) navigator.vibrate?.(12);
+    if (!going.byMove) navigator.vibrate?.(HAPTIC_MS);
   };
 
   /**
@@ -599,26 +703,11 @@ export function useRowDrag(state: AppState): RowDrag {
    * was a scroll, and `touchend`/`touchcancel` finish. `bind`'s pointer handlers
    * are a mouse's, and say so.
    *
-   * ⚠ **Non-passive, and attached to the scroller rather than to the document.**
-   * React attaches `onTouchStart`/`onTouchMove` passively, so `preventDefault`
-   * from a JSX handler is ignored — that part is unchanged and is why these are
-   * `addEventListener` at all. A touch's target is *latched* at `touchstart`, so
-   * the scroller is in the path of every event of the gesture including the ones
-   * delivered after the finger has left it, and being an ordinary element it is
-   * clear of the passive-by-default treatment `window`, `document` and `body` get.
+   * Why the three listeners are non-passive, on the scroller, and registered from
+   * the ref callback is {@link useTouchGesture}'s two ⚠ paragraphs — one copy, for
+   * the three gestures in this app that need it.
    */
-  const touchOps = useRef({
-    start: (_event: TouchEvent): void => {},
-    move: (_event: TouchEvent): void => {},
-    stop: (): void => {},
-  });
   const mouseOps = useRef((_event: PointerEvent): void => {});
-  /* Stable identities, so the listeners can be taken off the node they went on. */
-  const relay = useRef({
-    start: (event: TouchEvent): void => touchOps.current.start(event),
-    move: (event: TouchEvent): void => touchOps.current.move(event),
-    stop: (): void => touchOps.current.stop(),
-  });
 
   /**
    * Where the touch gesture begins, and the only place it may.
@@ -735,8 +824,12 @@ export function useRowDrag(state: AppState): RowDrag {
     if (Math.hypot(event.clientY - going.startY, event.clientX - going.startX) > MOUSE_SLOP) arm();
   };
 
-  touchOps.current = { start: onTouchStart, move: onTouchMove, stop: () => end() };
   mouseOps.current = onMousePointer;
+  /* One copy of the plumbing, above; the ⚠ paragraphs for it are on that hook. */
+  const scrollerRef = useTouchGesture(
+    { start: onTouchStart, move: onTouchMove, stop: () => end() },
+    scroller,
+  );
 
   useEffect(() => {
     const relayed = (event: PointerEvent): void => mouseOps.current(event);
@@ -751,30 +844,6 @@ export function useRowDrag(state: AppState): RowDrag {
   }, []);
 
   useEffect(() => end, [end]);
-
-  /*
-   * ⚠ **The listeners go on in the ref callback, not in an effect.** They have to
-   * exist before the first `touchstart` the node can receive, and a callback ref
-   * runs during the commit that puts the node in the document rather than after
-   * it. It also answers the node being *replaced* — a route change remounting the
-   * rail — which an effect with an empty dependency list never would.
-   */
-  const scrollerRef = useCallback((node: HTMLDivElement | null): void => {
-    const going = relay.current;
-    const previous = scroller.current;
-    if (previous !== null) {
-      previous.removeEventListener("touchstart", going.start);
-      previous.removeEventListener("touchmove", going.move);
-      previous.removeEventListener("touchend", going.stop);
-      previous.removeEventListener("touchcancel", going.stop);
-    }
-    scroller.current = node;
-    if (node === null) return;
-    node.addEventListener("touchstart", going.start, { passive: false });
-    node.addEventListener("touchmove", going.move, { passive: false });
-    node.addEventListener("touchend", going.stop);
-    node.addEventListener("touchcancel", going.stop);
-  }, []);
 
   /**
    * Where a row stands while another one is dragged over it.
@@ -1000,6 +1069,7 @@ export function useRowDrag(state: AppState): RowDrag {
     dragging: move?.key ?? null,
     pressing,
     sliding: move !== null,
+    armed: () => live.current?.armed === true,
     pillRef,
     unpinning: move !== null && move.origin.zone === PINNED_FOLDER && move.target.zone !== PINNED_FOLDER,
     spaceFor,

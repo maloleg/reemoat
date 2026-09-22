@@ -1,10 +1,11 @@
+import { ChevronLeft } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { signInError, signInReady } from "../account";
 import { gateNotice, showsGateLink } from "../gate";
-import { navigate } from "../router";
-import { store } from "../store";
+import { controlPlaneOrigin, inNativeShell, nativeBoot } from "../native";
+import { signInAuth } from "../signInAuth";
 import type { InstanceConfig } from "../instance";
-import { Button, FIELD, LINK, SETTINGS_HEADING } from "./bits";
+import { Button, FIELD, Icon, LINK, SETTINGS_HEADING } from "./bits";
 
 /**
  * Two fields, and nothing else.
@@ -68,13 +69,20 @@ export function SignIn({
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /*
+   * Where the two doors below lead. `location.origin` in a browser — which is the
+   * control plane, and where its own gate bundle is served from — and the chosen
+   * server under the shell, where `location.origin` is `tauri://localhost` and
+   * would name an installer that joins nothing.
+   */
+  const authority = controlPlaneOrigin();
 
   const submit = (event: FormEvent): void => {
     event.preventDefault();
     if (busy || !signInReady(name, password)) return;
     setBusy(true);
     setError(null);
-    void store
+    void signInAuth()
       .login(name.trim(), password)
       .catch((cause: unknown) => setError(signInError(cause)))
       .finally(() => setBusy(false));
@@ -91,8 +99,62 @@ export function SignIn({
             in `<title>` and in every mail this service sends. Lowercase `reemoat`
             survives only where it is an *identifier* — `REEMOAT_*`, `@reemoat/web`,
             `~/.reemoat`, the storage keys — and those must not be touched. */}
+        {/*
+          ⚠ **The way back to the screen before this one, and its absence was a
+          one-way door I built while removing another.**
+          
+          The welcome asks for a server and `Continue` adopts it. Without this
+          control, somebody who typed a reachable but *wrong* address arrived here
+          with no route to the screen that sets it — Settings → Account needs a
+          session, and getting one needs the right server. That is exactly the
+          defect this whole change set out to fix, reintroduced one screen along:
+          `setNativeServer` had one call site, and for a moment it had one that
+          nobody signed out could reach.
+
+          **It names where it goes and not what it shows.** `web-shell.md` says
+          there is no back button in this app — every leading control goes to a
+          fixed destination rather than into a history — and this is one of those:
+          it is drawn as a chevron and is not `history.back()`. It says "Server"
+          because that is the screen it opens, and deliberately not the address,
+          which is the line the owner rejected on this screen.
+
+          Shell only. In a browser the server is the origin that served the page,
+          so there is no screen to go back to and no control offering one.
+        */}
+        {inNativeShell() && (
+          <button
+            type="button"
+            onClick={() => signInAuth().pickServer()}
+            /* ⚠ **Not while a sign-in is in flight.** `App.tsx` tests
+               `pickingServer` above `phase`, so a login that succeeds behind this
+               screen would leave somebody on the server form with a live session
+               — recoverable through Cancel, and still a screen nobody asked for.
+               The one control that leaves mid-request is the one that should not. */
+            disabled={busy}
+            className="tap -ml-1 mb-3 flex items-center gap-0.5 text-sm text-muted hover:text-fg disabled:text-faint"
+          >
+            <Icon as={ChevronLeft} size={14} />
+            Server
+          </button>
+        )}
+
         <h1 className="text-xl font-semibold">Reemoat</h1>
         <p className="mt-1 text-sm text-muted">Sign in to reach your machines.</p>
+
+        {/*
+          ⚠ **The server's address is not on this screen, and it was for one
+          draft.** It sat under the lead sentence with a *Change* link, on the
+          argument that a custom scheme has no address bar and `cp.ts`'s oldest
+          rule — the credential goes to one origin — therefore has nowhere else to
+          be stated. The argument was sound and the screen was wrong: a login form
+          is not where somebody learns which fleet they are on, and a URL with a
+          verb beside it reads as a thing to deal with before typing a password.
+
+          It has its own screen instead — the welcome, which is the first thing
+          anybody sees and whose whole subject is that one question — and a row
+          under Settings → Account for afterwards. Owner's call, 2026-09-16, on
+          seeing it shipped.
+        */}
 
         {/* The involuntary case only — an expired or revoked session. A refused
             submit is local state and belongs beside the fields, not up here, and
@@ -171,12 +233,33 @@ export function SignIn({
           The strip keeps a fixed minimum height so the block does not change
           size when the config lands, and `showsGateLink` fails **open** — an
           unknown config draws both doors rather than none.
+
+          ⚠ **Both doors are anchors at the control plane, not navigations.** This
+          bundle carries no gate screen any more — `/register` and `/forgot` are
+          the control plane's own addresses, served from `dist-gate`. Three
+          properties ride on the exact shape, and each is a real failure:
+
+          **Absolute, never `/forgot`.** `openableHref` parses with no base, so a
+          relative href answers `null`, the shell's click interceptor does not
+          fire, the webview navigates, Tauri's asset protocol falls back to
+          `index.html`, and the app redraws this screen with a changed URL. A
+          relative href is a silent no-op under the shell.
+
+          **`target="_blank"`, and this is the one that is easy to lose.** In a
+          browser `<authority>/register` is the *same origin* as the page this
+          screen is drawn on — so a plain anchor is a real navigation, and what it
+          unloads is this document, taking whatever was already typed into the two
+          fields with it. `_blank` answers both surfaces at once: the shell
+          intercepts the click in the capture phase and never reads the attribute,
+          and a browser keeps the form on screen behind the new tab.
+
+          **`rel="noreferrer"`**, the house idiom beside it.
         */}
         <div className="mt-4 min-h-5 text-sm">
           {showsGateLink("forgot", config) && (
-            <button type="button" onClick={() => navigate("/forgot")} className={`tap ${LINK}`}>
+            <a href={`${authority}/forgot`} target="_blank" rel="noreferrer" className={`tap ${LINK}`}>
               Forgot password?
-            </button>
+            </a>
           )}
         </div>
 
@@ -193,12 +276,30 @@ export function SignIn({
           the wrong reason.
         */}
         <div className="mt-8 space-y-2 text-sm text-muted">
+          {/*
+            ⚠ **The same state and the same sentence as a browser with storage
+            disabled**, arriving by a different cause: there a private window has no
+            durable storage, here the machine has no credential store this app can
+            use. `cp.ts`'s `readStoredCredential` catch is the browser half and says
+            *"The app still works for one session; it just asks for the password
+            again next time."*
+            One state, one wording — two spellings of one state is a defect this
+            repository has shipped before. Read from `nativeBoot()` directly rather
+            than taken as a prop: this screen is only ever drawn once hydration has
+            settled, because `phase` cannot be `signed_out` before then.
+          */}
+          {nativeBoot()?.durable === false && (
+            <p className="text-fg">
+              This computer has no credential store Reemoat can use, so it will ask you to sign in again after it
+              restarts.
+            </p>
+          )}
           {showsGateLink("register", config) && (
             <p>
               No account?{" "}
-              <button type="button" onClick={() => navigate("/register")} className={`tap ${LINK}`}>
+              <a href={`${authority}/register`} target="_blank" rel="noreferrer" className={`tap ${LINK}`}>
                 Create one
-              </button>
+              </a>
             </p>
           )}
           {gateNotice(config) !== null && <p>{gateNotice(config)}</p>}

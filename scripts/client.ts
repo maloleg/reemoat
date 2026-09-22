@@ -131,9 +131,10 @@ const USAGE = `Reemoat client — drive the daemon from a terminal
   REEMOAT_CP_KEY   ${CP_KEY ? "(set)" : "(not set)"}
   REEMOAT_MACHINE  ${MACHINE || "(not set)"}
 
-  Against a control plane every request goes through its relay: daemons bind
-  loopback and the registry records no address for them, so the tunnel is the
-  only way in. Without one, REEMOAT_URL is a daemon on this machine.
+  A control plane is still where the token comes from, and REEMOAT_URL is where
+  the request goes: a daemon on this computer. A *remote* machine is reachable
+  only over an encrypted channel, which needs a device key this tool does not
+  have and the Reemoat app does — so for another machine, use the app.
 `;
 
 class ApiError extends Error {
@@ -219,9 +220,6 @@ let routes: { relay: string | null; relayConfigured: boolean } = {
   relayConfigured: false,
 };
 
-/** How long to wait for a machine to answer before calling it unreachable. */
-const PROBE_TIMEOUT_MS = 1_500;
-
 let chosenRoute: string | null = null;
 
 /**
@@ -267,12 +265,30 @@ async function tryResolveRoute(): Promise<string | null> {
   if (process.env["REEMOAT_URL"] !== undefined) return (chosenRoute = BASE_URL);
   if (!CP_MODE) return (chosenRoute = BASE_URL);
 
-  // Populates `routes` as a side effect of minting.
-  const token = await currentToken();
-
-  if (routes.relay !== null && (await probe(routes.relay, token))) {
-    return (chosenRoute = routes.relay);
-  }
+  /*
+   * ⚠ **The relay arm is gone, and this is the one thing Phase 5 took away from
+   * a person rather than giving them.**
+   *
+   * The relay carries encrypted channels only. Opening one needs an `X25519`
+   * device key and a capability the Authority bound to it with `cnf.jkt` — both
+   * of which the *app* has, because the shell holds a key in the operating
+   * system's keyring and every capability it mints names that key. This client
+   * has neither: `REEMOAT_TOKEN` is a long-lived bearer capability with no `cnf`
+   * at all, which is exactly what a device-bound channel exists to make
+   * worthless.
+   *
+   * So the honest answer is a refusal with a sentence, not a downgrade. Adding a
+   * plaintext path back for one CLI would put every prompt, diff and file in the
+   * fleet through the relay in the clear again — for whoever holds a token, which
+   * is precisely the threat the binding closes.
+   *
+   * What still works, unchanged, is every use this tool was actually built for:
+   * `REEMOAT_URL` against a daemon on this machine. `noRouteMessage` says which
+   * of the two situations somebody is in.
+   */
+  // Minted anyway, so `routes` is populated and the message below can be specific
+  // rather than guessing why there is no route.
+  await currentToken();
   return null;
 }
 
@@ -290,20 +306,15 @@ function noRouteMessage(): string {
   if (routes.relay === null) {
     return `no route to ${MACHINE}: it has no tunnel connected to the relay`;
   }
-  return `no route to ${MACHINE}: its relay did not answer`;
-}
-
-async function probe(base: string, token: string | null): Promise<boolean> {
-  try {
-    const response = await fetch(new URL("/health", base), {
-      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-      headers: token === null ? {} : { authorization: `Bearer ${token}` },
-    });
-    return response.ok;
-  } catch {
-    // Unreachable, refused, or too slow. All the same answer to the caller.
-    return false;
-  }
+  /*
+   * The machine is reachable and this tool cannot reach it, which is a different
+   * sentence from every other failure here and has to say what to use instead.
+   */
+  return (
+    `no route to ${MACHINE}: its relay carries encrypted channels only, and this client holds no ` +
+    `device key to open one. Use the Reemoat app for a remote machine, or set REEMOAT_URL to a ` +
+    `daemon on this computer`
+  );
 }
 
 /**

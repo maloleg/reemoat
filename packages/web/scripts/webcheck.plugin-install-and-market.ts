@@ -654,10 +654,11 @@ process.stdout.write("\nwhich plugins screen a URL names\n");
   /*
    * ⚠ **`upFrom` is the other consumer, and the third argument defaults to
    * `null`** — which is right for every pre-existing caller and is exactly why a
-   * caller that simply stops passing it typechecks clean. Telegram's arrow and the
-   * on-screen ◀ would then disagree, which is the one thing `nav.ts`'s docblock
-   * says this function exists to prevent. So both the function and its call site
-   * are pinned.
+   * caller that simply stops passing it typechecks clean. The ◀'s name and the
+   * place it actually goes would then disagree — `marketUpLabel` reads the origin
+   * and this would not — which is the control-naming-somewhere-you-are-not-going
+   * `nav.ts`'s own docblocks forbid. So both the function and its call site are
+   * pinned.
    */
   {
     const { upFrom } = await import("../src/nav.js");

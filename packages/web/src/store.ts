@@ -1,6 +1,8 @@
 import { authFailure, signedOutText, type AuthFailure } from "./account";
 import { forgetAttachments } from "./attach";
+import { forgetAllConfig, rememberConfig, rememberedConfig } from "./configMemory";
 import { clearEcho, landEcho, settleEcho } from "./echo";
+import { forgetHiddenFinished } from "./finishedTasks";
 import { forgetAsks } from "./ask";
 import { forgetChoices } from "./choices";
 import * as cp from "./cp";
@@ -9,7 +11,22 @@ import { ApiError, errorText, isTransportFailure, meansLater } from "./http";
 import type { InstanceConfig } from "./instance";
 import { keyOf, machineId, refOf, sessionId, type MachineId, type SessionKey, type SessionRef } from "./ids";
 import { describe, MachineConnection, type MachineState } from "./machine";
+import {
+  DAEMON_CONFIG,
+  DAEMON_EXIT,
+  daemonState,
+  hostReady,
+  localDaemon,
+  nativeHydrating,
+  startLocalDaemon,
+  type NativeBoot,
+} from "./native";
+import { isTruncationMarker } from "./permission";
+import { hostPlatform, localNetworkDetail } from "./platform";
+import { mayAddMachine } from "./quota";
+import { machineOrder, machineOrderVersion, orderMachines } from "./machineOrder";
 import { mergeOptimistic } from "./sessionOrder";
+import { provideSignInAuth } from "./signInAuth";
 import { SessionStream, type StreamSink, type StreamStatus } from "./stream";
 import {
   countsAsLive,
@@ -19,11 +36,13 @@ import {
   showsAsEnded,
   type AgentCommand,
   type AgentConfig,
+  type CreatedMachine,
   type LaggedFrame,
   type Me,
+  type PendingElicitationSnapshot,
+  type PendingPermissionSnapshot,
   type PluginSummary,
   type SessionSnapshot,
-  type SessionToken,
   type StoredEvent,
 } from "./wire";
 
@@ -766,6 +785,32 @@ export type CommandsPlan = "fetch" | "drop" | "defer" | "current";
  *   back to 0 while a client still holds 5, and 5 is the stale one.
  */
 /**
+ * `holdConfig`, plus the half of the memory that outlives this tab.
+ *
+ * One function rather than two call sites doing it by hand, because the two are
+ * the same decision read in two directions and they must not drift: what a
+ * *running* agent published is written down, and what a reload has no other copy
+ * of is read back. Both write sites for `heldConfig` go through here.
+ *
+ * ⚠ **The read is a fallback and never an override.** `holdConfig` already answers
+ * correctly whenever this tab has seen the agent — live set, or its own memory of
+ * one — and that answer is newer than anything on disk by construction. Storage is
+ * consulted only where it answers `undefined`, which is exactly the state a reload
+ * leaves and the one the strip drew three dashes in.
+ *
+ * The write is deliberately *after* the fallback rather than instead of it, so a
+ * memory restored from storage is not immediately written back as though this tab
+ * had seen it: `rememberConfig` ignores an empty set, and a restored one is not
+ * empty, so without that ordering the timestamp would refresh on every poll of a
+ * session nobody is looking at and the LRU would stop meaning "recently seen".
+ */
+function rememberHeld(key: SessionKey, held: AgentConfig | undefined): AgentConfig | undefined {
+  if (held === undefined || held.options.length === 0) return rememberedConfig(key);
+  rememberConfig(key, held);
+  return held;
+}
+
+/**
  * The controls to keep across a window in which there is no agent to publish any.
  *
  * The daemon empties `agentConfig` the moment the agent goes — "the controls
@@ -815,6 +860,206 @@ export function holdConfig(
   return held;
 }
 
+/**
+ * The parked permissions this client holds a **whole-record** copy of.
+ *
+ * Pulled out of {@link unreduceSnapshot} and named, because it is the whole of
+ * how that function tells the daemon's ingest clamp from the socket frame's
+ * ladder, and because being able to say *which* rows is what made the property
+ * checkable at all.
+ *
+ * `reduced` absent means the snapshot *is* the whole record — the 4s poll,
+ * `GET /sessions/:id`, or a socket frame that fitted and was therefore
+ * byte-identical to what the daemon built — so every row on one qualifies, and a
+ * `{truncated}` stand-in on such a row can only be the ingest clamp.
+ *
+ * `reduced` present means the snapshot came out of {@link unreduceSnapshot},
+ * which wrote the set it had.
+ *
+ * ⚠ **`?? []` is the floor and it is deliberately the pessimistic one.** It is
+ * reached by a `reduced` this client did not write — a daemon frame stored by
+ * some path that does not merge, or a build older than the field — and it costs
+ * the *recoverable* sentence, never a false claim of permanence.
+ */
+function onRecordPermissions(held: SessionSnapshot): Set<string> {
+  if (held.reduced === undefined) return new Set(held.pendingPermissions.map((row) => row.permissionId));
+  return new Set(held.reduced.onRecord ?? []);
+}
+
+/**
+ * A snapshot frame the daemon's ladder had to cut, put back together from the row
+ * this client already holds.
+ *
+ * ⚠ **The poll's snapshot and the socket's snapshot are written into the same
+ * `row.snapshot`, and only one of the two is the whole record.** `GET /sessions`
+ * serves every parked request with its payloads; a `hello`/`snapshot` frame past
+ * the daemon's `CONTROL_MAX_BYTES` is a *lossy projection* of it —
+ * `fitSnapshotFrame`'s first rung replaces every surviving permission's
+ * `rawInput` and `content` with the `{truncated, bytes}` stand-in, and its second
+ * halves the two parked lists until the frame fits. Writing that over a fuller
+ * row is how the approval count, `SessionView`'s *more waiting* line and
+ * `PermissionCard`'s *"Part of this request was too large to keep"* banner came
+ * to alternate twice a poll interval, each flip re-arming the effect that fires
+ * `store.loadAll`. `wire.ts`'s `waitingCount` learned to read `reduced` and that
+ * fixed the count; this is the other half, and without it the rows and the
+ * payloads still alternate.
+ *
+ * **Absent means whole**, so an ordinary frame and an older daemon's frame take
+ * the first line out of here and nothing below runs for them. The contract when
+ * it is present:
+ *
+ *  - **A frame carrying `reduced` may not shrink either parked list.** Rows are
+ *    topped up from the held record, capped at `reduced.pendingPermissions` /
+ *    `reduced.pendingElicitations`, which are the daemon's own **true** lengths
+ *    at the moment the frame was built.
+ *  - **A stand-in never overwrites a payload this client already has.** Where the
+ *    held row carries the real `rawInput` or `content`, it survives the frame.
+ *
+ * ⚠ **The top-up is bounded by `raisedAt` and that bound is the whole of its
+ * safety.** The ladder cuts a *prefix* — both lists are `[...map.values()]` in
+ * insertion order and `raisedAt` is stamped at insertion — so the frame is
+ * authoritative for everything up to its last row and silent only past it. A held
+ * row inside that range and absent from the frame was **answered**, and putting
+ * it back would park a card over a request that is already settled, which is a
+ * far worse failure than under-counting. So only held rows strictly newer than
+ * the last row the frame carried are candidates. A frame carrying no rows at all
+ * cannot happen — the halving rung floors at one each (`while (keep > 1)`) — and
+ * is written as "every held row is a candidate" rather than left to `-Infinity`
+ * by accident.
+ *
+ * **`reduced.blobs` is rewritten rather than carried through, and that is what
+ * keeps the card's sentence honest.** A `{truncated}` blob has two possible
+ * origins and they want opposite sentences: the daemon's own 8 KiB ingest clamp
+ * (`MAX_PERMISSION_BLOB_BYTES`), which is on the HTTP record too and is therefore
+ * the honest *"too large to keep"*, and this frame's ladder, which is not — the
+ * record has it whole.
+ *
+ * ⚠ **Nothing on the wire separates the two, the `bytes` count included.** Both
+ * are `clampBlob`'s stand-in. The ladder runs `clampBlob(pending.rawInput, 0)`
+ * over a value the ingest clamp has *already* replaced, so an ingest-clamped row
+ * reaches this client as a stand-in whose `bytes` is the size of the previous
+ * stand-in — around thirty — which is exactly what the ladder makes of a
+ * genuinely small payload. So the origin is not read off the row; it is
+ * reconstructed from where this client has seen the row before, which is what
+ * {@link onRecordPermissions} answers.
+ *
+ * **The discriminator is a per-row fact, and it is carried forward on
+ * `reduced.onRecord`.** A snapshot with **no** `reduced` is the whole record —
+ * that field's own contract — so every permission on one has been seen off the
+ * record, and a stand-in on such a row can only be the ingest clamp. A reduced
+ * frame teaches this client nothing new about any row, so the merge carries the
+ * previous set forward, narrowed to the rows still parked. `blobs` leaves here
+ * meaning: **at least one permission on this snapshot carries a stand-in on a row
+ * this client has no record copy of.**
+ *
+ * ⚠ **The set has to be carried rather than re-derived from `held`, and that is
+ * the defect this replaced.** It asked whether the row was in
+ * `held.pendingPermissions` at all — but `held` is the row a *previous* merge
+ * wrote, so a row first seen on a reduced frame counted as held by the very next
+ * reduced frame. Measured by driving this function twice over two identical
+ * reduced frames: `blobs` true, then false, with the same input and the payload
+ * still only on the machine — so the card swapped its alternation for the
+ * *permanent* sentence about something `GET /sessions/:id` still held whole. Two
+ * frames land between two polls routinely, snapshot frames being watch-driven,
+ * and `setSessionMeta` re-folds a row's own snapshot through `onSnapshot`, so
+ * pinning or dragging a session was enough to trigger it on the spot.
+ *
+ * ⚠ **This is a reconstruction of a fact the daemon holds and does not send.**
+ * `fitSnapshotFrame` knows which stand-ins it created and there is no field on the
+ * frame saying so; until there is, what this cannot decide is a row this client
+ * has never had a record copy of. Such a row is reported as still fetchable,
+ * which is the conservative direction — the poll is about to settle it — and is
+ * wrong for exactly one case, an *ingest-clamped* request raised since the last
+ * poll, for as long as it takes that poll to land.
+ *
+ * ⚠ It is a property of the *snapshot* and not of one request, and
+ * `PermissionCard` reads it for the single request it is drawing. With a mixture
+ * — one row with no record copy beside an ingest-clamped one — every card on that
+ * session takes the "not fetched yet" sentence until the poll lands. That is the
+ * conservative direction on purpose: the sentence it replaces claims permanence
+ * about something a poll is about to fix.
+ */
+export function unreduceSnapshot(next: SessionSnapshot, held: SessionSnapshot | undefined): SessionSnapshot {
+  const reduced = next.reduced;
+  // The ordinary path, and it is the overwhelming majority of frames: nothing was
+  // cut, so there is nothing to put back and the frame is the answer.
+  if (reduced === undefined) return next;
+  // Nothing held, or held for some other session — a row keyed by machine and id
+  // cannot normally disagree, and a merge across two sessions would be the worst
+  // possible way to find out that it had.
+  if (held === undefined || held.id !== next.id) return next;
+
+  const heldPermissions = new Map(held.pendingPermissions.map((row) => [row.permissionId, row]));
+  const onFrame = new Set(next.pendingPermissions.map((row) => row.permissionId));
+  const onRecord = onRecordPermissions(held);
+
+  /*
+   * `null`/`undefined` is not a payload and neither is a stand-in, so neither may
+   * be promoted over the frame's copy. `clampBlob` returns a nullish value
+   * unchanged — "jsonSize of any non-nullish value is at least 1, so the bound
+   * always bites" — which is why a held `null` beside a frame stand-in would be a
+   * contradiction rather than a recovery, and is refused here instead of being
+   * reasoned about at the call site.
+   */
+  const whole = (value: unknown): boolean => value !== null && value !== undefined && !isTruncationMarker(value);
+
+  const repaired: PendingPermissionSnapshot[] = next.pendingPermissions.map((pending) => {
+    const before = heldPermissions.get(pending.permissionId);
+    if (before === undefined) return pending;
+    return {
+      ...pending,
+      rawInput: isTruncationMarker(pending.rawInput) && whole(before.rawInput) ? before.rawInput : pending.rawInput,
+      content: isTruncationMarker(pending.content) && whole(before.content) ? before.content : pending.content,
+    };
+  });
+
+  const permissionCutoff = next.pendingPermissions.at(-1)?.raisedAt;
+  const permissions = [
+    ...repaired,
+    ...held.pendingPermissions.filter(
+      (row) => !onFrame.has(row.permissionId) && (permissionCutoff === undefined || row.raisedAt > permissionCutoff),
+    ),
+  ].slice(0, Math.max(reduced.pendingPermissions, repaired.length));
+
+  const frameQuestions = next.pendingElicitations ?? [];
+  const questionsOnFrame = new Set(frameQuestions.map((row) => row.elicitationId));
+  const questionCutoff = frameQuestions.at(-1)?.raisedAt;
+  const questions: PendingElicitationSnapshot[] = [
+    ...frameQuestions,
+    ...(held.pendingElicitations ?? []).filter(
+      (row) => !questionsOnFrame.has(row.elicitationId) && (questionCutoff === undefined || row.raisedAt > questionCutoff),
+    ),
+  ].slice(0, Math.max(reduced.pendingElicitations, frameQuestions.length));
+
+  return {
+    ...next,
+    pendingPermissions: permissions,
+    pendingElicitations: questions,
+    /*
+     * The counts stay the daemon's, because they are its claim about a list it
+     * holds and this client's top-up can only ever reach what it happened to have
+     * seen. `waitingCount`'s `Math.max` is then a no-op wherever the top-up was
+     * complete and still the honest floor wherever it was not.
+     */
+    reduced: {
+      ...reduced,
+      /*
+       * Narrowed to the rows still parked, which is what bounds it: a permission
+       * id is minted once and an answered row never comes back, so the set
+       * shrinks with the list instead of growing for the life of the session.
+       */
+      onRecord: permissions.map((row) => row.permissionId).filter((id) => onRecord.has(id)),
+      blobs:
+        reduced.blobs &&
+        permissions.some(
+          (row) =>
+            !onRecord.has(row.permissionId) &&
+            (isTruncationMarker(row.rawInput) || isTruncationMarker(row.content)),
+        ),
+    },
+  };
+}
+
 export function commandsPlan(
   held: number | undefined,
   revision: number | undefined,
@@ -839,12 +1084,194 @@ export interface AgentCommandList {
   dropped: number;
 }
 
+/** How often the setup flow asks the host whether the daemon is up yet. */
+const SETUP_POLL_MS = 1_000;
+
+/**
+ * How long a daemon is given to enroll before the screen stops promising it will.
+ *
+ * ⚠ **Derived, not guessed — and it was a guess until it was measured.** On a
+ * 2026 MacBook, with the bundled runtime and a spawn matching the supervisor's:
+ * the daemon is listening 0.311 s after launch on a cold `tsx` cache and 0.20 s
+ * warm, answering `/health` ~0.02 s later. Its own startup is therefore noise.
+ * What can actually take time is the one control-plane round trip, and `enroll()`
+ * bounds that itself at 15 s before giving up — so nothing here can legitimately
+ * run longer than that plus a start. The rest is margin for a cold page cache,
+ * which is unmeasured.
+ */
+const SETUP_SETTLE_MS = 30_000;
+
+/** How often it looks after {@link SETUP_SETTLE_MS} has passed and it is still up in the air. */
+const SETUP_SLOW_POLL_MS = 5_000;
+
+/**
+ * When the screen stops watching altogether.
+ *
+ * ⚠ **There is a slow phase because stopping at the fast deadline was a wrong
+ * answer rather than a late one**: a daemon that came up a second afterwards left
+ * the notice saying it had failed, with nothing still watching to take that back.
+ */
+const SETUP_GIVE_UP_MS = 5 * 60_000;
+
+/** Said when the env file here belongs to a fleet this app is not signed in to. */
+const FOREIGN_ENV_DETAIL =
+  "The daemon settings already on this computer name a different Reemoat server, or could not be read, " +
+  "so they were left alone. Sign in to that server instead, or move ~/.reemoat/daemon.env aside to set " +
+  "this computer up here.";
+
+/** Said when another daemon holds this computer and ours could not start. */
+const ANOTHER_DAEMON_DETAIL =
+  "Another Reemoat daemon is already running on this computer, so the one Reemoat started could not. " +
+  "It is reachable, but it belongs to a different machine — stop it, or use that machine instead.";
+
+/** Said when the daemon is neither up nor gone after {@link SETUP_SETTLE_MS}. */
+const SLOW_START_DETAIL = "The daemon on this computer has not finished starting yet.";
+
+/**
+ * Where the evidence is, appended to every failure that has any.
+ *
+ * ⚠ **The half of the 2026-09-15 change that keeps it from being a regression.**
+ * The rail used to carry the daemon's own output; taking it away and saying
+ * nothing would re-create exactly the failure `SetupNotice` was added to prevent —
+ * a cause sitting in a string nothing renders, which cost a whole round trip to
+ * diagnose on the first real run. So the listing moved and a pointer to it stayed.
+ *
+ * One string rather than a clause per arm: three arms need it, and three copies of
+ * a screen's name is three things to forget when the screen is renamed.
+ */
+const LOGS_POINTER = "Settings → Logs has what it printed.";
+
+/** Said when a daemon this app started came up and then stopped. */
+const DAEMON_STOPPED_DETAIL = `The daemon Reemoat started on this computer stopped. ${LOGS_POINTER}`;
+
+/**
+ * Said when it is neither up nor gone after {@link SETUP_GIVE_UP_MS}.
+ *
+ * Distinct from {@link SLOW_START_DETAIL}, which is drawn while something is still
+ * watching. This is drawn by the arm that has stopped watching, so it may not say
+ * "not finished yet" — nothing is going to come back and take that sentence away.
+ */
+const GAVE_UP_DETAIL = `The daemon on this computer did not finish starting. ${LOGS_POINTER}`;
+
+/**
+ * A control-plane label for this computer, from whatever name it has.
+ *
+ * ⚠ **A second copy of somebody else's validation rule, and it is deliberately the
+ * loose half.** `MACHINE_LABEL` on the control plane is
+ * `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`, and this does not re-implement it — it
+ * *shapes toward* it and lets the server refuse. The difference matters: a strict
+ * copy here would drift the day that regex changes and would start refusing names
+ * the server accepts, from a client that cannot see why. What this guarantees is
+ * only that a plausible name goes out rather than `Rends’s MacBook Pro`.
+ *
+ * `null` in, `"computer"` out — a name is required and there is nothing to build
+ * one from. It will collide on the second such machine, which is what the caller's
+ * one retry is for.
+ *
+ * ⚠ **`.slice(0, 64)` is the last step, which is what makes the caller's retry
+ * suffix a trap.** `machineLabelFor(`${sixtyFourChars}-2`)` answers the original
+ * sixty-four characters, so a retry that appends and re-shapes re-posts the name
+ * that just collided. {@link AppStore.createForThisComputer} slices to 61 first,
+ * and `webcheck` pins the boundary.
+ *
+ * ⚠ **It is not the only copy of this rule in the tree, and the other one is
+ * shell.** `deploy/bootstrap.sh`'s `sanitize_label` names a machine after
+ * `uname -n` for the one-line installer, and the two do not agree character for
+ * character: this strips a trailing `.local` upstream (`commands.rs`'s
+ * `host_name`), `uname -n` does not, and only this one collapses runs of hyphens.
+ * The same computer set up by the app and by the installer can therefore be
+ * spelled two ways — which is a *collision* rather than a correctness bug, since
+ * both are valid labels and the second is refused with `409 machine_exists`.
+ */
+export function machineLabelFor(hostName: string | null): string {
+  const shaped = (hostName ?? "")
+    .normalize("NFKD")
+    // Anything outside the label alphabet becomes a hyphen rather than vanishing,
+    // so `Ann's Mac` and `Anns Mac` stay different machines.
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    // A label must start with a letter or a digit.
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/[-._]+$/, "")
+    .slice(0, 64);
+  return shaped.length > 0 ? shaped : "computer";
+}
+
+/**
+ * How far setting this computer up has got, for the one screen that draws it.
+ *
+ * Three states and no more: it is running, it failed, or there is nothing to say.
+ *
+ * ⚠ **`said` is a sentence and never a listing — owner's call, 2026-09-15.** It
+ * was `detail`, and what it carried was a *mixture*: four arms put an
+ * app-authored remedy in it, and three put the daemon's own last two hundred
+ * lines, which the rail then drew verbatim in a `<pre>`. Program output in the
+ * one place somebody is reading prose. The output moved to Settings → Logs
+ * ({@link LogsSection}) and what is left here is one sentence per failure, each
+ * of which names where the evidence went when there is any.
+ *
+ * ⚠ **The sentence may still be multi-line, and that is not a listing.** One
+ * producer — the host's `managed_unit_detail` — ends with the command that clears
+ * the state it describes, indented on its own line, because a remedy somebody
+ * retypes is useless reflowed into a paragraph. That is a *remedy*, bounded at two
+ * lines and written by this fleet; the rule being kept is that a ring of somebody
+ * else's output does not ride this field.
+ */
+export interface SetupState {
+  step: "creating" | "starting" | "failed";
+  said: string | null;
+}
+
 export interface AppState {
   /**
    * `"signed_out"` rather than `"needs_key"`: it names the state, and the remedy
    * is no longer a key somebody pastes.
    */
   phase: "signed_out" | "loading" | "ready";
+  /**
+   * What the native shell answered about itself, or `null`.
+   *
+   * **`null` in a browser and for ever**, which is what makes the server picker
+   * structurally unreachable in the web build: there is no flag to set, no route to
+   * type and no env var to flip — the field is non-null only where a Tauri global
+   * was injected before the first script ran. `App.tsx` branches on it, and that
+   * branch is the only place it is read.
+   */
+  host: NativeBoot | null;
+  /**
+   * Whether somebody has asked to change which control plane this talks to.
+   *
+   * **`false` in a browser for ever**, exactly as {@link AppState.host} is `null`
+   * there: the server *is* the origin that served the page, so there is nothing
+   * to change and no control that offers to.
+   *
+   * State rather than a route, which is `ChooseServer`'s whole argument — a
+   * `Route` arm would be parsed by the web build too, offering a screen that can
+   * do nothing there, and would take a silent new arm in three switches. It lives
+   * here rather than in the component because two entrances reach it: the control
+   * on the sign-in screen, and Settings → Account once somebody is signed in.
+   */
+  pickingServer: boolean;
+  /**
+   * Which machine, if any, is the computer this app is running on.
+   *
+   * ⚠ **Drawn, never stored.** The machine's control-plane label is the ordinary
+   * host name, because that row is read by a phone, by a second computer and by
+   * anybody holding a grant — and "local" is false on every one of those screens.
+   * Which row you are *sitting at* is true of exactly one client, so it is
+   * answered here, per client, from the announce file the daemon on this computer
+   * wrote. {@link AppStore.createForThisComputer} carries the reversal that made
+   * this field necessary.
+   *
+   * ⚠ **The announce file rather than `route.kind === "local"`.** The route is a
+   * preference `setLocalOff` can switch off, so a badge keyed on it would vanish
+   * from the machine somebody is sitting at the moment they chose the relay.
+   * Identity and reachability are not the same read.
+   *
+   * **`null` in a browser and for ever**, the same structurally dead arm as
+   * {@link AppState.host}: `localDaemon()` answers `null` with no shell.
+   */
+  localMachineId: MachineId | null;
   me: Me | null;
   machines: MachineState[];
   /**
@@ -906,6 +1333,21 @@ export interface AppState {
    */
   commands: ReadonlyMap<SessionKey, AgentCommandList>;
   /** The control plane itself failed. Not fatal while cached tokens are alive. */
+  /**
+   * Setting this computer up as a machine, when the app is the thing doing it.
+   *
+   * `null` everywhere else and for ever — in a browser, on a computer that already
+   * has a daemon, and once one is running. It is a fact about *what this store has
+   * done*, which is why it lives here rather than on a `MachineState`: there is no
+   * machine yet to hang it on, and that is precisely the state it describes.
+   *
+   * ⚠ **Deliberately not `cpError`.** A control-plane outage is the app being
+   * unusable; failing to set a machine up is one affordance not working while
+   * everything else — other machines, other sessions — is fine. Writing this into
+   * `cpError` would put the whole app on the spinner for it, which is the failure
+   * `bootstrap`'s own catch arm already argues against at length.
+   */
+  setup: SetupState | null;
   cpError: string | null;
   /**
    * What this instance allows, or `null` while it is unknown.
@@ -948,7 +1390,20 @@ const EMPTY_TRANSCRIPT: Transcript = {
 class AppStore implements StreamSink {
   private listeners = new Set<() => void>();
   private snapshot: AppState = {
-    phase: cp.currentCredential() === null ? "signed_out" : "loading",
+    /*
+     * ⚠ **`nativeHydrating()` is what stops a flash of the sign-in form.**
+     *
+     * In the native shell the credential comes out of the OS keyring, which is
+     * async, so at this line there is genuinely no answer yet — and the honest
+     * value for "no answer yet" is the one this app already draws a spinner for.
+     * Without the conjunct every native launch shows the sign-in screen for a frame
+     * and then replaces it, which reads as having been signed out.
+     */
+    phase: cp.currentCredential() === null && !nativeHydrating() ? "signed_out" : "loading",
+    setup: null,
+    host: null,
+    pickingServer: false,
+    localMachineId: null,
     me: null,
     machines: [],
     rootsByMachine: new Map(),
@@ -1172,6 +1627,27 @@ class AppStore implements StreamSink {
      */
     void this.loadConfig();
 
+    /*
+     * **After `loadConfig` and before the credential check, and both halves of that
+     * placement matter.**
+     *
+     * After, because the ⚠ above is about `loadConfig` being the first statement and
+     * that is still true — and because `loadConfig` is safe to fire before a server
+     * is known: with none chosen the host refuses the call, and this method's own
+     * bare catch is already the right behaviour for that.
+     *
+     * Before, because the early return below is the path that leads to `SignIn`, and
+     * in the shell the credential that decides it has not been read yet. `await`ed
+     * rather than raced: it is one IPC round trip, it is the only thing between a
+     * launch and knowing whether somebody is signed in, and in a browser it is an
+     * already-resolved `null`.
+     */
+    const boot = await hostReady;
+    if (boot !== null) {
+      cp.adoptHydratedCredential(boot.credential);
+      this.patch({ host: boot });
+    }
+
     if (cp.currentCredential() === null) {
       this.patch({ phase: "signed_out" });
       return;
@@ -1253,8 +1729,458 @@ class AppStore implements StreamSink {
       });
     }
 
+    /*
+     * ⚠ **Here, and the placement is three constraints at once.**
+     *
+     * *After* the `try`, because a throw inside it lands in the catch above, which
+     * sets `cpError` and — with no connections, which is exactly the empty-fleet
+     * case this exists for — forces `phase` back to `"loading"`. Setting a machine
+     * up must never be able to put the app on the spinner.
+     *
+     * *After* `phase: "ready"`, so the app is usable while this runs. It talks to
+     * the control plane and then waits on a daemon starting; none of that is
+     * something to hold a first paint behind.
+     *
+     * *Before* `resume("bootstrap")`, so a machine created here is in the registry
+     * by the time the first resume runs rather than four seconds later.
+     */
+    /*
+     * Make sure this installation is registered, if it is one.
+     *
+     * ⚠ **After the `try`, for `beginSetUp`'s reason verbatim.** Inside it, any
+     * refusal — a full device cap, a network blip, a shell that could not
+     * describe itself — throws into the catch above, which with no connections
+     * forces `phase` back to `"loading"`: an account with no machines yet would
+     * get a spinner and an outage banner because a *bookkeeping* call failed.
+     *
+     * ⚠ **And its own catch, which is what makes that placement sufficient.**
+     * `beginSetUp` is awaited and can throw; a rejection here would reach the same
+     * place by a different route.
+     *
+     * `login` binds a device itself, in the request that signs in, so this is the
+     * path for a session restored from storage — which is every client on the
+     * release this ships in, and every launch after a restart.
+     */
+    await this.ensureDevice();
+
+    await this.beginSetUp();
+
     this.startPolling();
     await this.resume("bootstrap");
+  }
+
+  /**
+   * Register this installation with the control plane, once, if it has none.
+   *
+   * Silent on every failure. What a refusal costs is one unregistered launch: the
+   * app works, the sessions list simply describes this client through its
+   * `User-Agent` rather than by name, and the next start asks again.
+   *
+   * ⚠ **`password_change_required` is not a failure here and must not become
+   * one.** The route is registered *above* the control plane's second gate so an
+   * admin-created account can reach it — but a control plane that has not been
+   * updated answers 403, and this client has to keep working against one.
+   * `cp.machines()` makes the identical allowance in `bootstrap` above.
+   */
+  private async ensureDevice(): Promise<void> {
+    if (cp.currentDevice() !== null) return;
+    try {
+      await cp.registerDevice();
+    } catch {
+      // Bookkeeping. A device is how somebody *recognises* this client in a list;
+      // nothing in the app depends on having one.
+    }
+  }
+
+  /**
+   * The setup run in flight, so two bootstraps cannot both buy a machine.
+   *
+   * ⚠ **Released when it settles, never latched.** A flag set once per process
+   * also makes `retry()` a no-op for setup: somebody whose control plane was down
+   * fixes their network, presses Retry, and nothing happens until they restart the
+   * app. Concurrency is the only thing that needs guarding here — the flow is
+   * idempotent against its own result, since a second run sees the machine the
+   * first one made and adopts it.
+   */
+  private settingUp: Promise<void> | null = null;
+
+  private beginSetUp(): Promise<void> {
+    this.settingUp ??= this.setUpThisComputer().finally(() => {
+      this.settingUp = null;
+    });
+    return this.settingUp;
+  }
+
+  /**
+   * Make this computer a machine, if it is not one and this app can do it.
+   *
+   * **The whole of "the daemon stops being a thing you install".** Everything it
+   * needs already existed separately: the control plane hands back a machine, a
+   * grant and a single-use code in one answer; the host process can write the env
+   * file and start the daemon; and the daemon announces itself when it is up. This
+   * is the twenty lines that put them in a row.
+   *
+   * ⚠ **It never throws and never reports through `cpError`.** Every arm below
+   * either returns or lands in the one catch, which writes `setup` and nothing
+   * else. A person whose account is full, or whose daemon will not start, still has
+   * a working app pointed at every other machine they have.
+   */
+  private async setUpThisComputer(): Promise<void> {
+    /*
+     * `null` in a browser, for ever — this is the native shell's `host_boot`
+     * answer. Gated on the shell rather than on `machines.length === 0` on
+     * purpose: a fleet-size gate would also be true in the browser, where there is
+     * no host to ask and nothing to start.
+     */
+    const boot = this.snapshot.host;
+    if (boot === null) return;
+
+    try {
+      const state = await daemonState();
+      // No bridge, or a build carrying no payload: the relay is the only route,
+      // exactly as it was before any of this existed.
+      if (state === null || state.status === "unsupported") return;
+      /*
+       * ⚠ **`foreign` is a reason to stop, not a reason to try harder.** A daemon
+       * has announced itself here that this app did not start — the shell
+       * installer's, most likely. Starting a second would be refused by
+       * `claimDaemonLock` against one database, and creating a second machine for
+       * one computer would spend a quota slot on a machine nobody asked for.
+       */
+      if (state.status !== "absent" && state.status !== "exited") return;
+
+      /*
+       * ⚠ **A file naming another fleet is reported and left strictly alone.** The
+       * host refuses to write over it too; this arm exists so the refusal is a
+       * sentence on the screen rather than a thrown string, and so no machine is
+       * bought for a computer this app is not going to be able to start.
+       */
+      if (state.config === DAEMON_CONFIG.elsewhere) {
+        this.patch({ setup: { step: "failed", said: FOREIGN_ENV_DETAIL } });
+        return;
+      }
+
+      /*
+       * What this app already spent a machine on, for this server. Re-minting
+       * against it is how a code that expired before the daemon redeemed it gets
+       * replaced without buying a second machine — the window is real, an
+       * enrollment code lives an hour.
+       *
+       * ⚠ **Asked before adoption, and that ordering is the fix.** Measured
+       * 2026-09-15: this branch ran, minted a fresh code, and the host then skipped
+       * the write and started the daemon on the *old* file's dead code — a machine
+       * bought at 15:15:54 and a `409 code_unusable` one second later. A claim
+       * means the file is this app's to refresh; adoption is for a file that is
+       * not.
+       */
+
+      /*
+       * Adoption: something already configured a daemon here for this server —
+       * `deploy/install.sh`, or this app before a restart — and the machine it
+       * enrolled as already exists. Start it and buy nothing.
+       */
+      if (state.config === DAEMON_CONFIG.here) {
+        this.patch({ setup: { step: "starting", said: null } });
+        await startLocalDaemon("", "");
+        await this.settleDaemon(state.claimed);
+        return;
+      }
+
+      /*
+       * Nothing configured here, but a machine was already bought for this server
+       * — the app was quit between `POST /v1/machines` and the daemon redeeming
+       * its code. Re-mint against it rather than buying a second.
+       */
+      if (state.claimed !== null) {
+        if ((await this.remintFor(state.claimed)) !== "dead") return;
+        // Only a *refusal* falls through: the machine is gone or switched off, and
+        // re-minting at it for ever would be worse than making a new one.
+      }
+
+      /*
+       * The ceiling, asked before the request rather than discovered as a 409.
+       * `mayAddMachine` is the same predicate the three screens that offer this use
+       * — this is a fourth door onto one rule, and it must not invent a second.
+       */
+      if (!mayAddMachine(this.snapshot.me)) return;
+
+      this.patch({ setup: { step: "creating", said: null } });
+      const created = await this.createForThisComputer(boot);
+      if (created === null) return;
+
+      this.patch({ setup: { step: "starting", said: null } });
+      await startLocalDaemon(created.enrollment.code, created.machine.id);
+      /*
+       * The row is a fact now — the control plane answered 201 — so this is the
+       * store catching up rather than drawing ahead of an answer. `machinesChanged`
+       * rather than `resume` alone, because creating a machine also changes how
+       * many of them you may have, and that is read off `me`.
+       */
+      await this.machinesChanged("machine-added");
+      await this.settleDaemon(created.machine.id);
+    } catch (error) {
+      this.patch({ setup: { step: "failed", said: describe(error) } });
+    }
+  }
+
+  /**
+   * Watch the daemon this app just started until it is up, or is not going to be.
+   *
+   * ⚠ **The half that was missing, and its absence is why the failure was
+   * invisible.** `startLocalDaemon` resolving means a process was *spawned*;
+   * everything that can go wrong afterwards — a refused enrollment code, a
+   * certificate the daemon cannot verify, a database a newer daemon migrated —
+   * happens seconds later in a child whose output goes to a ring buffer nobody was
+   * reading. Measured 2026-09-15: the child died in under a second and the screen
+   * said nothing at all, because `setup` had already been cleared.
+   *
+   * One retry, and it is deliberately **not** conditional on what the log says.
+   * Matching `code_unusable` in a tail would be a fourth reader of a string the
+   * daemon is free to reword; re-minting costs no quota and the retry is bounded
+   * at one, so "it exited and we hold a machine" is both simpler and more robust
+   * than any pattern.
+   */
+  private async settleDaemon(claim: string | null, retried = false): Promise<void> {
+    const slowFrom = Date.now() + SETUP_SETTLE_MS;
+    const giveUpAt = Date.now() + SETUP_GIVE_UP_MS;
+    let slowed = false;
+    for (;;) {
+      await sleep(Date.now() < slowFrom ? SETUP_POLL_MS : SETUP_SLOW_POLL_MS);
+      const state = await daemonState();
+      // The bridge went away mid-poll. Nothing true can be said, so say nothing.
+      if (state === null) return;
+      if (state.status === "running") {
+        this.patch({ setup: null });
+        await this.machinesChanged("machine-added");
+        return;
+      }
+      /*
+       * ⚠ **`foreign` is not success here, however much it looks like one.** It
+       * means a daemon is up that this app did not start — so the child it *did*
+       * start is gone, and the machine this flow was setting up never enrolled.
+       * Counting it as success cleared the notice and left somebody with a machine
+       * that exists on the control plane and nowhere else. The concrete way in is
+       * the one measured on this Mac: a leftover `deploy/install.sh` LaunchAgent
+       * holding `reemoat.db`, so our child loses `claimDaemonLock` and dies while
+       * its daemon stays up and announced.
+       *
+       * ⚠ **The LaunchAgent is the macOS instance of this, not the whole of it.**
+       * `managed_unit` in `daemon.rs` looks in `~/.config/systemd/user` as well,
+       * so the same failure arrives on Linux through a user unit — and
+       * `managed_unit_detail` already answers it with `systemctl --user disable
+       * --now`. The sentence below names neither, deliberately.
+       */
+      if (state.status === "foreign") {
+        this.patch({ setup: { step: "failed", said: ANOTHER_DAEMON_DETAIL } });
+        return;
+      }
+      if (state.status === "exited") {
+        /*
+         * ⚠ **A fresh code is the answer to exactly one exit, and guessing cost a
+         * quota slot per failure.** Retrying on the *fact* of an exit was right
+         * while an exit was all the daemon said; it now says which, so `2` — a held
+         * database lock, a missing token, a database a newer daemon migrated —
+         * stops being answered with a mint that re-enrolls the machine over a
+         * problem no code can touch. Still no reading of the log: this is the
+         * process's own status, not its words.
+         */
+        /*
+         * ⚠ **The one failure whose remedy is a switch rather than a wait — on
+         * one platform.** The *classification* is errno-based and therefore
+         * platform-neutral (`localNetworkBlocked`, `src/enroll.ts`), so this exit
+         * arrives on any Unix; the *remedy* below has been measured on exactly
+         * one, which is why `platform.ts` chooses the sentence and only its macOS
+         * arm names an operating system.
+         *
+         * Measured 2026-09-15 on macOS 15: the daemon is a child of this app, so
+         * this app is the responsible process for Local Network Privacy — and
+         * until that is granted, a connect to a control plane on a private subnet
+         * fails with `EHOSTUNREACH` while the same address answers `ping` and
+         * `curl` from a terminal a second later. Nothing in the daemon's own words
+         * says "permission", so the sentence has to come from here — and the errno
+         * and the address, which are the evidence, are in Settings → Logs with
+         * everything else it printed rather than appended to this sentence.
+         */
+        if (state.exitCode === DAEMON_EXIT.localNetworkBlocked) {
+          /*
+           * ⚠ **The sentence is chosen by platform because the classifier is
+           * not.** `localNetworkBlocked` in `src/enroll.ts` keys on an errno to a
+           * private address, so this exit arrives on any Unix — while the string
+           * that used to be here named macOS's Local Network Privacy pane
+           * unconditionally, which on a Linux box behind a firewall is a remedy
+           * pointing at a screen that does not exist. `platform.ts` holds all
+           * four arms and the argument for why only one of them names an OS.
+           */
+          const said = `${localNetworkDetail(hostPlatform(this.snapshot.host?.platform))} ${LOGS_POINTER}`;
+          this.patch({ setup: { step: "failed", said } });
+          return;
+        }
+        if (!retried && state.exitCode === DAEMON_EXIT.codeRefused) {
+          const machine = claim ?? state.claimed;
+          if (machine !== null) {
+            /*
+             * `later` returns rather than falling through: `remintFor` has already
+             * written why the control plane could not be reached, and falling
+             * through would overwrite it with the daemon's own last words.
+             */
+            const again = await this.remintFor(machine);
+            if (again !== "dead") return;
+          }
+          /*
+           * No live claim, and settings that have provably failed to start. This is
+           * the original bug in its pure form — a half-finished `deploy/install.sh`
+           * install whose code is dead, on a computer this app has never bought a
+           * machine for. At most one machine is ever bought this way: the claim it
+           * writes is what the next launch re-mints against.
+           */
+          if (await this.provisionOver()) return;
+        }
+        this.patch({ setup: { step: "failed", said: DAEMON_STOPPED_DETAIL } });
+        return;
+      }
+      /*
+       * ⚠ **Slower, rather than stopping.** Giving up at the fast deadline left the
+       * notice saying `failed` over a daemon that came up a second later, with
+       * nothing watching to take it back. The poll widens instead, so a slow start
+       * costs patience rather than a wrong answer.
+       */
+      if (Date.now() >= giveUpAt) {
+        this.patch({ setup: { step: "failed", said: GAVE_UP_DETAIL } });
+        return;
+      }
+      if (!slowed && Date.now() >= slowFrom) {
+        slowed = true;
+        this.patch({ setup: { step: "starting", said: SLOW_START_DETAIL } });
+      }
+    }
+  }
+
+  /**
+   * Buy a machine and write over settings that have proved they cannot start.
+   *
+   * `false` where nothing was tried — no shell to ask, or the account is at its
+   * ceiling — so the caller reports the daemon's own reason instead.
+   *
+   * The write is `env_rewritten`, so an existing file keeps every key this app
+   * does not own: a private CA path, a custom `REEMOAT_HOST`/`REEMOAT_PORT`, and
+   * the installer's own prose all survive being re-pointed at a new machine.
+   */
+  private async provisionOver(): Promise<boolean> {
+    const boot = this.snapshot.host;
+    if (boot === null || !mayAddMachine(this.snapshot.me)) return false;
+    this.patch({ setup: { step: "creating", said: null } });
+    const created = await this.createForThisComputer(boot);
+    if (created === null) return false;
+    this.patch({ setup: { step: "starting", said: null } });
+    await startLocalDaemon(created.enrollment.code, created.machine.id);
+    await this.machinesChanged("machine-added");
+    await this.settleDaemon(created.machine.id, true);
+    return true;
+  }
+
+  /**
+   * A fresh code for a machine this app already created. `true` if it was used.
+   *
+   * `false` means the claim is not worth keeping — the machine was retired, or its
+   * owner is over the limit — and the caller should create a new one instead of
+   * re-minting at a row that will refuse for ever.
+   *
+   * ⚠ **Only the mint is caught.** A blanket `try` around the start as well read a
+   * *host* refusal — "that file belongs to another server" — as "this machine is
+   * gone", and fell through to buying another one. A failure to start is the
+   * caller's to report, not this function's to swallow.
+   */
+  private async remintFor(machineId: string): Promise<"used" | "dead" | "later"> {
+    let again;
+    try {
+      again = await cp.mintEnrollment(machineId);
+    } catch (error) {
+      /*
+       * ⚠ **Only a refusal means the claim is dead, and the distinction is a
+       * permanent quota slot.** A blanket `false` here read "the wifi dropped" as
+       * "that machine is gone" and fell through to buying another — for a computer
+       * that already had one, on the one failure most likely to be transient. A
+       * machine row is counted with no revoked filter, so that slot never comes
+       * back.
+       */
+      /*
+       * ⚠ **Dead is the *named* refusal, and everything else is `later`.** The
+       * first version had this the other way round — anything that was not a
+       * transport failure meant "that machine is gone" — so a 401 on an expired
+       * session, a 403 about the limit, or any 5xx bought a second machine for a
+       * machine that is alive and well. Nothing returns that slot but a person
+       * noticing and revoking it, so the default has to be the one that spends
+       * nothing.
+       */
+      const gone =
+        ApiError.isApiError(error) && (error.code === "machine_not_found" || error.code === "machine_revoked");
+      if (gone) return "dead";
+      this.patch({ setup: { step: "failed", said: errorText(error) } });
+      return "later";
+    }
+    this.patch({ setup: { step: "starting", said: null } });
+    await startLocalDaemon(again.code, machineId);
+    await this.machinesChanged("machine-added");
+    await this.settleDaemon(machineId, true);
+    return "used";
+  }
+
+  /**
+   * Create the machine, naming it after this computer.
+   *
+   * ⚠ **The name is the part that fails on the second computer, not the first.**
+   * A control-plane label is refused when the account can already *see* one
+   * spelled the same, compared case-insensitively — so two machines both called
+   * `macbook` collide even though nobody typed either. The host name is what
+   * distinguishes them, and where there is none this asks for nothing clever:
+   * `machineLabelFor(null)` answers `computer`, and the one retry below suffixes
+   * whatever the base turned out to be.
+   *
+   * ⚠ **Two callers, and the second is the one where a collision is likely.**
+   * {@link AppStore.setUpThisComputer} reaches here on a computer with no daemon
+   * settings at all; {@link AppStore.provisionOver} reaches here for a computer
+   * whose settings have proved they cannot start — which is exactly the computer
+   * most likely to already own a machine row under this same host name.
+   */
+  private async createForThisComputer(boot: NativeBoot): Promise<CreatedMachine | null> {
+    /*
+     * ⚠ **The ordinary host name — an owner's call, 2026-09-15, reversing one
+     * taken the same day.**
+     *
+     * The first answer was the literal `local`, on the argument that the one
+     * machine this app sets up is by definition the computer somebody is sitting
+     * at. What that missed is **who else reads the label.** It is not local to the
+     * account: it is the row a phone sees, the row a second computer sees, and the
+     * row somebody holding a grant on this machine sees — and to every one of them
+     * `local` names a computer that is somewhere else. A fact true of exactly one
+     * client may not be stored on a row every client reads. `localRoute.ts` states
+     * that rule for *reachability*; this is the same rule for *naming*.
+     *
+     * So the label is what this computer is called, and **"this device" is drawn
+     * rather than stored** — off the announce file, on the machine the app is
+     * actually running on, through {@link AppState.localMachineId}. It costs one
+     * badge and it cannot be wrong on anybody else's screen.
+     */
+    const base = machineLabelFor(boot.hostName);
+    try {
+      return await cp.createMachine(base);
+    } catch (error) {
+      /*
+       * One retry, with a suffix, and then it stops. A loop here would spend a
+       * permanent machine slot per attempt against a name rule it cannot see.
+       */
+      if (!ApiError.isApiError(error) || error.code !== "machine_exists") throw error;
+      /*
+       * ⚠ **Sliced to 61 before the suffix, because {@link machineLabelFor}
+       * truncates *last*.** Without the slice a maximal host name re-shapes back to
+       * itself, and the retry posts the name that has just collided — a wasted
+       * round trip and a failure that reads as the server's rather than as a
+       * second computer with the same name. `webcheck` pins the boundary.
+       */
+      const named = machineLabelFor(`${base.slice(0, 61)}-2`);
+      if (named === base) throw error;
+      return await cp.createMachine(named);
+    }
   }
 
   private dropMachine(id: MachineId): void {
@@ -1321,28 +2247,25 @@ class AppStore implements StreamSink {
     await this.bootstrap();
   }
 
-  /**
-   * Adopt a session the server minted on a gate screen — a confirmation, a
-   * reset, or an invitation.
+  /*
+   * `adoptSession` lived here and moved to `gateStore.ts` with its two callers —
+   * `Register`'s no-mail arm and `ResetPassword`, both in `Gate.tsx`.
    *
-   * **It drops every connection first**, and that is `handleSignedOut`'s reason
-   * rather than tidiness: this is reachable from `phase: "ready"`, so the tab may
-   * already be showing somebody else's fleet, and each of those connections holds
-   * a token minted from a credential that is about to stop being the one in use.
-   * Without the drop the previous person's machines paint for a frame and their
-   * sockets keep talking.
+   * A session minted by a confirmation, a password reset or a registration on an
+   * instance with no mail arrives on a **gate** address, which `dist` does not
+   * serve and cannot reach: those nine addresses are the control plane's own, out
+   * of `dist-gate`. Nothing else in the tree called it, so keeping it here would
+   * leave a callerless export describing a capability this bundle does not have —
+   * which is the exact situation the `useApiKey` tombstone below was written
+   * about.
    *
-   * `login` has the same latent hole and is safe only because `SignIn` is
-   * reachable only from `phase: "signed_out"`, which `handleSignedOut` reaches
-   * only after dropping them. Nothing but that ordering enforces it.
+   * ⚠ **What must not be lost with it**, because it is about `login` rather than
+   * about the method that moved: `login` has the same latent hole the moved
+   * docblock named — it does not drop connections before adopting a new
+   * credential — and it is safe only because `SignIn` is reachable only from
+   * `phase: "signed_out"`, which `handleSignedOut` reaches only after dropping
+   * every one of them. Nothing but that ordering enforces it.
    */
-  async adoptSession(token: SessionToken): Promise<void> {
-    this.stopPolling();
-    for (const id of [...this.connections.keys()]) this.dropMachine(id);
-    cp.setSession(token.token);
-    this.patch({ me: token.user, authError: null });
-    await this.bootstrap();
-  }
 
   /*
    * `useApiKey` lived here and is deleted with the field that fed it.
@@ -1387,6 +2310,27 @@ class AppStore implements StreamSink {
   }
 
   /**
+   * Re-read which machine this computer is, from the daemon's own announce file.
+   *
+   * ⚠ **A memo, where {@link localBaseFor} deliberately refuses one — and what
+   * the answer is *for* is the whole difference.** Routing must find a daemon
+   * that started after the app, on a laptop where both come up at login, so it
+   * re-reads per route resolution. A badge may be one wake late: what it costs to
+   * be stale is a row that does not say "this device" until the next resume, and
+   * what a per-render IPC read would cost is a file read per paint of a list.
+   *
+   * Called from {@link AppStore.runResume}, which is the one funnel every wake,
+   * every machine mutation and the bootstrap promotion already pass through.
+   * Best-effort and silent: `localDaemon` swallows its own refusals and answers
+   * `null`, which is the correct value for "there is no daemon here" as well.
+   */
+  private async refreshLocalMachine(): Promise<void> {
+    const found = await localDaemon();
+    const id = found === null ? null : machineId(found.machineId);
+    if (id !== this.snapshot.localMachineId) this.patch({ localMachineId: id });
+  }
+
+  /**
    * The fleet changed **and** what this account is allowed changed.
    *
    * Two facts, one call, because `runResume` re-lists machines and refreshes
@@ -1423,6 +2367,23 @@ class AppStore implements StreamSink {
   }
 
   /**
+   * Re-decide *how* to reach a machine, without disturbing anything else.
+   *
+   * Settings' "This device" row calls it when somebody switches the loopback path
+   * on or off, so the change lands on the next request rather than on the next
+   * wake. Deliberately not {@link forgetMachine}, which drops the connection, the
+   * token and every session row with it — a routing preference is not a reason to
+   * throw away a minted token or repaint the screen.
+   *
+   * Nothing in flight is disturbed: `SessionStream` re-resolves the route per
+   * connection, so an open socket keeps running on the path it opened on until it
+   * rotates or drops.
+   */
+  forgetMachineRoute(id: MachineId): void {
+    this.connections.get(id)?.forgetRoute();
+  }
+
+  /**
    * The app signed you out without being asked. Registered on `cp.onSignedOut`.
    *
    * Connections are dropped rather than left behind: signing back in *as somebody
@@ -1433,6 +2394,30 @@ class AppStore implements StreamSink {
   handleSignedOut(failure: AuthFailure): void {
     this.stopPolling();
     for (const id of [...this.connections.keys()]) this.dropMachine(id);
+    /*
+     * ⚠ **One failure asks for a second act, and only one.** `device_revoked`
+     * means the *installation* was retired, not merely the session, so the stored
+     * device id is finished and has to go — otherwise the next sign-in offers a
+     * dead id, the server hands back a fresh device by its adopt-or-register
+     * rule, and this app quietly registers a new one on every launch while
+     * presenting an id nothing will ever adopt.
+     *
+     * Every other failure here leaves it alone, deliberately. Signing out is not
+     * a statement about the computer, and `session_revoked` — which is what the
+     * per-user session cap produces — leaves the device perfectly valid; giving
+     * the id up there would spend a device slot every time somebody signed in on
+     * an eleventh browser.
+     */
+    if (failure === "device_revoked") cp.forgetDevice();
+    /*
+     * ⚠ **Both ways out, not only the deliberate one.** `signOut()` below swept
+     * the remembered controls and this path did not, so an expired or revoked
+     * session left them for whoever signed in next — which is the disclosure the
+     * sweep exists to prevent, and that argument is about the *browser* rather
+     * than about which verb ended the session. `configMemory`'s own docblock
+     * states it as "Everything, on sign-out"; this is the other sign-out.
+     */
+    forgetAllConfig();
     this.patch({ phase: "signed_out", me: null, cpError: null, authError: signedOutText(failure) });
   }
 
@@ -1463,7 +2448,44 @@ class AppStore implements StreamSink {
    */
   async signOut(): Promise<void> {
     await cp.logout();
+    /*
+     * The remembered controls go with the credential that was reading them.
+     *
+     * They are not secret — a model name and an effort level — but they are a
+     * record of what somebody was doing, keyed by session, and leaving them for
+     * whoever signs in next on this browser is the one way a per-tab convenience
+     * becomes a disclosure. Before the reload, so the next paint has no copy.
+     *
+     * Not in `cp.logout`'s `finally`: that clears the *credential*, which is its
+     * subject, and this is the app's own cache of what it drew.
+     */
+    forgetAllConfig();
     window.location.href = "/";
+  }
+
+  /**
+   * Open the screen that says which control plane this installation talks to.
+   *
+   * Two callers and one of them is new ground: the sign-in screen's own control,
+   * and Settings → Account for somebody already signed in. Before this there was
+   * exactly one way to reach `ChooseServer` — `state.host.server === null` — so a
+   * server that had been chosen **could not be changed from inside the app at
+   * all**, and signing out did not help, `clearSession` deliberately leaving the
+   * server alone. The only remedy was deleting the shell's config file by hand.
+   *
+   * **Nothing is torn down here, and that is what makes Cancel honest.** The poll
+   * keeps running, the sockets stay up, the transcript stays where it was; this
+   * only decides which screen is drawn. Everything is given up at the moment of
+   * *adoption*, immediately before the reload, which is `ChooseServer`'s own
+   * argument applied to a second entrance.
+   */
+  pickServer(): void {
+    this.patch({ pickingServer: true });
+  }
+
+  /** Back to whatever was on screen. See {@link AppStore.pickServer}. */
+  cancelServerPick(): void {
+    this.patch({ pickingServer: false });
   }
 
   /* ---------------------------------------------------------------- *
@@ -1504,6 +2526,10 @@ class AppStore implements StreamSink {
   private async runResume(reason: string): Promise<void> {
     const epoch = ++this.epoch;
     this.patch({ resuming: true });
+
+    // Which computer this is, before anything that draws a machine list. One
+    // file read over IPC in the shell, and a synchronous `null` in a browser.
+    await this.refreshLocalMachine();
 
     /*
      * The registry may have changed while we were asleep — a machine added, a
@@ -1831,7 +2857,7 @@ class AppStore implements StreamSink {
         snapshot: mergeOptimistic(snapshot, this.metaWrites.get(key)?.patch),
         daemonNow: listed.now,
         fetchedAt,
-        heldConfig: holdConfig(this.rows.get(key)?.heldConfig, snapshot),
+        heldConfig: rememberHeld(key, holdConfig(this.rows.get(key)?.heldConfig, snapshot)),
         });
     }
 
@@ -2251,8 +3277,16 @@ class AppStore implements StreamSink {
       key,
       ref,
       machineName: existing?.machineName ?? this.connections.get(ref.machineId)?.state().name ?? "",
-      snapshot: mergeOptimistic(session, this.metaWrites.get(key)?.patch),
-      heldConfig: holdConfig(existing?.heldConfig, session),
+      /*
+       * ⚠ **Through `unreduceSnapshot` first**, because a socket frame is not
+       * always the whole record and the row it is about to replace may be. Its
+       * docblock is the contract; what it prevents here is the frame's reduced
+       * copy of the parked lists — and the emptied payloads on them — clobbering
+       * the poll's fuller one twice a poll interval. A no-op on every frame the
+       * daemon did not have to cut, which is almost all of them.
+       */
+      snapshot: mergeOptimistic(unreduceSnapshot(session, existing?.snapshot), this.metaWrites.get(key)?.patch),
+      heldConfig: rememberHeld(key, holdConfig(existing?.heldConfig, session)),
       daemonNow: existing?.daemonNow ?? unanchored,
       fetchedAt: existing?.fetchedAt ?? unanchored,
       // Kept from the row the poll built. A snapshot frame does not carry the
@@ -2349,6 +3383,9 @@ class AppStore implements StreamSink {
     // And the message that was on its way to it. There is nothing left to draw it
     // in and no event that can ever settle it.
     clearEcho(key);
+    // And which finished rows this reader had cleared. There is nothing left to
+    // hide: the rows themselves are the daemon's, and this session has none.
+    forgetHiddenFinished(key);
     forgetAsks(key);
     // Anything optimistically drawn for a session that is gone. Every entry is
     // also released when its own request settles, so this is about the window in
@@ -2825,6 +3862,19 @@ export const store = new AppStore();
  */
 cp.onSignedOut((failure) => store.handleSignedOut(failure));
 
+/*
+ * And the one way `ui/SignIn.tsx` reaches this store without naming it.
+ *
+ * That screen is drawn by both bundles — it is the sign-in form the app shows
+ * when there is no credential, and the one `Gate` shows on a mailed link that
+ * needs a session — so it names `SignInAuth` and the bundle decides which
+ * store answers. Registered from this tail rather than from `main.tsx` because
+ * `dist` has exactly one store and nothing in it has ever had an opinion about
+ * which; the gate wires its own from its entry point, where the answer is not
+ * unambiguous. See `signInAuth.ts`.
+ */
+provideSignInAuth(store);
+
 /** Sessions needing a human, oldest wait first, across every machine. */
 /**
  * The three lists `Home` renders, plus the per-machine session counts.
@@ -3016,6 +4066,13 @@ export interface SessionGroups {
 
 let groupsForSessions: SessionRow[] | null = null;
 let groupsForMachines: MachineState[] | null = null;
+/**
+ * The machine order the cache was built under.
+ *
+ * `-1` cannot collide with a real version, which is one fewer thing to hold in
+ * your head than relying on `groupsCache !== null` to cover the first call.
+ */
+let groupsForOrder = -1;
 let groupsCache: SessionGroups | null = null;
 
 /**
@@ -3037,12 +4094,27 @@ let groupsCache: SessionGroups | null = null;
  * carries machine state too. `emitTranscripts` replaces neither, so a streamed
  * event still costs nothing — the same property `sessionLists` defends.
  *
- * **Groups are ordered by name, always — never by reachability.** `reach` flickers,
- * and a list that reorders itself while a thumb is already travelling toward a row
- * is the one failure this app cannot have.
+ * **Groups are ordered by name until a reader drags one, and never by
+ * reachability.** `reach` flickers, and a list that reorders itself while a thumb
+ * is already travelling toward a row is the one failure this app cannot have — a
+ * *stored* order is allowed for exactly that reason, since it moves when somebody
+ * moves it and at no other moment. `machineOrder.ts` is the merge and
+ * `machine-gestures.md` is the rule; a derived order is still banned outright.
+ *
+ * ⚠ **Which is why the order's version is in the guard above.** The memo is keyed
+ * on the identity of `sessions` and `machines`, and a reorder replaces neither —
+ * so without it a drop repaints nothing until the four-second poll happens to hand
+ * over a new `machines` array, which reads as a drag that does nothing for four
+ * seconds and then jumps. It is the third input and the only one that moves off
+ * the poll.
  */
 export function sessionGroups(state: AppState): SessionGroups {
-  if (groupsForSessions === state.sessions && groupsForMachines === state.machines && groupsCache !== null) {
+  if (
+    groupsForSessions === state.sessions &&
+    groupsForMachines === state.machines &&
+    groupsForOrder === machineOrderVersion() &&
+    groupsCache !== null
+  ) {
     return groupsCache;
   }
 
@@ -3142,11 +4214,17 @@ export function sessionGroups(state: AppState): SessionGroups {
   for (const row of lists.active) place(row, "active");
   for (const row of lists.ended) place(row, "ended");
 
-  const groups = [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+  /*
+   * The name sort **stays**, and is `orderMachines`' `natural`: it is the position
+   * of every machine nobody has dragged, and deleting it would leave such a
+   * machine with no order at all rather than with a stored one.
+   */
+  const groups = orderMachines([...byId.values()].sort((a, b) => a.name.localeCompare(b.name)), machineOrder());
 
   groupsCache = { pinned, groups, orphans };
   groupsForSessions = state.sessions;
   groupsForMachines = state.machines;
+  groupsForOrder = machineOrderVersion();
   return groupsCache;
 }
 

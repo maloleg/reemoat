@@ -33,9 +33,96 @@
  * device pixels and `RAIL_MIN` is a floor somebody can always drag away from, not
  * a fixed width — but it does mean `RAIL_MIN`'s "enough of a name to tell two
  * sessions apart" is a claim about a 16px root and gets tighter above it.
+ *
+ * ⚠ **This measures the whole rail, which is now two columns** — the machine
+ * folders plus the session list — and `rail.ts` states every bound as
+ * `MACHINE_COLUMN_PX` plus the number it used to be. The `312` quoted above is
+ * history: it is what the snap was measured at, on the build that had one column,
+ * and it is left as written for the reason every measurement in this repository is.
  */
 :root {
-  --rail-w: 312px;
+  --rail-w: 384px;
+  /*
+   * **And the background panel's, which is the second draggable pane and the
+   * first one with two declared answers.**
+   *
+   * `ui/taskWidth.ts` owns the bounds, `AppShell` writes a *chosen* width onto
+   * `documentElement` from the same effect, and `TaskPanel` spends this through
+   * `md:w-[var(--task-fit)]` with `SessionView` opening
+   * `md:pr-[calc(var(--task-fit)+0.75rem)]` beside it — the panel's width plus the
+   * 12px it stands off the edge, which is the subtraction that used to be two
+   * literals in two files.
+   *
+   * ⚠ **Two declarations, and the later one wins by *source order alone*.** Both
+   * are unlayered `:root`, and `@media` adds no specificity — which is this file's
+   * own post-mortem three hundred lines down, where every phone animation shipped
+   * onto the desktop for exactly this reason. So the override below is not
+   * stronger than this, it is merely later, and `webcheck` asserts the order
+   * rather than the values: written above this block it would silently never
+   * apply.
+   */
+  --task-w: 320px;
+  /*
+   * ⚠ **And the width actually spent, because the two panes' clamps are
+   * independent and their sum is not bounded anywhere.**
+   *
+   * `TASK_MAX` is 512 and `RAIL_MAX` is 552, and both are one ordinary gesture away
+   * at any width. Measured in a real browser at a 1024px window with both dragged
+   * to their maxima: the conversation column's content box floored at **0px**, its
+   * header title measured 0px wide, and the docked card lay 52px **over** the
+   * session rail. Neither module can see the other and neither can see the window —
+   * `webcheck` bans `matchMedia`/`innerWidth`/`clientWidth` in `TaskPanel.tsx` by
+   * literal, and a JavaScript clamp there would be a second source of truth for a
+   * width CSS already knows.
+   *
+   * So the clamp is here, where the viewport is. `--task-w` stays the *stored*
+   * number — it is what `PaneHandle` writes, reads back through `getComputedStyle`
+   * and announces — and `--task-fit` is what the panel and the gutter actually
+   * spend. `15.75rem` is a 240px floor for the conversation plus the 12px the card
+   * stands off the edge, so the floor is the conversation's own content and not the
+   * gap beside it.
+   *
+   * ⚠ **`var()` substitutes lazily, which is the whole reason this can be declared
+   * before the things it depends on.** Redefining `--task-room` in the `lg` block
+   * and `--task-w` in the `xl` block re-resolves `--task-fit` at use time; it is not
+   * frozen here. That is the one place in this pair where source order does *not*
+   * decide, and it is worth saying beside the ⚠ above where it does.
+   *
+   * The rail term only exists where the rail does: below `lg` the aside is
+   * `hidden`, so the room is the whole window.
+   */
+  --task-room: 100vw;
+  --task-fit: min(var(--task-w), calc(var(--task-room) - 15.75rem));
+}
+
+@media (min-width: 64rem) {
+  :root {
+    --task-room: calc(100vw - var(--rail-w));
+  }
+}
+
+/*
+ * 26rem where there is room for the rail and both panes.
+ *
+ * The conversation's width is **not monotonic in the window's**, which is why this
+ * is a step rather than one number: at `lg` the rail arrives and takes
+ * `RAIL_DEFAULT`, so the 20rem panel leaves 308px at 1024 — narrower than the 436px
+ * the same panel leaves at 768 with no rail at all. 20rem where the row is shared and
+ * 26rem where it is not, and the `lg` row is the tight one, accepted rather than
+ * hidden: the panel is opened, never opened *for* somebody, and closing it gives
+ * the whole width back.
+ *
+ * `80rem` is `xl`, written as Tailwind writes it. It is a breakpoint in CSS and
+ * nowhere else, which is `AppShell`'s standing rule — a resized window cannot end
+ * up drawing a docked panel over a conversation that made room for a different
+ * one. The two px values here are asserted against `TASK_DEFAULT`/`TASK_WIDE`, the
+ * same pin `--rail-w` carries after `19.5rem` and `312` agreed only at a 16px
+ * root.
+ */
+@media (min-width: 80rem) {
+  :root {
+    --task-w: 416px;
+  }
 }
 
 /*
@@ -480,6 +567,58 @@
     }
   }
 
+  /**
+   * The menu drawer, which is the sheet's movement on the other axis.
+   *
+   * **The same duration and the same curve, deliberately, and `webcheck` asserts
+   * the two numbers equal rather than pinning 260 twice.** A drawer arriving from
+   * the left and a sheet arriving from the bottom are one gesture in this app —
+   * "a layer covers the app" — and a second easing would be a second decision
+   * about it, made by whoever typed the second rule rather than argued anywhere.
+   *
+   * ⚠ **A distinct keyframe rather than `sheet` with a different transform**,
+   * because a keyframe here is a *name* a utility is generated from: Tailwind v4
+   * emits `animate-drawer` from `--animate-drawer` and nothing composes a
+   * direction onto it. `sheet-out`'s own docblock, ten lines down, records what
+   * happens to the nearest shortcut — `reverse` on an arrival plays once and
+   * never plays back.
+   *
+   */
+  --animate-drawer: drawer 260ms cubic-bezier(0.32, 0.72, 0, 1);
+
+  @keyframes drawer {
+    from {
+      transform: translateX(-100%);
+    }
+  }
+
+  /**
+   * And the way back out, which is a **separate keyframe** rather than the arrival
+   * reversed.
+   *
+   * ⚠ `animate-drawer` with a `reverse` composed onto it is the shortcut, and
+   * `sheet-out` twelve lines down records what it does: it slides out and does not
+   * slide back. An arrival plays once; naming the direction does not give you the
+   * departure.
+   *
+   * **`both`, and that is the half that is invisible when it is missing.** Without
+   * a fill the panel snaps back to its resting position for the frames between the
+   * animation ending and React dropping the element — a flash of the full drawer
+   * after it has already left. `MenuDrawer` waits exactly this long before it
+   * unmounts, and `webcheck` reads this duration out of the stylesheet and asserts
+   * it against that constant, because neither file can see the other's number.
+   *
+   * The easing is `sheet-out`'s rather than the arrival's, for the reason that one
+   * gives: leaving is quick at the start and settles, arriving is the opposite.
+   */
+  --animate-drawer-out: drawer-out 260ms cubic-bezier(1, 0, 0.68, 0.28) both;
+
+  @keyframes drawer-out {
+    to {
+      transform: translateX(-100%);
+    }
+  }
+
   /*
    * And the ground behind it darkens rather than switching.
    *
@@ -543,6 +682,41 @@
   @keyframes scrim-out {
     to {
       opacity: 0;
+    }
+  }
+
+  /*
+   * And `rise` leaving, which is the third of these pairs and arrived last.
+   *
+   * `TaskPanel` is a bottom sheet on a phone and a card docked beside the
+   * conversation from `md`, and it carried `md:animate-none` — no arrival there at
+   * all, which was fine while a close was an unmount in one frame. It is not fine
+   * once `animationend` is what ends the exit: an element carrying
+   * `animation: none` never fires one, so the exit falls to the backstop and a
+   * **fully visible** card sits over the conversation for the whole of it. Every
+   * variant that can be on screen owes an outgoing animation, which is the rule
+   * `leaving.ts` states and this token is what lets that panel keep it.
+   *
+   * So the docked card arrives on `rise` — `SHEET_PANEL`'s own answer for "a card
+   * at a width where there is no edge to have come from" — and leaves on this. 140ms
+   * either way, against the sheet's 260: it travels six pixels rather than a
+   * screen. ⚠ **A travel of six pixels rather than a slide, and that is measured
+   * against what happens beside it.** The conversation's gutter collapses in the
+   * same frame the panel starts leaving, so a card that *moved* any real distance
+   * would cross text that is reflowing underneath it.
+   *
+   * `both`, for `sheet-out`'s reason: without a fill the card snaps back to full
+   * opacity for the frames between the animation ending and React dropping it. The
+   * easing is the arrival's curve mirrored rather than a curve chosen again —
+   * `ease-out` and `ease-in` are each other's reflection, which is the same
+   * relation `sheet-out` spells out with a `cubic-bezier`.
+   */
+  --animate-rise-out: rise-out 140ms ease-in both;
+
+  @keyframes rise-out {
+    to {
+      opacity: 0;
+      transform: translateY(6px);
     }
   }
 
@@ -645,64 +819,32 @@ body {
 }
 
 /*
- * Telegram draws its own controls over the page, and `env()` does not know.
+ * The inline-start inset, and it exists for exactly one surface.
  *
- * ⚠ Reported with a screenshot: inside the Telegram mini app the client's
- * floating pill — ✕ Close top-left, ⌄ ⋯ top-right — sat directly on the session
- * title, which was clipped behind it. `safe-area-inset-top` describes the
- * *device's* notch and is what `pt-safe` already spends; the mini-app chrome is
- * something Telegram paints inside the same viewport afterwards, so on a phone
- * with no notch the inset is 0 and the header starts underneath the buttons.
+ * Both rules above are block-axis, because until now every edge this app pins to
+ * is the top or the bottom of the screen. The menu drawer is the first thing
+ * anchored to `inset-y-0 left-0`, and on a landscape iPhone with the notch on the
+ * left `env(safe-area-inset-left)` is around 44px — so its rows sit under the
+ * sensor housing with `viewport-fit=cover` set, which it is, in `index.html`.
  *
- * ⚠ **And then the same literal cost a band of empty screen, reported with a
- * second screenshot — because there are three states here and `[data-telegram]`
- * distinguishes none of them.**
+ * ⚠ **Here, beside the other two, and never inside the fade-scrollbar block
+ * further down.** `webcheck.strip-chosen-tile.ts` slices this file between two of
+ * that block's selectors with `indexOf` and asserts the slice declares no
+ * `width`/`height`/`scrollbar-width`; a rule inserted there is swallowed into that
+ * slice and re-anchors the assertion onto something else. The edge-fade rule
+ * already carries the same ⚠ for the same reason — this is the second instance,
+ * which is what makes it a rule about this file rather than a note about one class.
  *
- *   1. Telegram floats its chrome **over** the page. The page must spend the room.
- *      This is the state the 3.25rem was measured against.
- *   2. Telegram draws its header as a **bar above** the webview, which is the
- *      ordinary presentation. It overlaps nothing, the honest inset is 0, and the
- *      literal is 52px of nothing under a bar that already reserved its own space.
- *   3. A client too old to say which.
- *
- * `env()` cannot separate them and never could: **it reads 0 inside a mini-app
- * webview whatever the device** (Telegram-iOS #1377, open), so the `max()` had
- * exactly one live term and it was the constant. That is the sentence that stops
- * the next reader deleting `--tg-chrome-top` as redundant with `env()`.
- *
- * So the number is asked for rather than assumed — `watchTelegramInsets` posts
- * `web_app_request_safe_area` and `web_app_request_content_safe_area` and writes
- * the answer here. **The 3.25rem is now the value of the fallback rather than a
- * floor under the answer**, which bounds this change to clients that actually
- * reply: state 3 keeps precisely the header it had.
- *
- * Still a `max()` and still never an addition **at this line** — Q3.443's rule is
- * untouched, and the one addition is between Telegram's own two numbers, argued at
- * `telegramInsets` where both are in scope. `0.5rem` leads it so that an answer of
- * `0` falls back to the ordinary `.pt-safe` floor rather than to nothing: state 2
- * still needs a title that is not against the top edge.
- *
- * Scoped to `[data-telegram]`, written by `main.tsx` only when the bridge is
- * actually injected — so an ordinary browser, and a phone home-screen shortcut,
- * keep exactly the header they had.
+ * ⚠ **And this paragraph may not spell those selectors**, which is a second,
+ * sharper instance of the same thing: the driver's anchors are plain `indexOf`
+ * calls over the raw file, so a comment quoting the string being searched for is
+ * found *before* the rule it describes. Written out once, it moved all three of
+ * that block's assertions onto this docblock and failed them — the exact shape
+ * `webcheck.composer-and-config-bar.ts` records about its own counts, arriving
+ * from the other side.
  */
-:root[data-telegram] {
-  --tg-chrome-top: 3.25rem;
-  /*
-   * Zero, and that is today's behaviour rather than a guess. `.pb-safe` already
-   * resolves to its own 0.75rem floor inside Telegram — `env(safe-area-inset-
-   * bottom)` being 0 there for the reason above — so a fallback of 0 changes
-   * nothing for a client that cannot answer, and a client that can finally puts
-   * the approve buttons above the home indicator, which is the thing
-   * `viewport-fit=cover` was supposed to buy and silently did not.
-   */
-  --tg-chrome-bottom: 0px;
-}
-:root[data-telegram] .pt-safe {
-  padding-top: max(0.5rem, var(--tg-chrome-top), env(safe-area-inset-top));
-}
-:root[data-telegram] .pb-safe {
-  padding-bottom: max(0.75rem, var(--tg-chrome-bottom), env(safe-area-inset-bottom));
+.pl-safe {
+  padding-left: max(0rem, env(safe-area-inset-left));
 }
 
 /*
@@ -723,10 +865,14 @@ body {
  * before a single `pointermove` arrived. On a desktop it worked, because a mouse
  * is not gated by `touch-action` — which is exactly the shape of bug that ships.
  *
- * This is a **default**, not a decision, and base is where a default goes — the
- * same sentence the cursor rule above makes. Nothing else in this app overrides
- * `touch-action` today, so moving it changes one control's behaviour and no
- * other's.
+ * This is a **default**, not a decision, and `base` is where a default goes. That
+ * sentence used to be borrowed from the rule below, which set the mouse's shape on
+ * every pressable element and has since been removed outright — so the argument is
+ * written out here, where it is now the only copy: an unlayered rule beats every
+ * utility regardless of specificity, so a bare-element default written at the top
+ * level makes the matching utility a dead class wherever somebody needs one.
+ * Nothing else in this app overrides `touch-action` today, so moving it changes one
+ * control's behaviour and no other's.
  */
 @layer base {
   button {
@@ -735,35 +881,50 @@ body {
 }
 
 /*
- * A pointer over anything you can press — **restored, because Tailwind took it
- * away.**
+ * **Nothing in this client changes the mouse but one named control, and the
+ * rule that used to is gone by the owner's call.**
  *
- * v3's preflight carried `button, [role="button"] { cursor: pointer }` and v4
- * dropped it, deliberately, on the grounds that the browser default is what a
- * native button does. The result here is that *every* button in this app has
- * shown the ordinary arrow: the sign-in doors, the kebabs, the approve buttons,
- * the config strip. On a phone nobody can tell; on a desktop it is the one cue
- * that separates a control from a caption, and this app spends nothing else on
- * that — with the accent colour gone, an unfilled button is drawn in the colour
- * of what it sits on and identified by its border alone.
+ * The exception is the column-resize shape on `ui/PaneHandle.tsx`'s separator,
+ * whose whole affordance is the shape. `webcheck`'s `CURSOR_ALLOWED` is the
+ * list, and it holds that one file — so this is an allow-list of one rather
+ * than a total absence, and a reader here must not delete it as an offender.
  *
- * `:not(:disabled)` because a control that will not act must not claim it will.
- * That is the whole of the exception: `Button` disables Send until there is
- * something to send, and the arrow there is correct.
+ * ⚠ **The class is not spelled here on purpose.** That sweep reads comments
+ * too, so naming it in prose *about* it puts this file on the offenders list —
+ * measured, by writing it and watching the check go red.
  *
- * **Inside `@layer base`, unlike every other rule in this file**, and the
- * docblock on the focus ring below is why: an unlayered rule beats every
- * utility regardless of specificity, so writing this one at the top level would
- * make `cursor-default` and `cursor-not-allowed` dead classes wherever somebody
- * needed one. This is a default, not a decision — base is where a default goes.
+ * There was an `@layer base` block here setting the hand shape on every enabled
+ * `button`, every `[role="button"]` and the one `<summary>` — restored on purpose
+ * after Tailwind v4's preflight dropped it, on the argument that with the accent
+ * colour gone an unfilled button is drawn in the colour of what it sits on, so
+ * the shape of the mouse was the one thing left separating a control from a
+ * caption. That argument was true and it is not the decision: the owner's
+ * instruction is that no module here changes the mouse from its default, and
+ * nothing is to make it react.
+ *
+ * **What is left as the cue, so that nobody re-adds this to fix a report.** Every
+ * pressable thing in this app already answers hover — `.tap` carries a 120ms
+ * colour transition, rows take `hover:bg-raised`, captions take `hover:text-fg`,
+ * and the two resize separators thicken their line under the pointer. That is a
+ * cue on the control rather than on the pointer, which is the trade being made.
+ *
+ * ⚠ **The ban is a sweep over `src/`, not the absence of a rule here**, because
+ * three different wrong states satisfy a regex on this file alone: the
+ * declaration written unlayered, the same declaration with other whitespace, and
+ * a utility class in a `.tsx` — which Tailwind emits from *source text*, so it
+ * never appears in this stylesheet at all. `webcheck` walks both extensions and
+ * holds an allow-list, so a second exception is a failing check rather than a
+ * precedent somebody finds later.
+ *
+ * ⚠ **Anchors are not in scope and cannot be.** The eight real `<a>` elements get
+ * the hand from every user-agent stylesheet, and taking it back would mean this
+ * file setting a cursor — the thing being banned — on the only elements whose
+ * shape is universally understood. The claim is about what this app sets.
+ *
+ * The `@layer base` block above survives with its own argument intact; it used to
+ * borrow half of one from here. The reason a bare-element default belongs in
+ * `base` is stated there now, where it is load-bearing.
  */
-@layer base {
-  button:not(:disabled),
-  [role="button"]:not(:disabled),
-  summary {
-    cursor: pointer;
-  }
-}
 
 /*
  * 16px in every form control, decoupled from the reading scale above.
@@ -1474,6 +1635,51 @@ ol.md-paren > li::marker {
 }
 
 /*
+ * A row standing aside to make room for one being dragged past it.
+ *
+ * ⭐ **This exists because `.tap` above refuses `transform`, and refusing it is
+ * that rule's entire point.** Transitions here are opt-in per property, so `.tap`
+ * writes the `transition` *shorthand* — which resets `transition-property` to
+ * exactly the three colours it names. An element carrying `tap` therefore ignores
+ * Tailwind's `transition-transform` completely, and the neighbours in a reorder
+ * jump to their new position instead of sliding to it.
+ *
+ * ⚠ **Specificity has nothing to do with it and chasing that is the wrong
+ * repair.** `.transition-transform` lives inside `@layer utilities` and every rule
+ * in this file is unlayered on purpose, so `.tap` wins outright however the class
+ * string is written. Measured on the built stylesheet: the utilities layer spans
+ * bytes 9909–51781 with `.transition-transform` at 43519 inside it, against `.tap`
+ * at 56918 outside. That is the same trap `agent-strip.md` records for
+ * `touch-none`, one property to the left — and the reason it was not caught twice
+ * is that both lists which already reorder, the session rows and the agent strip,
+ * carry **no** `.tap` on the element that shifts.
+ *
+ * So the opt-in gains a second member rather than `.tap` gaining a fourth
+ * property: `transform` on every `.tap` in the app would put a 150ms interpolation
+ * on every row of a list that re-renders on every event, which is the smear the
+ * docblock above exists to prevent. This one is applied **only while a drag is
+ * live**, and never to the row under the pointer — that one's transform is
+ * rewritten every frame, and a transition restarts the interpolation on each
+ * write, so it crawls after the finger instead of following it.
+ *
+ * ⚠ **The three colour declarations are `.tap`'s, restated because a shorthand
+ * cannot extend one.** They must stay in step with the rule above; `webcheck`
+ * compares them. It sits after `.press` as well as after `.tap` so that an element
+ * wearing both still slides — no such element exists today, and this is here so
+ * that one arriving does not have to rediscover any of the above.
+ *
+ * `prefers-reduced-motion` needs nothing: the block at the foot of this file
+ * zeroes `transition-duration` on `*` with `!important`.
+ */
+.slides {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    transform 150ms ease;
+}
+
+/*
  * One focus ring for the whole app.
  *
  * Per-component focus styling is how the fifth copy of a control ends up with
@@ -1545,4 +1751,68 @@ ol.md-paren > li::marker {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/*
+ * ⚠ **Only the text is selected, and one property is the whole of it.**
+ *
+ * WebKit paints *selection gaps*: the run from the end of a selected line to the
+ * block's content edge, and the vertical space between two selected blocks. So a
+ * drag through a conversation painted one solid rectangle — the empty half of
+ * every short line, the margin between paragraphs, and the whole blank column
+ * beside a right-aligned bubble. Reported four times. Blink dropped gap painting
+ * with LayoutNG and never had it, which is why this reads correct in a browser
+ * and wrong in the app `packages/native` ships.
+ *
+ * A block WebKit treats as a **selection root** paints none of them, and
+ * `RenderBlock::isSelectionRoot` answers yes to a handful of unrelated things —
+ * among them any transformed block, and any block whose `column-span` is `all`.
+ *
+ * ⚠ **`column-span` rather than a transform, and the difference is measured in
+ * another engine.** Both make the root, and in WebKit the two are identical: the
+ * same band profile over a page carrying every markdown shape, and an unselected
+ * page byte-identical to no rule at all. But a transform also makes a **stacking
+ * context**, and a `td` in one composites its `border-edge/60` against a
+ * different backdrop — one 1px row under a markdown table's header moved
+ * `#E6E4E0` → `#ECEAE7` in Chromium 153. `column-span: all` makes no stacking
+ * context and no containing block, and outside a multi-column container it lays
+ * nothing out differently: Chromium is byte-identical under it, idle *and*
+ * selected, and so is the copied string. Neither trigger is specified behaviour;
+ * this one costs nothing when it is ignored, which is the whole argument for
+ * preferring it.
+ *
+ * ⚠ **A flex container between the root and the text puts the fill back**, which
+ * is why three elements name this and not one. Measured against controls on one
+ * DOM: nesting depth, horizontal padding and `w-fit` all change nothing, and
+ * `display: flex` alone re-introduced the fill — `46px@199w` against
+ * `22px@199w 24px@51w`. `UserBubble` hangs in a flex row, so the bubble carries
+ * its own; the transcript column carries one for the space *between* messages,
+ * which no message can reach; and every markdown body carries one so agent prose
+ * is covered wherever it is drawn.
+ *
+ * `pre`, `td` and `th` are the descendants that need their own, and the list is
+ * an ablation rather than a guess: drop them and the code fence paints
+ * `60px@863w` and the table `65px@855w` instead of their lines. Nothing above the
+ * cells works — `table`, `thead`/`tbody` and `tr` all leave the whole table
+ * filled. `li` and `blockquote` were in the list and came back out, their
+ * profiles unchanged band for band.
+ *
+ * ⚠ **What this cannot reach is an *anonymous* block**, which is what a tight
+ * list item holding a nested list wraps its own text in: no selector names it,
+ * so no property can be put on it. `remarkListItemBlocks` is the other half of
+ * that one shape, and it works by giving the run a real box instead.
+ *
+ * What stood here was a trailing `::after { content: "\200B" }` on every block.
+ * It ended the **last** line of a block and nothing else, and it is superseded
+ * rather than kept beside this: measured, the two agree everywhere the
+ * zero-width space worked, and only this one covers the intermediate lines, the
+ * gaps between blocks and the column beside a bubble. It also cost a
+ * `:not(:has(…))` guard that had already grown three real shapes by 24px each.
+ * Q3.638.
+ */
+.sel-root,
+.sel-root pre,
+.sel-root td,
+.sel-root th {
+  column-span: all;
 }

@@ -1,10 +1,10 @@
-import { MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
+import { ListTodo, MoreVertical, Pencil, Pin, PinOff, Play, Puzzle, Square } from "lucide-react";
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { errorText } from "../http";
 import { keyOf, type SessionRef } from "../ids";
 import { store, type AppState } from "../store";
 import { isParked, isResumable, isTerminal, parkedByOlderDaemon } from "../wire";
-import { Icon, IconButton, MENU_PANEL } from "./bits";
+import { Icon, IconButton, MENU_PANEL, menuPlacement } from "./bits";
 import { useDismissible } from "./overlay";
 import { toast } from "./Toast";
 import { pluginFailure, sessionActions } from "../plugins";
@@ -54,11 +54,25 @@ export function SessionMenu({
   sessionRef,
   state,
   onRename,
+  onOpenTasks,
   size = "lg",
 }: {
   sessionRef: SessionRef;
   state: AppState;
   onRename: () => void;
+  /**
+   * Opens the background-tasks panel, where one is reachable — the session
+   * header's kebab. Absent on a **list row**, which is why it is optional rather
+   * than required: that menu is about the row it sits on, and the panel is about
+   * the conversation you are inside.
+   *
+   * ⚠ **It is also the reason this menu now exists at every width.** Every other
+   * row here is on the session's own row in the rail, so at `lg` the kebab was a
+   * second door to a door and was drawn `lg:hidden` for exactly that. This one is
+   * on no row at any width and had no door at all once nothing was outstanding —
+   * see `web-transcript.md` and Q3.631.
+   */
+  onOpenTasks?: () => void;
   /**
    * `sm` for a list row, where the menu must not outweigh the row it sits on.
    *
@@ -75,6 +89,7 @@ export function SessionMenu({
   size?: "sm" | "lg";
 }): ReactNode {
   const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<"up" | "down">("down");
   const [busy, setBusy] = useState(false);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const row = state.rowsByKey.get(keyOf(sessionRef));
@@ -223,7 +238,18 @@ export function SessionMenu({
         size={size}
         disabled={busy}
         active={open}
-        onClick={() => setOpen(!open)}
+        /*
+         * Measured at the tap and handed to the panel below — see `menuPlacement`.
+         * This row lives inside `SessionBrowser`'s `overflow-y-auto` scroller, so a
+         * panel that does not fit below it grows that scroller rather than hanging
+         * out of it, and a scrollbar appears down the rail the moment the menu
+         * opens. Read here rather than in an effect so there is one pass and no
+         * flicker, and discarded on close.
+         */
+        onClick={() => {
+          if (!open) setPlacement(menuPlacement(boxRef.current));
+          setOpen(!open);
+        }}
       />
       {open && (
         <div
@@ -231,8 +257,37 @@ export function SessionMenu({
           // `MENU_PANEL` rather than a fourth hand-written copy of it, which is
           // what this was — byte-adjacent to the shared string and drifting from
           // it in the radius, the padding and the shadow.
-          className={`absolute top-full right-0 mt-1 w-52 max-w-[calc(100vw-2rem)] ${MENU_PANEL}`}
+          className={`absolute right-0 w-52 max-w-[calc(100vw-2rem)] ${
+            placement === "up" ? "bottom-full mb-1" : "top-full mt-1"
+          } ${MENU_PANEL}`}
         >
+          {/*
+           * ⭐ **First, and it is the only row here that is not about the session's
+           * own record.** Rename, Pin, Resume and Stop are all on the session's row
+           * in the rail; this is a door to a panel that exists nowhere else, which
+           * is why the kebab is drawn at every width now and why this row leads.
+           *
+           * ⚠ **`setOpen(false)` before `onOpenTasks()`, and it is load-bearing
+           * rather than tidy.** Both this menu and the panel register
+           * `"menu"` with `overlay.ts`, which is a LIFO stack: leaving this one on
+           * it would make Escape close the menu that is no longer on screen and
+           * leave the panel up. Nothing asserts the order, so it is said here.
+           *
+           * `aria-haspopup="dialog"` because that is what it opens — the same
+           * `role="dialog"` the transcript's foot opens, which is the other door
+           * and the one that closes when nothing is outstanding.
+           */}
+          {onOpenTasks !== undefined && (
+            <MenuItem
+              icon={ListTodo}
+              label="Background tasks"
+              haspopup="dialog"
+              onClick={() => {
+                setOpen(false);
+                onOpenTasks();
+              }}
+            />
+          )}
           <MenuItem
             icon={Pencil}
             label="Rename"
@@ -334,6 +389,7 @@ function MenuItem({
   onClick,
   tone = "plain",
   disabled = false,
+  haspopup,
 }: {
   icon: ComponentType<{ size?: number | string; className?: string }>;
   label: string;
@@ -369,10 +425,21 @@ function MenuItem({
    * question and the next inert row costs nothing to draw honestly.
    */
   disabled?: boolean;
+  /**
+   * What this row opens, where it opens something rather than acting.
+   *
+   * Every other row here *does* a thing — renames, pins, stops. `Background
+   * tasks` opens a `role="dialog"`, which is the same promise the transcript's
+   * foot makes with the same attribute, and a menu row that silently behaves like
+   * a second kind of control is the widget-role failure `web-shell.md` records
+   * about this app's two popovers.
+   */
+  haspopup?: "dialog";
 }): ReactNode {
   return (
     <button
       role="menuitem"
+      aria-haspopup={haspopup}
       onClick={onClick}
       disabled={disabled}
       // The whole label, for a pointer that can hover. A phone gets the truncation

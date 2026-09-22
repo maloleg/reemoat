@@ -21,7 +21,15 @@ import type { GitExec } from "../git.js";
  * and it is the seam a *confining* runtime would fill if one is ever wanted
  * again. `clientFileIo`, `login`, `git` and `launch` are exactly the four places
  * a sandbox has to answer differently, which is why they are still members and
- * not inlined. Reserved, in the same voice as the relay's `reemoat-enc: none`.
+ * not inlined.
+ *
+ * ⚠ **The comparison that used to end this paragraph is spent.** It read
+ * *"reserved, in the same voice as the relay's `reemoat-enc: none`"*, and that
+ * seam has been filled: the relay carries one encryption mode now and `none` is
+ * not a value anything can ask for. What the sentence meant is still exactly what
+ * this interface is, and it does not need the other half to say so — an interface
+ * with one implementation, kept because every place a second one would answer
+ * differently already carries a comment saying which and why.
  *
  * What is **not** kept is a `kind` discriminant. It had no reader anywhere, and
  * an unread discriminant on the one interface that survived a runtime deletion is
@@ -178,6 +186,38 @@ export interface AgentAvailability {
   available: boolean;
   /** What to do about it when `available` is false. */
   hint: string | null;
+  /**
+   * Whether `deploy/agents.sh` is the remedy for this harness being unavailable.
+   *
+   * ⚠ **A strict subset of `!available`, and reading it as a synonym is the whole
+   * defect this field exists to prevent.** `AgentUnavailableError` is thrown for
+   * four different absences and the installer repairs exactly one — a built-in's
+   * *CLI* missing from PATH and from `MANAGED_CLI_DIRS`. A missing ACP adapter is
+   * a `pnpm install` problem on this checkout; an unknown harness id and one a
+   * plugin contributed but did not ship a binary for are somebody's decision, not
+   * something a download fixes. Offering to install any of those is a button that
+   * runs a script and changes nothing.
+   *
+   * ⚠ **The bit has existed on the error since the auto-resume pass needed it
+   * (`AgentUnavailableError.installable`), and this method threw it away** —
+   * keeping only `describeError(error)` as {@link hint}. So the daemon has always
+   * known "there is a script that can fix this" and told nobody, which is why
+   * `agentCard.ts` could offer no remedy beyond *"Install it on the machine
+   * itself."*
+   *
+   * ⚠ **`false` on the available arm, deliberately.** A harness that is there has
+   * nothing to install; this does not quietly become "offer a Reinstall button",
+   * which is a different control with a different argument.
+   *
+   * ⚠ **`server.ts` narrows it further before it reaches a client**, folding in
+   * whether this daemon will run an install at all — exactly as `loginSupportOf`
+   * folds `logins === null` into `blocked`. A row that said yes here and no there
+   * is a button that answers `503`.
+   *
+   * Required rather than optional, so a runtime that grows an arm and forgets
+   * this is a compile error rather than a silently un-installable harness.
+   */
+  installable: boolean;
   /**
    * Whether the agent is authenticated — with `null` for "could not tell".
    *
@@ -409,6 +449,33 @@ export interface SessionRuntime {
    * is spent, and `routedPairing`, which is the one place the question is answered.
    */
   launch(agent: AgentId, extra?: NodeJS.ProcessEnv, routed?: boolean): Promise<AgentProcess>;
+
+  /**
+   * The ACP `authenticate` method id to send for this launch, or `null` to send
+   * none.
+   *
+   * ⚠ **It is here rather than in `acp/client.ts` because the answer is a fact
+   * about the *environment*, and that is this interface's to know.**
+   * `ACP_AUTH_METHOD` names which id spends a pasted key for a harness;
+   * `resolveAgent` returns `env: agentEnv()` and the credential is merged by
+   * {@link launch} afterwards, so the table alone cannot say whether there is
+   * anything to spend. `AcpClient.launch` is still the one place the call is
+   * made — only the decision moved.
+   *
+   * ⚠ **Answering with an id when no key is present is a defect rather than a
+   * harmless extra round trip.** Measured 2026-09-21 on grok 1.0.40: the call
+   * answers `{}` either way, but it *selects* an API-key auth mode, so a machine
+   * signed in with `grok login` then sends `auth_kind=none` upstream and its
+   * first prompt comes back `-32603 "Internal error"`. Silence is what lets that
+   * machine use the credential it already has. Q6.110.
+   *
+   * @param routed Whether this session is about to be pointed at another
+   * system's endpoint. `true` means {@link launch} will withhold the harness's
+   * own pasted credentials, so there is by construction nothing for an
+   * `authenticate` to spend — the two answers must agree or the id names a key
+   * that is not in the environment.
+   */
+  authMethod(agent: AgentId, routed?: boolean): string | null;
 
   /**
    * The credential for one system, or `null` where none is stored.

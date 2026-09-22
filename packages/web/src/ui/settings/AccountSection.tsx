@@ -12,6 +12,7 @@ import * as cp from "../../cp";
 import { agentWasRecorded, describeAgent, deviceLine } from "../../device";
 import { errorText } from "../../http";
 import { mailUsable, type InstanceConfig } from "../../instance";
+import { nativeBoot } from "../../native";
 import { navigate } from "../../router";
 import { settingsLeafPath, settingsPath } from "../../settings";
 import { store } from "../../store";
@@ -107,7 +108,7 @@ export function AccountSection({
             its own password.
           */}
           <EmailRow me={me} config={config} />
-          <Devices />
+          <SignIns />
         </>
       )}
 
@@ -131,6 +132,8 @@ export function AccountSection({
        * "On the server too" rather than "everywhere": other devices keep their
        * sign-ins, and the Devices list above is where those are ended.
        */}
+      <ServerRow />
+
       <section className={SETTINGS_SECTION}>
         <h2 className={SETTINGS_HEADING}>Sign out</h2>
         <p className="mt-1 text-xs text-muted">Ends this sign-in on the server too.</p>
@@ -193,6 +196,60 @@ function FactRow({
       </span>
       <span className="shrink-0">{action}</span>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Which server this is
+ * ------------------------------------------------------------------ */
+
+/**
+ * The control plane this installation talks to, and the way to change it.
+ *
+ * **Immediately above Sign out, because they are the same kind of act.** Changing
+ * servers *is* signing out, plus a redirection: `host_set_server` erases
+ * `credential#<previous>` in the same act that adopts the next one, and
+ * `ChooseServer` clears this page's copy one line before that. Filed anywhere
+ * else it would read as a preference.
+ *
+ * **The second of the screen's two entrances**, the first being the control on
+ * the sign-in screen. Before both, `setNativeServer` had exactly one call site —
+ * `state.host.server === null` — so a server that had been chosen could not be
+ * changed from inside the app at all, and signing out did not help: `clearSession`
+ * deliberately leaves the server alone.
+ *
+ * ⚠ **Not a `SettingsLeaf`, and it must not become one.** A leaf is a *route*,
+ * `parseSettingsRoute` is shared with the web build, and every argument
+ * `ChooseServer`'s own docblock makes against a `Route` arm applies unchanged.
+ * `store.pickServer()` sets state and `App.tsx` returns the screen above
+ * `<AppShell>`, so the sheet is replaced rather than nested — which means Cancel
+ * puts it back exactly where it was, the URL never having moved.
+ *
+ * ⚠ **"Server address", not "Server".** The admin band already has a section
+ * called Server — registration, the domains, the machine limit — and two things
+ * called the same on one settings screen is the collision that gets tidied the
+ * wrong way. These answer different questions: *which* server, against *that
+ * server's* settings.
+ *
+ * Absent in a browser rather than disabled, which is `visibleSections`' idiom: a
+ * control that can never do anything on this client is not a control.
+ */
+function ServerRow(): ReactNode {
+  const server = nativeBoot()?.server ?? null;
+  if (server === null) return null;
+  return (
+    <section className={SETTINGS_SECTION}>
+      <h2 className={SETTINGS_HEADING}>Server address</h2>
+      <FactRow
+        value={<span className="truncate font-mono">{server}</span>}
+        subline="Changing it signs this computer out."
+        action={
+          <Button size="sm" onClick={() => store.pickServer()}>
+            Change
+          </Button>
+        }
+      />
+    </section>
   );
 }
 
@@ -548,8 +605,25 @@ function EmailForm({ onDone }: { onDone: () => void }): ReactNode {
  * **Inside Account rather than a section of its own** (decision 1B): every verb
  * here is a sign-out, and for an API-key credential the whole section is one
  * sentence — a rail row for that fails the subtraction test.
+ *
+ * ⚠ **This was called `Devices` and its heading said Devices, and neither is
+ * true any more.** A registered installation is now a real entity with its own
+ * section, and two things called Devices on one settings screen is the collision
+ * that gets tidied the wrong way — Q1.630's own argument, *"a session is a person
+ * signed in and listed under Devices"*, would have pointed at whichever the
+ * reader happened to open.
+ *
+ * **Decision 1B stands and only the name moved**, which is worth saying because
+ * the new section looks like it reverses it. That argument is about a *session*
+ * list whose only verb is sign-out; a device survives a sign-out, retiring one is
+ * a decision about a computer rather than a tab, and it carries retired rows and
+ * a limit this list has nothing to say about.
+ *
+ * Each row now prefers the **device's** name where the session has one, falling
+ * back to `device.ts`'s reading of the `User-Agent` where it does not — one was
+ * written by a person, the other is a guess at a header.
  */
-function Devices(): ReactNode {
+function SignIns(): ReactNode {
   const [rows, setRows] = useState<SessionRecord[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -575,13 +649,16 @@ function Devices(): ReactNode {
       // The number the server actually revoked, not the number this button
       // was labelled with — the list is a poll old, and `revokedCount` is
       // the answer to what just happened.
-      toast("ok", count === 1 ? "1 device signed out." : `${count} devices signed out.`);
+      // "sign-in", not "device": this ends sessions, and a device keeps working
+      // — it just asks for the password again. Saying "devices signed out" here
+      // beside a Devices section that retires them is two acts under one word.
+      toast("ok", count === 1 ? "1 other sign-in ended." : `${count} other sign-ins ended.`);
       refresh();
     });
 
   return (
     <section className={SETTINGS_SECTION}>
-      <h2 className={SETTINGS_HEADING}>Devices</h2>
+      <h2 className={SETTINGS_HEADING}>Signed in</h2>
       {/*
        * One placeholder row while the first listing is in flight, so the heading
        * never stands over nothing and the rows arriving do not shove Sign out
@@ -611,7 +688,7 @@ function Devices(): ReactNode {
         <>
           <div className="mt-2">
             {rows.map((row) => (
-              <DeviceRow key={row.id} row={row} onChanged={refresh} />
+              <SignInRow key={row.id} row={row} onChanged={refresh} />
             ))}
           </div>
 
@@ -642,7 +719,7 @@ function Devices(): ReactNode {
   );
 }
 
-function DeviceRow({ row, onChanged }: { row: SessionRecord; onChanged: () => void }): ReactNode {
+function SignInRow({ row, onChanged }: { row: SessionRecord; onChanged: () => void }): ReactNode {
   const [busy, setBusy] = useState(false);
   const now = Date.now();
   const ip = row.ip !== null && row.ip !== undefined && row.ip !== "unknown" ? row.ip : null;
@@ -659,7 +736,17 @@ function DeviceRow({ row, onChanged }: { row: SessionRecord; onChanged: () => vo
             className="min-w-0 truncate text-sm font-medium"
             title={agentWasRecorded(row.userAgent) && describeAgent(row.userAgent) === null ? (row.userAgent ?? undefined) : undefined}
           >
-            {deviceLine(row.userAgent)}
+            {/*
+             * The device's own name wins, and it is a different *kind* of fact
+             * from the fallback beside it. `deviceLine` reads a `User-Agent`,
+             * which is a claim a request makes about itself; a device name was
+             * written by somebody who had already signed in and appears in a list
+             * they can retire rows from. Neither is evidence — a stolen session
+             * can register a device and call it anything — but only one of them
+             * is a word this person chose, which is the whole question this list
+             * answers.
+             */}
+            {row.deviceName ?? deviceLine(row.userAgent)}
           </span>
           {/* Which row you are on is the one thing here that is certain, so it is
               the badge and not the title — the title is what the agent said. And

@@ -163,6 +163,49 @@ export function meansMachineGone(error: unknown): boolean {
 }
 
 /**
+ * Whether the daemon that answered is not the machine we thought it was.
+ *
+ * **The one code, and only the local route may act on it.** `src/auth.ts`'s
+ * `SignedTokenVerifier` answers `wrong_machine` when a token's `aud` names a
+ * different machine, and that is the *only* thing it can mean: every daemon trusts
+ * the same signing keys, so the audience claim is what stops one grant becoming a
+ * grant to the whole fleet. Arriving from loopback it means the file that named
+ * this machine is stale — a daemon re-enrolled, or a second one now on that port.
+ *
+ * ⚠ **A relay route may never read it**, and `machine.ts` guards on
+ * `route.kind === "local"` rather than on this predicate alone. Down the tunnel the
+ * relay has already derived the machine from the verified `aud` before a byte
+ * moved, so a `wrong_machine` from there would be the relay and the daemon
+ * disagreeing about a fact they share — a fleet-wide problem, not a reason for one
+ * client to stop using the only path it has.
+ *
+ * Kept apart from {@link meansMachineGone} deliberately, though both license
+ * dropping a route. That one means *this machine is unreachable* and the screen
+ * says so; this one means *reach it the other way*, and the screen shows nothing at
+ * all, because from the person's side nothing happened.
+ */
+/**
+ * The control plane will not mint a capability because this installation has not
+ * registered a device key.
+ *
+ * ⚠ **A refusal with a remedy the client can apply itself**, which is why it is
+ * a code of its own rather than a generic 409. It is what every installation that
+ * predates device keys sees on its first mint after the update, and what one sees
+ * after its credential store is reset — both are fixed by registering the key the
+ * shell already holds. `MachineConnection.mint` does exactly that, once.
+ *
+ * Keyed on the code and never the status, for `meansMachineGone`'s reason one
+ * function down: a status is shared by refusals that mean unrelated things.
+ */
+export function meansDeviceKeyMissing(error: unknown): boolean {
+  return ApiError.isApiError(error) && error.code === "device_key_required";
+}
+
+export function meansWrongMachine(error: unknown): boolean {
+  return ApiError.isApiError(error) && error.code === "wrong_machine";
+}
+
+/**
  * Whether a refused config change is the one the control already answered.
  *
  * **One code, and it has to be the code rather than the status** — the rule

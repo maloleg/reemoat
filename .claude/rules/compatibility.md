@@ -5,25 +5,43 @@ paths:
   - packages/control-plane/src/store.ts
   - packages/control-plane/src/schema.sql
   - packages/web/src/wire.ts
+  # The frame table, for the open question at the bottom of this file: it is the
+  # one vocabulary in the tree spoken between two independently shipped artifacts,
+  # and the section only does its job if it arrives when somebody opens the file
+  # they are about to add a frame type to.
+  - packages/protocol/src/frames.ts
 ---
 
 ## What may skew from what
 
-Three things ship on three schedules, and nothing coordinates them:
+Four things ship on four schedules, and nothing coordinates them:
 
 | Ships | When | Says what it is |
 |---|---|---|
 | control plane + relay | weekly, from a tag | `VERSION` in `app.ts`, on `GET /v1/instance` |
-| **the web client** | **with the control plane** — it is built into that image | nothing |
+| **the app** | **whenever its owner installs a build** — the whole client is compiled into the native binary, and it downloads no interface, ever | nothing |
 | a daemon | whenever its owner runs `deploy.sh` | `DAEMON_VERSION`, on the tunnel handshake and `GET /health` — and which build of each agent CLI it would launch, `AGENT_CLIS_HEADER`, on the handshake only |
 | **an agent CLI** | **whenever `deploy/agents.sh` runs — daily, by the daemon, with nobody pressing anything** | nothing of its own; the daemon announces it beside its version |
 
-**The web client shipping inside the control plane's image is the fact that
-decides everything else here.** A weekly deploy hands a new browser client to
-every user at once, while their daemons stay wherever they were. So *new client
-against old daemon* is not an edge case, it is the normal state of the fleet
-between Tuesday and whenever somebody updates their laptop. The rarer direction —
-a tab left open across a daemon update — is the one that was destructive.
+**Nobody can push a client any more, and that is the fact that decides everything
+else here.** It used to ride the control plane's image (`dist` in the Dockerfile,
+`REEMOAT_CP_WEB` to point at one), so a weekly deploy handed a new client to every
+user at once while their daemons stayed wherever they were: skew ran **one way**,
+*new client against old daemon*, and it was the normal state of the fleet between
+Tuesday and whenever somebody updated their laptop. That is gone. The image carries
+`dist-gate` alone — sign-up, the mailed-link screens, the legal documents and the
+handoff page — and the app is a binary somebody installs.
+
+So **both ends now move on their own owner's schedule, skew runs in either
+direction, and neither direction has a bound on it.** The direction that used to be
+nearly impossible is the ordinary one now: a months-old app against a daemon updated
+this morning, because the person who updated the daemon is the same person who has
+not opened the app's updater. It is exactly what rule 2 was written for — an unknown
+value must fail toward *keep working* — with the difference that there is no longer a
+weekly deploy quietly retiring the oldest clients in the fleet. ⚠ The one skew that
+is still *not* survivable is the relay protocol's, because a daemon that cannot dial
+in has no second door; that is rule 1's range, and raising its floor is rule 4's
+inventory.
 
 **The daemon still asks the control plane nothing** (Q1.9, Q1.10). Everything
 below is announced on a connection the daemon opens anyway, or read off a reply it
@@ -99,7 +117,11 @@ heard of: the session fell into `showsAsEnded` and `Composer.tsx` **took the
 composer off the screen for a conversation that was coming back**. It asks "is
 this a *final* reason?" now, so an unknown one keeps the composer. Same shape as
 `reemoat-enc` on the tunnel: an unrecognised value is one refused *stream*, never
-a dropped tunnel.
+a dropped tunnel — which is the property that let the encryption seam be spent
+with no protocol break at all. ⚠ **The flag day that *was* taken is a different
+thing and is the one exception to the rollout below**: `RELAY_PROTOCOL_MIN_VERSION`
+went straight to 2, because v2 is the version on which a stream is always
+encrypted and no range can span "plaintext HTTP" and "ciphertext". Q7.143.
 
 **3. The control plane's schema grows and never changes shape.**
 `applyControlPlaneSchema` is schema + `checkSchemaVersion` + `migrate`, in that
@@ -156,15 +178,24 @@ until you notice which way the call goes:
 |---|---|---|
 | A new relay protocol version | the relay, on the tunnel handshake | **control plane** |
 | A new route on the daemon (`/plugins`, …) | the daemon | **the daemons** |
+| **A new route or field the app will ask a daemon for** | the daemon | **the daemons** |
+| **A new field the app reads off the control plane** (`machine.key`, `legal.documents`, …) | the control plane | **control plane** |
+
+The last two are the same rule as the first two and are written out because the app
+is now a separately shipped artifact, which makes them a real question rather than a
+consequence of one deploy. An app build that asks for something no daemon answers
+yet is not broken — that is what rule 2 buys — but it is a feature every user is
+offered and nobody can use.
 
 ⚠ **"New client against old daemon is the normal state of the fleet" is a
 statement about what this system *tolerates*, and not a recommendation about what
 to choose.** Tolerating a skew and electing to create one are different acts, and
-reading the first as the second is exactly how a release ships the control plane
-— which carries the web client — ahead of the daemons that would have to answer
-it. The cost of getting it backwards is not breakage, because the client degrades
-by design: it is every user being offered a feature that answers *"update your
-machine"* for as long as the slowest owner takes to do it.
+reading the first as the second is how a release ships an app build ahead of the
+daemons that would have to answer it. The cost of getting it backwards is not
+breakage, because the client degrades by design: it is every user being offered a
+feature that answers *"update your machine"* for as long as the slowest owner takes
+to do it — and now, with no weekly deploy behind the client, for as long as **that
+app build is installed**, which is a window nobody at this end can close.
 
 Where **both** apply in one release the protocol half forces control-plane-first,
 and that is not a tie being broken by preference: a relay that cannot accept what
@@ -184,6 +215,46 @@ first, send-new second, with every host updated in between"*. There is now:
 3. Watch `cpctl admin fleet` until nothing is below the new version.
 4. Only then raise `RELAY_PROTOCOL_MIN_VERSION`, which is the act that cuts off
    whatever is left.
+
+## The open question: the inner frame protocol has no version between its two ends
+
+**`packages/protocol/src/frames.ts` is spoken between two artifacts that ship
+independently, and nothing on the wire says which version either of them is.** The
+app and the daemon are the two ends of a Noise session; the frame table
+(`HELLO`, `REQUEST`, `RESPONSE_BODY`, `SOCKET_MESSAGE`, …) is the whole vocabulary
+inside it. Both compile the same source file — at whatever commit each happened to
+be built from, which the section at the top of this page has just established can
+now be months apart in either direction.
+
+**There *is* a version string, and it is written by the party that speaks none of
+this protocol.** `STREAM_ENCRYPTION_NOISE_IK` is
+`noise-ik-25519-chachapoly-blake2s/1`, and `protocol.ts` argues correctly that the
+suite and the inner framing belong in one string, because a change to either is a
+disagreement about what the bytes mean. But that header is stamped onto the h2
+CONNECT by the **relay** (`relay/proxy.ts`), from the constant the *control plane's*
+image was built with, and the daemon refuses a value it does not know with a 501 on
+that one stream. So the pair it actually versions is relay ↔ daemon. The app never
+sends it, is never asked for it, and could not be refused by it.
+
+⚠ **And an unknown frame type is fatal in both directions**, which is this file's
+rule 2 pointing the other way. `src/e2ee.ts` answers `fail(400, "unexpected frame
+N")`, which ends the session; `packages/web/src/e2ee.ts`'s `default:` arm answers
+`fail(new Error(...))`, which ends the channel. Neither skips the frame it did not
+recognise — and that is *right* at this layer, because a frame carries a length and
+a body rather than a named field to ignore, and carrying on past one you cannot
+parse is a stream that has lost its own boundaries. The rule is not wrong here; it
+simply does not reach.
+
+**What is not decided is what to do about it, and this file does not decide.**
+Nothing is broken today: the union has only ever grown by addition, the app and the
+daemon in the field were built within a release of each other, and the frame table
+has never lost a member. What is written down here is the shape of the hole — one
+protocol, two independently shipped speakers, a version label owned by a third party,
+and a fail-closed reader at each end — so that whoever first adds a frame type is
+looking at it rather than discovering it. **Do not invent a negotiation for this on
+the strength of this section.** Rule 1 is the standing constraint on any answer: a
+version is negotiated or it is a label, never both, and something that sat unused
+would be neither.
 
 ## What is still a flag day, and is not fixed here
 

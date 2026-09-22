@@ -2,12 +2,12 @@ import { Suspense, lazy, useEffect, useState, useSyncExternalStore, type ReactNo
 import { clearRevokedKeyNotice, peekRevokedKeyNotice } from "./account";
 import { legalPublishable } from "./legal";
 import { isSheet, sheetTitle, sheetUpLabel, upFrom } from "./nav";
-import { navigate, parsePath, useOrigin, useRoute, useUnder, type Route } from "./router";
-import { setTelegramBack } from "./telegram";
+import { navigate, parsePath, useOrigin, usePathname, useRoute, useUnder, type Route } from "./router";
 import { sessionLists, store } from "./store";
 import { AppShell, NothingSelected } from "./ui/AppShell";
+import { ChooseServer } from "./ui/ChooseServer";
 import { ForcedPasswordChange } from "./ui/ForcedPasswordChange";
-import { Gate } from "./ui/gate/Gate";
+import { MenuDrawer } from "./ui/MenuDrawer";
 import { StartSheet } from "./ui/NewSession";
 import { Sheet } from "./ui/Sheet";
 import { SessionBrowser } from "./ui/SessionBrowser";
@@ -121,34 +121,47 @@ export function App(): ReactNode {
   // `under`'s and is unchanged. See `Location.origin` in `router.ts`.
   const origin = useOrigin();
   /*
-   * Telegram's own control, kept in step with the screen.
+   * The way *up* from a pop-up, computed once above every early return.
    *
-   * It draws **✕ Close** until a mini app asks for a back button and **‹ Back**
-   * once it has — so "Close on the list, Back inside a conversation" is
-   * `upFrom(...)` answering `null` at the root and a destination everywhere else.
-   * The same function the app's own leading control could be built from, because
-   * two back affordances that disagree is worse than one.
-   *
-   * An effect rather than a render-time call: this posts a message to another
-   * process, which is not something a render React may discard is allowed to do.
-   * Keyed on the destination string, so it fires when the *answer* changes rather
-   * than on every re-render — and `navigate` is stable.
-   *
-   * ⚠ **Above every early return in this component, and that is not style.** It
-   * sat below them at first, so a render that took the gate, the sign-out or the
-   * forced-password-change arm ran one hook fewer than the render before it —
-   * `Minified React error #310`, an error boundary, and the whole screen gone.
-   * Caught in a browser rather than by `typecheck`, which cannot see it. Every
-   * hook here belongs above line one of the branching.
+   * ⚠ **Above the branching, and that is not style.** It sat below at first, so a
+   * render that took the sign-out or the forced-password-change arm ran one hook
+   * fewer than the render before it — `Minified React error #310`, an error
+   * boundary, and the whole screen gone. Caught in a browser rather than by
+   * `typecheck`, which cannot see it. Every hook here belongs above line one of
+   * the branching, and `upFrom` is read by `LegalScreen` below.
    */
   const up = upFrom(route, under, origin);
-  useEffect(() => {
-    setTelegramBack(up === null ? null : () => navigate(up, true));
-    // Deliberately no teardown. There is one back button and one page; hiding it
-    // on unmount would be hiding it when the app is going away anyway, and a
-    // cleanup racing the next screen's effect is how it ends up hidden on a
-    // screen that wanted it.
-  }, [up]);
+
+  /*
+   * The menu drawer's open state, held here and threaded down as `onMenu`.
+   *
+   * ⚠ **React state and not a `groups.ts`-shaped module store**, which is the
+   * first thing to reach for in this package and is wrong here. Those stores
+   * exist on an argument `rail.ts` states plainly — *"this is a preference about
+   * the app rather than about a screen, and a component that unmounts must not
+   * take it with it"* — and that argument is **inverted** for this panel: the
+   * drawer should die when the screen changes, and surviving the phone's
+   * list → detail → back unmount is a liability rather than the point. It is
+   * also above every early return, for the reason `up` is.
+   *
+   * Two triggers open it — the phone's header row and the top of the desktop
+   * machine column — and they live in two different subtrees, which is what the
+   * prop is for.
+   *
+   * ⚠ **The effect is keyed on `usePathname()` and may not be keyed on `route`
+   * or on `background`.** Every destination in the drawer is an overlay path, so
+   * `background` does not change when a row navigates and a listener on it would
+   * fire never. What this buys, beyond a belt on the rows' own `onClose`, is the
+   * one thing a panel that is not a route cannot get for free: **Android's Back
+   * closes the drawer.** It closes it *and* navigates, which is one press doing
+   * two things — a known limitation recorded in `docs/DECISIONS.md` rather than
+   * a bug, and the price of not minting a `/menu` URL that is a dead end.
+   */
+  const [menu, setMenu] = useState(false);
+  const path = usePathname();
+  useEffect(() => setMenu(false), [path]);
+  const openMenu = (): void => setMenu(true);
+  const closeMenu = (): void => setMenu(false);
 
   /*
    * **The tab says how many sessions are waiting, and it is the only thing this
@@ -197,34 +210,54 @@ export function App(): ReactNode {
   }, [blocked]);
 
   /*
-   * **A URL somebody was mailed, above every phase.**
+   * **Which server this is, above everything — including the mailed links below.**
    *
-   * Above `signed_out` because that is the state on the *first frame* for the
-   * overwhelmingly common case — a reset link opened in a browser that has never
-   * signed in — so below it the reset screen would be unreachable in exactly its
-   * normal case. Above `loading` because a stale credential in `localStorage`
-   * makes `phase` `loading` before any request has been answered, and somebody
-   * clicking a link on the device whose session expired would watch a spinner
-   * for the full `CP_TIMEOUT_MS` while holding a short-lived token. And above
-   * the wall below, because somebody who cannot remember the temporary password
-   * cannot type it into a "current password" box — the link is their way out and
-   * it has to beat the wall.
+   * `state.host` is non-null only in the native shell, and `server === null` only
+   * until somebody has said which control plane this installation talks to. So this
+   * branch is **structurally unreachable in the web build**: there is no flag, no
+   * env var and no route that reaches it, because in a browser the server is the
+   * origin that served this page.
    *
-   * One branch and no predicate: `Gate` asks `gateOutranksSession` itself, where
-   * `webcheck` can import it. A predicate here would be a decision nothing
-   * asserts, which is what `settings.ts`'s own header forbids.
+   * **Two states, one screen.** `server === null` is first run; `pickingServer` is
+   * somebody asking to change it — from the sign-in screen's own control, or from
+   * Settings → Account with a live session behind it. The second is why this arm
+   * had to widen rather than stay a first-run branch.
    *
-   * ⚠ **That sentence was false for four releases and is now true.** The
-   * predicate existed, the driver asserted things about it, and *nothing read
-   * it* — `Gate` tested `!gateNeedsToken(screen)` directly, so the two agreed
-   * only because both said the same thing. Q3.598.
+   * Above the documents, because nothing on any screen below can be fetched until
+   * this is answered. `App` waits on `state.config` for a document route and
+   * `config` comes from `GET /v1/instance`, which needs a server — so below this,
+   * `/terms` would spin for ever. ⚠ **That was a sentence about a freshly
+   * installed app and is now a standing one**: with the picker reachable while
+   * signed in, "there is no usable config" is every frame it is open, not just
+   * the first ones after an install.
    *
-   * **A document sits beside the gate and above the same phases**, for a
-   * narrower reason than a mailed link: it has to answer at all with no
-   * credential, because the sign-up form links to it and because it is the URL
-   * somebody is given when they ask what the terms are. Order between the two is
-   * arbitrary — `parseLegalDoc` and `parseGateScreen` are asserted disjoint — and
-   * saying so here is cheaper than somebody deriving it again.
+   * Below every hook, which is the ⚠ two docblocks up: a render taking this arm must
+   * run exactly as many hooks as one that does not.
+   */
+  if (state.host !== null && (state.host.server === null || state.pickingServer)) return <ChooseServer />;
+
+  /*
+   * **A document, above every phase.**
+   *
+   * Above `signed_out` because that is the state on the *first frame* for
+   * somebody who has never signed in, so below it the documents would be
+   * unreachable in exactly their normal case. Above `loading` because a stale
+   * credential makes `phase` `loading` before any request has been answered, and
+   * somebody who asked what the terms are would watch a spinner for the full
+   * `CP_TIMEOUT_MS`. And above the wall below, because a contract is readable
+   * whether or not you owe a password change.
+   *
+   * ⚠ **This block used to be about a mailed link, and that half has moved off
+   * this bundle entirely.** `/confirm`, `/reset` and `/verify` are opened by a
+   * mail client, in a browser, and land on the control plane's own gate — the
+   * arm above records why there is nothing here to outrank any more.
+   *
+   * ⚠ **And nothing in this bundle links to a document now.** The consent line in
+   * the sign-up form was the only control that did, and that form is the
+   * browser's. The arm is kept because a document must still render where a
+   * `legal` route is parsed — the two parsers are asserted disjoint and the web
+   * build shares this file — but a reader who finds it should know it is reached
+   * by no control here rather than delete the wrong one.
    */
   if (route.name === "legal") {
     /*
@@ -258,7 +291,28 @@ export function App(): ReactNode {
     // Off: this address names nothing here, so it falls through to whatever `/`
     // would have drawn — the same answer every unknown path already gets.
   }
-  if (route.name === "gate") return <Gate screen={route.screen} state={state} />;
+  /*
+   * ⚠ **The gate arm is gone, and it took two screens with it rather than five.**
+   *
+   * `/register`, `/confirm`, `/forgot`, `/reset` and `/verify` are addresses the
+   * *control plane* serves, from `dist-gate`, over a closed list checked **before**
+   * the app's own fallback (`packages/control-plane/src/app.ts`). So no HTTP
+   * request anywhere has ever rendered this bundle's copy of them, and in the
+   * shell three of the five were unreachable outright — a mail client opens a
+   * link in a browser, and a Tauri window has no address bar. What this arm
+   * actually drew was the two screens `SignIn` itself created, client-side, with
+   * `navigate("/register")` and `navigate("/forgot")`.
+   *
+   * Those are anchors now, at the control plane's own origin: the system browser
+   * under the shell, a new tab elsewhere. So the app carries one sign-up form
+   * instead of two, one consent box instead of two, and one place to fix either.
+   *
+   * `Route` keeps its `gate` arm and `screenOf` keeps its case — deleting those is
+   * the eight-edits-and-a-case-table this file and `native-shell.md` both argue
+   * against, and the parse is what keeps `parseGateScreen` and `parseLegalDoc`
+   * assertably disjoint. A typed `/register` now falls through to `SignIn`, which
+   * is the answer every unknown path already gets.
+   */
 
   if (state.phase === "signed_out") {
     // An involuntary sign-out has its own sentence and wins over the revoke
@@ -304,10 +358,11 @@ export function App(): ReactNode {
 
   return (
     <>
-      <AppShell state={state} route={background}>
-        <Suspense fallback={<Waiting />}>{content(state, background)}</Suspense>
+      <AppShell state={state} route={background} onMenu={openMenu}>
+        <Suspense fallback={<Waiting />}>{content(state, background, openMenu)}</Suspense>
       </AppShell>
       {overlay && <OverlaySheet state={state} route={route} />}
+      <MenuDrawer state={state} open={menu} onClose={closeMenu} />
       <ToastHost />
     </>
   );
@@ -531,7 +586,11 @@ function Waiting(): ReactNode {
   );
 }
 
-function content(state: ReturnType<typeof store.getSnapshot>, route: Route): ReactNode {
+function content(
+  state: ReturnType<typeof store.getSnapshot>,
+  route: Route,
+  onMenu: () => void,
+): ReactNode {
   switch (route.name) {
     case "session":
       return <SessionView state={state} sessionRef={route.ref} />;
@@ -557,7 +616,7 @@ function content(state: ReturnType<typeof store.getSnapshot>, route: Route): Rea
            * boundary follows a different rule.
            */}
           <div className="h-full bg-ink lg:hidden">
-            <SessionBrowser state={state} />
+            <SessionBrowser state={state} onMenu={onMenu} />
           </div>
           <div className="hidden flex-1 lg:block">
             <NothingSelected state={state} />

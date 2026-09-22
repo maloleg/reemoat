@@ -151,6 +151,24 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- session that is meant to change after creation.
   ultracode        INTEGER,
 
+  -- What the agent was offering when it went: the config and the command list, as
+  -- one JSON blob. NULL for a session that never started an agent and for one that
+  -- is not coming back, which are the same honest value — there is nothing to
+  -- remember.
+  --
+  -- The one copy of agent state that outlives the process that learned it. The
+  -- argument is at `AgentStateMemory` in src/events.ts and the write gate is
+  -- `revivableByPrompt` in src/registry.ts; what makes it safe is that a wake
+  -- replays it through `Session.restoreConfig`, which drops anything the returning
+  -- agent no longer offers.
+  --
+  -- Nullable with no DEFAULT on `resume_gave_up`'s grounds, and in the DO UPDATE
+  -- clause on `ultracode`'s: it is a fact about the session that is meant to change
+  -- after creation. `SCHEMA_VERSION` does not move — a nullable column an older
+  -- daemon never selects is invisible to it, so a rollback keeps working, and such
+  -- a daemon simply draws the strip the way it did before.
+  agent_state_json TEXT,
+
   -- The SessionWorkspace record. The denormalized columns beside it exist so
   -- "which worktrees do I own" is one query rather than N blob parses.
   workspace_json   TEXT    NOT NULL,
@@ -520,4 +538,86 @@ CREATE TABLE IF NOT EXISTS agent_strip (
   rank          INTEGER NOT NULL,
   hidden        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (kind, ref)
+);
+
+
+-- The X25519 static key this machine is known by to an app that reaches it.
+--
+-- **The only key this daemon generates rather than learns.** That is why it is
+-- its own table instead of two more columns on `identity`: that row is described
+-- as *what this machine learned at enrollment, and the only thing it ever needs
+-- from a control plane*, and a key generated here falsifies both halves of the
+-- sentence. `identity` is also `CHECK (id = 1)` and this table has to hold more
+-- than one row — the live key plus every key ever retired — the same reason
+-- `signing_keys` is plural on the control plane.
+--
+-- ⚠ **`private_key` is the second recoverable secret in this file**, beside
+-- `identity.tunnel_key`, and it is a stronger one: the tunnel key proves which
+-- machine this is to a relay, while this one decrypts what an app sends. It sits
+-- in the same 0600 file in the same 0700 directory as the transcripts it
+-- protects, which is the same argument `identity.tunnel_key` already makes — a
+-- second file would be a second set of permissions to get right and no second
+-- protection. Anything that can read this file can already read the work.
+--
+-- ⚠ **At most one row may have `retired_at IS NULL`, and it is enforced — but
+-- not here.** The partial unique index `machine_keys_one_live` is created by
+-- `migrate()` in `sqlite.ts`, deliberately rather than by this file, because this
+-- file is one `exec` that runs *before* `claimDaemonLock` and before any repair.
+-- Two daemons racing on one file could once both mint a key (the lock was a read
+-- and then an unconditional write), so databases holding two live rows exist; a
+-- `CREATE UNIQUE INDEX` here would throw at schema load on exactly those files and
+-- the daemon would never start. The repair that has to precede it *retires a row*,
+-- which is destructive and must not run before the lock is claimed.
+--
+-- ⚠ **"Nothing *rotates* a key today" was true when this table was written and
+-- is not true now**, and everything this paragraph used to conclude rested on
+-- it. `retired_at` was added ahead of a rotation deliberately rather than
+-- speculatively — the column costs nothing, and a rotation that had to add it
+-- later would have to add it to a table a live daemon is reading — and the
+-- rotation that arrived is the case that argument was made for.
+--
+-- **Four things touch `retired_at`, not three.** `active()` filters on it,
+-- `retire()` and `migrateMachineKeysToOneLive` write a timestamp into it, and
+-- `promote()` in `sqlite.ts` — the dial's answer to a 409 — writes both halves:
+-- it retires every other live row and then writes `retired_at = NULL` back onto
+-- the candidate, which makes it the only writer in this tree that *un*-retires
+-- anything. That is what makes a retirement reversible by code rather than only
+-- by hand, and it is why a retirement keeps the row: `promote` needs the private
+-- half of a key that was taken out of the answer.
+--
+-- **What the rotation moved is which key is announced, not how many are live,
+-- and that distinction is why this index stays.** A rotation in the full sense
+-- would mean an *overlap* — announce the new key, keep answering on the old
+-- until no app offers it — and nothing in this build can answer on two statics
+-- at once: `scripts/daemon.ts` hands the tunnel one static, and the 409 arm
+-- swaps the public and private halves together rather than holding two pairs. So
+-- the overlap is still something a rotation would have to **add**, and it would
+-- still have to remove this index to get it.
+--
+-- ⚠ **"A 409 on every dial, for ever" is no longer what a second live row costs,
+-- and that sentence was the whole justification written here.** The rotation
+-- recovers from exactly that state — it is what it exists for — so the index can
+-- no longer be argued for as the only thing standing between a file and a
+-- permanently dark machine. What a second live row still costs is smaller and is
+-- real: `active()` orders `created_at DESC`, so it answers the *later* key, which
+-- is the one trust-on-first-use never pinned; every start then announces a key
+-- the control plane will refuse, and the machine is reachable only after a 409
+-- and a redial that promotes the row which should have been live all along. A
+-- recoverable wrong answer is still a wrong answer, and this index is what stops
+-- the state being created instead of cleaned up after.
+--
+-- A new table, so `SCHEMA_VERSION` does not move: this file is
+-- `CREATE … IF NOT EXISTS` and is re-applied on every open. The index does not
+-- move it either: an older daemon inserts here only when it has no live key, so
+-- it can never reach the constraint.
+CREATE TABLE IF NOT EXISTS machine_keys (
+  -- base64url(sha256(RFC 7638 thumbprint of the public JWK)). Derived rather
+  -- than random, so the same key is the same id wherever it is named — which is
+  -- what lets an operator compare what the daemon logged with what `cpctl`
+  -- prints, by eye.
+  kth         TEXT PRIMARY KEY,
+  public_key  TEXT    NOT NULL,
+  private_key TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL,
+  retired_at  INTEGER
 );

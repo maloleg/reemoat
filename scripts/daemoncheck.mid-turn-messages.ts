@@ -295,7 +295,7 @@ process.stdout.write("\na message sent while the agent is working\n");
     class MidTurnRuntime extends LocalRuntime {
       override async availability(): Promise<AgentAvailability[]> {
         return [
-          { id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null },
+          { id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null },
         ];
       }
       override describe(agent: AgentId): AgentLaunchConfig {

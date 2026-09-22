@@ -65,13 +65,18 @@ await import("./webcheck.interrupted-and-spawn-routes.js");
 await import("./webcheck.history-and-cursor.js");
 await import("./webcheck.elicitation-and-links.js");
 await import("./webcheck.accounts-and-credentials.js");
+await import("./webcheck.devices.js");
+// Beside the credential section, because it is the same subject through a second
+// transport — and above `closeWss()`, which is where the socket-driving sections end.
+await import("./webcheck.native-bridge.js");
 await import("./webcheck.agent-card.js");
+await import("./webcheck.agent-install.js");
 await import("./webcheck.settings-routing.js");
 await import("./webcheck.shell-and-enrollment.js");
 await import("./webcheck.gate-and-server-settings.js");
 await import("./webcheck.legal-and-consent.js");
 await import("./webcheck.machine-limit-and-probe.js");
-await import("./webcheck.navigation-and-telegram.js");
+await import("./webcheck.navigation.js");
 closeWss();
 await import("./webcheck.plugin-protocol.js");
 await import("./webcheck.plugin-consent.js");
@@ -83,6 +88,8 @@ await import("./webcheck.strip-order-and-hidden.js");
 await import("./webcheck.refusing-controls.js");
 await import("./webcheck.harness-and-systems.js");
 await import("./webcheck.model-list.js");
+await import("./webcheck.local-route.js");
+await import("./webcheck.e2ee.js");
 await import("./webcheck.typography.js");
 
 finish();

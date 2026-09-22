@@ -151,6 +151,15 @@ services:
   control-plane:
     <<: *cp-common
 
+    # ⚠ **There is no browser UI to mount, and the variable that named one is
+    # deleted.** A commented bind mount lived here for an operator who wanted to
+    # build `packages/web` on the host and serve it beside the API. That stopped
+    # being a trade worth offering: a browser holds no device key, so it cannot
+    # open an encrypted channel to a daemon — it could load the app and reach no
+    # machine at all. The Reemoat app carries its own interface and is the only
+    # client. The **gate** — sign-up, the mailed-link screens, the legal
+    # documents — is in the image and served unconditionally.
+
     environment:
       # **The in-container bind, pinned.** Measured: `environment:` wins over
       # `env_file:`. So a REEMOAT_CP_HOST left over in the operator's file — and
@@ -186,6 +195,17 @@ services:
       # *carried* from the env file, because a fleet whose daemons enrolled
       # against a non-default issuer checks `iss` against exactly that value.
       REEMOAT_CP_DB: "/var/lib/reemoat/control-plane.db"
+      # No browser UI, and **`:-` rather than a pin**, which is the one difference
+      # from the three above it.
+      #
+      # Those are pinned because an operator's value would be *wrong*: a loopback
+      # bind inside a namespace is unreachable by anybody, an embedded relay here
+      # binds a port nothing publishes, and a relocated database is a fresh one
+      # with a new signing key. This is a **preference**, and one the volume below
+      # exists to let somebody exercise — so it defaults off and gets out of the
+      # way rather than beating the env file, which is `environment:`'s measured
+      # behaviour and the reason every other line here is a pin.
+      #
 
     ports:
       # ------------------------------------------------------------------

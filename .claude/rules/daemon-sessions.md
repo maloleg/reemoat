@@ -34,7 +34,7 @@ left, and a fresh agent worked four minutes later. Q7.103.
 **A session reads as stopped only when somebody stopped it.** Everything else the
 daemon ended it brings back by itself, on the same conversation, at the next boot,
 over ACP's `session/resume` — which restores the agent's own context without
-replaying anything, and which all four agents advertise. Q2.1, Q2.106. opencode's
+replaying anything, and which all five agents advertise. Q2.1, Q2.106. opencode's
 is read off `initialize` (Q6.105) rather than driven with a real login, which is
 the same standing this claim had for codex before it was exercised.
 
@@ -50,10 +50,11 @@ deletable; and **a message is the only way back**, an exclusion rather than an
 omission, `canResume` being satisfied by both its clauses. It draws as an ordinary `idle`
 session and says nothing — explicitly, since the fallthrough says `ended` — but
 **Stop stays offered**: `stop()` memoises, so without an override a person
-pressing it got `200` and no change. Its **controls and its `/` menu stay live** —
-parking is the one stop keeping `agentConfigState` *and* `agentCommands`, so a tap
-is *recorded* and applied by `doResume`, never a wake, and no empty command menu
-gives it away. Q2.224, Q2.228.
+pressing it got `200` and no change. Its **controls and its `/` menu stay live**, so
+a tap is *recorded* and applied by `doResume`, never a wake. ⚠ **And not only a
+parked one**: `revivableByPrompt` gates the keeping, the tap and
+`agent_state_json`, so every such stop keeps both across a restart. Q2.224,
+Q2.229.
 
 **The rule is `autoResumable`, a `switch` over `ExitReason` with no `default`
 arm**, so adding a reason is a compile error rather than a silent `false`:
@@ -257,6 +258,20 @@ the failure the exported guard exists to prevent. What it cost while missing:
 plugin hook never fanned, and the turn's origin claim was never spent, so the
 plugin that started it had the *next* turn's hook suppressed instead. Q2.218.
 
+**A turn nobody answers ends anyway.** `running` is `turn !== null`, and `turn` is
+cleared only by a `turn_end` the unbounded `session/prompt` produces — so an adapter
+that stops answering pinned a session at *working* for the daemon's life, invisible
+to `cancel` and to every sweep. `wedged` decides, `abandonWedgedTurns` runs on
+`idlepark.ts`'s clock, `Session.abandonTurn` writes `turn_end{abandoned}`
+**locally**: the agent is not stopped, not told, and what it says later still lands
+through the drain. ⚠ Three traps, all of them easy to leave out and each a worse bug
+than the one fixed: `turnActive` must be cleared by hand or every later message
+throws *"already in flight"*; the outstanding request's callbacks must be fenced on
+`promptEpoch` or a late answer ends the turn running by then; and
+`withAbandonableDeadline` may not be used — it reclaims nothing from a silent peer
+and `session/prompt` is the one method whose `ctx.signal` an adapter honours, so it
+would abort the agent's work. Q2.231.
+
 **The turn ending is not the agent stopping.** `session/prompt` resolves while claude
 drives work it has spawned and `Session.prompt`'s generator returns on `turn_end`, so
 everything the agent emits afterwards goes into an `EventQueue` with no consumer —
@@ -436,19 +451,10 @@ for it stays. Q7.113, Q2.228.
 
 ## Bounds
 
-| | |
-|---|---|
-| Event log | **Unbounded per session.** 128 KiB per event (truncated visibly at the store boundary). What bounds the database is whole sessions, `prune()` at startup — the next row, every id reported. Q2.222. That bounds **rows**; bytes, by `reclaim()`, which `VACUUM`s once a quarter of the file is free |
-| Sessions on disk | Inactive — ended by a person or the agent, never started, or given up on; never a live, daemon-ended or **parked** row (Q2.224) — idle 7 days / 200 of them; never under 50. `GET /sessions` unbounded by default, takes `?limit=`, reorders blocked-first so a cut drops only rows nobody waits on |
-| Sessions running | **64 live, and 16 creations then one per 2 min.** Both are needed: the ceiling bounds what is running, the burst bounds create-and-stop, which walks past a ceiling while still writing the rows the prune deletes. **It releases rather than refuses** — a wake *or* a create takes the least recently used **idle** slot, by need rather than by the sweep's age; with none to take a wake goes one over, a create answers `429` before the cwd is resolved. So it counts **agents resident**. In memory; `REEMOAT_MAX_LIVE_SESSIONS` moves it. Q2.100, Q2.224 |
-| Idle agents | **Released after 30 min of quiet**, on by default — never while claude reports live background work (Q2.228). `REEMOAT_IDLE_PARK_MINUTES` moves it, `0` switches off the sweep *and* the eviction. Swept once a minute. Q2.224. A value saved on the machine's settings screen (`PATCH /settings`) **overrides** the variable, without a restart: config is still env only, this is the narrower class the *user* owns. Q2.225 |
-| WS outbound queue | 8000 events / 16 MiB, with **`ATTACH_REPLAY_MAX` 2000** under the *event* half only — at 128 KiB an event a full replay is 250 MiB, so the byte ceiling still collapses an attach and reports the same `lagged{backlog}` rather than `slow_consumer`. The socket is bounded, the transcript is not |
-| `Session.EventQueue` | 2000, evicting only `agent_log`/`other`. Never drop-oldest: dropping `text` or `file_change` yields a contiguous log missing content. **What it bounds is narrow**: a `ManagedSession` attaches a reader between turns, so the unread window is the gap between `adopt` and `onStarted`, plus any bare `Session` (`harness`, the Session-level drivers) where nothing drains between turns at all. Q2.104 |
-| Timeouts | start 45s, shutdown budget 20s, cancel-send 1s, session/close 2s, cancel grace 5s **on a dispose** and 1.5s on a turn somebody stopped (what follows the first is SIGKILL, and what follows the second is nothing), exit grace 3s, WS ping 20s, enrollment 15s |
-| Agent stderr | 64 KiB per line without a newline, flushed as its own line past that. Every bound downstream is on the *event*, which does not exist until a line does. Q2.101 |
-| Session title | 120 chars from a rename, 60 for the derived one. Same reason |
-| Auto-resume | 3 attempts per session per **daemon life** (in memory, so a restart tries again — a restart is new information). 2 agents at once. Backoff 2s→60s, **full** jitter. Failure on the snapshot capped at 64 chars of code and 512 of message |
-| Shutdown | 20s graceful, then a **bounded** 3s parallel SIGKILL sweep, inside `daemon.ts`'s 25s hard exit |
+Every number this daemon holds — the log, the prune, the live ceiling, the idle
+sweep, the timeouts, a silent turn — is `daemon-bounds.md`, which arrives on the
+same globs as this file. It is a file of its own because this one reached
+`MAX_RULE_CHARS`, and that constant's docblock says what to do about it.
 
 ## Known gotchas
 

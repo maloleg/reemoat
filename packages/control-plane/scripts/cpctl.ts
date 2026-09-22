@@ -49,6 +49,10 @@ const USAGE = `cpctl — drive the Reemoat control plane
   passwd                                    change your own password
   key                                       mint yourself an API key
   keys [--revoke <keyId>]                   your API keys, and how to retire one
+  devices [--revoke <deviceId>]             the apps signed in to this account. Retiring one ends
+                                            its sign-ins and touches no other device. There is no
+                                            way to register one here: an API key has no session
+                                            for a device to belong to
   email [<address>]                         your address; setting one sends a confirmation
   me                                        who this credential belongs to
   machines                                  machines you may reach
@@ -123,6 +127,15 @@ const USAGE = `cpctl — drive the Reemoat control plane
                                             machine that is enrolled and has an owner or grantees:
                                             redeeming replaces their daemon rather than reading it,
                                             so its owner mints their own with 'cpctl enroll' 
+  admin clearkey <machineId>                forget the encryption key pinned for a machine, so its
+                                            next dial pins the one it announces. The way out of a
+                                            daemon that dials for ever and never connects because
+                                            it announces a key this service pinned a different one
+                                            for — a restored backup, a wiped ~/.reemoat. On a daemon
+                                            new enough to send its key, re-enrolling does this by
+                                            itself; this is for the ones already out there.
+                                            ⚠ Nothing reaches that machine between this and its
+                                            next dial: there is no unencrypted mode
   admin revoke <machineId>                  revoke a machine
   admin relay                               tunnels connected, and how much each carried
   admin fleet                               what every machine is running, connected or not —
@@ -649,6 +662,62 @@ async function main(): Promise<void> {
           out(`${key.id}  ${key.prefix}…  ${(key.revokedAt === null ? "live" : "revoked").padEnd(7)}  ${usedText(key.lastUsedAt)}`);
         }
         out("Retire one with: cpctl keys --revoke <id>");
+      });
+      return;
+    }
+    /*
+     * The installations signed in to this account, and retiring one.
+     *
+     * **A read and a revoke, and deliberately no way to register.** The route
+     * that registers refuses an API key outright — a device is a *signed-in
+     * installation*, a key has no session for one to hang off, and this command
+     * is the thing that holds keys. So the list here is an operator's view of a
+     * table somebody else writes, which is `keys`' shape pointed the other way.
+     *
+     * Retiring one from here is the remedy when the app itself is the thing you
+     * have lost, which is exactly the case a terminal is for.
+     */
+    case "devices": {
+      const retire = values.revoke;
+      if (typeof retire === "string") {
+        const body = await api<{ revoked: boolean; sessionsRevoked: number }>(`/v1/me/devices/${retire}`, {
+          method: "DELETE",
+        });
+        show(body, () => {
+          out(`retired ${retire}`);
+          out(`${body.sessionsRevoked} sign-in(s) on it were ended. Other devices are untouched.`);
+        });
+        return;
+      }
+      const list = await api<{
+        devices: {
+          id: string;
+          name: string;
+          platform: string;
+          lastSeenAt: number | null;
+          revokedAt: number | null;
+          current: boolean;
+        }[];
+        limit: number;
+      }>("/v1/me/devices");
+      show(list, () => {
+        if (list.devices.length === 0) {
+          out("no devices. One is registered when you sign in from the app.");
+          return;
+        }
+        for (const device of list.devices) {
+          // The retired rows are listed rather than filtered, for the route's
+          // own reason: "was that laptop retired, and when" is the question this
+          // gets asked for, and a list one row shorter cannot answer it.
+          const state = device.revokedAt === null ? "live" : `retired ${new Date(device.revokedAt).toISOString()}`;
+          const seen = device.lastSeenAt === null ? "never used" : `last seen ${new Date(device.lastSeenAt).toISOString()}`;
+          out(
+            `${device.id}  ${device.name}  ${device.platform.padEnd(8)}  ${state.padEnd(34)}  ${seen}` +
+              (device.current ? "  (this one)" : ""),
+          );
+        }
+        out(`${list.devices.filter((d) => d.revokedAt === null).length} live of ${list.limit} allowed.`);
+        out("Retire one with: cpctl devices --revoke <id>   (its sign-ins end; no other device is touched)");
       });
       return;
     }
@@ -1547,6 +1616,47 @@ async function admin(args: string[]): Promise<void> {
         out("Start the daemon on that machine with:");
         out(enrollmentLines(body.controlPlaneUrl ?? "", body.code));
         out(`# single-use, expires ${new Date(body.expiresAt).toISOString()}`);
+      });
+      return;
+    }
+    /*
+     * The one repair in this file, and it is a repair rather than a policy.
+     *
+     * Its own verb rather than a flag on `setmachine`, which renames and is
+     * documented as touching nothing else: this changes what an app is told to
+     * expect from a machine, and a rename that could do that by accident is a
+     * flag away from somebody losing a fleet's reachability with a typo.
+     */
+    case "clearkey": {
+      const machineId = rest[0];
+      if (!machineId) fail("usage: cpctl admin clearkey <machineId>");
+      const body = await api<{ machineId: string; cleared: boolean; previousKey: string | null }>(
+        `/v1/admin/machines/${machineId}/machine-key`,
+        { method: "DELETE" },
+      );
+      show(body, () => {
+        /*
+         * "Nothing was pinned" is a different sentence rather than a failure, for
+         * the route's own reason: the operator asked for this machine to have no
+         * pin and it has none. Saying so stops them going looking for a second
+         * lever that does not exist.
+         */
+        if (!body.cleared) {
+          out(`${body.machineId} had no encryption key pinned — nothing to clear.`);
+        } else {
+          out(`cleared the encryption key pinned for ${body.machineId}.`);
+          // The only time this is ever printed anywhere. Nothing else in this
+          // service reports a pin, so an operator who wants a record of what was
+          // there has this line and no other chance at it.
+          out(`  was ${body.previousKey ?? ""}`);
+        }
+        out("Its next dial pins whatever it announces, so start or restart that daemon now.");
+        // Said even when nothing was cleared: an operator who ran this is in the
+        // middle of a machine that will not connect, and the window is the part
+        // that surprises people.
+        out("Until that dial nothing can reach it — a token minted now carries no key,");
+        out("and there is no unencrypted mode to fall back to. Sessions already open are");
+        out("unaffected: the key is read when a token is minted and never again.");
       });
       return;
     }

@@ -130,11 +130,14 @@ an unrelated reason. Q2.22.
 an over-long option value, an unknown property type or an over-large projected total
 refuses the whole elicitation naming the cap. A form missing a question is not a
 smaller form (its answer *means something different*) and an option value
-round-trips to the agent. ⚠ **Prose used to be clipped and is not any more**: with
-several questions on one form the adapter puts each *question* in its field's
-`description`, so a 300-character cap was a cap on the sentence somebody is being
-asked to answer — measured, one real option description was 318 characters and was
-being cut. The 32 KiB byte total is the only bound left. `pattern` is dropped at
+round-trips to the agent. ⚠ **Prose *on the form* used to be clipped and is not any
+more**: with several questions on one form the adapter puts each *question* in its
+field's `description`, so a 300-character cap was a cap on the sentence somebody is
+being asked to answer — measured, one real option description was 318 characters and
+was being cut. The 32 KiB byte total is the only bound left *there* — ⚠ **`message`
+is not on the form**, so nothing weighed it at all until its 0.3.0 clip came
+**back** at 4096 in 0.9.1 (`MAX_ELICITATION_MESSAGE_CHARS`): a reversal, forced by
+the permanent stall an unshrinkable ~1 MiB question causes. `pattern` is dropped at
 ingest: an agent-chosen regex run here is a ReDoS on the event loop, and carrying it
 only moves the hazard into a tab. Q2.23, Q2.214.
 
@@ -219,15 +222,9 @@ handed the tool. Q2.28.
   prose is charged a flat 192 bytes against the byte budget and never truncated,
   silently and with the compiler agreeing. Do not reintroduce a `default` to quiet
   the error that adding a member causes; add the arm. Q5.65.
-- **The login command is a table lookup, never a request field.** There is no route,
-  body field or header anywhere that names a program to run — so "a caller cannot
-  run code of their choosing as the daemon" is a property of there being nothing to
-  pass. This daemon is reachable from the internet through the relay.
-- **The login probe runs with the pasted credential in its environment.** The whole
-  asymmetry rests on it: a clean `false` from `claude auth status` is believed over
-  a pasted token, and "cannot tell" falls back to it — only honest if the CLI has
-  *seen* the token. Without it a wrong token reports `loggedIn: true` and the first
-  session answers `502 agent_auth_required`. Q5.67.
+- **The login command is a table lookup, never a request field**, and **the probe
+  runs with the pasted credential in its environment**. Both moved to
+  `agent-login.md`, which owns how a credential reaches an agent. Q5.67.
 
 **The client**
 
@@ -276,7 +273,7 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
 | Permission payload | 8 KiB each for `rawInput` and `content`, and **8 KiB over `{title, options}` together** (`MAX_PERMISSION_SNAPSHOT_BYTES`) — far below the per-event cap because all of it rides the snapshot. **24 options**, `optionId` 256. **Every one is a refusal now** (`invalidParams` to the agent): an `optionId` round-trips verbatim, so a clipped one is an answer the agent cannot recognise, and the two 200-character clips on `title` and an option `name` went in 0.3.0 — that name is a model-written *answer* wherever kimi asks a question down this channel, and clipping it broke `askedQuestion`'s identity match against the unclipped `rawInput`. Q7.82, Q2.214 |
 | Tool call locations | 64 per event, 1024 chars each, **and counted** — `estimateBytes` must charge for `locations` and `toolCallId`, since the per-event cap, the per-session byte budget and `MAX_QUEUE_BYTES` all read that number rather than the payload. Q7.83 |
 | Agent commands | 256 per session; 64 chars of name, 200 of description, 100 of hint, clamped at **ingest**. **The name cap is a refusal and the other two are truncations** — a command is invoked by *sending* `/<name>`, so a clipped name is broken rather than shorter. What is cut is *counted* into `dropped`, and the menu draws that count. Off the snapshot; only `commandsRevision` rides the poll. The hint cap sits *above* the longest real hint on purpose: a bound set to the largest thing you have seen clips the next one. Q6.18 |
-| Elicitation form | 24 fields, 24 options per field, **32 KiB** projected total, option value 512 — all four **refusals**, and now the only bounds there are. **Prose is carried whole**: the 512/100/300 clips on `message`, a title and a description went in 0.3.0, because with several questions on one form the *question* is the field's description. 32 KiB rather than a permission's 8 because the form does **not** ride the snapshot. An answer over 2048 chars is refused on the route, never cut. Q2.214 |
+| Elicitation form | 24 fields, 24 options per field, **32 KiB** projected total, option value 512 — all four **refusals**. **Prose on the form is carried whole**: the 100/300 clips on a title and a description went in 0.3.0, because with several questions on one form the *question* is the field's description. `message`'s 512 came **back** at 4096 in 0.9.1, it being no field of the form. An answer over 2048 chars is refused on the route, never cut. Q2.214 |
 
 ## Known gotchas
 
@@ -405,13 +402,27 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
 - **kimi intercepts an unknown slash command; claude forwards it.** This client does
   not paper over it: an unmatched `/foo` is sent as typed, because the cached list
   can lag what the agent accepts. Q6.19.
-- **ACP has `session/authenticate` and this daemon never calls it.** Gemini offers
-  four `authMethods` and expects the client to pick one; any future agent support
-  has to decide whether to drive it. Q6.20. opencode advertises one too
-  (`opencode-login`, described as "Run `opencode auth login` in the terminal"),
-  and ⚠ **is not signed in at all** — `AGENT_LOGIN.opencode.args` is `null` and no
-  pty is ever allocated for it, which this line claimed the opposite of for two
-  releases. Q6.105 is the measurement: it completes a turn with no credential.
+- **ACP's `authenticate` is called now, for one harness — and only when there is a
+  key to spend.** Sending it with none does not merely fail: it **selects** an
+  API-key auth mode, so a machine signed in by `grok login` answers the first
+  prompt `-32603 "Internal error"` with `auth_kind=none`. `ACP_AUTH_METHOD` names
+  *which id spends a pasted key*; `SessionRuntime.authMethod` answers *whether
+  there is one*, and sits there because only the layer that builds the environment
+  can see it. `AcpClient.launch` is still the single call site, so none of the
+  three launch paths can drop it (Q2.215). The measurement, and why Q6.20's premise
+  was half of one, is `agent-login.md`'s. Q6.110, Q6.111.
+- **grok publishes two controls and both are doors this daemon already drives** —
+  `model` under `category: "model"`, `reasoning_effort` under `thought_level`,
+  opencode's spelling — with **bare** ids, so `SYSTEMS.xai` needs no
+  `nativeModelPrefix`. `session/load` republishes them. ⚠ **It must never be spawned
+  with `--always-approve`** (alias `--yolo`, also `_meta.yoloMode`): it runs every
+  tool without asking, so every permission card would stop appearing with nothing
+  failing. ⚠ **`--no-auto-update` is not optional either** — it updates itself in the
+  background when it runs, and `src/agentupdate.ts` owns when a build moves here.
+  ⚠ **And it publishes no `mode` at all, in any session** — `configOptions` is those
+  two and `modes` is absent. What the composer does with that is
+  `web-composer.md`'s. Q6.109, Q6.111.
+  Q6.109.
 - **`session/set_config` and `session/set_config_option` are different methods,
   and only the second is this daemon's.** opencode answers `-32601` to the first
   and implements the second — so an upstream issue closing "per-session model
@@ -419,21 +430,13 @@ codex supersedes the first and abandons a live turn. `mid-turn-messages.md`, Q6.
   instead of running the binary would have bought a whole new environment-based
   model door that is not needed. Q6.105.
 - **⚠ opencode's options do *not* arrive in two waves, and the note that said so
-  was an inference from one model.** `thought_level` is published for a model that
-  has levels and omitted for one that does not — at `session/new` exactly as in
-  every answer after it. Re-measured 2026-08-27 on 1.18.23 with one OpenRouter key,
-  three probes: `set_config_option` on the **mode** of a session running
-  `openai/gpt-5` returns `thought_level` untouched beside it, so an answer is a
-  full option list rather than a delta about the option that was set; with a
-  project `opencode.json` naming that model, **`session/new` itself carries the
-  control**; and `openai/gpt-5` answers `Minimal/Low/Medium/High` while
-  `minimax/minimax-m3`, `deepseek/deepseek-r1` and opencode's own default
-  `opencode/big-pickle` answer with no effort control at all. So the model decides,
-  exactly as it does on claude — the only difference is that opencode never
-  publishes the control rather than withdrawing it. **The old wording matters
-  because a client cannot tell "wave one is incomplete" from "this model has no
-  levels", and it would have to refuse to say anything if the first were true.**
-  Q3.518 is what the strip does with the answer. Q6.105.
+  was an inference from one model.** An answer is a **full option list**, never a
+  delta about the option that was set, and `thought_level` is published for a model
+  that has levels and omitted for one that does not — at `session/new` exactly as
+  in every answer after it. So the model decides, exactly as on claude; the only
+  difference is that opencode never publishes the control rather than withdrawing
+  it. The three probes that settle it, and why the old wording would have made the
+  effort slot a lie, are in Q6.105; Q3.518 is what the strip does with the answer.
 - **opencode is the one agent whose control vocabulary needs reconciling twice.**
   It calls the mode control `Session Mode` where the other three call it `Mode`,
   and it publishes its mode *choices* in lower case (`build`, `plan`) where the

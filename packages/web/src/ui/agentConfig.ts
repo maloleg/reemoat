@@ -150,10 +150,17 @@ export function labelFor(option: Pick<AgentConfigOption, "category" | "name">): 
  * chip drawn from a memory may be read and may not be tapped, because there is
  * nothing on the other end to accept the change.
  *
- * The three arms, in the order they are tested: a live agent that published
- * something is drawn; a live agent that published nothing draws nothing, because
- * an agent with no controls is a fact rather than a gap; and only when there is
- * no agent at all does the memory stand in.
+ * ⚠ **Four arms now, and the second one is a reversal rather than a gap being
+ * filled.** This read "a live agent that published nothing draws nothing, because
+ * an agent with no controls is a fact rather than a gap"; it goes through
+ * `withUnusable([], [], false, false)` and gets the three `ALWAYS_DRAWN`
+ * placeholders, so
+ * the strip keeps its shape. The order they are tested:
+ *
+ *   - a live agent that published something — drawn, plus any withdrawn slots;
+ *   - a live agent that published nothing — the standard slots, unavailable;
+ *   - no agent, with a memory — the memory plus slots, `stale: true`;
+ *   - no agent and nothing remembered — placeholders alone, `stale: false`.
  */
 export interface DrawnControls {
   options: readonly AgentConfigOption[];
@@ -172,72 +179,103 @@ export interface DrawnControls {
    * for: "the agent is not offering this" and "there is no agent" are different
    * sentences and `stale` is already the second one. What it does hold beside a
    * withdrawn control is a select the agent published with nothing in it, and the
-   * one slot this client keeps for itself — see {@link NO_LEVELS}. Both are the
+   * one slot this client keeps for itself — see {@link placeholderFor}. Both are the
    * same fact as a withdrawal, arriving by a different door, and a strip drawn
    * from memory keeps the slot for exactly the reason it keeps every other one.
    */
   unavailable: ReadonlySet<string>;
+  /**
+   * Of the slots in {@link unavailable}, the ones this agent will never offer.
+   *
+   * ⚠ **A strict subset, and the pair is "why is this empty" split in two.**
+   * `unavailable` says a control cannot be used right now; this says the agent has
+   * already answered with a configuration that does not contain it, so it is not
+   * coming back in this conversation. Everything here is a slot
+   * {@link placeholderFor} stood in — a control the agent published and *withdrew*
+   * is never in it, because that one genuinely may return when the model changes.
+   *
+   * ⚠ **It exists because a permanent fact was being described in transient
+   * words.** grok publishes `model` and `reasoning_effort` and no `mode` at all,
+   * measured on 1.0.40 across every session — and the mode chip's menu said *"not
+   * offering this control at the moment"*, which reads as a feature that has gone
+   * missing rather than one that was never there. `unavailableHint` takes this as
+   * its second argument and that is the only thing it decides.
+   *
+   * ⚠ **A set rather than a second id spelling.** The obvious alternative was to
+   * give the permanent placeholder a distinct id, which would have carried the
+   * fact inside the option — but `AgentConfigBar` keys each chip on `option.id`,
+   * so a slot that changed id when the agent came back remounted the chip and
+   * dropped the open menu with it. The fact belongs to the read, not to the
+   * option.
+   */
+  never: ReadonlySet<string>;
 }
 
 const NOTHING: ReadonlySet<string> = new Set();
 
+
 /**
- * The effort control an agent never published, drawn as one it has withdrawn.
+ * The slots this strip always has, derived rather than listed.
  *
- * ⚠ **One fact, two shapes, and the strip drew only one of them.** claude and kimi
- * publish a `thought_level` control and *drop* it when the model has no levels —
- * which `unavailable` already keeps the slot for, with {@link unavailableHint}'s
- * sentence inside it. opencode never publishes one for such a model in the first
- * place, so the identical fact arrived as an absence and the chip simply was not
- * there: two controls in the right-hand cluster on one session and three on the
- * next, which is the shape change every other rule in this file exists to prevent.
+ * ⚠ **`CATEGORY_SLOT` filtered, and not a fifth array.** Four lists in this file
+ * already almost say this — `CATEGORY_SLOT`, `CAPTION_SILENT`, `RIGHT_ORDER` and
+ * `CATEGORY_ICON` one file over — and each says something slightly different on
+ * purpose. A literal `["mode", "model", "thought_level"]` would be the fifth, and
+ * the one nothing forces into step: adding a category to `CATEGORY_SLOT` would
+ * silently not give it a slot here. Filtering for the two visible slots yields
+ * exactly those three and excludes `model_config` (hidden) and
+ * `collaboration_mode` (nested) without naming either.
  *
- * **Measured 2026-08-27 against opencode 1.18.23**, which is what makes the
- * sentence that gets drawn a description rather than a guess. One
- * `OPENROUTER_API_KEY`, one catalogue of 362 models: `session/set_config_option`
- * on the model answers *with* a `thought_level` for `openai/gpt-5`
- * (Minimal/Low/Medium/High) and for `~anthropic/claude-sonnet-latest` (five
- * levels), and *without* one for `minimax/minimax-m3`, `deepseek/deepseek-r1` and
- * opencode's own default `opencode/big-pickle`. "The model in use offers no levels
- * here. Another model may." is that measurement, one model apart.
- *
- * ⚠ **And the inference the whole slot rests on was measured rather than
- * assumed: `session/new` is a complete snapshot.** It had been written down that
- * opencode's `thought_level` "appears only in the answer to a
- * `set_config_option`" — which would make this slot a claim about a model at the
- * one moment nothing had been said about it. Two probes settle it. Every answer is
- * a full option list, not a delta about the option that was set: setting the
- * *mode* on a session running `openai/gpt-5` returns `thought_level` untouched
- * beside it. And with a project `opencode.json` naming that model,
- * **`session/new` itself carries the control**. So the absence is the model's
- * answer at wave one exactly as it is at wave two.
- *
- * **`thought_level` alone.** A synthesized `mode` would be found by
- * {@link splitOptions} as the {@link NESTED_HOST} and `Absent` draws no nested
- * sections, so codex's `collaboration_mode` would nest inside a placeholder and
- * silently cease to exist — the exact failure that slot partition is asserted
- * against. `model` is left out for a weaker reason and it is worth being honest
- * about which: no agent has been seen without one, and nothing was asked for. The
- * argument here is not symmetric anyway, since what earns this slot is a
- * measurement saying the absence *means* something.
- *
- * **It buys a chip and not a command.** `buildCommands` skips a select with
- * nothing in it, and `Composer` hands it the raw `agentConfig` rather than this —
- * so there is no `/effort` row that opens onto zero choices, which is the dead end
- * `commands.ts` refuses on purpose. The chip exists to say why; a menu entry that
- * only ate what you typed would not.
+ * `hidden` and `nested` are excluded because neither is a chip: the first is drawn
+ * nowhere and the second lives inside its host's menu, so a placeholder for either
+ * would be a slot with no shape to hold.
  */
-const NO_LEVELS: AgentConfigOption = {
-  // Namespaced, because `unavailable` is keyed on ids and this is the one row here
-  // that no agent said: a collision would draw a live control as an absent one.
-  id: "reemoat:thought_level",
-  name: "Effort",
-  description: null,
-  category: "thought_level",
-  kind: "select",
-  value: "",
-  choices: [],
-};
+const ALWAYS_DRAWN: readonly string[] = Object.keys(CATEGORY_SLOT).filter(
+  (category) => CATEGORY_SLOT[category] === "left" || CATEGORY_SLOT[category] === "right",
+);
+
+/**
+ * The stand-in for a slot nobody has published, for any of the three reasons.
+ *
+ * The effort slot was the only one of these, under a constant of its own, and it
+ * was built for one measured case — every agent derives its effort list from the
+ * selected model, so a model with no levels withdraws the control. That constant
+ * is gone: this function answers it, and the other two slots needed the same
+ * treatment for a different reason, which is that **there are states where the
+ * agent has published nothing at all**: a session whose agent has not started, one
+ * whose agent failed to, and — the largest by far — any session reloaded in a
+ * browser while its agent is away, since the memory `holdConfig` keeps is in the
+ * tab and the daemon deliberately restores none from disk.
+ *
+ * ⚠ `kind: "select"` with no choices is load-bearing twice. `commands.ts` refuses
+ * to build a `/` entry from an empty select, so a placeholder never becomes a menu
+ * row that eats what you typed; and `withUnusable` marks it `unavailable`, so
+ * `Absent` draws it rather than `Select` — a live `Select` over `value: ""` would
+ * fall through `choiceLabel` to the empty string and draw a **blank** chip.
+ */
+function placeholderFor(category: string): AgentConfigOption {
+  /*
+   * ⚠ **Title-cased, because this string is read even where it is not drawn.**
+   * `labelFor` answers `CATEGORY_LABEL` for `mode` and `thought_level` and falls
+   * through to `name` for everything else — and `name` here is the wire's own
+   * category, which is lower-case and underscored. `showsCaption` keeps it off the
+   * chip, so it looked right; it reaches the reader through `Absent`'s `title` and
+   * `aria-label`, where a screen reader announced the control as "model".
+   */
+  const spelled = category
+    .split("_")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+  return {
+    id: `reemoat:${category}`,
+    name: labelFor({ category, name: spelled }),
+    description: null,
+    category,
+    kind: "select",
+    value: "",
+    choices: [],
+  };
+}
 
 export function drawnControls(
   session: Pick<SessionSnapshot, "status" | "agentConfig">,
@@ -257,9 +295,23 @@ export function drawnControls(
      */
     const liveIds = new Set(live.map((option) => option.id));
     const dropped = (held?.options ?? []).filter((option) => !liveIds.has(option.id));
-    return withUnusable(dropped.length === 0 ? live : [...live, ...dropped], dropped, false);
+    // `published: true` — this branch is reached only when the agent answered, so
+    // a slot still empty here is one it does not have rather than one it has not
+    // got to yet.
+    return withUnusable(dropped.length === 0 ? live : [...live, ...dropped], dropped, false, true);
   }
-  if (hasLiveAgent(session.status)) return { options: [], stale: false, unavailable: NOTHING };
+  /*
+   * ⚠ **A live agent offering nothing still gets the slots, and this reverses a
+   * decision rather than filling a gap.** It returned `{options: []}` on the
+   * argument that an agent publishing nothing *is* the sentence "this agent has no
+   * controls", and that a strip which is not drawn cannot have a slot missing from
+   * it. True, and it answers the wrong question: the reader is not comparing this
+   * agent against itself, they are comparing this session against the last one they
+   * looked at — and the composer growing and shrinking a whole row between sessions
+   * is the shape change the rule two tables up forbids in every other form. Drawn
+   * as three unavailable slots, each says what it is and why it cannot be used.
+   */
+  if (hasLiveAgent(session.status)) return withUnusable([], [], false, false);
   const remembered = held?.options ?? [];
   /*
    * ⚠ **The memory gets the slot too, and leaving it out re-created the bug one
@@ -269,8 +321,28 @@ export function drawnControls(
    * length of every restart, on the one agent it was built for, moving every
    * button beside it. That is Q3.418's complaint with a different trigger.
    */
-  if (remembered.length === 0) return { options: remembered, stale: held !== undefined, unavailable: NOTHING };
-  return withUnusable(remembered, [], held !== undefined);
+  /*
+   * ⚠ **And so does an absent agent with nothing remembered**, which is the state
+   * the defect was actually reported from. `held` is per-tab and the daemon
+   * restores none, so this is every reload of an interrupted, parked or ended
+   * session — permanently, for the ended ones, since nothing will publish again.
+   *
+   * `stale: false` even where a `held` exists but is empty: `stale` means "this is
+   * a memory, readable but not tappable", and there is no memory here to read.
+   * These are placeholders, and `unavailable` is how a placeholder says so — which
+   * is also the arm that gives each one a sentence, where `stale` has no text at
+   * all and dims in silence.
+   */
+  /*
+   * `published: false` on both, and on the second it is the interesting one. A
+   * remembered configuration is what *a* daemon published, and the agent is away —
+   * so a slot missing from it is missing from a snapshot rather than from the
+   * agent, and "not at the moment" is the honest reading until the agent is back
+   * to say otherwise. The permanent sentence is reserved for the one state that
+   * has actually proved it: a live answer with the slot absent from it.
+   */
+  if (remembered.length === 0) return withUnusable([], [], false, false);
+  return withUnusable(remembered, [], held !== undefined, false);
 }
 
 /**
@@ -284,7 +356,7 @@ export function drawnControls(
  *     absence with a chip in front of it — `Select` would open onto a heading with
  *     no rows under it and close again on the next tap, and `commands.ts` already
  *     refuses to make a command out of one for that exact reason;
- *   - the effort slot **nobody published at all**, {@link NO_LEVELS}.
+ *   - any standard slot **nobody published at all**, {@link placeholderFor}.
  *
  * The last is tested against the drawn set rather than the live one, so an agent
  * that withdrew its effort control keeps that row — with the levels it used to
@@ -295,19 +367,74 @@ function withUnusable(
   options: readonly AgentConfigOption[],
   dropped: readonly AgentConfigOption[],
   stale: boolean,
+  /**
+   * Whether these options are an agent's own live answer.
+   *
+   * ⚠ **It decides which of two true sentences a missing slot gets, and never
+   * whether the slot is drawn.** The row keeps its three slots in every state —
+   * that is the rule the `hasLiveAgent` branch below argues for, and dropping a
+   * chip here would reintroduce the composer growing and shrinking between
+   * sessions. What changes is the sentence behind it: an agent that has published
+   * nothing yet may still publish this control, so *"not at the moment"* is true;
+   * an agent that has published a configuration **without** it will never offer
+   * one, and the same words are then a lie about a permanent fact. Measured
+   * 2026-09-21 on grok 1.0.40, which publishes `model` and `reasoning_effort` and
+   * no `mode` at all, in any session — the state that made this worth telling
+   * apart.
+   *
+   * A control the agent published and then *withdrew* takes neither arm: it is in
+   * `dropped`, so it is in `options`, so it fills its own category and no
+   * placeholder is appended for it at all. That is the case the transient
+   * sentence was originally written about and it is still exactly right.
+   */
+  published: boolean,
 ): DrawnControls {
   const unavailable = new Set(dropped.map((option) => option.id));
   for (const option of options) {
     if (option.kind === "select" && option.choices.length === 0) unavailable.add(option.id);
   }
-  const has = options.some(
-    (option) => option.category === NO_LEVELS.category || option.id === NO_LEVELS.id,
-  );
-  if (has) {
-    return { options, stale, unavailable: unavailable.size === 0 ? NOTHING : unavailable };
+  /*
+   * Every standard slot that nothing in the drawn set already occupies.
+   *
+   * Tested against the **drawn** set rather than the live one, so an agent that
+   * withdrew a control keeps that row — with the choices it used to offer still
+   * behind it — instead of gaining a second one beside it saying there are none.
+   * The test is by category *or* by the placeholder's own id, which is what makes
+   * this idempotent: `withUnusable` over its own output adds nothing.
+   *
+   * Order is `ALWAYS_DRAWN`'s, i.e. `CATEGORY_SLOT`'s, and it does not matter:
+   * `splitOptions` puts each in its slot and `RIGHT_ORDER` sorts the right-hand
+   * cluster. Appended rather than prepended only so a live control keeps the index
+   * it had, which the assertions read positionally.
+   */
+  const filled = new Set<string>();
+  for (const option of options) {
+    if (option.category !== null && option.category !== undefined) filled.add(option.category);
+    filled.add(option.id);
   }
-  unavailable.add(NO_LEVELS.id);
-  return { options: [...options, NO_LEVELS], stale, unavailable };
+  const drawn = [...options];
+  const never = new Set<string>();
+  for (const category of ALWAYS_DRAWN) {
+    const stand = placeholderFor(category);
+    if (filled.has(category) || filled.has(stand.id)) continue;
+    drawn.push(stand);
+    unavailable.add(stand.id);
+    /*
+     * ⚠ **The id is deliberately the same in both cases, and the *set* is what
+     * differs.** Spelling the permanent one `reemoat:none:<category>` was tried
+     * first and taken back out: `AgentConfigBar` draws each chip with
+     * `key={option.id}`, so a slot whose id changed when the agent came back
+     * unmounted and remounted the chip — dropping `Absent`'s own `open` state
+     * with it — over a fact that is about the sentence and nothing else.
+     */
+    if (published) never.add(stand.id);
+  }
+  return {
+    options: drawn,
+    stale,
+    unavailable: unavailable.size === 0 ? NOTHING : unavailable,
+    never: never.size === 0 ? NOTHING : never,
+  };
 }
 
 /**
@@ -316,17 +443,49 @@ function withUnusable(
  * Keyed on `category` like everything else here, never on an agent id — but the
  * effort case earns a sentence of its own, because "why is this empty" has a
  * specific answer there and a vague one everywhere else. The
- * specific answer is measured rather than guessed: **all four agents build this
- * list from the currently selected model's own levels.** claude, kimi and codex
- * express that by publishing the control and dropping it when there are none;
- * opencode expresses it by not publishing one, at `session/new` and in every
- * answer after it. Same sentence, which is why {@link NO_LEVELS} can reuse it
+ * specific answer is measured rather than guessed: **all five agents build this
+ * list from the currently selected model's own levels.** claude, kimi, codex and
+ * grok express that by publishing the control and dropping it when there are none
+ * — grok measured 2026-09-21, where `grok-4.6` offers four levels and `grok-4.5`
+ * three; opencode expresses it by not publishing one, at `session/new` and in every
+ * answer after it. Same sentence, which is why {@link placeholderFor} can reuse it
  * rather than inventing a second.
  */
-export function unavailableHint(option: Pick<AgentConfigOption, "category">): string {
-  return option.category === "thought_level"
-    ? "The model in use offers no levels here. Another model may."
-    : "The agent is not offering this control at the moment.";
+export function unavailableHint(
+  option: Pick<AgentConfigOption, "category">,
+  /**
+   * Whether this agent has answered with a configuration that does not contain
+   * this control — `DrawnControls.never`, which is the only thing that knows.
+   *
+   * Required rather than defaulted, because a default is how the wrong half of
+   * this pair gets used by omission. Two call sites, both a set membership test.
+   */
+  never: boolean,
+): string {
+  /*
+   * Effort first, and it takes both arms deliberately. Its sentence is already
+   * the permanent one for every agent that reaches it: the list is built from the
+   * *selected model's* own levels on all five, so "another model may" is true
+   * whether this agent withdrew the control or never published one. opencode is
+   * the never arm and grok is the withdrawing arm, and they want the same words.
+   */
+  if (option.category === "thought_level") {
+    return "The model in use offers no levels here. Another model may.";
+  }
+  /*
+   * ⚠ **"at the moment" was a lie for one agent and nobody could tell**, which is
+   * the whole of why this branch exists. grok publishes `model` and
+   * `reasoning_effort` and no `mode` at all, in any session — so the mode chip sat
+   * greyed on every grok conversation for ever, under a sentence promising it
+   * might come back. It was reported as the agent missing a feature, which is
+   * what a permanent state described in transient words reads as.
+   */
+  if (never) {
+    return option.category === "mode"
+      ? "This agent has no modes."
+      : "This agent offers no choice here.";
+  }
+  return "The agent is not offering this control at the moment.";
 }
 
 /**
@@ -522,7 +681,15 @@ const rightOrder = (category: string | null): number => {
  * failure mode of a partition that loses a member is a control that silently
  * stops existing.
  */
-export function splitOptions(options: readonly AgentConfigOption[]): Record<Slot, AgentConfigOption[]> {
+export function splitOptions(
+  options: readonly AgentConfigOption[],
+  /**
+   * Ids the strip will draw as `Absent`. Optional, and defaulting to none keeps
+   * every existing caller and every hand-built fixture reading as it did — what it
+   * changes is only that an unavailable `NESTED_HOST` stops counting as a host.
+   */
+  unavailable: ReadonlySet<string> = NOTHING,
+): Record<Slot, AgentConfigOption[]> {
   const out: Record<Slot, AgentConfigOption[]> = { left: [], right: [], overflow: [], hidden: [], nested: [] };
   for (const option of options) out[slotFor(option)].push(option);
   /*
@@ -556,7 +723,32 @@ export function splitOptions(options: readonly AgentConfigOption[]): Record<Slot
     out.overflow.push(...out.nested.filter((option) => option.kind === "boolean"));
     out.nested = nestable;
   }
-  const host = out.left.find((option) => option.category === NESTED_HOST && option.kind !== "boolean");
+  /*
+   * ⚠ **A host that cannot be opened is no host, and this was a live defect
+   * before anything was synthesized into the strip.**
+   *
+   * `Absent` takes `{ option }` and draws a chip and one sentence. It has no
+   * `nested` prop and no `ChoiceSection`, and nothing else in the renderer reads
+   * `slots.nested` — so a nested control whose host routed to `Absent` was drawn
+   * **nowhere**, and `commands.ts` skips an empty select, so it was not in the `/`
+   * menu either. It ceased to exist. On codex that is `collaboration_mode`, the
+   * plan switch, silently gone for as long as the agent had withdrawn `mode`.
+   *
+   * The remedy is the one already sitting one line down for a host that is
+   * *missing*: demote to `overflow`, where the control is a row in the `…` menu
+   * and can still be used. Unavailable and absent are the same fact from the
+   * reader's side — there is no menu to nest into — so they take the same answer
+   * rather than a second one.
+   *
+   * `unavailable` is a parameter with a default, so every existing caller and
+   * every hand-built fixture keeps working; the renderer passes the set it already
+   * has. Deciding it here rather than in the renderer is this module's own rule:
+   * "which slot is this in" is the question it answers and `webcheck` asserts.
+   */
+  const host = out.left.find(
+    (option) =>
+      option.category === NESTED_HOST && option.kind !== "boolean" && !unavailable.has(option.id),
+  );
   if (out.nested.length > 0 && host === undefined) {
     out.overflow.push(...out.nested);
     out.nested = [];

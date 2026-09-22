@@ -224,6 +224,10 @@ token for any machine with any `sub` — the daemon checks the signature, the is
 and the audience, and never compares the subject to anything — so the operator's
 reach is unchanged and no route deletion can change it. They also serve the web
 client from their own image, terminate TLS at the relay, and hold the database.
+(⚠ Terminating TLS there no longer means *reading* what passes through it — see
+the end-to-end encryption note below — but the other two clauses are untouched,
+and serving the client is the one that matters most: whoever ships the code that
+holds the keys does not need to read the wire.)
 What the deletions buy is that an admin account, on its own, is no longer one
 request from somebody else's computer; **an operator is still trusted completely,
 and self-hosting is the only version of "not trusted" this system has.**
@@ -285,22 +289,91 @@ work in flight, and it is the same property that makes revocation slow: nothing 
 re-checked, no revocation list is fetched, and a grant revoked at the control
 plane stops new requests at the *relay* rather than at the daemon.
 
-**Tokens are not replay-tracked.** They live 300 s with 60 s of clock leeway
-either side, verification is local and stateless, and nothing remembers a `jti`.
-A token that leaks — out of a log, a proxy, or a `?token=` query string on a
-WebSocket, which is the one place a browser cannot set a header — is usable by
-whoever holds it until it expires.
+**Tokens are not replay-tracked, and they are bound to a device.** They live
+300 s with 60 s of clock leeway either side, verification is local and stateless,
+and nothing remembers a `jti`. What changed is that a leaked one is no longer
+*bearer*: every capability names the requesting device's X25519 public key in an
+RFC 7800 `cnf.jkt` claim, and the daemon refuses one whose key is not the key the
+encrypted handshake just authenticated. So a capability out of a log or a proxy
+cannot be spent from another machine — the holder would have to produce a private
+key that never left the operating system's keyring on the device it was minted
+for.
 
-**Traffic through the relay is not end-to-end encrypted.** The relay terminates
-TLS and sees plaintext: prompts, diffs, file contents, everything a session
-carries. It is written to route and never to parse, but that is a discipline in
-the code rather than a property of the protocol. The seam for changing this is
-`reemoat-enc: none` on the CONNECT handshake, and no crypto has been written.
+Two honest limits on that. A capability carrying **no** `cnf` at all is refused
+rather than treated as unbound, so the binding cannot be opted out of — but it is
+enforced by the *daemon*, on the encrypted path, so a stolen capability spent
+against a daemon on the same computer over loopback is still a bearer token for
+its remaining life. And `?token=` still exists on exactly one hop: the app's
+WebSocket handshake to the relay, because a browser cannot set a header on one.
+It no longer appears on the daemon's own loopback dial, which is made by Node and
+carries a header.
+
+**Traffic through the relay is end-to-end encrypted, and that is the only mode.**
+The app and the daemon run `Noise_IK_25519_ChaChaPoly_BLAKE2s` between themselves:
+the app's static is its device key, the daemon's is a machine key it generates on
+first start and announces on its tunnel dial, and the Authority reports that key
+on the same call that says where the machine is. The relay authorizes the
+connection and then moves bytes it holds no key for — prompts, diffs, file
+contents and terminal output are ciphertext to it. There is no plaintext mode to
+negotiate: the constant naming one was deleted, `RELAY_PROTOCOL_MIN_VERSION` was
+raised past every build that spoke it, and a daemon that cannot speak the
+encrypted mode is reported unreachable rather than reached another way.
+
+⚠ **What this does and does not buy.** It removes the **relay** from the trusted
+payload path — a compromised carrier, a hostile TLS terminator or anyone reading
+that host's memory gets ciphertext. It does **not** defend against a malicious
+Authority: that service mints every capability and holds
+`signing_keys.private_pem`, so it can issue one naming a device key of its
+choosing and talk to your daemon as you. It does not make the operator untrusted;
+they still serve the client from their own image. E2EE narrows one party's reach,
+and the paragraph above about operators is unchanged.
 
 **A relayed stream's authorization is checked at open and not re-checked.** A
 grant revoked mid-stream does not tear down a live WebSocket; the daemon's own
 expiry re-check on the ping tick closes it when the token dies. Every ordinary
 request is refused immediately.
+
+**Retiring a device is a control-plane act, and it does not reach a token already
+minted.** A *device* is the installation somebody signs in from — the computer or
+the phone — and retiring one ends every session bound to it and refuses any future
+sign-in that offers its id. What it deliberately does **not** do is enter the
+token-verifying half of the system: `relay/authorize.ts` reads users, machines and
+grants live and reads no device row, because permissions belong to the **person**
+and a device authenticates as one. So per-device revocation is a grouping key over
+sessions plus a bind refusal, not a new boundary, and the windows are the ones
+above:
+
+| Path | When a retired device stops |
+|---|---|
+| Any control-plane request | next request |
+| Minting a machine token | next request |
+| A machine token already minted, **over the relay** | ≤ 300 s + 60 s leeway, from the last mint — and only from *that* device, because the capability names its key |
+| A WebSocket already open | that, plus one 20 s ping tick |
+| Loopback to a local daemon | the same ≤ 360 s, with no control-plane hop at all — and here the capability **is** a bearer token, because a loopback request has no channel to be bound to |
+
+⚠ **Two rows changed with end-to-end encryption and the rest did not.** Device
+retirement still bites at the *next mint* and nowhere deeper — nothing in the
+token-verifying half reads a device row, and it must not learn to. What the key
+adds is that the window on an already-minted capability is now a window **for one
+device**: it cannot be spent from anywhere else over the relay, because the daemon
+compares the key inside it against the key the handshake authenticated. The
+loopback row is the exception and is stated rather than glossed: there is no
+channel there, so there is no key to compare, so a capability on that path is what
+it always was for its remaining life. That is the same trade `.claude/rules/relay.md`
+already bounds, taken by a process running as the uid that owns `~/.reemoat`.
+
+⚠ **And a device id is not a credential.** It is an identifier this service hands
+back, stored unhashed and returned in full: holding one authorizes nothing,
+because every request still carries the session token and the id is read only
+*after* that token has resolved. That is why the client keeps it in ordinary
+configuration rather than an OS keyring — which also means it is **not** protected
+at rest on the client, and does not need to be.
+
+⚠ **A caller on an API key has no device**, so nothing that came in on one appears
+in a device list and nothing there revokes one. An API key is retired by its
+holder, from the keys screen or `cpctl keys --revoke`, and by nobody else — an
+admin has no verb over anybody's keys (Q1.631). The Devices screen says so rather
+than implying it is the complete inventory of what can reach an account.
 
 **Registration is a user-enumeration oracle, knowingly** (Q7.78). A taken name
 answers `409`, because a name is the login and a form nobody can complete is not a
@@ -347,8 +420,17 @@ it is swept.
 inferred from the schema: a login name, a password hash, an optional email
 address, and — per sign-in — the IP address and `User-Agent` the session arrived
 with (`user_session_origins`), which are recorded for recognition and are never
-used to authorize anything. Sessions and their origins are swept 7 days after
-revocation; email tokens and unconfirmed sign-ups are swept on expiry.
+used to authorize anything. **And now a name per registered device**: what
+somebody calls the computer or phone they signed in from, plus the platform it
+reported. Both are caller-supplied and clamped at ingest, neither authorizes
+anything, and the name is usually a host name — which on a personal machine is
+frequently a person's own. It is listed to its owner, it is retired by them, and
+`DELETE /v1/admin/users/:id` sweeps every device row of a deleted account by hand,
+because nothing in this database cascades. Sessions and their origins are swept 7
+days after revocation; a retired device is swept after 30 — longer because that
+list is read *after* something has gone wrong rather than as a live inventory, and
+a list one row shorter cannot say whether a laptop was retired or never registered.
+Email tokens and unconfirmed sign-ups are swept on expiry.
 `enrollment_codes` is swept 7 days after a code is used or expires, whichever
 applies — `used_from` is the only forensic trail here, so a code is not dropped on
 the tick of expiry.

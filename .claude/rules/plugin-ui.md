@@ -233,6 +233,23 @@ downstream of that.
   hooks* and nothing else, so an under-declaring manifest is refused before the
   plugin starts — while `id`, `name`, `version`, `description` and the
   contributions are compared by neither, which is what a forged address bought.
+  ⚠ **And `connect-src` is only half of what a cross-origin read needs — the
+  other half is the *service's* CORS, which is where this one is broken today.**
+  The catalogue answers `access-control-allow-origin` for `https://app.<domain>`
+  and for nothing else, and **that origin no longer exists**: the Authority serves
+  nine gate addresses and the app at none, so the Plugins screen only ever runs
+  in the shell, at `tauri://localhost` on macOS and Linux and
+  `http://tauri.localhost` on Windows and Android. So the market fails with
+  `Load failed` — a *thrown* fetch, not a status, which is why the sentence names
+  no code. Measured: the listing is a 200 with a valid body, `connect-src` carries
+  the host, the CSP in the shell allows `https:` outright, and the only thing
+  missing is that header. **Anything this page fetches directly owes the shell's
+  two origins**, which is what the daemon and the relay already give by answering
+  `*` (`native-shell.md`'s "exactly one leg leaves the webview"), and what the
+  catalogue was written before there was a shell to give it to. The remedy is in
+  the catalogue service, not here; `PLUGINS_ALLOWED_ORIGINS` is set per stack, so
+  a stand and a fleet are two separate decisions rather than one.
+
   `browse` and `manifest` are `https` on `github.com` or they fall back to that
   same derivation — a person still gets the true link, and no plugin goes dark
   over the spelling of one — and an `icon` off `raw.githubusercontent.com` becomes

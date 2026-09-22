@@ -7,21 +7,7 @@ import { errorText } from "../../http";
 import { adminMayInvite, type InstanceConfig } from "../../instance";
 import { machineLimitChangeNotice, machineLimitProblem } from "../../quota";
 import type { Me } from "../../wire";
-import {
-  Badge,
-  Button,
-  Empty,
-  FIELD,
-  IconButton,
-  Menu,
-  RowAction,
-  SETTINGS_HEADING,
-  SETTINGS_SECTION,
-  SkeletonRow,
-  Spinner,
-  TWO_STEP_BOX,
-  TwoStep,
-} from "../bits";
+import { Badge, Button, Empty, FIELD, IconButton, Menu, RowAction, SETTINGS_HEADING, SETTINGS_SECTION, SkeletonRow, Spinner, TWO_STEP_BOX, TwoStep, menuPlacement } from "../bits";
 import { toast } from "../Toast";
 import { OneTimeSecret } from "./OneTimeSecret";
 import { FIELD_LABEL } from "./SettingField";
@@ -318,19 +304,6 @@ function CreateUser({
  */
 type RowPanel = "limit" | null;
 
-/**
- * How much room a kebab's panel needs below the row before it opens upward.
- *
- * `w-56` and four items measure about 190px; the margin is for the sheet's own
- * bottom padding. The row's *position* is measured, on the tap, and that is a
- * different thing from the breakpoint-in-JavaScript `AppShell` forbids: no
- * render branches on it, no width is read, and the answer is about *this* row
- * at *this* moment — which its index in the list, the previous answer, could
- * not know. The last two rows opened upward by index, so a two-row list opened
- * both up on a desktop with a whole pane of room below them, and a ten-row list
- * on a phone opened the third-from-last into the sheet's footer.
- */
-const MENU_ROOM_PX = 240;
 
 function UserRow({
   user,
@@ -575,8 +548,14 @@ function UserRow({
              * The reserved 184px slot those two used to sit in is gone with them:
              * this trigger is the same square on every row, so nothing shifts.
              *
-             * `placement` is measured on the tap — see `MENU_ROOM_PX` — and handed
+             * `placement` is measured on the tap — see `menuPlacement` — and handed
              * to `Menu` as the prop it insists on; the menu itself detects nothing.
+             *
+             * ⚠ It read `window.innerHeight` here, and this pane is
+             * `overflow-y-auto`: the viewport said there was room while the box the
+             * panel is actually inside ended higher up, so the menu grew the pane's
+             * scroll extent instead of fitting. Invisible here only because the pane
+             * carries `no-scrollbar` — the same defect the rail showed plainly.
              */
             <Menu
               align="right"
@@ -590,10 +569,7 @@ function UserRow({
                   active={open}
                   disabled={busy}
                   onClick={() => {
-                    const rect = rowRef.current?.getBoundingClientRect();
-                    if (rect !== undefined) {
-                      setPlacement(window.innerHeight - rect.bottom < MENU_ROOM_PX ? "up" : "down");
-                    }
+                    setPlacement(menuPlacement(rowRef.current));
                     toggle();
                   }}
                 />

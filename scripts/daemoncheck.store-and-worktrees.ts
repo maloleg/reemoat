@@ -22,10 +22,18 @@ import { GitError, hostGit, type GitExec, type GitRun } from "../src/git.js";
 import { SessionRegistry } from "../src/registry.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { createApp } from "../src/server.js";
-import { DEFAULT_MIN_SESSIONS, SCHEMA_VERSION, openStores } from "../src/store/sqlite.js";
+import { DEFAULT_MIN_SESSIONS, SCHEMA_VERSION, openStores, takeDaemonRow } from "../src/store/sqlite.js";
+import type { DaemonRow } from "../src/store/sqlite.js";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { generateStaticKey, localStaticKey } from "@reemoat/protocol";
+import { RelayTunnel } from "../src/relay/tunnel.js";
+import { MACHINE_KEY_HEADER } from "../src/relay/protocol.js";
+import { ensureMachineKey, machineKeyRotation } from "../src/machinekey.js";
+import { jwkThumbprint, x25519Jwk } from "../src/token.js";
 import { createWorkspace, inspectRepo, removeWorkspace, WorktreeError } from "../src/worktree.js";
 import { tmp } from "./tmp.js";
-import { check } from "./daemoncheck.env.js";
+import { check, report } from "./daemoncheck.env.js";
 import {
   sandbox,
   users,
@@ -59,6 +67,25 @@ import {
  * writes with one bundle and reads with a second.
  */
 process.stdout.write("\nthe database, across a restart\n");
+
+const badState: [string, string][] = [
+  ["notobject", "[]"],
+  ["nullconfig", '{"config":null,"commands":{"commands":[],"dropped":0}}'],
+  ["nullcommands", '{"config":{"modes":null,"options":[]},"commands":null}'],
+  ["optionsnotarray", '{"config":{"modes":null,"options":{}},"commands":{"commands":[],"dropped":0}}'],
+  ["listnotarray", '{"config":{"modes":null,"options":[]},"commands":{"commands":{},"dropped":0}}'],
+  // The one that reached `snapshot()`: an object, so `typeof` passed, with no
+  // `available` for `config.modes.available.map` to walk.
+  ["modesnoavailable", '{"config":{"modes":{"current":"plan"},"options":[]},"commands":{"commands":[],"dropped":0}}'],
+  ["modesnotobject", '{"config":{"modes":3,"options":[]},"commands":{"commands":[],"dropped":0}}'],
+  ["optionnull", '{"config":{"modes":null,"options":[null]},"commands":{"commands":[],"dropped":0}}'],
+  // `choices` is what `clipChoices` reads `.length` off and `reduceAgentState`
+  // `.map`s on the way back out.
+  ["optionnochoices", '{"config":{"modes":null,"options":[{"id":"model","kind":"select","value":"opus"}]},"commands":{"commands":[],"dropped":0}}'],
+  ["choicenotobject", '{"config":{"modes":null,"options":[{"id":"model","kind":"select","value":"opus","choices":[7]}]},"commands":{"commands":[],"dropped":0}}'],
+  ["commandnoname", '{"config":{"modes":null,"options":[]},"commands":{"commands":[{}],"dropped":0}}'],
+];
+
 {
   const dbPath = join(sandbox, "store", "reemoat.db");
   const old = now - 30 * 24 * 60 * 60 * 1000;
@@ -98,6 +125,71 @@ process.stdout.write("\nthe database, across a restart\n");
         "('ca_future2', 'also', 'claude', 'bedrock-direct', 'x', 1)",
     );
     first.db.exec("INSERT INTO system_credentials (system, secret, updated_at) VALUES ('gemini', 's', 1)");
+    /*
+     * ⚠ **The one copy of agent state that outlives the process that learned it.**
+     *
+     * Its own rows for the same reason the one below has one: what is being driven
+     * is a *column*, and a dropped or mangled row would otherwise fail an
+     * assertion about a title. The pair is the whole rule — one blob comes back,
+     * and one that cannot be read comes back as `null` **without taking the
+     * session with it**, which is the half that matters: `fromRow`'s own catch
+     * drops the whole row, and applying it here would cost somebody a conversation
+     * to save a faint strip.
+     */
+    first.sessions.put({
+      ...persisted("s_remembered"),
+      agentState: {
+        config: {
+          modes: { current: "plan", available: [{ id: "plan", name: "Plan", description: null }] },
+          options: [
+            {
+              id: "model",
+              name: "Model",
+              description: null,
+              category: "model",
+              kind: "select",
+              value: "opus",
+              choices: [{ value: "opus", name: "Opus", description: "the selected one keeps its prose", group: null }],
+            },
+          ],
+        },
+        commands: { commands: [{ name: "context", description: "Show current context usage", hint: null }], dropped: 0 },
+      },
+    });
+    first.sessions.put(persisted("s_unreadable"));
+    first.db.exec("UPDATE sessions SET agent_state_json = '{not json' WHERE id = 's_unreadable'");
+    /*
+     * ⚠ **The blobs that *parse*, which is the half the containers-only check
+     * waved through and the half with the teeth.** A half-written file fails
+     * `JSON.parse` and was already covered by the row above; what was not is a
+     * well-formed object whose *elements* are wrong — `modes` missing `available`
+     * is the measured one. Adopted, it throws inside `snapshot()`, which
+     * `GET /sessions` maps over every session with no per-row guard (one bad row
+     * 500s the listing for the whole machine) and which `touchSafe` swallows in
+     * its own catch (that session silently stops persisting and stops fanning
+     * out, for ever, with nothing logged).
+     *
+     * A row each, and the second assertion on every one of them is that the
+     * *session* came back — the whole contract of `toAgentState`'s inner `try` is
+     * that a blob it cannot vouch for costs a faint strip and never a
+     * conversation.
+     */
+    for (const [name, blob] of badState) {
+      first.sessions.put(persisted(`s_bad_${name}`));
+      first.db.exec(`UPDATE sessions SET agent_state_json = '${blob}' WHERE id = 's_bad_${name}'`);
+    }
+    /*
+     * And the one that must *survive*: `modes` absent entirely. `JSON.stringify`
+     * omits an `undefined` key, so a build that ever makes the field optional has
+     * every stored blob arrive this way — and discarding the record over it would
+     * take the option list and the command list with it. `compatibility.md` rule
+     * 2: degrade to today's behaviour, which is `modes: null`.
+     */
+    first.sessions.put(persisted("s_nomodes"));
+    first.db.exec(
+      `UPDATE sessions SET agent_state_json = '{"config":{"options":[]},"commands":{"commands":[{"name":"context","description":"","hint":null}],"dropped":0}}' WHERE id = 's_nomodes'`,
+    );
+
     // A row of its own rather than rewriting one of the fixtures above: those
     // are the controls for the title, the pin and the sweep, and a dropped row
     // would make three unrelated assertions fail for a reason none of them names.
@@ -157,7 +249,19 @@ process.stdout.write("\nthe database, across a restart\n");
    * it rather than casting. The three rows beside it are the positive control — a
    * reader that dropped everything would pass a check written the other way round.
    */
-  check("a session written by one daemon is there for the next", rows.map((r) => r.id).sort(), ["s_named", "s_plain", "s_routed"]);
+  check(
+    "a session written by one daemon is there for the next",
+    rows.map((r) => r.id).sort(),
+    [
+      ...badState.map(([name]) => `s_bad_${name}`),
+      "s_named",
+      "s_nomodes",
+      "s_plain",
+      "s_remembered",
+      "s_routed",
+      "s_unreadable",
+    ].sort(),
+  );
   check(
     "a session naming an agent this build does not have is dropped, not cast",
     rows.some((r) => r.id === "s_future"),
@@ -296,6 +400,50 @@ process.stdout.write("\nthe database, across a restart\n");
   // actually about.
   check("a title survives the restart", named?.title, "Fix the reconnect");
   check("and so does a pin", named?.pinned, true);
+  /*
+   * And so do the agent's own controls, for the one class of session that keeps
+   * them. Measured 2026-09-19: every parked row on this machine answered
+   * `revision 0, count 0` after a deploy, so the strip drew `—` and the `/` menu
+   * was empty — permanently, since nothing publishes again until somebody types.
+   */
+  {
+    const remembered = rows.find((row) => row.id === "s_remembered");
+    check("the agent's controls survive the restart", remembered?.agentState?.config.options[0]?.value, "opus");
+    check("and the mode with them", remembered?.agentState?.config.modes?.current, "plan");
+    check("and the command list, which is what the `/` menu is", remembered?.agentState?.commands.commands[0]?.name, "context");
+    /*
+     * ⚠ **The unreadable half, and the half of *that* which is the actual rule.**
+     * `fromRow`'s own catch drops the whole row; reaching it here would cost
+     * somebody a conversation to save a faint strip, so `toAgentState` has a
+     * `try` of its own and answers `null`.
+     */
+    const unreadable = rows.find((row) => row.id === "s_unreadable");
+    // ⚠ Not `?? "<sentinel>"`, which `null` itself would trip — the value under
+    // test *is* `null`, so the row's presence is asserted separately below.
+    check("a blob this build cannot read is forgotten", unreadable?.agentState, null);
+    check("and the session it belongs to is not", unreadable?.id, "s_unreadable");
+    /*
+     * ⚠ **Both halves per row, and the second is the one that matters.** A guard
+     * that answered `null` by *throwing* would satisfy the first assertion here
+     * and lose the session to `fromRow`'s catch, which is the exact trade
+     * `toAgentState`'s inner `try` exists to refuse.
+     */
+    const kept = badState.map(([name]) => rows.find((row) => row.id === `s_bad_${name}`));
+    check(
+      "a blob that parses but is not the declared shape is forgotten, every kind of it",
+      kept.map((row) => row?.agentState ?? "<forgotten>"),
+      badState.map(() => "<forgotten>"),
+    );
+    check(
+      "and not one of them cost its session",
+      kept.map((row) => row?.id ?? "<lost>"),
+      badState.map(([name]) => `s_bad_${name}`),
+    );
+    // The other direction, so the sweep above is a gate rather than a blanket.
+    const noModes = rows.find((row) => row.id === "s_nomodes");
+    check("a blob with no modes at all degrades to null rather than being dropped", noModes?.agentState?.config.modes, null);
+    check("keeping everything beside it", noModes?.agentState?.commands.commands[0]?.name, "context");
+  }
   /*
    * A position outlives the process, and it outlives it as a **fraction**. The
    * column is REAL because a drop between two adjacent milliseconds has to land
@@ -1030,6 +1178,829 @@ process.stdout.write("\nthe database, across a restart\n");
     { kind: "harness", ref: "codex", hidden: true },
   ]);
   third.close();
+}
+
+/* ------------------------------------------------------------------ *
+ * The machine's own X25519 static
+ * ------------------------------------------------------------------ */
+
+/**
+ * The key an app authenticates this machine by, which had no driver at all.
+ *
+ * ⚠ **Nothing in `scripts/` or `packages/web/scripts/` reached
+ * `SqliteMachineKeyStore` or `ensureMachineKey` before this section, and the cost
+ * of that gap is asymmetric with every other store in this file.** A session row
+ * that comes back wrong is one conversation; a credential that comes back wrong is
+ * one re-paste. This one is generated **once in the life of a machine** and the
+ * control plane pins the first key it is told about — `pinMachineKey` answers
+ * `mismatch` and the dial is refused, rather than adopting the new one, which is
+ * trust-on-first-use chosen on purpose. So a bug that mints a fresh key on the
+ * *second* start darkens the machine permanently, and does it on the one path
+ * nobody is watching: the daemon comes up, dials in, announces a static the
+ * Authority will not take, and every app that tries to reach it fails a handshake
+ * that has no key to send a refusal under. Re-enrollment is the only way back and
+ * nothing says that is what is needed.
+ *
+ * So the subject here is not the SQL. It is the two properties the whole E2EE
+ * design rests on — **the key survives a restart unchanged**, and **`active()`
+ * names exactly one row** — driven against a real store on a real **file**, opened
+ * twice. An in-memory store cannot tell "held in a `Map` for the life of this
+ * process" from "written to disk", and that is precisely the distinction being
+ * asserted.
+ */
+process.stdout.write("\nthe machine's own key\n");
+{
+  const keyPath = join(sandbox, "machinekey", "reemoat.db");
+
+  const first = openStores({ path: keyPath, instanceId: "i_mk_a" });
+  // Before anything generates one. A machine enrolled before this table existed
+  // starts here rather than migrating: it generates at its next start and
+  // announces at its next dial, with nobody touching the host.
+  check("a machine that has never run answers no key at all", first.machineKeys.active(), null);
+  const minted = ensureMachineKey(first.machineKeys, now);
+  check("and generating one makes it the answer", first.machineKeys.active(), minted);
+  first.close();
+
+  /*
+   * The whole property, in one comparison: a second daemon on the same file gets
+   * the same key back rather than a new one.
+   *
+   * **The private half is compared too, and that is not belt-and-braces.**
+   * `ensureMachineKey` reads back from the store after writing instead of
+   * returning the object it just built — because `save` is `DO NOTHING` on
+   * conflict, so a process that lost a race wrote nothing and would otherwise be
+   * handed a secret the database does not hold. Comparing `kth` alone would pass
+   * with that read-back deleted, since the thumbprint of a key nobody stored is
+   * still a thumbprint.
+   */
+  const second = openStores({ path: keyPath, instanceId: "i_mk_b" });
+  check("the same key comes back on the next start", ensureMachineKey(second.machineKeys, now + 60_000), minted);
+  check(
+    "and the second start wrote no second row",
+    Number(second.db.prepare("SELECT count(*) AS n FROM machine_keys").get()?.["n"]),
+    1,
+  );
+
+  /*
+   * Two TEXT columns holding raw key material, so the encoding *is* the contract:
+   * `src/e2ee.ts` decodes these into a 32-byte static and the handshake has no
+   * other length.
+   *
+   * ⚠ **The length is the assertion because the decoder is lenient.**
+   * `Buffer.from(value, "base64url")` does not throw on a character it does not
+   * recognise — it drops it and answers a short buffer — so a value mangled by the
+   * TEXT round trip decodes to *something* and only its size says so. The
+   * re-encode comparison is the other half: it is what catches a value that
+   * happens to decode to 32 bytes while not being the string that was stored.
+   */
+  for (const [half, value] of [
+    ["public", minted.publicKey],
+    ["private", minted.privateKey],
+  ] as const) {
+    const raw = Buffer.from(value, "base64url");
+    report(
+      `the ${half} half survives the TEXT round trip as 32 base64url bytes`,
+      raw.length === 32 && raw.toString("base64url") === value,
+      `${value.length} chars in the column, ${raw.length} bytes out`,
+    );
+  }
+
+  /*
+   * And that the row's name is *derived from* the key rather than stored beside
+   * it. `kth` is what the Authority pins, what the tunnel dial announces and what
+   * an operator compares by eye against `cpctl`; a row whose id does not hash to
+   * its own public half is a machine pinned under a name nothing else computes.
+   */
+  check(
+    "the row's name is the thumbprint of its own public half",
+    minted.kth,
+    jwkThumbprint(x25519Jwk(Buffer.from(minted.publicKey, "base64url"))),
+  );
+
+  /*
+   * `active()` is `WHERE retired_at IS NULL ORDER BY created_at DESC, kth ASC
+   * LIMIT 1`, and every clause of that is load-bearing for a rotation **that does
+   * not exist yet** — which is exactly why it is asserted now. The store's own
+   * docblock says the plural is there because "the only safe rotation is an
+   * overlap, and an overlap needs two rows"; an ordering nothing executes is an
+   * ordering that is right by inspection only, and inspection is what put `kth
+   * ASC` there in the first place.
+   *
+   * The overlap rows are inserted by hand, because there is no supported way to
+   * produce one: `ensureMachineKey` refuses to mint a second key while one is
+   * live, which is the property asserted three lines up.
+   */
+  const insert = second.db.prepare(
+    "INSERT INTO machine_keys (kth, public_key, private_key, created_at, retired_at) VALUES (?, ?, ?, ?, ?)",
+  );
+
+  /*
+   * ⚠ **First, the thing that made the overlap below impossible to write.**
+   * `machine_keys_one_live` is a partial unique index over `retired_at IS NULL`,
+   * created by `migrate()` rather than by `schema.sql`, and it is the ONLY
+   * mechanism by which a daemon that lost a startup race learns that it lost:
+   * `kth` is the thumbprint of the key generated one line earlier, so two racers
+   * hash to two different primary keys and the `kth` conflict absorbs nothing.
+   * Before it, both racers wrote, `active()` answered the newer by
+   * `created_at DESC`, and the machine announced a key the Authority had not
+   * pinned — refused 409 at every dial, for ever, repairable only by
+   * `cpctl admin clearkey`.
+   *
+   * This assertion is that fix's negative control and belongs above the overlap
+   * rather than after it, because the overlap has to destroy the index to exist.
+   */
+  let refusedSecondLive: string | null = null;
+  try {
+    insert.run("k_racer", "pub_racer", "sec_racer", now + 1, null);
+  } catch (cause) {
+    refusedSecondLive = cause instanceof Error ? cause.message : String(cause);
+  }
+  report(
+    "a second live key is refused by the index rather than quietly stored",
+    refusedSecondLive !== null && refusedSecondLive.includes("machine_keys_one_live"),
+    refusedSecondLive ?? "the INSERT was accepted",
+  );
+  check("and the machine's key is still the one it minted", second.machineKeys.active()?.kth, minted.kth);
+
+  /*
+   * ⚠ **The index is dropped for the rest of this section, deliberately.**
+   * Everything below asserts `active()`'s `ORDER BY created_at DESC, kth ASC` and
+   * `retire()`'s fall-through, which exist for a rotation that does not exist
+   * yet — and a rotation is an overlap, which is exactly the state the index now
+   * forbids. Two honest options: delete these assertions with the capability, or
+   * keep pinning the ordering the future rotation will depend on and pay for it
+   * by dropping the index in this one fixture. The second is chosen because "an
+   * ordering nothing executes is an ordering that is right by inspection only"
+   * is this section's own argument, and inspection is what put `kth ASC` there.
+   *
+   * Whoever builds rotation has to confront the index and decide what replaces
+   * it. That is the intended outcome and better than leaving a door open today
+   * so that an accident can walk through it.
+   */
+  second.db.exec("DROP INDEX machine_keys_one_live");
+  insert.run("k_newer", "pub_newer", "sec_newer", now + 1_000, null);
+  check("a newer live row is the one a handshake answers on", second.machineKeys.active()?.kth, "k_newer");
+  // Same instant, two rows. Two keys generated on one millisecond still have to
+  // rank, or "the current key" is whatever SQLite felt like returning and two
+  // reads of one database can disagree.
+  insert.run("k_aaa", "pub_aaa", "sec_aaa", now + 1_000, null);
+  check("a same-millisecond tie is broken by the name, ascending", second.machineKeys.active()?.kth, "k_aaa");
+  // A retired row is skipped rather than merely deprioritised, which is a
+  // different statement: it is the newest row in the table and must lose anyway.
+  insert.run("k_zzz", "pub_zzz", "sec_zzz", now + 9_000, now + 9_500);
+  check("a retired row is skipped however new it is", second.machineKeys.active()?.kth, "k_aaa");
+
+  /*
+   * `retire()` has no caller in `src/` at all — a rotation would be its first —
+   * so this is the only thing in the repository that executes it. What it owes is
+   * narrow and total: take one row out of the answer and leave the next live one
+   * standing, which is the whole of what an overlap is.
+   */
+  second.machineKeys.retire("k_aaa", now + 2_000);
+  check("retiring the active key falls through to the next live row", second.machineKeys.active()?.kth, "k_newer");
+  second.machineKeys.retire("k_newer", now + 2_000);
+  check("and again, down to the key this machine generated", second.machineKeys.active()?.kth, minted.kth);
+  // The `AND retired_at IS NULL` half of the UPDATE: retiring something twice
+  // must not move the moment it was retired, because that moment is the only
+  // record of when a key stopped being announced.
+  second.machineKeys.retire("k_aaa", now + 3_000);
+  check(
+    "and retiring one twice leaves the first answer standing",
+    Number(second.db.prepare("SELECT retired_at AS t FROM machine_keys WHERE kth = 'k_aaa'").get()?.["t"]),
+    now + 2_000,
+  );
+
+  /*
+   * `save` is `ON CONFLICT DO NOTHING` rather than an upsert, and the reason is in
+   * the primary key: `kth` is a hash *of the public half*, so a conflict means
+   * this exact key is already here. An upsert would let a second caller overwrite
+   * a private key that the first caller has already handed to a live session.
+   */
+  second.machineKeys.save({
+    kth: minted.kth,
+    publicKey: "not-the-stored-public-half",
+    privateKey: "not-the-stored-private-half",
+    createdAt: now + 4_000,
+  });
+  check("saving a key that is already there changes nothing", second.machineKeys.active(), minted);
+  second.close();
+}
+
+/* ------------------------------------------------------------------ *
+ * The file that lost the two-daemon startup race
+ * ------------------------------------------------------------------ */
+
+/**
+ * `migrateMachineKeysToOneLive`'s **destructive** half, which nothing drove.
+ *
+ * ⚠ **The section above is not this one, and the difference is the whole
+ * point.** It asserts the index refusing a second INSERT and then `DROP`s the
+ * index to pin `active()`'s ordering — so it never opens a store over a file
+ * that *already holds two live rows*, which is the only state the repair is
+ * observable in at all. Every line of the repair could be deleted and that
+ * section stays green.
+ *
+ * The fixture is a file from before the index existed, because it has to be: the
+ * index is what forbids the state, so it is dropped, two live rows are inserted,
+ * and the file is closed. Reopening it through the **real** `openStores` is what
+ * runs `migrate()`, and therefore the repair, and therefore the `CREATE UNIQUE
+ * INDEX` that could not have run on this file a statement earlier.
+ *
+ * **What is asserted is not only which row won.** A repair that kept the right
+ * row and deleted the loser would pass a `kth` comparison and would have thrown
+ * away the private half that `promote` — and therefore the whole 409 rotation —
+ * depends on. So the loser's secret is compared byte for byte against what went
+ * in, beside a `retired_at` that is not null, and a second open has to leave that
+ * timestamp exactly where it was: that moment is the only record of when a key
+ * stopped being announced, and the `AND retired_at IS NULL` on the UPDATE is the
+ * only thing keeping a second run from rewriting it.
+ *
+ * Then the half that makes the migration's guess survivable. It keeps the
+ * **oldest** live row, which is right for a machine nobody repaired and
+ * backwards for one whose operator already ran `cpctl admin clearkey` — that one
+ * had the *newest* pinned and works today. Neither timestamp knows which; the
+ * Authority does, and it says so with a 409. So `machineKeyRotation` is driven
+ * here over a real store: one promotion, in the direction the migration got
+ * wrong, and then `null` for ever.
+ */
+process.stdout.write("\ntwo live machine keys, and who decides which one wins\n");
+{
+  const racePath = join(sandbox, "machinekey-race", "reemoat.db");
+  mkdirSync(dirname(racePath), { recursive: true });
+
+  const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url");
+  const kthOf = (key: { publicKey: Uint8Array }): string => jwkThumbprint(x25519Jwk(key.publicKey));
+  // Real X25519 keypairs rather than the string fixtures the section above uses,
+  // because `machineKeyRotation` hands its answer to `localStaticKey`, which
+  // derives a public key from the bytes and refuses anything that is not 32 of
+  // them. A fixture that cannot be announced would assert the walk and not the
+  // thing the walk produces.
+  const older = generateStaticKey();
+  const newer = generateStaticKey();
+
+  {
+    const seed = openStores({ path: racePath, instanceId: "i_race_seed" });
+    seed.close();
+  }
+  {
+    const raw = new DatabaseSync(racePath);
+    raw.exec("DROP INDEX machine_keys_one_live");
+    const insert = raw.prepare(
+      "INSERT INTO machine_keys (kth, public_key, private_key, created_at, retired_at) VALUES (?,?,?,?,NULL)",
+    );
+    insert.run(kthOf(older), b64(older.publicKey), b64(older.secretKey), now);
+    insert.run(kthOf(newer), b64(newer.publicKey), b64(newer.secretKey), now + 1_000);
+    raw.close();
+  }
+  {
+    // The non-vacuity half. Without it everything below would pass against a file
+    // holding one row, i.e. against no race at all.
+    const raw = new DatabaseSync(racePath);
+    check(
+      "the fixture really is a file with two live keys",
+      Number(raw.prepare("SELECT count(*) AS n FROM machine_keys WHERE retired_at IS NULL").get()?.["n"]),
+      2,
+    );
+    raw.close();
+  }
+
+  // stderr is captured for `migrateCredentialsToV6`'s reason: this is a repair
+  // that retires somebody's key, and the print is the only moment anybody is told.
+  const said: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => void said.push(args.map(String).join(" "));
+  const repaired = openStores({ path: racePath, instanceId: "i_race_a" });
+  console.error = realError;
+
+  const liveCount = (db: DatabaseSync): number =>
+    Number(db.prepare("SELECT count(*) AS n FROM machine_keys WHERE retired_at IS NULL").get()?.["n"]);
+  check("the repair leaves exactly one live row", liveCount(repaired.db), 1);
+  check("and it is the older of the two", repaired.machineKeys.active()?.kth, kthOf(older));
+  report(
+    "and it says so, and names the way back",
+    said.some((line) => line.includes("live machine keys") && line.includes("clearkey")),
+    said.length === 0 ? "nothing was printed" : said.join(" | "),
+  );
+
+  const loserRow = (db: DatabaseSync): Record<string, unknown> | undefined =>
+    db.prepare("SELECT private_key, retired_at FROM machine_keys WHERE kth = ?").get(kthOf(newer)) as
+      | Record<string, unknown>
+      | undefined;
+  const loser = loserRow(repaired.db);
+  report(
+    "the loser is retired rather than deleted, private half intact",
+    loser !== undefined && String(loser["private_key"]) === b64(newer.secretKey) && loser["retired_at"] != null,
+    loser === undefined ? "the row is gone" : `retired_at ${String(loser["retired_at"])}`,
+  );
+  check(
+    "and the index the repair had to precede exists afterwards",
+    Number(
+      repaired.db
+        .prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='index' AND name='machine_keys_one_live'")
+        .get()?.["n"],
+    ),
+    1,
+  );
+  const retiredAt = loser === undefined ? null : Number(loser["retired_at"]);
+  repaired.close();
+
+  const again = openStores({ path: racePath, instanceId: "i_race_b" });
+  const loserAgain = loserRow(again.db);
+  check(
+    "a second open leaves the moment it stopped being announced alone",
+    loserAgain === undefined ? null : Number(loserAgain["retired_at"]),
+    retiredAt,
+  );
+
+  /*
+   * And now the dial's half. `all()` is what makes a retirement reversible by
+   * code rather than only by hand, so it has to answer the retired row too.
+   */
+  check(
+    "every key this machine has ever held is still readable, oldest first",
+    again.machineKeys.all().map((key) => key.kth),
+    [kthOf(older), kthOf(newer)],
+  );
+  const announcing = again.machineKeys.active();
+  if (announcing === null) throw new Error("the race fixture lost its live key");
+  const rotate = machineKeyRotation(again.machineKeys, announcing);
+  const promoted = rotate();
+  check("a 409 on the kept key promotes the other one this machine holds", promoted?.kth, kthOf(newer));
+  check("and hands back the public half the next dial announces", promoted?.machineKey, b64(newer.publicKey));
+  check("the store answers the promoted key from here on", again.machineKeys.active()?.kth, kthOf(newer));
+  check("with exactly one row live throughout", liveCount(again.db), 1);
+  // Finite, and the reason this can never be a redial loop: the key the daemon
+  // booted announcing is in `tried` from the start, and every candidate is added
+  // before it is promoted.
+  check("and nothing is ever offered twice", rotate(), null);
+
+  /*
+   * ⚠ **The `ROLLBACK` arm, which is the sharpest assertion in this section.**
+   * `promote` retires the incumbent and then un-retires the candidate — that
+   * order is forced, because the reverse leaves two live rows for the width of a
+   * statement and the index refuses it. Written as two bare `run` calls, a `kth`
+   * naming no row leaves the incumbent retired and nothing live: `active()`
+   * answers `null`, `ensureMachineKey` mints a *fresh* static the Authority has
+   * never seen, and the machine is 409'd for ever by the code that was trying to
+   * stop exactly that.
+   */
+  check("promoting a key that is not in the table answers false", again.machineKeys.promote("k_nobody"), false);
+  check("and leaves the live row standing", again.machineKeys.active()?.kth, kthOf(newer));
+  check("rather than leaving this machine with no key at all", liveCount(again.db), 1);
+
+  /*
+   * `save`'s swallow of the live-row conflict, which no driver could reach.
+   *
+   * ⚠ **The existing `save` assertion runs after the `DROP INDEX` and re-saves
+   * the same `kth`**, which `ON CONFLICT(kth) DO NOTHING` resolves before any
+   * index is consulted — so the `catch` in `save` was never entered by anything
+   * in this repository. A *different* `kth` while a live row stands is the only
+   * way in, and it is exactly the shape a daemon that lost the startup race
+   * produces: `kth` is a hash of a key generated one line earlier, so two racers
+   * never collide on the primary key.
+   */
+  const stranger = generateStaticKey();
+  // Caught rather than called bare, so a `save` that stopped absorbing reports as
+  // one failed assertion instead of taking the rest of this driver down with it.
+  let absorbed: string | null = null;
+  try {
+    again.machineKeys.save({
+      kth: kthOf(stranger),
+      publicKey: b64(stranger.publicKey),
+      privateKey: b64(stranger.secretKey),
+      createdAt: now + 6_000,
+    });
+  } catch (cause) {
+    absorbed = cause instanceof Error ? cause.message : String(cause);
+  }
+  report("a second live key is absorbed rather than thrown", absorbed === null, absorbed ?? "no throw");
+  check("and the machine still answers the key it had", again.machineKeys.active()?.kth, kthOf(newer));
+  check(
+    "and absorbed means nothing was written",
+    Number(
+      again.db.prepare("SELECT count(*) AS n FROM machine_keys WHERE kth = ?").get(kthOf(stranger))?.["n"],
+    ),
+    0,
+  );
+
+  /*
+   * The negative control for that swallow, and the reason `isLiveMachineKeyConflict`
+   * matches a name and not only an errcode: anything else must still throw, or a
+   * store that cannot hold a key says nothing about it.
+   */
+  let otherFailure: string | null = null;
+  try {
+    again.machineKeys.save({
+      kth: "k_null_public",
+      publicKey: null as unknown as string,
+      privateKey: "whatever",
+      createdAt: now + 7_000,
+    });
+  } catch (cause) {
+    otherFailure = cause instanceof Error ? cause.message : String(cause);
+  }
+  report(
+    "but a constraint that is not the live-row index is still thrown",
+    otherFailure !== null && !otherFailure.includes("machine_keys_one_live"),
+    otherFailure ?? "it was swallowed",
+  );
+  again.close();
+
+  /*
+   * ⚠ **And the population that must not notice any of this.** Every legitimate
+   * 409 the tunnel's docblock names — a host restored from backup, a wiped
+   * `~/.reemoat`, a machine id reused for a rebuilt box — is a machine holding
+   * exactly one key. It has nothing to promote, so the rotation answers `null` on
+   * its first call, the tunnel prints the sentence it always printed, and nothing
+   * on disk moves. A rotation that retired the only key here would darken a
+   * machine whose only problem was a message.
+   */
+  const lonePath = join(sandbox, "machinekey-lone", "reemoat.db");
+  mkdirSync(dirname(lonePath), { recursive: true });
+  const lone = openStores({ path: lonePath, instanceId: "i_lone" });
+  const loneKey = ensureMachineKey(lone.machineKeys, now);
+  check("a machine holding one key has nothing to promote", machineKeyRotation(lone.machineKeys, loneKey)(), null);
+  check("and nothing was retired finding that out", lone.machineKeys.active()?.kth, loneKey.kth);
+  check("nor anything created", lone.machineKeys.all().length, 1);
+  lone.close();
+}
+
+/* ------------------------------------------------------------------ *
+ * The dial's half of that, which no offline driver reaches
+ * ------------------------------------------------------------------ */
+
+/**
+ * The rotation above is a capability, and a capability nothing calls is a dead
+ * one — **which is this repository's own worst failure mode, measured four
+ * reviews running**: a driver green over code nobody could reach. Everything
+ * asserted above would stay green with `rotateMachineKey` deleted from
+ * `scripts/daemon.ts`, and the machines it exists for would go on being refused
+ * for ever.
+ *
+ * So the wiring is read off the files that place it, for the reason the
+ * `REEMOAT_MIN_SESSIONS` census above gives: no in-process driver reaches
+ * `scripts/daemon.ts`, and the 409 arm lives inside a `ws.on`
+ * ("unexpected-response") closure that needs a relay answering 409 to enter.
+ * ⚠ **Over a comment-stripped copy**, because this codebase deliberately
+ * restates code facts in prose and every one of these patterns is written out in
+ * the docblocks a few lines above the code — matching one of those is the exact
+ * shape this repository keeps producing.
+ *
+ * The third assertion is the one that is not about presence. `machineKey` and
+ * `staticKey` are the public and private halves of **one** key: the dial
+ * announces the first and `serveSecureSession` opens message 1 with the second,
+ * so a rotation that moves one and leaves the other reading `this.options` is a
+ * machine that is up, visible, and fails every handshake with no key to send a
+ * refusal under. Asserted as an **absence** — no `this.options.machineKey` and no
+ * `this.options.staticKey` anywhere in the file — because that is the only form
+ * that catches a *future* read of the stale value rather than today's two.
+ */
+process.stdout.write("\nwhere the promoted key is actually announced\n");
+{
+  /*
+   * Block comments and whole-line `//` comments only, deliberately: a naive
+   * strip to end-of-line would eat the `https://` inside a string literal and
+   * shorten lines this census then reads. Nothing below is being looked for in a
+   * trailing comment, and everything below is written out in a docblock.
+   */
+  const withoutComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const daemonEntry = withoutComments(readFileSync(new URL("../scripts/daemon.ts", import.meta.url), "utf8"));
+  const tunnelSrc = withoutComments(readFileSync(new URL("../src/relay/tunnel.ts", import.meta.url), "utf8"));
+
+  check(
+    "the daemon hands the tunnel a rotation over its own machine-key store",
+    /rotateMachineKey:\s*machineKeyRotation\(stores\.machineKeys,\s*machineKey\)/.test(daemonEntry),
+    true,
+  );
+  check(
+    "and the 409 arm is what spends it, inside the guard that keeps it from escaping",
+    /status === 409\s*\)\s*\{[\s\S]{0,240}?try\s*\{\s*promoted = this\.options\.rotateMachineKey\?\.\(\) \?\? null;\s*\}\s*catch/.test(
+      tunnelSrc,
+    ),
+    true,
+  );
+  check(
+    "moving both halves of the key together",
+    /this\.machineKey = promoted\.machineKey;\s*this\.staticKey = promoted\.staticKey;/.test(tunnelSrc),
+    true,
+  );
+  report(
+    "and nothing in the tunnel reads the pair it was started with again",
+    !/this\.options\.machineKey/.test(tunnelSrc) && !/this\.options\.staticKey/.test(tunnelSrc),
+    "the dial header and the Noise responder both read the rotated fields",
+  );
+  /*
+   * The non-vacuity half of all four: a stripper that ate the file, or a path
+   * that read nothing, would satisfy every absence above and three of the
+   * presences would be the only thing standing. Both files are named in it
+   * because reading the wrong one is the failure that looks identical.
+   */
+  report(
+    "and both files really were read",
+    daemonEntry.includes("RelayTunnel.start({") && tunnelSrc.includes("export class RelayTunnel"),
+    `${daemonEntry.length} and ${tunnelSrc.length} chars after stripping`,
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * And the same thing again, behaviourally, over a relay that says 409
+ * ------------------------------------------------------------------ */
+
+/**
+ * What the census above cannot see, driven against a socket instead.
+ *
+ * ⚠ **The section above is a source census and was the *only* evidence the
+ * rotation works.** It proves the option is passed and that both halves of the
+ * pair move together in the file; it cannot prove the thing the whole change
+ * exists for, which is that the **second dial carries the promoted public key**.
+ * A rotation that updated `this.machineKey` after the header object had already
+ * been built would satisfy every regex up there and announce the refused key for
+ * ever — and this repository's worst failure mode, four reviews running, is a
+ * driver green over code nobody could reach. So a real `RelayTunnel` dials a real
+ * listener that answers 409 to every upgrade, and the headers it received are
+ * read back.
+ *
+ * **`random: () => 0` is what makes this finish.** `reconnectDelayMs` is full
+ * jitter, so a zero collapses the backoff to the same tick and dial 2 happens
+ * immediately; the same seam `relaycheck` uses to walk the curve without waiting
+ * on it. The generator returns `1` afterwards so that a tunnel this section has
+ * finished with parks on a long timer rather than spinning until `stop()` lands.
+ *
+ * Three tunnels, because the three behaviours are different and only one of them
+ * is the happy path:
+ *
+ *   1. A rotator with something to offer. Dial 1 announces the key the daemon
+ *      booted on, dial 2 announces the promoted one. This is the unproven fact.
+ *   2. No rotator at all — every machine with one key, which is every legitimate
+ *      409. The sentence is pinned **verbatim** against a constant, because "an
+ *      operator reads these words and does what they say" is the entire value of
+ *      the arm and a paraphrase is a different instruction.
+ *   3. A rotator that throws, which is the guard `tunnel.ts` grew for
+ *      `SQLITE_BUSY`. Without it the throw escapes `ws.on("unexpected-response")`
+ *      as an uncaught exception and takes this process down — so the negative
+ *      control for this one is that the driver *runs at all*, and the assertions
+ *      are that the cause is said and that the terminal sentence still follows.
+ */
+process.stdout.write("\nthe second dial, against a relay that answers 409\n");
+{
+  /** The words an operator reads when there is nothing left to try. Pinned, not paraphrased. */
+  const TERMINAL_409 =
+    "relay refused the tunnel: this machine announced an encryption key that does not match " +
+    "the one the control plane pinned for it, so nothing can reach it and retrying will not help. " +
+    "Re-enroll this machine, or have an operator run `cpctl admin clearkey <machineId>`.";
+
+  const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url");
+  const booted = generateStaticKey();
+  const other = generateStaticKey();
+
+  const announced: Array<string | undefined> = [];
+  const relay = createServer();
+  relay.on("upgrade", (request, socket) => {
+    const header = request.headers[MACHINE_KEY_HEADER];
+    announced.push(Array.isArray(header) ? header.join(",") : header);
+    // A raw status line rather than `response.writeHead`: this is an upgrade
+    // request, so there is no `ServerResponse` — and a 409 written here is
+    // exactly what the relay's tunnel endpoint sends, which is what puts the
+    // client into `unexpected-response` rather than into `open`.
+    socket.write("HTTP/1.1 409 Conflict\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    socket.end();
+  });
+  await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve));
+  const relayUrl = `http://127.0.0.1:${(relay.address() as AddressInfo).port}`;
+
+  /** Zero once — collapse the first backoff — then the top of the window, so a finished tunnel parks. */
+  const collapseFirstBackoff = (): (() => number) => {
+    let first = true;
+    return () => {
+      if (!first) return 1;
+      first = false;
+      return 0;
+    };
+  };
+  const until = async (done: () => boolean): Promise<boolean> => {
+    for (let waited = 0; waited < 5_000; waited += 20) {
+      if (done()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return done();
+  };
+
+  /* 1. Two keys on this disk: the refusal is believed and the other one is announced. */
+  {
+    let offers = 0;
+    const said: string[] = [];
+    const tunnel = RelayTunnel.start({
+      relayUrl,
+      tunnelKey: "tk_fixture",
+      local: { host: "127.0.0.1", port: 1 },
+      machineKey: b64(booted.publicKey),
+      staticKey: localStaticKey(booted.secretKey),
+      rotateMachineKey: () => {
+        offers += 1;
+        return offers === 1
+          ? { kth: "k_other", machineKey: b64(other.publicKey), staticKey: localStaticKey(other.secretKey) }
+          : null;
+      },
+      random: collapseFirstBackoff(),
+      onEvent: (kind, detail) => {
+        if (kind === "rejected") said.push(detail);
+      },
+    });
+    const reached = await until(() => announced.length >= 2 && said.length >= 2);
+    await tunnel.stop();
+    report("a relay answering 409 is dialled twice", reached, `${announced.length} dials, ${said.length} said`);
+    check("the first dial announces the key the daemon booted on", announced[0], b64(booted.publicKey));
+    // The whole point of the change, and the one fact no source census can see.
+    check("and the second announces the promoted one", announced[1], b64(other.publicKey));
+    report(
+      "the operator is told which key is live now",
+      said[0] !== undefined && said[0].includes("k_other is live now and the next dial announces it"),
+      said[0] ?? "nothing was said",
+    );
+    check("and an exhausted walk reaches the sentence it always reached", said[1], TERMINAL_409);
+  }
+
+  /* 2. One key on this disk, which is every legitimate 409. Nothing may have changed. */
+  {
+    announced.length = 0;
+    const said: string[] = [];
+    const tunnel = RelayTunnel.start({
+      relayUrl,
+      tunnelKey: "tk_fixture",
+      local: { host: "127.0.0.1", port: 1 },
+      machineKey: b64(booted.publicKey),
+      staticKey: localStaticKey(booted.secretKey),
+      // Absent rather than `() => null`, because absent is what a daemon that
+      // predates the rotation passes and the two must be indistinguishable.
+      random: collapseFirstBackoff(),
+      onEvent: (kind, detail) => {
+        if (kind === "rejected") said.push(detail);
+      },
+    });
+    const reached = await until(() => announced.length >= 2 && said.length >= 2);
+    await tunnel.stop();
+    report("a tunnel with no rotator still dials twice", reached, `${announced.length} dials, ${said.length} said`);
+    check("and says the same thing both times", said.slice(0, 2), [TERMINAL_409, TERMINAL_409]);
+    check(
+      "announcing the same key, because nothing on this machine moved",
+      announced.slice(0, 2),
+      [b64(booted.publicKey), b64(booted.publicKey)],
+    );
+  }
+
+  /* 3. The rotator throws — `SQLITE_BUSY` on a dial path whose own writers are live. */
+  {
+    announced.length = 0;
+    const said: string[] = [];
+    const tunnel = RelayTunnel.start({
+      relayUrl,
+      tunnelKey: "tk_fixture",
+      local: { host: "127.0.0.1", port: 1 },
+      machineKey: b64(booted.publicKey),
+      staticKey: localStaticKey(booted.secretKey),
+      rotateMachineKey: () => {
+        throw new Error("SQLITE_BUSY: database is locked");
+      },
+      random: collapseFirstBackoff(),
+      onEvent: (kind, detail) => {
+        if (kind === "rejected") said.push(detail);
+      },
+    });
+    // ⚠ Reaching this line at all is the assertion. Without the guard in
+    // `tunnel.ts`'s 409 arm the throw leaves `ws`'s emit uncaught and this
+    // process is gone before `until` resolves — measured by deleting the `try`.
+    const reached = await until(() => said.length >= 2);
+    await tunnel.stop();
+    report("a rotator that throws does not take the daemon with it", reached, said.join(" | ") || "nothing was said");
+    report(
+      "the cause is said rather than swallowed",
+      said[0] !== undefined && said[0].includes("SQLITE_BUSY: database is locked"),
+      said[0] ?? "nothing was said",
+    );
+    check("and it degrades to exactly the pre-rotation sentence", said[1], TERMINAL_409);
+    report(
+      "and the daemon is still dialling",
+      announced.length >= 2,
+      `${announced.length} dials after the throw`,
+    );
+  }
+
+  await new Promise<void>((resolve) => relay.close(() => resolve()));
+}
+
+/* ------------------------------------------------------------------ *
+ * The daemon lock's compare-and-set
+ * ------------------------------------------------------------------ */
+
+/**
+ * `takeDaemonRow`, which was exported as a seam for a driver nobody wrote.
+ *
+ * ⚠ **Its own docblock said `scripts/daemoncheck.*` was its other caller and
+ * that this was "the entire reason this is not a closure inside
+ * `claimDaemonLock`".** Nothing outside `sqlite.ts` called it, so the
+ * compare-and-set that replaced a read-then-unconditional-write — the race that
+ * let two daemons both mint a machine key, which is the failure the whole section
+ * above exists to repair — was asserted by nothing at all.
+ *
+ * **Both halves, because neither discriminates alone.** A *stale* observation
+ * must answer `false` with the racer's row still standing, which an unconditional
+ * `DO UPDATE` turns `true`; and a *matching* observation must answer `true`,
+ * which is what fails against a statement that never updates anything. Pass
+ * either one on its own and a broken statement is still green.
+ *
+ * The interleave this exists for cannot be produced through `openStores` at all,
+ * which always makes its own read immediately before its own write. Standing in
+ * for the losing racer means passing an observation that is deliberately out of
+ * date, and only a caller that owns the observation can do that — which is the
+ * seam.
+ */
+process.stdout.write("\nthe daemon lock's compare-and-set\n");
+{
+  const lockPath = join(sandbox, "daemon-cas", "reemoat.db");
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const held = openStores({ path: lockPath, instanceId: "i_cas_winner" });
+  const rowNow = (): DaemonRow | null => {
+    const row = held.db.prepare("SELECT instance_id, pid, started_at FROM daemon WHERE id = 1").get();
+    if (!row) return null;
+    return {
+      instanceId: String(row["instance_id"]),
+      pid: Number(row["pid"]),
+      startedAt: Number(row["started_at"]),
+    };
+  };
+  const winner = rowNow();
+  check("opening the store claimed the row", winner?.instanceId, "i_cas_winner");
+
+  const claimant: DaemonRow = { instanceId: "i_cas_loser", pid: process.pid, startedAt: now };
+  // The exact interleave: a second daemon read the table before the first wrote,
+  // so what it observed is *nothing*, and by the time it writes there is a row.
+  check("a claim from a racer that observed an empty table loses", takeDaemonRow(held.db, claimant, null), false);
+  check(
+    "and so does one that observed a row that has since moved",
+    takeDaemonRow(held.db, claimant, { instanceId: "i_ghost", pid: 999_999, startedAt: 1 }),
+    false,
+  );
+  check("the winner's row is untouched by either", rowNow()?.instanceId, "i_cas_winner");
+  check("a claim that observed exactly what is there takes the row", takeDaemonRow(held.db, claimant, winner), true);
+  check("and the row is the claimant's afterwards", rowNow(), claimant);
+  held.close();
+}
+
+/*
+ * ⚠ **And the file every machine already enrolled is about to be opened as.**
+ *
+ * `machine_keys` was added to `schema.sql` with no `SCHEMA_VERSION` bump — which
+ * is correct, and the v6 section below carries the argument — so `migrate()` does
+ * not mention the table and the only thing that creates it is `CREATE TABLE IF NOT
+ * EXISTS` re-applied on every open. That is a real upgrade path with a real
+ * failure: were the schema not re-applied, `active()` would throw `no such table`
+ * on the first start after an update and the daemon would not come up at all,
+ * because `SqliteMachineKeyStore` prepares its statements in its constructor and
+ * every method there throws rather than swallowing.
+ *
+ * The second assertion is the one with teeth. A machine that upgrades must have
+ * **no key yet** — it generates at this start and announces at its next dial, and
+ * the Authority pins it then — so a build that somehow found a row here would be
+ * announcing a static somebody else generated.
+ */
+{
+  const upgradeDir = join(sandbox, "pre-machinekeys");
+  const upgradePath = join(upgradeDir, "reemoat.db");
+  mkdirSync(upgradeDir, { recursive: true });
+  {
+    const raw = new DatabaseSync(upgradePath);
+    raw.exec("PRAGMA journal_mode = WAL");
+    // Stamped at the version this build is at, with the table simply absent —
+    // which is exactly the shape of a file written by the release before
+    // `machine_keys` existed, since adding it moved no version.
+    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    raw.close();
+  }
+  const tableCount = (db: DatabaseSync): unknown =>
+    db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='machine_keys'").get()?.["n"];
+  {
+    // The non-vacuity half: without it this whole block would pass against a file
+    // that already had the table, and would be asserting nothing about upgrading.
+    const raw = new DatabaseSync(upgradePath);
+    check("the fixture really is a file with no machine_keys table", tableCount(raw), 0);
+    raw.close();
+  }
+  const upgraded = openStores({ path: upgradePath, instanceId: "i_mk_upgrade" });
+  check("an upgraded file gains the table on open", tableCount(upgraded.db), 1);
+  check("and the machine has no key until it generates one", upgraded.machineKeys.active(), null);
+  check(
+    "and the version does not move for it",
+    Number(upgraded.db.prepare("PRAGMA user_version").get()?.["user_version"]),
+    SCHEMA_VERSION,
+  );
+  const afterUpgrade = ensureMachineKey(upgraded.machineKeys, now);
+  report(
+    "and a key generated on that file is one the row really holds",
+    JSON.stringify(upgraded.machineKeys.active()) === JSON.stringify(afterUpgrade),
+    `kth ${afterUpgrade.kth.slice(0, 10)}…, created_at ${afterUpgrade.createdAt}`,
+  );
+  upgraded.close();
 }
 
 /* ------------------------------------------------------------------ *

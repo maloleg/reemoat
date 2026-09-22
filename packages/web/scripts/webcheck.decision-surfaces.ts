@@ -10,9 +10,17 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * for a reason worth stating: a blanket rule would be false. Measured across
    * `src/ui`, 40 of 57 class strings carrying `tap` or `press` do not reach 44px,
    * and most of them are right not to — `SignIn`'s `tap ${LINK}` is a link inside a
-   * sentence, `AgentsPanel`'s are `<summary>` elements in running text, and the
-   * machine tabs are deliberately 32px pills in a strip you drag sideways. A check
-   * needing a 40-entry exception list is a list, not a check.
+   * sentence, `AgentsPanel`'s are `<summary>` elements in running text, and
+   * `tabPill` is deliberately a 32px pill — navigation between two views of one
+   * pop-up, with its own argued exemption at the function. A check needing a
+   * 40-entry exception list is a list, not a check.
+   *
+   * ⚠ **That third example used to be "the machine tabs", and it had stopped being
+   * true.** The pills went when the strip became underline tabs — a change this
+   * file's sibling asserts from the other side, pinning the pill class *absent*
+   * from `SessionBrowser.tsx` — and those tabs are `min-h-11`, now `px-4` and
+   * `min-w-22` besides. So the paragraph was arguing that a blanket rule would be
+   * false from an example that clears the floor, which is worse than stale.
    *
    * What makes these three different is consequence. A mis-tap here answers the
    * agent: it approves a command, refuses one, or submits a form into the model's
@@ -93,6 +101,14 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
   ];
   // The documented escape, spelled once: `sm` keeps the desktop density and the
   // media query puts the platform minimum back wherever there is a finger.
+  //
+  // ⚠ **`[@media(pointer:coarse)]:` is now the escape for *both* ways to reach
+  // 44px rather than for this one.** `BUTTON_SIZE` grows its box behind it and
+  // `ICON_BUTTON_SIZE` grows its pad behind it, for two different reasons that
+  // arrive at the same prefix: a taller box costs layout a mouse does not need,
+  // and a wider pad costs `:hover` a mouse *does* notice. So this pattern stays
+  // anchored on `min-h-11` — the box half — and the pad half is asserted where
+  // the size table is read, beside `NAMES_ITS_44`.
   const COARSE_FLOOR = /pointer:coarse\)\]:min-h-11/;
 
   const shortPlugin: string[] = [];
@@ -769,20 +785,35 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
      */
     check("the bordered card is drawn only where this block names the plugin", /names \? "mt-3 rounded-lg border border-edge p-3" : "mt-3"/.test(consent), true);
     /*
-     * ⚠ **And the tap target went with the component instead of being lost in the
-     * move.** `min-h-11` is on the fold because it opens the list of capabilities
-     * somebody is about to grant a stranger's code, and this app is used from a
-     * phone. It is asserted against `bits.tsx` now, where the class string lives: a
-     * height that disappears in a refactor disappears silently, which is the same
-     * quiet loss `aria-expanded` was nearly a victim of when `AskCard`'s collapse
-     * became an `IconButton`.
+     * ⭐ **The fold is the height of its own words now, and the 44px it carried is
+     * gone by the owner's call.**
+     *
+     * This asserted the opposite, on the argument that `min-h-11` was right
+     * *"because it opens the list of capabilities somebody is about to grant a
+     * stranger's code, and this app is used from a phone"*. That reasons from the
+     * **importance** of what is behind the fold, and a tap floor is not about
+     * importance — it is about what a mis-tap costs. `web-shell.md` scopes the
+     * floor to controls that *answer an agent*, asserted on three files, and says
+     * outright that a blanket version would be false, naming a `<summary>` and a
+     * link inside a sentence as things that are right not to reach it. Opening a
+     * fold costs one tap to undo; **approving the grant does not**, and that
+     * control is untouched and still swept by the three-file check above.
+     *
+     * ⚠ **What is kept is the other half of the original finding**, which was never
+     * about the height: `aria-expanded` and the component itself, so the plugin
+     * screens cannot fall back to the platform's `<details>`. A height that
+     * disappears in a refactor disappears silently — so the absence is pinned as
+     * deliberately as the presence was, and in the same file.
      */
+    const bitsFold = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
     check(
-      "and the fold keeps its 44px, in the file it moved to",
-      /className="tap flex min-h-11 w-full items-center gap-1\.5/.test(
-        stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8")),
-      ),
-      true,
+      "and the fold is the height of its words, with the disclosure itself intact",
+      [
+        /className="tap flex w-full items-center gap-1\.5 text-left text-xs/.test(bitsFold),
+        /className="tap flex min-h-11 w-full items-center gap-1\.5/.test(bitsFold),
+        /aria-expanded=\{open\}/.test(bitsFold),
+      ],
+      [true, false, true],
     );
     /*
      * ⚠ **The sentence naming the blast radius is OUTSIDE the fold and above it,
@@ -1048,11 +1079,71 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * 10px would not, and `lg` simply is 44px. A size that reaches the floor some
    * fifth way has to say so here, which is the point: the assertion is that the
    * table *states* how, not that it happens to.
+   *
+   * ⚠ **Three of the four are now "under a finger", and the pattern says so.**
+   * The three that grow do it behind `[@media(pointer:coarse)]:`; only `lg`'s
+   * `h-11` is 44px on every pointer, because it is real box rather than pad.
    */
-  const NAMES_ITS_44 = /after:-inset-2\.5|after:-inset-1\.5|\$\{TAP_GROW_Y\}|\bh-11\b/;
+  const COARSE = String.raw`\[@media\(pointer:coarse\)\]:`;
+  const NAMES_ITS_44 = new RegExp(
+    `${COARSE}after:-inset-2\\.5|${COARSE}after:-inset-1\\.5|\\$\\{TAP_GROW_Y\\}|\\bh-11\\b`,
+  );
   check(
-    "and every size a caller can name says how it reaches 44px",
+    "and every size a caller can name says how it reaches 44px under a finger",
     sizes.filter(([, classes]) => !NAMES_ITS_44.test(classes)).map(([name]) => name),
+    [],
+  );
+  /*
+   * ⭐ **And the two that grow say *where* — which is the half this driver was
+   * green over while it was false.**
+   *
+   * The pad used to be unconditional, and a pad that extends hit-testing extends
+   * `:hover` with it: a generated box is a child box of its originating element,
+   * so `:hover` matches while the pointer is anywhere in the 44px rectangle and
+   * the 24px of ink lights up 10px early. Reported off the ✕ in the
+   * background-tasks head. `[@media(pointer:coarse)]:` is the repair, and it is
+   * free because Tailwind wraps every `hover:` utility in `@media (hover: hover)`
+   * — the pad is wanted exactly where the leak is not.
+   *
+   * ⚠ **A substring match would not have noticed the repair being undone.**
+   * `after:-inset-2.5` is still a substring of the gated spelling, so the pattern
+   * above is anchored on the prefix rather than on the inset, and the same
+   * anchoring is what `GROWS_TO_44` carries for the hand-rolled sweep. An
+   * assertion that stays green through the change it is about is this
+   * repository's own named failure (Q5.114).
+   */
+  const UNGATED_PAD = /(?<!\]:)after:(?:absolute|-inset-|-top-|-bottom-|inset-x-|top-|content-)/;
+  check(
+    "and neither of them grows on a pointer that hovers",
+    sizes.filter(([, classes]) => UNGATED_PAD.test(classes)).map(([name]) => name),
+    [],
+  );
+  /*
+   * `TAP_GROW_Y` is the third mechanism and `chip` reaches it by name, so the
+   * sweep above reads `${TAP_GROW_Y}` and never the five classes behind it. Five
+   * call sites outside this table spend the same constant, which is what makes one
+   * ungated class in it five leaks rather than one.
+   *
+   * ⚠ **Keyed on the gate itself and not on the shape of one.** This tested
+   * `!token.includes("]:after:")` for one release-less afternoon, and that is
+   * satisfied by *any* arbitrary variant: respelling the media query
+   * `[@media(pointer:fine)]:` — the exact inversion of the property this check is
+   * named for — left every assertion here green while the pad stopped existing
+   * under a thumb, on the composer's Send and Stop, the config bar's chips and
+   * its drag handle, the sheet's grab bar and the transcript's download button.
+   * Measured by mutating the constant and re-running this driver's own logic. A
+   * plain variant (`lg:`, `hover:`) was caught, which is what made the hole look
+   * closed. So the literal `COARSE` above is the one spelling of the gate, and it
+   * is spent by both halves of this section.
+   */
+  const growAt = bitsCode.indexOf("export const TAP_GROW_Y");
+  const growValue = bitsCode.slice(growAt, bitsCode.indexOf(";", growAt));
+  check("the shared vertical grow was found", growValue.includes("after:"), true);
+  check(
+    "and every class in it is gated on a coarse pointer too",
+    growValue
+      .split(/\s+/)
+      .filter((token) => token.includes("after:") && !token.includes("[@media(pointer:coarse)]:after:")),
     [],
   );
   /*
@@ -1212,7 +1303,7 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * counting zero of them.
    */
   const SQUARE = /\bh-(\d+)\b[^"`]*?\bw-\1\b/;
-  const GROWS_TO_44 = /after:-inset-2\.5|TAP_GROW_Y|min-h-11/;
+  const GROWS_TO_44 = /\[@media\(pointer:coarse\)\]:after:-inset-2\.5|TAP_GROW_Y|min-h-11/;
   /*
    * ⚠ **This sweep found one control the first time it was run, and it has since
    * been fixed — so what stands here is the sweep and not a list.**

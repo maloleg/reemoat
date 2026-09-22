@@ -239,7 +239,7 @@ export interface PluginAction {
  *
  * ⚠ **Declarative, and that is the whole of it — no plugin code runs for this.**
  * What a harness needs from a manifest is the same handful of facts
- * `resolveAgent` writes down for each of the four built-ins, and nothing about
+ * `resolveAgent` writes down for each of the five built-ins, and nothing about
  * `Session.start` learns that a plugin supplied them. So this is a table row
  * somebody else wrote, not an extension point with a callback behind it.
  *
@@ -278,7 +278,7 @@ export interface HarnessContribution {
    * The program, as a bare name resolved on `PATH`.
    *
    * ⚠ **A name and never a path.** `findOnPath` already memoises the walk and
-   * already reports "not installed" the way the four built-ins do, and a path from
+   * already reports "not installed" the way the five built-ins do, and a path from
    * a manifest would be a synchronous `accessSync` against a location this daemon
    * did not create — which `files-paths-git.md` forbids for a reason that is about
    * a stalled mount blocking every session, not about trust.

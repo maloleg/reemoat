@@ -1,7 +1,8 @@
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { CONTROL_PLANE_UNREACHABLE } from "../../account";
-import { installCommand } from "../../enrollment";
+import { AGENT_HOST_OS, installCommand } from "../../enrollment";
+import { controlPlaneOrigin } from "../../native";
 import {
   machineAllowanceText,
   machineBadgeText,
@@ -147,6 +148,7 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
                 key={machine.id}
                 machine={machine}
                 showId={ambiguous.has(machine.name.toLowerCase())}
+                isThisDevice={machine.id === state.localMachineId}
               />
             ))
           )}
@@ -179,8 +181,12 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
         <h2 className={SETTINGS_HEADING}>Add a machine</h2>
         {canAdd ? (
           <>
-            <div className="mt-3">
-              <CommandLine command={installCommand(location.origin)} />
+            {/* Which machines this is for, for `AGENT_HOST_OS`'s reason: the
+                command is about the computer that will run agents, not about the
+                one drawing this screen. */}
+            <p className="mt-3 text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
+            <div className="mt-2">
+              <CommandLine command={installCommand(controlPlaneOrigin())} />
             </div>
             {/* Under the command, never above it: the free way to add a machine
                 is the answer, and this is the alternative for somebody who has
@@ -200,20 +206,46 @@ export function MachinesSection({ state }: { state: AppState }): ReactNode {
 function MachineRow({
   machine,
   showId,
+  isThisDevice,
 }: {
   machine: AppState["machines"][number];
   /** Another machine in this list answers to the same name. See `ambiguousNames`. */
   showId: boolean;
+  /**
+   * This row is the computer the app is running on.
+   *
+   * ⚠ **The whole of what is left of "local" after 2026-09-15.** The machine's
+   * label is the ordinary host name, because that row is read by a phone and by
+   * every other client of the account; which row you are *sitting at* is true of
+   * one client only, so it is drawn here and stored nowhere. `AppState.localMachineId`
+   * is the read, and it comes from the daemon's announce file rather than from the
+   * route — a routing preference can be switched off, and the badge must not go
+   * with it.
+   *
+   * ⚠ **Not the same claim as the `This device` *heading* one screen along.**
+   * That heading (`MachineSection.tsx`) is on every machine's page and is about
+   * *this client's* preference for reaching that host. This is about which host
+   * the client is on. Same two words, two facts, and they are never on screen
+   * together.
+   */
+  isThisDevice: boolean;
 }): ReactNode {
   /*
    * **At most one badge per row.** A limit or enrolment badge is the fact that
-   * has to be fixed first; `shared` is a fact about who may act, and it gives
-   * way. Two boxes beside a truncating name on a 390px phone is the collapse the
-   * kebab exists to prevent, and it is the *name* that truncates — every badge
-   * is `shrink-0`, because the badge is what makes the row recognisable.
+   * has to be fixed first; `this device` is what makes one row findable in a list
+   * where every name is now an ordinary host name; `shared` is a fact about who
+   * may act, and it gives way to both. Two boxes beside a truncating name on a
+   * 390px phone is the collapse the kebab exists to prevent, and it is the *name*
+   * that truncates — every badge is `shrink-0`, because the badge is what makes
+   * the row recognisable.
+   *
+   * ⚠ **`this device` outranks `shared` rather than the other way round**, even
+   * though a shared machine you are sitting at is possible: of the two, the one
+   * that tells you *where you are* is the one you scan the list for, and the one
+   * about who may act is answered on the row's own screen the moment you open it.
    */
   const stateBadge = machineBadgeText(machine);
-  const badge = stateBadge ?? (machine.owned === true ? null : "shared");
+  const badge = stateBadge ?? (isThisDevice ? "this device" : machine.owned === true ? null : "shared");
 
   const standing =
     machine.ownerDisabled || machine.overLimit
@@ -279,9 +311,12 @@ function MachineRow({
           <span className="min-w-0 truncate text-sm font-medium">{machine.name}</span>
           {badge !== null && (
             <span className="shrink-0">
-              {/* `strong` for a state that needs fixing, plain for `shared`,
-                  which is a fact and not a problem. */}
-              <Badge tone={stateBadge !== null ? "strong" : "plain"}>{badge}</Badge>
+              {/* `strong` for a state that needs fixing and for `this device`,
+                  plain for `shared`, which is a fact and not a problem. `bits.tsx`
+                  enumerates `this device` among the app's non-plain uses by name,
+                  and `AccountSection` already draws it that way for the sign-in
+                  row — the same two words, weighted the same, one screen apart. */}
+              <Badge tone={badge === "shared" ? "plain" : "strong"}>{badge}</Badge>
             </span>
           )}
         </span>

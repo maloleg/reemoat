@@ -2,10 +2,14 @@ import type { AuthFailure } from "./account";
 import { authFailure } from "./account";
 import { ApiError, readJson, withTimeout } from "./http";
 import { parseInstanceConfig } from "./instance";
+import type { CpInit } from "./native";
+import { cpSend, inNativeShell, nativeBoot, setNativeCredential, setNativeDevice } from "./native";
 import type { ConfigField, InstanceConfig } from "./instance";
 import type {
   AdminUser,
+  CreatedMachine,
   CreatedUser,
+  DeviceRecord,
   EnrollmentCode,
   IssuedToken,
   MachineRecord,
@@ -17,11 +21,20 @@ import type {
 /**
  * The control plane, from the browser.
  *
- * Same-origin: this page is served by it, and in dev Vite proxies `/v1` to it.
- * That is not an implementation detail, it is the security boundary — **the
- * credential is sent here and nowhere else.** It never goes to a daemon and never
- * to the relay; those get short-lived, machine-scoped tokens that this service
- * mints.
+ * **The credential is sent to one origin and nowhere else.** It never goes to a
+ * daemon and never to the relay; those get short-lived, machine-scoped tokens that
+ * this service mints. That is the security boundary, and it is held two different
+ * ways depending on where this code is running.
+ *
+ * In a browser it is held by *being* same-origin: this page is served by the
+ * control plane, and in dev Vite proxies `/v1` to it rather than letting the call
+ * go cross-origin. In the native shell there is no such thing as same-origin — the
+ * document comes from a custom scheme and the control plane mounts no CORS at all —
+ * so the base URL lives in the host process instead, this module sends it a *path*,
+ * and the host refuses anything that would leave the configured origin. **Stronger
+ * than same-origin rather than weaker**: the page cannot name the address the
+ * credential goes to. `native.ts` is the seam and `.claude/rules/native-shell.md`
+ * carries the argument.
  *
  * The credential is a session token now, obtained by signing in. It is **not a
  * cookie**: `src/cors.ts` answers `*` and never sends
@@ -61,6 +74,25 @@ const CREDENTIAL_STORAGE = "reemoat.credential";
  * the rename, and then they are deleted rather than updated.
  */
 const LEGACY_STORAGE = ["remoslop.credential", "remoslop.apiKey"];
+
+/**
+ * Which device this browser is registered as, on this origin.
+ *
+ * **Deliberately a separate key rather than a field beside the credential**, and
+ * not merely for tidiness: it survives a sign-out. That is the whole behaviour —
+ * signing out ends a session, and the computer you signed out of is still the same
+ * computer, so the next sign-in re-binds the same row rather than registering a
+ * second one for one machine.
+ *
+ * `LEGACY_STORAGE` has no twin here and never will: nothing wrote this under an
+ * older name, so there is nothing to adopt and nothing to sweep.
+ *
+ * A browser origin scopes this for free, which is why it needs no origin in the
+ * key — the asymmetry with the native shell, where one webview origin serves every
+ * server and `config.rs` keys the same value by origin, is `native-shell.md`'s and
+ * is not an inconsistency.
+ */
+const DEVICE_STORAGE = "reemoat.device";
 
 const CP_TIMEOUT_MS = 10_000;
 
@@ -115,7 +147,46 @@ export function authHeader(credential: Credential | null): Record<string, string
   return { authorization: `Bearer ${credential.value}` };
 }
 
-let credential: Credential | null = readStoredCredential();
+/*
+ * ⚠ **Two stores, and which one is read is decided synchronously, here.**
+ *
+ * In a browser this line is unchanged and is the whole story: `localStorage`, read
+ * once in the module body, with the pre-rename names adopted and swept.
+ *
+ * In the native shell there is no `localStorage` worth trusting, and the sharper
+ * reason is not trust: **there is one webview origin for every server somebody
+ * might point that app at.** A browser hands out one storage area per origin and
+ * therefore scopes a credential to a server for free; a custom scheme does not. So
+ * the credential lives in the operating system's credential store under a key that
+ * *is* the server's origin (`packages/native/src-tauri/src/credential.rs`), which
+ * means it cannot be read for a server it was not issued by — structurally, rather
+ * than because a code path remembered to clear it on a change.
+ *
+ * That store is async and this assignment is not, so the native arm starts empty
+ * and `store.bootstrap()` fills it through {@link adoptHydratedCredential} after
+ * awaiting `hostReady`. `nativeHydrating()` is what stops the sign-in screen being
+ * drawn in the frame before it lands. The alternatives, and why each is worse, are
+ * in `native.ts`'s docblock for `hostReady`.
+ */
+let credential: Credential | null = inNativeShell() ? null : readStoredCredential();
+
+/**
+ * Adopt what the operating system's credential store held, once it has answered.
+ *
+ * **A function the store calls rather than a `.then` registered here**, so the
+ * ordering is something a reader can see and a driver can drive: two promise
+ * callbacks on one promise resolve in registration order, which is true and is
+ * exactly the kind of thing that stops being true when somebody moves an import.
+ *
+ * A credential adopted since is **newer than the keyring's** and wins — a sign-in
+ * that completed while the keyring read was in flight is the whole case, and it is
+ * the same reasoning `cpFetch` uses when it refuses to let a late 401 clear a fresh
+ * credential.
+ */
+export function adoptHydratedCredential(value: string | null): void {
+  if (value === null || credential !== null) return;
+  credential = { value, kind: credentialKind(value) };
+}
 
 function readStoredCredential(): Credential | null {
   try {
@@ -164,6 +235,20 @@ export function currentCredential(): Credential | null {
  */
 export function setSession(token: string): void {
   credential = { value: token.trim(), kind: credentialKind(token.trim()) };
+  /*
+   * ⚠ **The native arm returns, and never falls through to the writes below.**
+   *
+   * Writing to `localStorage` *as well* would be the one thing a native client must
+   * not do: the whole reason the credential lives in the OS store is that a
+   * webview's storage is neither protected nor scoped to a server, and a second
+   * copy sitting beside it would be the unprotected one somebody later reads.
+   * `webcheck` asserts the absence under all three names rather than trusting this
+   * comment.
+   */
+  if (inNativeShell()) {
+    setNativeCredential(credential.value);
+    return;
+  }
   try {
     window.localStorage.setItem(CREDENTIAL_STORAGE, credential.value);
     /*
@@ -183,11 +268,76 @@ export function setSession(token: string): void {
 
 export function clearSession(): void {
   credential = null;
+  // Removed from the keyring rather than blanked, and before anything else: this is
+  // the path `store.signOut()` takes, and it ends in a full reload.
+  //
+  // ⚠ **The device is deliberately left alone here.** Signing out ends a session;
+  // the computer is still the same computer, and the row on the server is still
+  // live. Clearing it would make every sign-out register a second device for one
+  // machine, which walks an account into its device limit. `forgetDevice` is the
+  // separate act, called on `device_revoked` alone.
+  if (inNativeShell()) {
+    setNativeCredential(null);
+    return;
+  }
   try {
     window.localStorage.removeItem(CREDENTIAL_STORAGE);
     for (const key of LEGACY_STORAGE) window.localStorage.removeItem(key);
   } catch {
     // Nothing to do; the in-memory value is already cleared.
+  }
+}
+
+/**
+ * Which installation this client is registered as, or `null`.
+ *
+ * In the shell this comes from `NativeBoot` — the shell's own configuration file,
+ * **not its keyring**, so it survives a machine whose credential store silently
+ * discards writes (`config.rs` carries that argument). In a browser it is
+ * `localStorage`, which the origin already scopes.
+ */
+export function currentDevice(): string | null {
+  if (inNativeShell()) return nativeBoot()?.deviceId ?? null;
+  try {
+    const held = window.localStorage.getItem(DEVICE_STORAGE);
+    return held === null || held.length === 0 ? null : held;
+  } catch {
+    // Private browsing, or storage disabled. The app registers a device per
+    // session instead, which is the same degraded mode the credential has.
+    return null;
+  }
+}
+
+/** Remember the device the control plane just bound this session to. */
+export function rememberDevice(id: string): void {
+  if (inNativeShell()) {
+    setNativeDevice(id);
+    return;
+  }
+  try {
+    window.localStorage.setItem(DEVICE_STORAGE, id);
+  } catch {
+    // See `currentDevice`: in-memory-only is a working degraded mode.
+  }
+}
+
+/**
+ * Give up the stored device id.
+ *
+ * Called on `device_revoked` and on nothing else — see `clearSession`, which
+ * deliberately does not. The server declines to bind a retired id and registers a
+ * fresh device instead, so this is belt rather than the only guard; what it buys
+ * is that the client stops presenting something it has been told is finished.
+ */
+export function forgetDevice(): void {
+  if (inNativeShell()) {
+    setNativeDevice(null);
+    return;
+  }
+  try {
+    window.localStorage.removeItem(DEVICE_STORAGE);
+  } catch {
+    // Nothing to do.
   }
 }
 
@@ -204,7 +354,7 @@ export function onSignedOut(handler: (failure: AuthFailure) => void): void {
   signedOutHandler = handler;
 }
 
-async function cpFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function cpFetch<T>(path: string, init: CpInit = {}): Promise<T> {
   /*
    * Which credential this request actually carried, held so the refusal below can
    * be attributed to it rather than to whatever is current when it lands.
@@ -216,7 +366,7 @@ async function cpFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (headers === null) throw new ApiError(401, "missing_api_key", "not signed in");
   if (init.body !== undefined) headers["content-type"] = "application/json";
 
-  const response = await fetch(path, { ...init, headers, signal: withTimeout(CP_TIMEOUT_MS) });
+  const response = await cpSend(path, { ...init, headers, signal: withTimeout(CP_TIMEOUT_MS) });
   try {
     return await readJson<T>(response);
   } catch (error) {
@@ -264,7 +414,7 @@ async function cpFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
  * ------------------------------------------------------------------ */
 
 async function publicPost<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
+  const response = await cpSend(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -291,7 +441,7 @@ async function publicPost<T>(path: string, body: unknown): Promise<T> {
  * with everything off — is the failure it replaces.
  */
 export async function instanceConfig(): Promise<InstanceConfig> {
-  const response = await fetch("/v1/instance", { signal: withTimeout(CP_TIMEOUT_MS) });
+  const response = await cpSend("/v1/instance", { signal: withTimeout(CP_TIMEOUT_MS) });
   const config = parseInstanceConfig(await readJson<unknown>(response));
   if (config === null) throw new Error("this control plane described itself in a shape this client cannot read");
   return config;
@@ -361,15 +511,117 @@ export function consumePasswordReset(token: string, newPassword: string): Promis
  * special case in exactly the place that must not have any.
  */
 export async function login(name: string, password: string): Promise<Me> {
-  const response = await fetch("/v1/login", {
+  /*
+   * The installation, named in the same request that signs in.
+   *
+   * **One round trip rather than two**, which is the argument `GET /v1/me` already
+   * makes for computing `canAddMachine` server-side: this is the cold-start path
+   * and a second call to bind a device would sit on it every time.
+   *
+   * The stored id is offered rather than asserted — the control plane adopts it
+   * where it is this account's and still live, and **registers a fresh one
+   * otherwise rather than refusing**. That is what stops a retired id closing a
+   * sign-in loop, so a client must never treat its own id as the answer:
+   * `body.deviceId` is what to keep.
+   *
+   * Absent in a browser with storage disabled and in a shell whose configuration
+   * could not be read, both of which simply register.
+   */
+  const device = describeDevice();
+  const response = await cpSend("/v1/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name, password }),
+    body: JSON.stringify(device === null ? { name, password } : { name, password, device }),
     signal: withTimeout(CP_TIMEOUT_MS),
   });
-  const body = await readJson<SessionToken>(response);
+  const body = await readJson<SessionToken & { deviceId?: string | null }>(response);
   setSession(body.token);
+  if (typeof body.deviceId === "string") rememberDevice(body.deviceId);
   return body.user;
+}
+
+/**
+ * What this installation should be called, or `null` where it is not one.
+ *
+ * `null` in a browser: a tab is not an installation somebody chose to register,
+ * and naming it after its `User-Agent` would put a guess in a list whose whole
+ * value is that its rows were named by a person. The sessions list already
+ * describes a browser through `device.ts`, which is the right surface for it.
+ *
+ * In the shell the name is the computer's own — the same string `machineLabelFor`
+ * uses when this app buys a machine — because that is the word somebody will
+ * recognise in a list of three.
+ */
+function describeDevice(): { id?: string; name: string; platform: string; publicKey?: string } | null {
+  const boot = nativeBoot();
+  if (!inNativeShell() || boot === null) return null;
+  const name = boot.hostName ?? "This computer";
+  const held = currentDevice();
+  /*
+   * ⚠ **The key travels with the registration, and it is what makes a capability
+   * more than a bearer token.** The control plane names it in everything it mints
+   * for this installation, and the daemon compares that name against the key the
+   * encrypted handshake authenticated — so a capability copied off this device is
+   * worth nothing to whoever copied it.
+   *
+   * Omitted rather than sent as `null` where the shell has none, which is a real
+   * state on a machine no credential store would answer for. The route keeps the
+   * registration and says the installation has no key; minting is what refuses,
+   * with a code naming the remedy.
+   */
+  const key = boot.devicePublicKey ?? undefined;
+  return {
+    ...(held === null ? {} : { id: held }),
+    name,
+    platform: boot.platform,
+    ...(key === undefined ? {} : { publicKey: key }),
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Devices
+ * ------------------------------------------------------------------ */
+
+/**
+ * Register this installation, or adopt the one it already holds.
+ *
+ * Called by `store.bootstrap()` when a session was restored from storage rather
+ * than just minted — `login` binds one itself, so this is the path for a client
+ * that came back with a credential and no device, which is every client upgrading
+ * to this release.
+ *
+ * Answers `null` where there is nothing to register: a browser, or a shell that
+ * could not describe itself. The caller treats that as "no device", which is an
+ * ordinary state rather than a failure.
+ */
+export async function registerDevice(): Promise<string | null> {
+  const device = describeDevice();
+  if (device === null) return null;
+  const body = await cpFetch<{ id: string; hasKey?: boolean }>("/v1/me/devices", {
+    method: "POST",
+    body: JSON.stringify(device),
+  });
+  rememberDevice(body.id);
+  return body.id;
+}
+
+/** The installations on this account — live, and recently retired. */
+export async function devices(): Promise<{ devices: DeviceRecord[]; limit: number }> {
+  return await cpFetch<{ devices: DeviceRecord[]; limit: number }>("/v1/me/devices");
+}
+
+/**
+ * Retire one installation, ending every sign-in on it.
+ *
+ * ⚠ **Retiring the one you are holding is allowed and ends this session**, which
+ * is what somebody reaching for it on a machine they are giving away wants — and
+ * refusing would mean the last device on an account could never be retired. The
+ * caller is what confirms; this does not guess.
+ */
+export function revokeDevice(id: string): Promise<{ revoked: boolean; sessionsRevoked: number }> {
+  return cpFetch<{ revoked: boolean; sessionsRevoked: number }>(`/v1/me/devices/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 /**
@@ -572,6 +824,36 @@ export function renameMachine(id: string, name: string): Promise<{ id: string; n
 
 export function mintEnrollment(id: string): Promise<EnrollmentCode> {
   return cpFetch<EnrollmentCode>(`/v1/machines/${encodeURIComponent(id)}/enrollments`, { method: "POST" });
+}
+
+/**
+ * Register a machine, grant it to yourself and mint its first code — one request.
+ *
+ * ⚠ **This function existed, was deleted on 2026-09-04, and is back for a
+ * different caller.** It went with the by-name "add a machine" form on Settings →
+ * Machines, because a machine is enrolled *from the host it runs on* and a code
+ * carried to another computer by hand was the step that form existed to create.
+ * `webcheck.machine-limit-and-probe.ts` still pins that **no settings screen may
+ * `POST /v1/machines` under any spelling**, and that pin stays true: the caller
+ * now is `store.ts`'s provisioning step, on a computer that is about to run the
+ * daemon itself, where there is nothing to carry anywhere.
+ *
+ * ⚠ **Every call spends one of fifty, permanently.** `machine_owners` is counted
+ * with no revoked filter, so retiring a machine does not give the slot back. A
+ * caller must know it has not already claimed one — `DaemonState.claimed` is that
+ * record — and should ask `mayAddMachine(me)` first rather than discovering the
+ * ceiling as a `409 machine_limit`.
+ *
+ * The answer carries all three halves because the server resolves the third:
+ * `controlPlaneUrl` is the address **the daemon will dial**, taken from the
+ * request rather than from this page's origin — which in dev is Vite's port, and
+ * in the native shell is a custom scheme naming no server at all.
+ */
+export function createMachine(name: string): Promise<CreatedMachine> {
+  return cpFetch<CreatedMachine>("/v1/machines", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
 }
 
 /**

@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { check, report } from "./webcheck.env.js";
-import { stripComments } from "./webcheck.source.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 
 /* ------------------------------------------------------------------ *
  * The machine limit
@@ -267,7 +267,314 @@ process.stdout.write("\nthe machine limit\n");
    * somebody else, while the limit counts only the ones you own).
    */
   const strip = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-  for (const file of ["ui/SessionBrowser.tsx", "ui/NewSession.tsx", "ui/settings/MachinesSection.tsx"]) {
+
+  /*
+   * ⭐ **The fourth door onto that predicate, and it draws no screen.**
+   *
+   * `store.ts` creates a machine by itself now, for the computer the desktop app
+   * is running on. The three files below are affordances somebody presses; this
+   * one is not, which is exactly why it needs naming here — a silent create that
+   * skipped `mayAddMachine` would spend a permanent slot and answer `409` to
+   * nobody, and every assertion in this file would stay green while it did.
+   */
+  {
+    const store = strip(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+    check("the store asks the shared predicate before creating a machine", /mayAddMachine\(/.test(store), true);
+    check("and never re-derives it from the fields", /machineLimit|machineCount|canAddMachine/.test(store), false);
+    /*
+     * ⚠ **Gated on the native shell, never on the fleet being empty**, and this is
+     * the assertion that keeps the live bootstrap driver honest. That driver stubs
+     * `fetch` with a function that ignores `init.method`, so a `POST /v1/machines`
+     * from it would be answered `{machines: []}` with a 200 and a machine id of
+     * `undefined`. It cannot reach this code because `__TAURI__` is absent when
+     * `native.ts` is first imported and `host` is therefore `null` — a fleet-size
+     * gate would have no such protection.
+     */
+    check(
+      "and reaches the host before it decides anything",
+      /const boot = this\.snapshot\.host;\s*if \(boot === null\) return;/.test(store),
+      true,
+    );
+    /*
+     * ⚠ **A failed setup may not become `cpError`.** That field puts the whole app
+     * on the spinner — `bootstrap`'s catch arm forces `phase: "loading"` with no
+     * connections, which is precisely the empty-fleet state this runs in. One
+     * affordance failing must not read as the control plane being down.
+     */
+    const setUp = /private async setUpThisComputer\(\)[\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check("the setup path exists to be checked", setUp.length > 0, true);
+    check("and it never writes cpError", /cpError/.test(setUp), false);
+    check("and it never moves the phase", /phase:/.test(setUp), false);
+    /*
+     * And it consults what it already claimed. Creating unconditionally on every
+     * bootstrap is the defect this whole record exists to prevent: a machine row is
+     * counted with no revoked filter, so each one holds a slot until it is
+     * revoked — and nobody revokes a machine they never knew was made.
+     */
+    check("and it re-mints against a machine it already made", /state\.claimed/.test(setUp), true);
+    /*
+     * ⭐ **And it asks what is already configured on this computer, before it buys
+     * anything.**
+     *
+     * Measured on a real machine 2026-09-15, and this is the whole failure: a
+     * computer carrying a half-finished `deploy/install.sh` install reported
+     * `absent` — because nothing looked at the env file — so the store created a
+     * machine at 15:15:54, and one second later the host started the daemon on the
+     * *old* file's hour-dead enrollment code. `409 code_unusable`, a child gone in
+     * under a second, a permanently spent quota slot, and nothing on the screen.
+     *
+     * Three assertions because the three arms fail differently: without the
+     * `elsewhere` arm this app writes over a daemon somebody else configured;
+     * without the `here` arm it buys a machine for a computer that has one; and
+     * without the empty-argument adoption call the host cannot tell "start what is
+     * there" from "provision this".
+     */
+    check("and it reads what the env file here already says", /state\.config/.test(setUp), true);
+    for (const arm of ["elsewhere", "here"] as const) {
+      check(`and it has an arm for ${arm}`, new RegExp(`DAEMON_CONFIG\\.${arm}`).test(setUp), true);
+    }
+    check('and adoption starts with no code at all', /startLocalDaemon\("",\s*""\)/.test(setUp), true);
+    /*
+     * ⭐ **And adoption is tried *before* a fresh code is minted.**
+     *
+     * Re-minting first re-enrolls a daemon that was already enrolled: the daemon
+     * compares `codeFp` against the file's code (`scripts/daemon.ts`), so a new
+     * code is a new fingerprint and `enroll()` runs — rotating the tunnel key on
+     * every single launch, and turning a half-reachable control plane into a
+     * daemon that exits 2 despite holding a perfectly good identity. The ordering
+     * is the whole fix, so it is asserted as an ordering rather than as two arms.
+     */
+    check(
+      "and adoption comes before re-minting",
+      setUp.indexOf("DAEMON_CONFIG.here") < setUp.indexOf("remintFor("),
+      true,
+    );
+    /*
+     * ⭐ **And a transient mint failure may not buy a machine.** `remintFor`
+     * answering a plain boolean read "the wifi dropped" as "that machine is gone"
+     * and fell through to `createForThisComputer` — a permanently spent quota slot
+     * for a computer that already had one, on the failure most likely to be
+     * temporary.
+     */
+    check('only a refusal falls through to buying one', /!== "dead"/.test(setUp), true);
+
+    /*
+     * ⭐ **And the whole flow runs once.** `bootstrap()` has three callers — the
+     * entry point, `retry()` and the forced password change — so two runs racing
+     * would each read `absent` and each buy a machine.
+     */
+    check("the setup flow is single-flight", /this\.settingUp \?\?=/.test(store), true);
+    /*
+     * ⚠ **And the guard is released, never latched.** A flag set once per process
+     * also makes `retry()` a no-op for setup: somebody whose control plane was
+     * down fixes their network, presses Retry, and nothing happens until they
+     * restart the app. Concurrency is all that needs guarding — a second run sees
+     * the machine the first made and adopts it.
+     */
+    check("and it is released when the run settles", /\.finally\(\(\) => \{\s*this\.settingUp = null;/.test(store), true);
+    /*
+     * ⭐ **And the start is watched rather than assumed.**
+     *
+     * `startLocalDaemon` resolving means a process was *spawned*. Everything that
+     * can still go wrong — a refused code, an unverifiable certificate, a database
+     * a newer daemon migrated — happens seconds later in a child whose output goes
+     * to a ring buffer. The version of this flow that cleared `setup` on the next
+     * line reported success for a daemon that was already dead, which is how the
+     * failure above stayed invisible through two builds.
+     */
+    check("the setup flow settles rather than assuming a spawn worked", /settleDaemon\(/.test(setUp), true);
+    const settle = /private async settleDaemon\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    const remint = /private async remintFor\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check("and the settle loop exists to be checked", settle.length > 0, true);
+    /*
+     * ⚠ **And what it reports is a *sentence*, never the daemon's own output** —
+     * owner's call, 2026-09-15, reversing the arm this assertion used to pin. The
+     * settle loop put `state.detail` — the host's two-hundred-line ring — straight
+     * into the rail's notice, which drew it verbatim in a `<pre>`. The ring is
+     * Settings → Logs now and the rail says one sentence.
+     *
+     * Both halves, because either alone goes green over the wrong thing: the tail
+     * is not read here, **and** every failure that has evidence says where it went.
+     * A negative alone is the anti-pattern this file already names elsewhere — it
+     * would pass just as well over a flow that says nothing at all.
+     */
+    check("and the settle loop never puts the daemon's output in the notice", /state\.detail/.test(settle), false);
+    check("while every failure with evidence names where it is", /LOGS_POINTER|DAEMON_STOPPED_DETAIL|GAVE_UP_DETAIL/.test(settle), true);
+    const pointer = /const LOGS_POINTER = "([^"]+)"/.exec(store)?.[1] ?? "";
+    check("and the pointer names a real settings section", /Logs/.test(pointer), true);
+    const sections = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
+    check("which the section table actually has", /title: "Logs"/.test(sections), true);
+    /*
+     * ⚠ **And it retries on the *fact* of an exit, never on the text of one.**
+     * Matching `code_unusable` in a log tail would be a fourth reader of a string
+     * the daemon is free to reword, and a reworded string would silently switch the
+     * retry off. Re-minting costs no quota and the retry is bounded at one.
+     */
+    check("and it never pattern-matches the log to decide", /code_unusable|code_rejected/.test(settle), false);
+    /*
+     * ⭐ **And a fresh code answers exactly one exit.** Retrying on the *fact* of
+     * an exit was right while an exit was all the daemon said; it says which now,
+     * so a held database lock or a missing token stops being answered with a mint
+     * that re-enrolls the machine over a problem no code can touch. Still the
+     * process's status rather than its words.
+     */
+    check("a mint answers a refused code and nothing else", /DAEMON_EXIT\.codeRefused/.test(settle), true);
+    /*
+     * ⭐ **And the fast deadline slows down rather than giving a wrong answer.**
+     * Stopping there left the notice saying `failed` over a daemon that came up a
+     * second later, with nothing still watching to take it back.
+     */
+    check("a slow start is waited out, not called a failure", /SETUP_SLOW_POLL_MS/.test(settle), true);
+    /*
+     * ⭐ **And a computer whose settings cannot start is not a dead end.**
+     *
+     * The pure form of the original bug: a half-finished `deploy/install.sh`
+     * install with a dead code, on a Mac this app has never bought a machine for.
+     * Adoption is the right first move and it fails; without this arm the answer is
+     * a sentence, identical on every relaunch, escapable only by deleting a file
+     * nobody mentions. At most one machine is bought this way — the claim it writes
+     * is what the next launch re-mints against.
+     */
+    check("a failed adoption can still provision", /provisionOver\(\)/.test(settle), true);
+    const provision = /private async provisionOver\([\s\S]*?\n  \}/.exec(store)?.[0] ?? "";
+    check("and buying there asks the shared predicate too", /mayAddMachine\(/.test(provision), true);
+    /*
+     * ⭐ **And an unreachable control plane keeps its own sentence.** `remintFor`
+     * writes why the mint failed; falling through would overwrite it with the
+     * daemon's last words, so somebody whose network is down reads "this enrollment
+     * code was rejected".
+     */
+    check("a control plane that could not be reached is not reported as a bad code", /!== "dead"/.test(settle), true);
+    /*
+     * ⭐ **And a daemon this app did not start is not this app's success.**
+     * Reaching `foreign` from inside a settle means the child that *was* started is
+     * gone and the machine being set up never enrolled — while something else
+     * answers on this computer. Counting it as success cleared the notice and left
+     * somebody owning a machine that exists on the control plane and nowhere else.
+     */
+    check("a foreign daemon does not clear the notice", /status === "foreign"/.test(settle), true);
+    check("and only a daemon this app started does", /status === "running"[\s\S]{0,120}setup: null/.test(settle), true);
+    /*
+     * ⭐ **And "that machine is gone" is a *named* refusal.** With the test the
+     * other way round, a 401 on an expired session or any unrecognised 5xx bought a
+     * second machine for a machine that is alive — a slot held until a person
+     * notices it, so the default has to be the answer that spends nothing.
+     */
+    for (const code of ["machine_not_found", "machine_revoked"] as const) {
+      check(`a dead claim is ${code}`, remint.includes(code), true);
+    }
+    check("and the mint failure is classified rather than swallowed", /ApiError\.isApiError\(/.test(remint), true);
+  }
+
+  /*
+   * ⭐ **The name, which is the half that fails on the *second* computer.**
+   *
+   * A control-plane label is refused when the account can already see one spelled
+   * the same, compared case-insensitively — so this is not about tidiness, it is
+   * the difference between an app that sets up one Mac and an app that sets up
+   * two. And the alphabet is not ours: `MACHINE_LABEL` is
+   * `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`, so anything this produces that the
+   * server would refuse is a `400` nobody can act on.
+   *
+   * Asserted against the server's own regex rather than against examples, because
+   * the property wanted is "whatever comes out is acceptable", not "these six
+   * strings map to these six strings".
+   */
+  {
+    const { machineLabelFor } = await import("../src/store.js");
+    const LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+    const cases: [string | null, string][] = [
+      ["Rendss-MacBook-Pro", "an ordinary host name survives intact"],
+      ["Ann's Mac", "an apostrophe becomes a separator rather than vanishing"],
+      ["--weird--", "leading punctuation is dropped, since a label must start alphanumeric"],
+      ["...", "a name with nothing usable in it still yields a label"],
+      ["", "so does an empty one"],
+      [null, "and so does no name at all"],
+      ["Ы-машина", "and a name in another script"],
+      ["x".repeat(200), "and one far past the length bound"],
+    ];
+    for (const [input, name] of cases) {
+      check(name, LABEL.test(machineLabelFor(input)), true);
+    }
+    /*
+     * The one behavioural assertion, and it is about *collisions* rather than
+     * shape: two different computers must not be flattened onto one label by the
+     * sanitiser itself, or the retry is asked to fix something it cannot see.
+     */
+    check(
+      "two names that differ only in punctuation stay different machines",
+      machineLabelFor("Anns Mac") !== machineLabelFor("Ann's Mac"),
+      true,
+    );
+    /*
+     * ⚠ **The machine this app sets up carries the ordinary host name, and
+     * `local` is not a name at all** — an owner's call, 2026-09-15, reversing one
+     * taken the same day. The first answer was the literal `local`, on the
+     * argument that the machine this app sets up is the computer somebody is
+     * sitting at. What that missed is who else reads the label: a phone, a second
+     * computer, anybody holding a grant — and to all of them `local` names a
+     * computer somewhere else.
+     *
+     * So this pins **both halves of the reversal**, because either alone can be
+     * quietly undone: the base is the host name, and no literal `"local"` is left
+     * in the function. The `local`-ness moved to a badge drawn off the announce
+     * file, asserted in `webcheck.local-route.ts` where the announce stub lives.
+     */
+    const storeSrc = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+    const creating = /private async createForThisComputer\([\s\S]*?\n  \}/.exec(storeSrc)?.[0] ?? "";
+    check("createForThisComputer was found to read", creating.length > 0, true);
+    check("the machine this app sets up is named after the computer", /const base = machineLabelFor\(boot\.hostName\)/.test(creating), true);
+    check("and nothing there names a machine `local`", /"local"/.test(creating), false);
+    check("the constant that used to is gone", /LOCAL_MACHINE_NAME/.test(storeSrc), false);
+
+    /*
+     * ⚠ **The retry's suffix, and the boundary that made it vacuous.**
+     * `machineLabelFor` applies its `.slice(0, 64)` **last**, so appending `-2`
+     * and re-shaping a maximal name answers the original name — the retry would
+     * re-post what had just collided. The base is sliced to 61 first; this is the
+     * case that proves it, and it is the case the old spelling of this assertion
+     * (`machineLabelFor(null)` = eight characters) could never have reached.
+     */
+    check("a disambiguated name is still a label", LABEL.test(machineLabelFor(`${machineLabelFor(null)}-2`)), true);
+    const longest = machineLabelFor("x".repeat(200));
+    check("a maximal label is the full sixty-four", longest.length, 64);
+    check("and re-shaping it with a suffix gives the name back", machineLabelFor(`${longest}-2`), longest);
+    check("so the retry slices first", machineLabelFor(`${longest.slice(0, 61)}-2`).endsWith("-2"), true);
+    check("and the code does the slicing", /base\.slice\(0, 61\)/.test(creating), true);
+  }
+
+  /*
+   * ⚠ **A census against the tree, because the floor that used to guard this list
+   * was `quotaDoors.length === 4` — a hand-typed literal compared against a
+   * hand-typed copy of its own length, six lines apart.** It read nothing from
+   * `src/`, so it could not fail on any product change, and its own comment
+   * claimed the opposite: *"a new door not on it passes silently. The floor below
+   * is what says the list was walked at all."* It never said that. It also could
+   * only ever go red on somebody **adding** a door correctly, which is the
+   * driver-fails-on-an-improvement shape this repository names elsewhere.
+   *
+   * And the claim was already false when it was written: `ui/AppShell.tsx` draws
+   * `installCommand(controlPlaneOrigin())` plus `<MachineOffer/>` in one arm
+   * against `machineQuotaNotice(state.me)` in the other — the door-or-the-sentence
+   * pair these three per-file checks exist for — and was on no list.
+   *
+   * Differencing two derivations is what goes red on a skip: the set of UI files
+   * that mention the predicate, against the set somebody wrote down. A count
+   * cannot, because a skipped item does not lower one.
+   */
+  const quotaDoors = [
+    "ui/AppShell.tsx",
+    "ui/SessionBrowser.tsx",
+    "ui/MachineColumn.tsx",
+    "ui/NewSession.tsx",
+    "ui/settings/MachinesSection.tsx",
+  ];
+  const asksQuota = srcFiles()
+    .filter((file) => file.startsWith("ui/"))
+    .filter((file) => /mayAddMachine\(/.test(strip(srcFile(file))))
+    .sort();
+  check("every door the quota gates is on the list, and nothing else is", asksQuota, [...quotaDoors].sort());
+  for (const file of quotaDoors) {
     const src = strip(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"));
     check(`${file} asks the shared predicate`, /mayAddMachine\(/.test(src), true);
     check(`${file} never re-derives it from the fields`, /machineLimit|machineCount|canAddMachine/.test(src), false);
@@ -302,6 +609,28 @@ process.stdout.write("\nthe machine limit\n");
     //    the one that lets the parent hold a folder the picker is not showing.
     check("and reports the absence of a folder too", /if \(path !== null\) onPick/.test(src), false);
     check("reporting it unconditionally instead", /onPick\(path\);/.test(src), true);
+    /*
+     * ⚠ **And the report's dependencies are `path` alone**, which is the half that
+     * became load-bearing when the picker grew a second arm. `osDialog` arrives one
+     * `runResume` after the first render, so a dependency list holding it would
+     * re-fire the report at that moment — a second writer on a different clock,
+     * which is this whole block's subject arriving through a new door.
+     */
+    check("and the report is keyed on the folder and nothing else", /onPick\(path\);\s*\}, \[path\]\);/.test(src), true);
+    /*
+     * ⚠ **A dismissed file panel leaves the folder alone.** `pickFolderNative`
+     * answers `null` for a cancel, and writing that through would clear a folder
+     * somebody had already chosen — which is `setCwd(null)` above arriving by the
+     * one route this file did not previously have.
+     */
+    check("a cancelled panel is not a choice", /if \(picked !== null\) setPath\(picked\);/.test(src), true);
+    /*
+     * **And the panel arm grows no second way to make a folder.** Every platform's
+     * open panel has a New Folder button that hands back what it made, already
+     * selected; a copy beside it would post against a parent this arm deliberately
+     * does not list. One call site, on the tree arm, is what that means on disk.
+     */
+    check("there is one route to making a folder, and it is the tree's", (src.match(/\.makeDir\(/g) ?? []).length, 1);
   }
 
   {
@@ -379,7 +708,20 @@ process.stdout.write("\nthe machine limit\n");
     // screen, asserted below once that file is read: a negative alone pointed at
     // the file the sentence left (review D12).
     check("and no longer says so in the subline", /not yours to rename or retire/.test(src), false);
-    check("with the state badge outranking it", /machineBadgeText\(machine\)[\s\S]{0,200}\?\? \(machine\.owned === true \? null : "shared"\)/.test(src), true);
+    /*
+     * ⚠ **Three ranks now, and the middle one is the 2026-09-15 reversal.** The
+     * machine this app sets up is named after the computer like any other, so the
+     * only thing left saying *which row you are sitting at* is this badge — and it
+     * has to outrank `shared` or a machine somebody shared with you stops being
+     * findable on the one screen you are on. A state badge still wins over both.
+     */
+    check(
+      "with the state badge outranking both",
+      /machineBadgeText\(machine\)[\s\S]{0,260}\?\? \(isThisDevice \? "this device" : machine\.owned === true \? null : "shared"\)/.test(src),
+      true,
+    );
+    check("and `this device` comes from the store rather than from the route", /isThisDevice=\{machine\.id === state\.localMachineId\}/.test(src), true);
+    check("never from the routing preference, which can be switched off", /route[\s\S]{0,40}=== "local"/.test(src), false);
     /*
      * Creating and retiring a machine move `machineCount`, which is the number
      * the limit is enforced against — and `runResume` refreshes `me` only on a
@@ -748,7 +1090,23 @@ process.stdout.write("\nthe machine limit\n");
     check("and the empty arm is one somebody can reach", /Only you so far\./.test(src), true);
     check("and \"Nobody yet\" is not drawn over a list that always has you in it", /Nobody yet/.test(src), false);
     // The panel's direction is measured on the tap, never taken from the index.
-    check("the kebab's direction is measured, not indexed", /getBoundingClientRect\(\)/.test(src) && !/openUp/.test(src), true);
+    /*
+     * ⚠ **The measurement moved out of this file and the property did not.** It
+     * read `getBoundingClientRect()` here against `window.innerHeight` — which was
+     * the wrong box: this pane is `overflow-y-auto`, so the viewport answered
+     * "room below" about a scroller that ends higher up, and the panel grew that
+     * scroller instead of fitting. `menuPlacement` in `bits.tsx` is the one
+     * spelling now, and it walks to the nearest scrolling ancestor.
+     *
+     * What is still asserted is what this line always meant: the direction comes
+     * from geometry read at the tap, never from the row's `index` — which is how
+     * it was wrong before either version, opening the last rows off the screen.
+     */
+    check(
+      "the kebab's direction is measured, not indexed",
+      /menuPlacement\(/.test(src) && !/openUp/.test(src) && !/index/.test(src.slice(src.indexOf("setPlacement") - 200, src.indexOf("setPlacement") + 200)),
+      true,
+    );
   }
 
   {
@@ -872,7 +1230,7 @@ process.stdout.write("\nthe machine limit\n");
 process.stdout.write("\na re-probe is not the host going away, and asking is not failing\n");
 {
   const { daemonRead, daemonReadable } = await import("../src/machine.js");
-  const { reachText } = await import("../src/ui/bits.js");
+  const { reachText, OFFLINE_TEXT } = await import("../src/ui/bits.js");
   const mach = stripComments(readFileSync(new URL("../src/machine.ts", import.meta.url), "utf8"));
 
   // All four, because the interesting one is `probing` and a predicate over a
@@ -929,19 +1287,30 @@ process.stdout.write("\na re-probe is not the host going away, and asking is not
    * all seven `OfflineReason` values rather than over the one arm that broke, since
    * a table entry emptied later fails exactly the same way and by hand.
    */
-  const REASONS = [
-    null,
-    "no_route",
-    "no_token",
-    "not_enrolled",
-    "cp_unreachable",
-    "over_limit",
-    "owner_disabled",
-  ] as const;
+  /*
+   * ⚠ **Derived from the table, never re-typed beside it.**
+   *
+   * This was a hand-written list of seven, asserted against the literal `28` — and
+   * `28` is four reaches times that same hand-written seven, so both halves moved
+   * together and neither could notice a reason the table had grown. `no_machine_key`
+   * was added to `OFFLINE_TEXT` and this sweep went on covering the other seven,
+   * green, which is the shape a count floor cannot see: a member left out does not
+   * lower the number, it fails to raise it.
+   *
+   * `OFFLINE_TEXT` is typed `Record<NonNullable<OfflineReason>, string>`, so the
+   * compiler already forces the table total over the union; taking the keys from it
+   * makes this sweep total too, by the same fact rather than by a second promise.
+   */
+  const REASONS = [null, ...(Object.keys(OFFLINE_TEXT) as (keyof typeof OFFLINE_TEXT)[])];
   const phrases = (["unknown", "probing", "online", "offline"] as const).flatMap((reach) =>
     REASONS.map((reason) => reachText(reach, reason)),
   );
-  check("the sweep found every reach and every reason", phrases.length, 28);
+  check("the sweep found every reach and every reason", phrases.length, 4 * (Object.keys(OFFLINE_TEXT).length + 1));
+  report(
+    "and the table it swept is the shipped one",
+    Object.keys(OFFLINE_TEXT).length > 0,
+    `${String(Object.keys(OFFLINE_TEXT).length)} reasons`,
+  );
   check("and none of them is punctuation standing in for a phrase", phrases.filter((one) => !/[a-z]/.test(one)), []);
   check(
     "the four reaches read as the four things they are",
@@ -1242,7 +1611,38 @@ process.stdout.write("\na sign-in that is not offered\n");
   check("and a different BSD gets its own name", osName("freebsd"), "FreeBSD");
   check("while a daemon that does not say names nothing", osName(undefined), "This machine");
   check("a wizard that can run says nothing at all", stanceLine({ id: "claude" }, "signed_out", true, "darwin"), null);
-  check("and the panel passes the platform through", /stanceLine\(agent, stance, canSignIn, os\)/.test(panel), true);
+  // The fifth argument arrived with the install button: `installable` decides
+  // which of two true sentences the not-installed arm draws, and absent it is
+  // the old one byte for byte. Pinned together, so a call that dropped either
+  // fails here rather than silently telling somebody to press a button that is
+  // not there.
+  /*
+   * ⚠ **The fifth argument is asserted as a PROPERTY, not as a spelling.** This
+   * pinned the literal `agent.installable === true` inline at the call, and went
+   * red the day that expression was lifted into a named `canInstall` that is
+   * *stronger* — `installable === true && !noInstallRoute`, so the sentence no
+   * longer promises a button on a daemon whose install route answers `supported:
+   * false`. A pin on the spelling reports an improvement as a regression, and the
+   * improvement is the thing this check exists to protect. So: the call passes
+   * the decision through, and the decision is the conjunction.
+   */
+  const installDecision = /const canInstall = agent\.installable === true && !noInstallRoute;/.test(panel);
+  check(
+    "and the panel passes the platform through, and whether it can install",
+    [/stanceLine\(agent, stance, canSignIn, os, canInstall\)/.test(panel), installDecision],
+    [true, true],
+  );
+  check(
+    "an older daemon that sends no such field keeps the sentence it always had",
+    [
+      stanceLine({ id: "claude" }, "not_installed", false, "darwin"),
+      stanceLine({ id: "claude" }, "not_installed", false, "darwin", true),
+    ],
+    [
+      "Claude Code isn't installed. Install it on the machine itself.",
+      "Claude Code isn't installed on this machine.",
+    ],
+  );
 
   /*
    * **The command sits on the field it fills.** It was a paragraph above the

@@ -1,6 +1,7 @@
 import {
   ChevronRight,
   CornerLeftUp,
+  Download,
   FileArchive,
   Folder,
   FolderPlus,
@@ -9,15 +10,17 @@ import {
   Settings2,
 } from "lucide-react";
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { agentDoor, doorLabel, type AgentDoor } from "./agentInstall";
 import { ApiError, errorText } from "../http";
 import { forgetPick, heldPick, keepPick, takePick, takeRemoval } from "../agentPick";
 import { refOf, sessionId, type MachineId } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
-import { pathCrumbs } from "../paths";
+import { displayCwd, pathCrumbs } from "../paths";
+import { nativeBoot, pickFolderNative } from "../native";
 import { agentStripPath, settingsPath } from "../settings";
 import { navigate, newPath, sessionPath, type Route } from "../router";
 import { store, type AppState } from "../store";
-import type { AgentInfo, AgentStripEntry, CustomAgent, DirEntry, Me, SystemInfo } from "../wire";
+import type { AgentAvailability, AgentStripEntry, CustomAgent, DirEntry, Me, SystemInfo } from "../wire";
 import { customAgentSubline, harnessSubline, offersStripTile, startableHere } from "../agents";
 import { defaultRow, orderStrip, stripKey } from "../agentStrip";
 import { AgentGlyph } from "./AgentIcons";
@@ -391,7 +394,7 @@ function NewSession({
     if (selected === null) return;
     onPick(selected, next);
   };
-  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
+  const [agents, setAgents] = useState<AgentAvailability[] | null>(null);
   /**
    * Why `GET /agents` came back with nothing, when it came back with nothing
    * because it failed.
@@ -961,6 +964,34 @@ function NewSession({
               key={selected}
               machineId={selected}
               initial={selected === fromRoute ? fromRouteCwd : null}
+              /*
+               * **The folder is chosen with this computer's own panel where the
+               * daemon *is* this computer.** `localMachineId` comes from the
+               * announce file the local daemon wrote, and `state.localMachineId`'s
+               * own docblock argues at length why it rather than
+               * `route.kind === "local"`: the route is a preference `setLocalOff`
+               * can switch off, so a picker keyed on it would put the tree back the
+               * moment somebody chose the relay on the machine they are sitting at.
+               * Identity and reachability are not the same read. (A screen could
+               * not reach `route.kind` anyway — `MachineConnection` is pinned to
+               * four modules and no `ui/` file is among them.)
+               *
+               * ⚠ **Not part of `key`.** `localMachineId` lands one `runResume`
+               * after the first render, and `picksFolder` one `hostReady`, so this
+               * can go false → true under a mounted picker; a remount would throw
+               * away a folder somebody had already walked to, which is the defect
+               * `initial`'s own docblock is about. Flipping is harmless: `path`
+               * survives and the tree is simply replaced by a line naming the same
+               * folder.
+               *
+               * ⚠ **`picksFolder` is a declared capability, not `inNativeShell()`.**
+               * A shell exists on Android too and has no folder panel there — the
+               * plugin offers none, because the platform's answer is a Storage
+               * Access Framework tree URI rather than a path. The shell says what
+               * it can do; this does not guess from the platform string, and does
+               * not lean on the accident that a phone has no local daemon.
+               */
+              osDialog={nativeBoot()?.picksFolder === true && state.localMachineId === selected}
               onPick={setCwd}
             />
           )}
@@ -1093,10 +1124,22 @@ const shownHere = offersStripTile;
  * nothing saying why — which is the state hiding signed-out tiles would otherwise
  * have created on a machine where nothing is signed in.
  */
-function signInOffered(candidate: AgentInfo): boolean {
-  return (
-    candidate.login?.blocked !== "no_flow" && (!candidate.available || candidate.loggedIn === false)
-  );
+/*
+ * ⚠ **This is `agentDoor` now, in `ui/agentInstall.ts`, and the move is a repair
+ * rather than a tidy.** The predicate that stood here answered `true` for
+ * `!available` — so a machine without a harness drew **"Sign in to Grok"**, which
+ * opened a card whose control slot computes `login.supported && agent.available`
+ * and therefore rendered nothing at all. What was left on screen was the daemon's
+ * hint: *"grok not found on this daemon's PATH…"*. A door onto one true sentence
+ * and no control, which is exactly the state the block below says it was written
+ * to prevent — the fix had landed on the `no_flow` arm alone, which covers
+ * opencode and nothing else.
+ *
+ * Kept as a named re-export so both readers below still call one binding, which
+ * is the property the old function was extracted for.
+ */
+function doorFor(candidate: AgentAvailability): AgentDoor {
+  return agentDoor(candidate);
 }
 
 /**
@@ -1126,7 +1169,7 @@ function signInOffered(candidate: AgentInfo): boolean {
  */
 export function offeredHere(
   pick: Picked | null,
-  agents: AgentInfo[] | null,
+  agents: AgentAvailability[] | null,
   customAgents: CustomAgent[] | null,
   /**
    * What the machine's strip has been told to leave out.
@@ -1252,7 +1295,7 @@ function AgentStrip({
   machineId,
   onChanged,
 }: {
-  agents: AgentInfo[];
+  agents: AgentAvailability[];
   /**
    * The assembled agents, or `null` while that read is still out.
    *
@@ -1494,7 +1537,7 @@ function AgentStrip({
     value?.kind === "harness"
       ? (agents.find((candidate) => candidate.id === value.id) ?? null)
       : value === null && !agents.some(shownHere)
-        ? (agents.find(signInOffered) ?? agents[0] ?? null)
+        ? (agents.find((one) => doorFor(one) !== null) ?? agents[0] ?? null)
         : null;
   const presets = customAgents ?? [];
   /*
@@ -1985,7 +2028,17 @@ function AgentStrip({
               harness on it is a CLI installed there — so this is a machine to go
               and look at rather than a screen to fix.
             </>
-          ) : harness !== null && signInOffered(harness) ? (
+          ) : harness !== null && doorFor(harness) === "install" ? (
+            /*
+             * ⚠ **A third arm, and `webcheck` tells these states apart by the
+             * quoted strings and by nothing else** — so a third one needs a third
+             * pinned literal in the same change. It exists because nothing puts a
+             * harness on a machine by itself any more: a freshly enrolled machine
+             * has no agents at all, and *"not ready to start"* describes that as a
+             * fault when it is the ordinary first-run state with a button under it.
+             */
+            "No agent is installed on this machine yet."
+          ) : harness !== null && doorFor(harness) !== null ? (
             "No agent on this machine is ready to start."
           ) : (
             /*
@@ -2098,7 +2151,7 @@ function AgentStrip({
           draws are reachable for opencode in one way only (not installed), and the
           panel that opened for it held one true sentence and no controls, under a
           button offering a sign-in that does not exist. */}
-      {harness !== null && signInOffered(harness) && machineId !== null && (
+      {harness !== null && doorFor(harness) !== null && machineId !== null && (
         <div>
           <button
             type="button"
@@ -2106,8 +2159,13 @@ function AgentStrip({
             aria-expanded={signingIn === harness.id}
             className="tap press -my-2 inline-flex min-h-11 items-center gap-1 rounded-sm px-2 text-xs text-muted hover:bg-raised hover:text-fg"
           >
-            <Icon as={LogIn} size={12} />
-            {signingIn === harness.id ? "Hide sign-in" : `Sign in to ${harnessName(harness)}`}
+            {/* ⚠ **The glyph follows the door, and so does the label.** A button
+                saying "Sign in" over a harness that is not on the machine is the
+                reported defect: it opened a card that could draw no control,
+                leaving the daemon's own "not found on this daemon's PATH" as the
+                whole of what was on screen. */}
+            <Icon as={doorFor(harness) === "install" ? Download : LogIn} size={12} />
+            {doorLabel(doorFor(harness) ?? "sign_in", harnessName(harness), signingIn === harness.id)}
           </button>
           {/* `bg-raised/50` — the quiet grade, the one a tool card uses. This is
               a container for the wizard rather than a value to read. */}
@@ -2259,6 +2317,7 @@ function FieldLabel({ children }: { children: ReactNode }): ReactNode {
 function DirectoryPicker({
   machineId: id,
   initial,
+  osDialog,
   onPick,
 }: {
   machineId: MachineId;
@@ -2273,6 +2332,15 @@ function DirectoryPicker({
    * `key` at the call site.
    */
   initial: string | null;
+  /**
+   * True where the folder is chosen with this computer's own file panel.
+   *
+   * The whole of what it changes is which body is drawn and whether `GET
+   * /fs/list` is ever issued. Every piece of state, and the one-writer rule below,
+   * is shared by both arms deliberately — two components would be two copies of
+   * that rule, and it is the one `webcheck` asserts by reading this file.
+   */
+  osDialog: boolean;
   /** Lifted so the footer can render the chosen path the same way this does. */
   onPick: (path: string | null) => void;
 }): ReactNode {
@@ -2333,7 +2401,13 @@ function DirectoryPicker({
         // Start at the top of their own tree rather than at nothing. With one
         // root — a tenant's own directory — a "pick a root" step would be a list
         // of one, and with several the first is still where to begin.
-        setPath((current) => current ?? first);
+        //
+        // ⚠ **Not on the panel arm.** There the first act is opening a panel, so a
+        // seed would arm `Start` over a folder nobody picked — the same class of
+        // lie as a footer naming a folder the picker is not showing, one effect
+        // down. The roots read itself still happens on both arms: `displayCwd`
+        // cuts against them and `ImportCode` takes them as a prop.
+        if (!osDialog) setPath((current) => current ?? first);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
@@ -2342,7 +2416,7 @@ function DirectoryPicker({
     return () => {
       cancelled = true;
     };
-  }, [daemon, attempt]);
+  }, [daemon, attempt, osDialog]);
 
   /*
    * The current folder *is* the selection, so the parent form is told on every
@@ -2360,7 +2434,10 @@ function DirectoryPicker({
   }, [path]);
 
   useEffect(() => {
-    if (daemon === undefined || path === null) return;
+    // `osDialog` is the whole of why no listing is ever issued on this computer:
+    // the panel shows the same disk, and walking it over the wire to draw a second
+    // one beside it would be the round trip this arm exists to remove.
+    if (daemon === undefined || path === null || osDialog) return;
     let cancelled = false;
     setEntries(null);
     setError(null);
@@ -2378,7 +2455,31 @@ function DirectoryPicker({
     // `attempt` for the roots read's reason, and it costs nothing here: this
     // effect already re-runs whenever `path` moves, so the counter only adds the
     // one case `path` cannot express — the same folder, asked for again.
-  }, [daemon, path, attempt]);
+  }, [daemon, path, attempt, osDialog]);
+
+  /**
+   * Open this computer's own panel, and take the answer as the chosen folder.
+   *
+   * ⚠ **A cancel leaves `path` alone**, which is the whole of `picked !== null`.
+   * `pickFolderNative` answers `null` for a dismissed panel, and writing that
+   * through would clear a folder somebody had already chosen because they opened
+   * the panel to look.
+   *
+   * ⚠ **A failure is a `toast`, not `setError`.** `error` is the *reads*' state
+   * and the control beside it re-drives `attempt` — which would re-request the
+   * roots rather than reopen a panel, so the one button on screen would answer the
+   * wrong question. `create()` above takes the same route for the same reason.
+   */
+  const choose = (): void => {
+    if (busy) return;
+    setBusy(true);
+    void pickFolderNative(path ?? roots[0] ?? null)
+      .then((picked) => {
+        if (picked !== null) setPath(picked);
+      })
+      .catch((cause: unknown) => toast("error", errorText(cause)))
+      .finally(() => setBusy(false));
+  };
 
   const create = (): void => {
     if (daemon === undefined || path === null || name.trim().length === 0 || busy) return;
@@ -2414,6 +2515,61 @@ function DirectoryPicker({
    * still in flight, which are the three states the bar itself draws nothing for.
    */
   const parent = crumbs.length >= 2 ? (crumbs[crumbs.length - 2]?.path ?? null) : null;
+
+  if (osDialog) {
+    /*
+     * **This computer's own panel, and there is no module around it.**
+     *
+     * The tree arm below is a *browser* — crumbs, a scrolling list, a footer — and
+     * it needs a box to be a browser inside. Here there is nothing to browse: the
+     * operating system's panel is the control, and it is not on this screen. A
+     * bordered box the height of the one below it would be a frame drawn around two
+     * lines of text, which is what it looked like.
+     *
+     * ⚠ **Nothing here moves between the two states, and that is the layout rather
+     * than a coincidence.** The folder's line keeps its height whether or not there
+     * is a folder (`min-h-5`), and the button keeps one label — it does **not**
+     * become "Change…" once something is chosen, because a control that renames
+     * itself is a control that changes width under the pointer that is about to
+     * press it again. It also does not swap its label for a spinner while the panel
+     * is open: the panel is a window in front of this one, so it is its own
+     * feedback, and a spinner narrower than the word would move the button out from
+     * under the cursor.
+     *
+     * **No "Import code" either.** It is the answer to "there is no code on that
+     * machine yet", which is a question about a machine you are not sitting at.
+     * Here the archive and the folder are already on the same computer, and the
+     * platform's own panel is a better route to both. It stays on the tree arm.
+     */
+    return (
+      <div className="flex shrink-0 flex-col items-start gap-2">
+        {/* The slot is here whether or not a folder is, so choosing one moves
+            nothing below it. `displayCwd` rather than crumbs: there is nothing to
+            navigate, and it already falls back to `shortPath` for a folder under
+            no root — which on this arm is the ordinary case, a panel being
+            narrowed by nothing. */}
+        <div className="flex min-h-5 w-full min-w-0 items-center gap-2">
+          {path === null ? (
+            <span className="text-xs text-muted">No folder chosen yet.</span>
+          ) : (
+            <>
+              <span className="shrink-0 text-faint">
+                <Icon as={Folder} size={13} />
+              </span>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs" title={path}>
+                {displayCwd(path, roots)}
+              </span>
+            </>
+          )}
+        </div>
+        {/* Not `tone="primary"`: `bg-fg` is the affirmative action inside a
+            decision, and on this screen that is `Start`. */}
+        <Button onClick={choose} disabled={busy}>
+          Choose directory
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-edge-strong bg-surface">

@@ -36,6 +36,33 @@ import { createTunnelEndpoint } from "./tunnel-endpoint.js";
  */
 export const RELAY_HEALTH_PATH = "/__relay/health";
 
+/**
+ * Where an app opens an **encrypted channel** to a machine.
+ *
+ * One WebSocket per channel, authorized here exactly as a proxied request is, and
+ * then spliced to one h2 `CONNECT` stamped `reemoat-enc: noise-ik-…` as raw bytes.
+ * ⚠ **Everything past the splice is opaque to this process**: the Noise handshake
+ * runs between the app and the daemon, so the relay holds no key, sees no request
+ * line, and could not read a prompt, a diff or a file if it wanted to.
+ *
+ * A WebSocket rather than an HTTP stream because it is the only way a page gets
+ * opaque bidirectional bytes — `fetch` has no duplex body anywhere this client
+ * runs. The credential still rides `?token=` on **this** hop for the reason it
+ * always did (a browser cannot set a header on a WebSocket handshake), and that
+ * is now the *only* hop where it does: inside the channel the daemon's own
+ * credential is a frame, and `src/e2ee.ts` puts it on the loopback request as a
+ * header.
+ *
+ * Declared here beside {@link RELAY_HEALTH_PATH} and for the same reason: no
+ * daemon ever sends this path, so it is not the tunnel's shared vocabulary, and
+ * putting it under `src/` would add the *daemon* to `deploy.sh`'s restart list.
+ * The app carries its own copy in `packages/web/src/e2ee.ts` and
+ * `webcheck.e2ee.ts` compares the two literals — `relaycheck` imports this one
+ * and never reads the app's — because a client dialling a path this relay does
+ * not serve is a fleet that cannot reach any machine.
+ */
+export const RELAY_CHANNEL_PATH = "/__relay/channel";
+
 export interface RelayListenerOptions {
   db: DatabaseSync;
   issuer: string;
@@ -45,8 +72,8 @@ export interface RelayListenerOptions {
   /** Where tunnel presence is mirrored, or nothing to keep it in memory alone. */
   presence?: PresenceWriter | null;
   onEvent?: (event: string, detail: string) => void;
-  /** Seam for `relaycheck`: how long a daemon may hold a request. See `proxy.ts`. */
-  upstreamTimeoutMs?: number;
+  /** Seam for `relaycheck`: how long a daemon may take to answer a channel. See `proxy.ts`. */
+  channelTimeoutMs?: number;
   /**
    * What to do when the listener cannot bind.
    *
@@ -68,7 +95,7 @@ export function createRelayListener(options: RelayListenerOptions): RelayListene
   const presence = options.presence ?? null;
   const onEvent = options.onEvent ?? ((): void => {});
 
-  const proxy = createRelayProxy({ db, issuer, registry, onEvent, upstreamTimeoutMs: options.upstreamTimeoutMs });
+  const proxy = createRelayProxy({ db, issuer, registry, onEvent, channelTimeoutMs: options.channelTimeoutMs });
   const endpoint = createTunnelEndpoint({ db, registry, onEvent });
   // Prepared once, for `presence.ts`'s reason: this runs on the event loop that
   // carries every tunnel, and a healthcheck every 15s is not a place to compile
@@ -128,7 +155,11 @@ export function createRelayListener(options: RelayListenerOptions): RelayListene
   });
 
   server.on("upgrade", (req, socket, head) => {
-    if (pathOf(req.url) === TUNNEL_PATH) return endpoint.handleUpgrade(req, socket, head);
+    const path = pathOf(req.url);
+    if (path === TUNNEL_PATH) return endpoint.handleUpgrade(req, socket, head);
+    // Above the generic proxy arm, because this one is not proxied at all: it is
+    // spliced, and the bytes on it are not HTTP.
+    if (path === RELAY_CHANNEL_PATH) return proxy.handleChannel(req, socket, head);
     return proxy.handleUpgrade(req, socket, head);
   });
 

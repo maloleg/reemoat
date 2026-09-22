@@ -5,6 +5,8 @@ paths:
   - packages/control-plane/src/relay/*
   - packages/web/src/stream.ts
   - packages/web/src/machine.ts
+  - packages/web/src/localRoute.ts
+  - src/announce.ts
   - scripts/relaycheck.ts
 ---
 
@@ -22,10 +24,60 @@ nothing in `server.ts`, `session.ts` or `registry.ts` changed for it. Q1.25.
 
 The direct path is **deleted, not disabled**, and **loopback binding is the
 lever** — `REEMOAT_HOST` defaults to `127.0.0.1` and the `baseUrl` column is gone
-rather than left null. Q1.21. `REEMOAT_PORT` stays 7887 because what addresses it
-is on the same machine: `pnpm client` under the shared secret, and the deploy
-script's `/health` probe. `REEMOAT_PORT=0` still works for a relay-only daemon.
-Q1.22.
+rather than left null. Q1.21. `REEMOAT_PORT` stays 7887 because what
+addresses it is on the same machine: `pnpm client` under the shared secret, the
+deploy script's `/health` probe, and — since Q7.137 — the desktop app on that
+machine. `REEMOAT_PORT=0` still works for a relay-only daemon, and is announced
+like any other. Q1.22.
+
+**There is one exception and it is not that feature coming back.** The desktop app
+reaches a daemon on the **same computer** over loopback. No address a server names
+is ever dialled, nothing is discovered on a network, and a browser cannot take this
+path at all — `localRoute.ts` answers `null` outside the shell, because a page
+served over `https:` cannot reach `http://127.0.0.1` and an arm that is dead is
+better than one that is merely unused. Q7.137. Four rules bound it and each closes
+a way the old direct path went wrong:
+
+- **Loopback or nothing**, enforced in `local.rs` where the page cannot reach it —
+  the same place `proxy.rs` keeps the control-plane origin. `LOOPBACK` is two
+  literals and `localhost` is deliberately not one of them: a name is whatever a
+  resolver says.
+- **The `aud` check establishes the machine and nothing else does.**
+  `proveLocal` spends one authenticated `GET /fs/roots`, and ⚠ **any status but 401
+  is proof** — a `403 insufficient_scope` and a bare 404 both come from *below* the
+  auth gate. Requiring 200 would refuse a healthy daemon over a scope the probe
+  never needed. `/health` is asked afterwards, never before: it is unauthenticated,
+  so a 200 from it is a stranger's 200.
+- **A daemon says where it is; nothing guesses.** `src/announce.ts` writes
+  `~/.reemoat/daemon.json` at 0600 in a 0700 directory. ⚠ **The file is the
+  security argument, not a convenience.** Probing a well-known port was built and
+  taken back out: the probe has to carry a machine token to prove anything, so it
+  hands a 300-second bearer — spendable through the relay from anywhere — to
+  whichever process won the race for that port. A file another uid cannot write
+  cannot be planted. It also reaches a daemon on a custom `REEMOAT_PORT`, or on `0`.
+- **One 401 rule the relay candidate must not get.** `meansWrongMachine` is keyed
+  on the code, and `settleAnswer` guards on `route.kind === "local"` as well —
+  down the tunnel the relay has already derived the machine from the same verified
+  `aud` before a byte moved, so the same code there means two services disagreeing
+  about one fact. It calls `denyLocal`, ⚠ **never `forgetRoute`**, which drops the
+  memo and would send the next resolve straight back to loopback for ever, and
+  never `refetchRoute`, which would spend a control-plane mint on a daemon
+  answering about itself. The deny is cleared in `update()`, i.e. per wake.
+
+**What it costs, and it is stated to the person who owns the machine rather than
+buried here.** The relay reads live user, machine and grant rows before each
+request; loopback does not. So on this one path a revoked grant, a disabled owner
+or a machine switched off keeps working for the token's remaining life — 300s plus
+60s of leeway either way. Settings → Machines → *This device* says so in the
+sentence beside the switch. What makes the trade defensible rather than merely
+disclosed is *who* can take it: only a process running as the uid that owns
+`~/.reemoat`, which already holds the database, the signing keys and every
+transcript.
+
+⚠ **A Unix socket would not remove the TCP port.** `tunnel.ts` splices every
+*relayed* stream to `127.0.0.1:<port>`, and so do `pnpm client` and
+`deploy/lib.sh`'s `/health` probe. It would also move the whole daemon leg into
+Rust, which `native-shell.md` refuses for four separate reasons. Q7.137.
 
 `REEMOAT_CP_RELAY_URL` is therefore **required** and `main.ts` refuses to start
 without it. It is the name **daemons** dial, written into each one's
@@ -90,20 +142,25 @@ relay's rows are cleared by its replacement at boot. Q4.35.
 - **The relay routes by the verified `aud` claim, not by the URL.** Q5.8.
 - **Authorization happens before a stream is opened, never after.** A refused
   request must not increment `requestsProxied`. Q5.9.
-- **The relay's own metadata never enters the proxied request.** `reemoat-*`
-  headers ride the CONNECT handshake and stop at the daemon's tunnel code; a
-  client-supplied copy is stripped in `forwardHeaders`. Q5.10.
+- **The relay's own metadata never enters a request, and this is structural now
+  rather than a strip.** `reemoat-*` headers ride the CONNECT handshake and stop at
+  the daemon's tunnel code. There is no proxied request for one to enter:
+  `forwardHeaders` is deleted with the plaintext path, and a client's bytes are
+  ciphertext the relay cannot open let alone edit. Q5.10, Q7.143.
 - **An upgrade socket gets an `error` listener before anything else.** Node
   removes its own `socketOnError` *before* emitting `upgrade`, so the raw socket
-  starts with zero listeners. It is the first statement of `handleUpgrade`, before
+  starts with zero listeners. It is the first statement of `handleChannel`, before
   `authorize`, because the refusal paths write to that socket too; `main.ts`
   carries an `uncaughtException` backstop. Q5.11.
 - **A request target the HTTP parser accepts and the WHATWG URL parser rejects is
-  answered, not held.** `readToken` returns `null` rather than letting `new URL`
-  throw, landing on `401 missing_token` with `pathOf` logging `(unparseable)`. It
-  runs **first** on both `handleRequest` and `handleUpgrade`, before `authorize`,
-  so this is reachable with no credential at all; `relaycheck` drives it on a raw
-  `node:net` socket, `fetch` and `ws` both normalizing the target away. Q1.46.
+  answered, not held.** An unguarded `new URL` throw escaped the `'request'` emit
+  before anything wrote a response or destroyed the socket — one leaked fd per
+  unauthenticated line, against the only ingress this system has. `listener.ts`'s
+  own `pathOf` catches it and answers `"/"`, which now lands on the retired
+  plaintext handler and its `426` **before reading anything at all** — a stronger
+  guarantee than the `401 missing_token` it replaced, which had to run `readToken`
+  on the way to its refusal. `relaycheck` drives it on a raw `node:net` socket,
+  `fetch` and `ws` both normalizing the target away. Q1.46, Q7.143.
 - **The relay logs a path, never a URL** — the credential arrives as `?token=`,
   and a *refusal* path leaks a cryptographically intact one. `pathOf` exists for
   this. Q5.12.
@@ -185,15 +242,16 @@ relay's rows are cleared by its replacement at boot. Q4.35.
 |---|---|
 | `src/relay/protocol.ts` | The tunnel's shared vocabulary: version, handshake headers, close codes, bounds — and the one grammar of the CLI inventory, `parseAgentClis`/`formatAgentClis`, so the daemon's spelling and the relay's reading cannot drift. Imported by the control plane — the one-way rule still holds, which is why it may import nothing of the daemon's; `announcedAgentClis`, which needs `AGENT_IDS` and the runtime, lives in `tunnel.ts` |
 | `src/relay/tunnel.ts` | The daemon's end: dial out, run an h2 *server* on the socket it dialled, splice each CONNECT to loopback, reconnect with full jitter |
+| `packages/web/src/localRoute.ts` | Whether a daemon on *this computer* may be reached without the relay: the off list, and the one place an announced machine id is compared to a wanted one. Composes no URL — `base` arrives finished from the host |
 | `packages/web/src/machine.ts` | One machine's token and reachability. `forgetRoute` drops the belief that it is up, never on an HTTP status. Also `missingRowReason` |
 | `packages/web/src/stream.ts` | One session's socket: rotation before expiry, the close-code table, the cursor |
 | `packages/control-plane/src/relay/main.ts` | The relay's entry point, the second deployment of this package. Mints no signing key, bootstraps nobody, sends no mail, does not wait for the API |
-| `packages/control-plane/src/relay/listener.ts` | The dispatcher both entry points share: the tunnel path, `/__relay/health` — emphatically **not** `/health`, that being the daemon's on the far side of a tunnel — and everything else to the proxy |
+| `packages/control-plane/src/relay/listener.ts` | The dispatcher both entry points share: the tunnel path, `/__relay/channel`, `/__relay/health` — emphatically **not** `/health`, that being the daemon's on the far side of a tunnel — and everything else to a refusal. `RELAY_CHANNEL_PATH` is declared here and mirrored in `packages/web/src/e2ee.ts`, with both drivers comparing the literals |
 | `packages/control-plane/src/relay/presence.ts` | The only writable part of a tunnel, including which relay holds it (`relay_id`, read by `relayFor`). Its heartbeat predicate is load-bearing: a flush may write a row only if it is already this relay's *or* describes a tunnel no older, because `stats()` does not test `isClosed`. Plus `dbRelayView` |
 | `packages/control-plane/src/relay/authorize.ts` | May this caller reach this machine. Verify, then read `aud`, then check live user/machine/grant rows |
 | `packages/control-plane/src/relay/registry.ts` | Which machines hold a tunnel, and how to open a stream down one. The authority; it mirrors transitions into `presence.ts` and never waits on one. `RelayView.relayFor` answers only "me or nobody" |
 | `packages/control-plane/src/relay/tunnel-endpoint.ts` | Where daemons dial in. Authenticates *before* the WS handshake completes |
-| `packages/control-plane/src/relay/proxy.ts` | The browser-facing half: authorize, then let Node's own HTTP client serialize onto a CONNECT stream |
+| `packages/control-plane/src/relay/proxy.ts` | The app-facing half: authorize, then splice a WebSocket to a CONNECT stream as **raw bytes**. It parses nothing — `handleRequest` and `handleUpgrade` are `426` refusals now, and the HTTP client, the 101 replay, `forwardHeaders` and the CORS preflight are deleted with the plaintext path. `.claude/rules/e2ee.md` |
 | `scripts/relaycheck.ts` | Offline driver: framing, flow control, authorization ordering, CORS preflight, a WebSocket through the tunnel |
 
 ## Bounds

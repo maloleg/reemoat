@@ -262,6 +262,7 @@ function migrate(db: DatabaseSync): void {
   const machines = columnsOf("PRAGMA table_info(machines)");
   const users = columnsOf("PRAGMA table_info(users)");
   const apiKeys = columnsOf("PRAGMA table_info(api_keys)");
+  const userSessions = columnsOf("PRAGMA table_info(user_sessions)");
   const has = (name: string): boolean => machines.has(name);
 
   /*
@@ -355,6 +356,30 @@ function migrate(db: DatabaseSync): void {
    */
   addColumn(db, has("enrolled_by"), "ALTER TABLE machines ADD COLUMN enrolled_by TEXT");
   /*
+   * The X25519 static a machine announced on its dial, and when it was first
+   * recorded. `schema.sql` carries what NULL means and why a later disagreement
+   * is refused; an older build selects neither column, so the version stays
+   * where it is.
+   *
+   * Nothing indexes them, deliberately. A key is only ever read by machine id,
+   * which is already the primary key, and an index nothing queries is the mirror
+   * of the column-nothing-writes that Q1.642 refused.
+   */
+  /*
+   * The installation's own X25519 public key, and when it was last set.
+   *
+   * ⚠ **Its own `table_info` reader**, because `has()` asks `machines` — which is
+   * the wrong-table mistake this function has already made once, and the guard
+   * would then be false for ever while the statement was attempted on every open
+   * by both processes.
+   */
+  const deviceColumns = db.prepare("PRAGMA table_info(devices)").all();
+  const hasDevice = (name: string): boolean => deviceColumns.some((column) => column["name"] === name);
+  addColumn(db, hasDevice("public_key"), "ALTER TABLE devices ADD COLUMN public_key TEXT");
+  addColumn(db, hasDevice("key_set_at"), "ALTER TABLE devices ADD COLUMN key_set_at INTEGER");
+  addColumn(db, has("machine_key"), "ALTER TABLE machines ADD COLUMN machine_key TEXT");
+  addColumn(db, has("machine_key_set_at"), "ALTER TABLE machines ADD COLUMN machine_key_set_at INTEGER");
+  /*
    * When somebody last chose their own password, and when a key last signed a
    * request — two facts the settings screen draws beside the row they belong to
    * ("Changed 3 mo ago", "last used 2 d ago"). Both nullable with no DEFAULT,
@@ -365,6 +390,48 @@ function migrate(db: DatabaseSync): void {
    */
   addColumn(db, users.has("password_changed_at"), "ALTER TABLE users ADD COLUMN password_changed_at INTEGER");
   addColumn(db, apiKeys.has("last_used_at"), "ALTER TABLE api_keys ADD COLUMN last_used_at INTEGER");
+  /*
+   * Which installation a sign-in belongs to. `schema.sql` says what NULL means
+   * and why there are three ways to get one; an older build selects this column
+   * nowhere, so the version stays where it is.
+   *
+   * ⚠ **It is guarded on `userSessions`, and reaching for `has()` here is the one
+   * mistake this function has already made once.** `has()` asks `machines`, which
+   * will never carry a column of this name — so the guard would be false for ever,
+   * the `ALTER` would be attempted on every open by both processes rather than
+   * once, and the only thing standing between that and `exit(2)` would be
+   * `addColumn`'s duplicate-name clause, which is measured as a *one-shot* window
+   * and is not a licence to re-roll the race at every restart. The three readers
+   * above exist so each table answers for itself; a fourth table needs a fourth.
+   */
+  addColumn(db, userSessions.has("device_id"), "ALTER TABLE user_sessions ADD COLUMN device_id TEXT");
+  /*
+   * And the index over it, which is the one index in this service that cannot
+   * live in `schema.sql`.
+   *
+   * ⚠ **Ordering, and it is not a preference.** `applyControlPlaneSchema` runs
+   * the file, then the version gate, then this — so an index in `schema.sql`
+   * naming a column this function has not added yet fails with
+   * `no such column: device_id` against every database that already exists,
+   * which is every deployment. Measured: it takes `openControlStore` down, and
+   * `main.ts` answers that with `exit(2)` under a unit that restarts. Here, one
+   * statement after the `ALTER`, it is correct on a fresh database and on an
+   * upgraded one alike.
+   *
+   * ⚠ **It is also the reason `deploycheck` allows a third statement shape.**
+   * That driver refuses anything here that is not an `ALTER … ADD COLUMN` or a
+   * `PRAGMA`, because those are the two that cannot make an older build wrong.
+   * An idempotent `CREATE INDEX` is the third with that property — it changes no
+   * row, no column and no meaning, and an older build simply never uses it — and
+   * the check names it explicitly rather than loosening to a wildcard.
+   *
+   * What it is for: retiring a device ends every session bound to it, which is
+   * one `WHERE device_id = ?`. Unindexed that is a scan of every session in the
+   * fleet, inside a transaction, against `synchronous = FULL`, on the process
+   * the relay shares — the cost `idx_grants_machine` was added to remove from
+   * the same shape of question one table over.
+   */
+  db.exec("CREATE INDEX IF NOT EXISTS idx_user_sessions_device ON user_sessions (device_id)");
 }
 
 /**

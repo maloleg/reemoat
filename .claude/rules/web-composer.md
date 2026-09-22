@@ -91,7 +91,7 @@ safe baseline it looked like. What carries the refusal at these tones is
 *flatness*: a live chip is two-tone, a refused one uniformly faint with no hover
 and no press fill. It also fades — `.tap` transitions `color` and not `opacity` —
 and restores the `disabled` dims / `locked` does not distinction. `stale` is the
-composer's resting appearance on every restart.
+resting appearance of a session nothing revives.
 
 **Send is a circle holding an arrow, and it is one of two exceptions to the radius
 rule.** `IconButton`'s `shape` prop, declared in `bits.tsx` beside the rule it
@@ -192,9 +192,8 @@ that growth is still vertical-only. Q3.561, Q3.563.
 `composerPlaceholder`'s idle line is `Type / for commands` and nothing else — the one
 affordance nothing else advertises, and no "message" in front of it because an empty
 box already reads as somewhere to write. It falls back to `Message…` where
-`buildCommands` returns nothing: an agent that is away publishes no commands and no
-`agentConfig` for the synthesized controls, and a hint for a key that does nothing
-is worse than none. **All six are sentence-cased**, asserted over every
+`buildCommands` returns nothing — now only a session nothing revives — and a hint
+for a key that does nothing is worse than none. **All six are sentence-cased**, asserted over every
 state; a register split was argued and withdrawn. Q3.562, Q3.593.
 
 **`Composer` outlives a session switch, so every write that follows an `await` is
@@ -207,10 +206,11 @@ naming the session they belong to; the **shared React** halves (`text`, `busy`,
 compares the `liveKey` ref. Ungated, a `409 turn_in_flight` from session A ran
 `update(body)` on the composer now bound to B — A's message in B's box, where Enter
 sends it to B's agent, behind a `busy` spinner that swallowed everything typed into
-B. Nothing but this paragraph enforces the split. **The optimistic echo moved from the second list to the
-first**, which is the direction to move anything else here: as a keyed map the
-write needs no guard and leaving mid-send and coming back still shows the message.
-It is drawn by the transcript — see `web-transcript.md`. **`onScreen` is only ever asked after an
+B. Nothing but this paragraph enforces the split. **Second list to first is the
+direction to move anything here**: a keyed map needs no guard, and leaving
+mid-send and coming back still shows the message — which is what the optimistic
+echo bought by moving (it is drawn by the transcript, `web-transcript.md`).
+**`onScreen` is only ever asked after an
 await, and `send`'s required `late` argument is what makes that a property rather
 than a hope** — `send` is reachable from `submit` straight off the keystroke *and*
 from `applyValue`'s callback a round trip later, and `liveKey` is written from an
@@ -285,9 +285,9 @@ in it draws a caption, and `model_config` is in the set for that reason alone.
 
 **There is no context readout in this client, and the daemon still sends one.**
 It reported how full the agent's window was, and on kimi it reported nothing for
-the life of every session — `usage_update` is a shape kimi can parse and never one
-it sends — nor on any session waiting for its agent. A control blank on most agents
-is not worth the width, so `ContextPie` and its rules are deleted. `contextUsage`
+the life of every session (`acp-agents.md`, Q7.26) — nor on any session waiting for
+its agent. A control blank on most agents is not worth the width, so `ContextPie`
+and its rules are deleted. `contextUsage`
 stays on the wire and on the daemon, where `pnpm client` prints `ctx N%`:
 `webcheck.plugin-protocol.ts` pins that field on the client's snapshot mirror, and
 with nothing in `packages/web` reading it, that is all that holds it there.
@@ -295,42 +295,70 @@ with nothing in `packages/web` reading it, that is all that holds it there.
 **A chip is as wide as what it says, bounded above by `CHIP_MAX` and by nothing
 below.** ⚠ **There was a fixed reserve and it is gone** — invisible per-category
 sizer strings that held every chip at the widest value it could show. Withdrawn on
-the owner's word; Q3.564 carries the cost Q3.402 and Q3.417 measured: a value that
-grows moves its neighbours, two agents draw two shapes, and an unavailable slot
-saying `—` is narrower than the control it stands for. What holds: `chipParts`'
-caption still does not depend on availability; the value truncates with the full
-text in the menu and the `title`; and `webcheck` asserts the sizers are **absent**
-as well as the cap present, a revert bringing the empty box back with them.
+the owner's word; the cost is Q3.402 and Q3.417, measured, and Q3.564 carries it.
+What holds: `chipParts`' caption still does not depend on availability; the value
+truncates with the full text in the menu and the `title`; and `webcheck` asserts
+the sizers are **absent** as well as the cap present, a revert bringing the empty
+box back with them.
 
 **A control never leaves the strip, and the model gate is what breaks that.** All
-**four** agents build the effort list from the **currently selected model's** own
-levels; the first three publish the control and drop it when there are none,
-opencode never publishes one — see below. `holdConfig` merges by option id rather
+**five** agents build the effort list from the **currently selected model's** own
+levels; four publish the control and drop it when there are none, opencode never
+publishes one — see below. `holdConfig` merges by option id rather
 than replacing; `drawnControls` returns the live set **plus** the slots of anything
 missing, named in `unavailable`; and `Absent` draws that slot from **`chipParts`
 and `chipInner`, the same two calls the live chip makes**. Q3.404. The menu holds one row saying there is nothing to
 choose and why (`unavailableHint`, keyed on category — the effort case gets its own
 sentence, "why is this empty" having a measured answer there and a vague one
 elsewhere). It is deliberately **not** disabled: a dimmed inert chip answers "why
-is this greyed out" with silence on a phone. `unavailable` is empty whenever there
-is no agent at all — that sentence is `stale` instead.
+is this greyed out" with silence on a phone.
 
 **And the same fact arrives in a second shape, which drew nothing.** claude and
 kimi *withdraw* the effort control; opencode never publishes one for a model with
 no levels, so there was no slot to keep and the right cluster had three chips on one
-session and two on the next. `drawnControls` synthesizes `NO_LEVELS` — an empty
-`thought_level` select, id-namespaced `reemoat:` so it cannot collide with something
-an agent said — into `unavailable`, so the paragraph above draws it with no second
-code path. **`thought_level` only**: a synthesized `mode` would be found by
-`splitOptions` as the `NESTED_HOST`, and `Absent` draws no nested sections, so
-`collaboration_mode` would nest into a placeholder and cease to exist. **The memory gets the slot too** — `held` holds only what a
+session and two on the next. `placeholderFor` builds an empty select,
+id-namespaced `reemoat:` so it cannot collide with something an agent said, and
+`withUnusable` appends one for **every standard slot nothing already occupies** —
+`ALWAYS_DRAWN`, derived from `CATEGORY_SLOT` rather than listed, so it is exactly
+the two visible slots and cannot drift. So the paragraph above draws them with no
+second code path. **The memory gets the slot too** — `held` holds only what a
 daemon published, so a slot invented on the live branch alone vanished for every
-restart. Not synthesized only where nothing is drawn at all: a live agent
-publishing no controls. `unavailable` also carries **a select published with
+restart. **And there is no state that draws none**: the two branches that returned
+an empty set — a live agent publishing nothing, and an absent one with nothing
+remembered — go through the synthesis as well, which is what makes the row the
+same shape on every session rather than only on every agent. `heldConfig` is
+per-tab and the daemon restores none, so that second branch was **every reload of
+a session whose agent is away**, permanently for an ended one. Reversed on the
+owner's report of a composer with a paperclip, a Send button and nothing else;
+`webcheck` sweeps all nine statuses against every config shape and asserts none of
+the 81 empties it. ⚠ **A synthesized `mode` is only safe because `splitOptions`
+takes `unavailable` now**: it looked for `NESTED_HOST` by category alone, `Absent`
+draws no nested sections, and nothing else reads `slots.nested` — so codex's
+`collaboration_mode` ceased to exist whenever `mode` was unavailable, which was
+already true of a *withdrawn* one and asserted nowhere. An unavailable host demotes
+`nested` to `overflow`, the answer a missing host already had. `unavailable` also carries **a select published with
 nothing in it**, the same absence with a chip in front. Q3.518.
 
-**The strip never empties while the agent is away.** The daemon drops
-`agentConfig` with the agent, so `holdConfig` in `store.ts` keeps the last set a
+⚠ **The slot stays; the sentence under it must survive an agent that will never
+fill it** — grok publishes no `mode`, ever. `DrawnControls.never`. Q6.111.
+
+**The strip never empties while the agent is away, and now not across a reload
+either.** `holdConfig`'s memory lives in `rows`, in this tab; `configMemory.ts`
+writes it through to `localStorage` and `rememberHeld` in `store.ts` is the one
+place both directions happen — read only where `holdConfig` answers `undefined`,
+which is exactly what a reload leaves. ⚠ **Only the *selected* choice is kept**:
+`chipValue` names a value through its choice, so dropping it draws
+`openai/gpt-5` instead of `GPT-5`, and keeping the rest is 362 models a session.
+Nothing read back is ever sent — a memory is `stale`, so `Select` is `disabled`
+over it — which is what makes storing a possibly-stale value safe here. ⚠ **It is
+no longer unsafe on the daemon either, and this memory is the fallback rather than
+the ordinary case**: `doStop` keeps the controls and commands for every stop a
+message would undo and `agent_state_json` carries them across a restart, so such a
+session arrives with real options and `drawnControls` takes its **first** branch —
+live, tappable, and never reading `status`. Cleared on sign-out; the *reading* only.
+
+The daemon drops
+`agentConfig` with an agent nothing revives, so `holdConfig` in `store.ts` keeps the last set a
 **running** agent published, `drawnControls` chooses between the live answer and
 that memory, and `stale` makes the memory readable but not tappable. The live agent
 always wins **including when it publishes nothing**: `hasLiveAgent` tells an agent

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { check } from "./webcheck.env.js";
+import { check, report } from "./webcheck.env.js";
 import { stripComments } from "./webcheck.source.js";
 import { type BuiltRows, drawn } from "./webcheck.rows.js";
 import {
@@ -649,8 +649,21 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     );
 
     /*
-     * The sections, as the panel partitions them — and `Completed` is a state
-     * rather than a kind, so a finished shell must appear once, under it.
+     * The sections, as the panel partitions them — **the three live kinds, and
+     * `Completed` is not one of them.**
+     *
+     * ⭐ **It used to be pushed in here, and moving it out is what lets the band be
+     * drawn when there is nothing.** The owner's rule is that Finished is reachable
+     * *even when no work exists*, and a function that returns a section per thing
+     * that exists cannot return one for a thing that does not. So `sections` means
+     * how many **live kinds** — which is all any caller ever read it for — and the
+     * band is `PanelBody`'s, which is what `taskSections`' own docblock always
+     * claimed: *"neither is a member … Both are drawn by the panel around this
+     * list."*
+     *
+     * The property the old pair protected survives for free and is asserted below
+     * from the other side: a finished shell must never *also* appear under
+     * `Shells`. `live` is filtered before the kinds are applied, so it cannot.
      */
     const sectioned = taskSections([
       task("live", "shell", "running") as never,
@@ -659,14 +672,14 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
       task("old", "shell", "completed") as never,
     ]);
     check(
-      "the panel's sections are the three kinds and then Completed, workflows first",
+      "the panel's sections are the three live kinds, workflows first",
       sectioned.map((section) => `${section.label}:${section.tasks.length}`),
-      ["Dynamic workflows:1", "Shells:1", "Monitors:1", "Completed:1"],
+      ["Dynamic workflows:1", "Shells:1", "Monitors:1"],
     );
     check(
-      "a finished task appears once, under Completed and not under its kind",
+      "and a finished task is in none of them, the band being drawn from the snapshot instead",
       sectioned.flatMap((section) => section.tasks.map((row) => row.id)).filter((id) => id === "old").length,
-      1,
+      0,
     );
     check("and a section with nothing in it is absent rather than empty", taskSections([]), []);
 
@@ -703,6 +716,7 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
     const panelSrc = stripComments(
       readFileSync(new URL("../src/ui/TaskPanel.tsx", import.meta.url), "utf8"),
     );
+    const taskCssEarly = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
     const viewSrc = stripComments(
       readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"),
     );
@@ -732,27 +746,629 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
      * over a conversation that never made room for it — or dimming one it is
      * sitting beside.
      */
-    check("the panel docks at the wide breakpoint", /xl:right-0/.test(panelSrc), true);
     /*
-     * ⚠ **The two halves are read and compared, where this used to grep one
-     * literal in one file.** It asserted `xl:pr-[26rem]` appeared in
-     * `SessionView` — so the *gutter* was watched and the panel's own width was
-     * watched by nothing, which is the direction that could drift in silence. The
-     * two are `TASK_PANEL_WIDTH` and `TASK_PANEL_GUTTER` on adjacent lines now,
-     * and what is asserted is the property that actually matters: the same length
-     * on both. A Tailwind class only exists if it survives a source scan as a
-     * literal, so neither can be derived from the other and a comparison is the
-     * only thing that can hold them together.
+     * ⚠ **It docks *inset*, and the change of shape is what retired a
+     * measurement.** Flush against the viewport — `inset-y-0 right-0`, square, no
+     * shadow — it claimed the same edges as the window's own chrome, so its head's
+     * rule and the header's had to be the same height to the pixel or the eye read
+     * one broken line. They were 4px apart; pinning the two heights fixed that
+     * instance and left the arrangement, where any later change to either row
+     * reopens it. A card standing 12px off every edge meets no line, so there is
+     * nothing left to keep in step.
      */
-    const widthRem = /TASK_PANEL_WIDTH = "xl:w-\[([\d.]+)rem\]"/.exec(panelSrc)?.[1] ?? "width missing";
-    const gutterRem = /TASK_PANEL_GUTTER = "xl:pr-\[([\d.]+)rem\]"/.exec(panelSrc)?.[1] ?? "gutter missing";
-    check("the panel's width and the conversation's gutter are one length", [widthRem, gutterRem], [widthRem, widthRem]);
+    check("the panel docks inset rather than flush", [/md:right-3/.test(panelSrc), /(?:xl|md):right-0\b/.test(panelSrc)], [true, false]);
+    check("and it is a card there: round, bordered, lifted", [
+      /md:rounded-2xl/.test(panelSrc),
+      /md:border\b/.test(panelSrc),
+      /md:shadow-lg/.test(panelSrc),
+      /md:rounded-none|md:shadow-none/.test(panelSrc),
+    ], [true, true, true, false]);
+    /*
+     * ⭐ **The sheet is for a phone, so it stops at `md`.** Every phone in portrait
+     * is under 768px, and a phone in landscape is better served by the card — a
+     * bottom sheet at `h-[92dvh]` over a short landscape viewport is the whole
+     * screen. Pinned as the breakpoint the *scrim* stops at too, since the scrim is
+     * what makes it a sheet.
+     */
+    check("the sheet is the phone's arrangement and stops there", [/md:hidden/.test(panelSrc), /xl:hidden/.test(panelSrc)], [true, false]);
+    /*
+     * ⭐ **It collapses rather than disappearing, and every variant that can be on
+     * screen owes an outgoing animation.**
+     *
+     * The close was `if (!open) return null` — one frame, on a phone, under a sheet
+     * that had taken 260ms to arrive. The mechanism is `leaving.ts`'s and asserted
+     * there; what is asserted here is the half that is this panel's, and it is the
+     * half with a trap in it.
+     *
+     * ⚠ **`md:animate-none` may not survive in the shared run.** It was correct
+     * while there was no exit — it cancels `animate-sheet`, whose `translateY(100%)`
+     * would slide the docked card up from the bottom of the screen — and it is
+     * exactly wrong now: an element carrying `animation: none` fires no
+     * `animationend`, so at `md` and above the exit would fall to the backstop and
+     * leave a **fully visible** card over the conversation for its whole duration.
+     * Pinned absent, because the repair for that defect is to delete this utility
+     * and the repair for the *old* defect was to add it.
+     *
+     * ⚠ **And both arms are read, because writing `md:animate-rise-out` beside a
+     * standing `md:animate-none` is two utilities setting one property in one
+     * variant** — resolved by Tailwind's emission order rather than by the order of
+     * the class string, which is the `SETTINGS_HEADING` trap on the animation axis.
+     * The check is that the cancellation moved onto the *other* arm.
+     */
+    check(
+      "the panel leaves under its own keyframes rather than being unmounted",
+      [
+        /leaving \? "animate-sheet-out" : "animate-sheet"/.test(panelSrc),
+        /leaving \? "md:animate-rise-out" : "md:animate-rise"/.test(panelSrc),
+        /md:animate-none/.test(panelSrc),
+        /onAnimationEnd=\{onAnimationEnd\}/.test(panelSrc),
+      ],
+      [true, true, false, true],
+    );
+    /*
+     * ⚠ **`shown`, never `open`, in both places** — the layer's lifetime and the
+     * element's are one statement. Registered on `open` the layer pops at the
+     * *start* of the exit, so the ask card's digit shortcuts stand back up and
+     * Escape stops being swallowed while an opaque sheet is still covering the
+     * screen. `MenuDrawer` measured it one layer kind over, where it costs `inert`
+     * as well and was keyboard-only — which is why it survived being looked at.
+     */
+    check(
+      "and the layer it registers lasts exactly as long as the element does",
+      [/useDismissible\("menu", onClose, shown\)/.test(panelSrc), /if \(!shown\) return null;/.test(panelSrc)],
+      [true, true],
+    );
+    /*
+     * The scrim had no animation in **either** direction: it snapped to 25% ink on
+     * open and blinked out on close while the sheet slid. `pointer-events-none` is
+     * the other half — `--animate-scrim-out` ends at `opacity: 0` while the element
+     * lives on, so the tail of every close was an invisible viewport-sized
+     * click-eater.
+     */
+    check(
+      "the ground under it arrives and leaves on the same clock",
+      [
+        /leaving \? "animate-scrim-out pointer-events-none" : "animate-scrim"/.test(panelSrc),
+        /onClick=\{leaving \? undefined : onClose\}/.test(panelSrc),
+      ],
+      [true, true],
+    );
+    /*
+     * ⚠ **The backstop is the *longer* of the two exits, not the one it plays
+     * most.** `leaving.ts` ends the exit on `animationend` and this number only
+     * decides what happens when that never arrives; a backstop under either
+     * duration cuts a movement off mid-slide and leaves the panel mounted with
+     * nothing running. Read out of the stylesheet, because neither file can see the
+     * other's number — the shape `--rail-w`/`RAIL_DEFAULT` is pinned for.
+     */
+    const panelCss = taskCssEarly;
+    const sheetOutMs = Number(/--animate-sheet-out:\s*sheet-out\s+(\d+)ms[^;]*\bboth\b/.exec(panelCss)?.[1] ?? Number.NaN);
+    const riseOutMs = Number(/--animate-rise-out:\s*rise-out\s+(\d+)ms[^;]*\bboth\b/.exec(panelCss)?.[1] ?? Number.NaN);
+    const backstopMs = Number(/TASK_PANEL_EXIT_MS = (\d+);/.exec(panelSrc)?.[1] ?? Number.NaN);
+    report(
+      "both departures were found, and both fill forwards",
+      Number.isFinite(sheetOutMs) && Number.isFinite(riseOutMs) && Number.isFinite(backstopMs),
+      `sheet ${String(sheetOutMs)}ms, card ${String(riseOutMs)}ms, backstop ${String(backstopMs)}ms`,
+    );
+    check("the backstop outlasts both of them", backstopMs, Math.max(sheetOutMs, riseOutMs));
+    check("and the card's exit is the shorter, since it travels six pixels", riseOutMs < sheetOutMs, true);
+    /*
+     * ⚠ **Its name may not compete with the name of the screen it is inside.**
+     * The panel is a sub-window, and its head was `text-lg` against the
+     * conversation's own `text-sm` title. Asserted as the *comparison* rather than
+     * as either number, so it stays true when either moves.
+     */
+    const SCALE = ["text-2xs", "text-xs", "text-sm", "text-base", "text-lg"];
+    const panelWord = SCALE.findIndex((size) => new RegExp(`<h2 className="[^"]*\\b${size}\\b`).test(panelSrc));
+    const titleWord = SCALE.findIndex((size) => new RegExp(`tap min-w-0 truncate[^"]*\\b${size}\\b`).test(viewSrc));
+    report("both words were found on the scale", panelWord >= 0 && titleWord >= 0, `panel ${SCALE[panelWord] ?? "?"}, title ${SCALE[titleWord] ?? "?"}`);
+    check("the panel's name is strictly quieter than the conversation's", panelWord >= 0 && titleWord >= 0 && panelWord < titleWord, true);
+    /*
+     * ⭐ **And its band is this panel's own height, spelled out rather than
+     * composed — which nothing here asserted until the height came down.**
+     *
+     * The head was `SHEET_HEAD`, 56px, a number argued for a *sheet's* head: a
+     * `text-lg` `<h1>` beside a 32px `nav` control. This one carries a `text-xs`
+     * `<h2>` and a 24px `sm` button, so it was forty pixels of band around
+     * twenty-four of content.
+     *
+     * ⚠ **The repair that suggests itself is a measured no-op.** Two `min-h-*`
+     * utilities on one element are resolved by the stylesheet's emission order
+     * rather than by the class string, and that order is numeric and ascending —
+     * `.min-h-9`, `.min-h-10`, `.min-h-11`, `.min-h-12`, `.min-h-14` in sequence
+     * inside one layer — so `` `${SHEET_HEAD} min-h-11` `` can only ever make the
+     * band taller. The composed form is pinned **absent** for that reason: it is
+     * the smaller diff, it looks right, and it does nothing.
+     *
+     * ⚠ **44 rather than 40.** Every `ICON_BUTTON_SIZE` entry reaches this app's
+     * 44px floor through a positioned `::after` that costs no layout, and the
+     * `<aside>` carries `overflow-hidden`, which clips hit-testing along with
+     * paint — so at 40 the ✕ is a 42px target with a 2px strip missing off the top
+     * and nothing on screen to explain it. Read as a *number* and compared against
+     * the floor rather than pinned as a literal.
+     */
+    const headClasses = /const PANEL_HEAD = "([^"]*)"/.exec(panelSrc)?.[1] ?? "";
+    const headMin = Number(/\bmin-h-(\d+)\b/.exec(headClasses)?.[1] ?? Number.NaN);
+    report("the panel's own head string was found", headClasses.length > 0, headClasses);
+    check(
+      "the head is spelled out at this panel's height rather than composed from the sheet's",
+      [/<div className=\{PANEL_HEAD\}>/.test(panelSrc), /SHEET_HEAD/.test(panelSrc)],
+      [true, false],
+    );
+    check("and it is shorter than a sheet's head but still reaches the tap floor", [headMin < 14, headMin >= 11], [true, true]);
+    /*
+     * ⚠ **A head inset further than its own contents is the one visible thing
+     * spelling this string out can get wrong**, and the panel's docblock says so —
+     * which is a sentence rather than a mechanism until the two are differenced.
+     * The scroller directly below it is the comparison.
+     */
+    const headPad = (headClasses.match(/\bs?m?:?px-[\w.[\]/-]+/g) ?? []).filter((one) => one.includes("px-"));
+    const scrollerPad = (/<div className="(min-h-0 flex-1 overflow-y-auto[^"]*)"/.exec(panelSrc)?.[1] ?? "")
+      .split(/\s+/)
+      .filter((one) => one.includes("px-"));
+    report("both insets were read to compare", headPad.length > 0 && scrollerPad.length > 0, `head ${headPad.join(" ")}, body ${scrollerPad.join(" ")}`);
+    check("the head and the list it heads share one inset, at every width", headPad, scrollerPad);
+
+    /* ----------------------------------------------------------------
+     * The finished band: folded, seeded closed, and clearable.
+     * ---------------------------------------------------------------- */
+
+    /*
+     * ⭐ **A workflow that ended while the panel was open used to just sit there.**
+     * `taskSections` did move it to `Completed` — but `PanelBody` names a section
+     * only when something else is populated, so with one workflow and no
+     * delegations the finished card kept its place, its size and its position, with
+     * its chip changed from `(running)` to `(done)` and **nothing saying the word**.
+     * A band that folds is what says the row moved, so the finished section is
+     * routed to its own component before `named` is ever consulted.
+     */
+    check(
+      "the finished band is drawn as its own folding section",
+      [
+        /function FinishedSection\(/.test(panelSrc),
+        /aria-expanded=\{open\}/.test(panelSrc),
+        /const finished = useMemo\(\(\) => background\.filter\(\(task\) => taskFinished\(task\.state\)\)/.test(panelSrc),
+      ],
+      [true, true, true],
+    );
+    /*
+     * ⭐ **And it is drawn when there is nothing, which is the owner's rule and the
+     * reason the kebab's door exists at all** — a record reachable only while
+     * something else is running is not a record.
+     *
+     * ⚠ **Gated on `reports`, and that gate is the one thing here that is not
+     * cosmetic.** `Completed (0)` is a count, and a count of finished background
+     * work is an **answer**: claude is the one agent of the four with a lifecycle
+     * on the wire, so on the other three a zero asserts exactly what the sentence
+     * beside it is careful to disclaim. Ungated, this change would make the panel
+     * lie about kimi in the same breath as the paragraph saying it must not.
+     */
+    check(
+      "and it is drawn with nothing in it, but only where an empty list is an answer",
+      [
+        /const showFinished = reporting === "reports" \|\| finished\.length > 0;/.test(panelSrc),
+        /\{showFinished && \(\s*<FinishedSection/.test(panelSrc),
+      ],
+      [true, true],
+    );
+    /*
+     * ⚠ **Nothing to show is a heading rather than a fold.** A disclosure whose
+     * body is empty is a control that lies about having something behind it —
+     * `EventList` names it and draws an inert paragraph for the same reason — and
+     * it was already reachable before the band became unconditional: clearing the
+     * list leaves `tasks.length > 0` with `shown.length === 0`. One condition
+     * covers the cleared session and the one that never backgrounded anything.
+     */
+    check(
+      "an empty band is a heading with no fold and no clear",
+      /if \(shown\.length === 0\) \{[\s\S]{0,200}?<PanelHeading count=\{0\}/.test(panelSrc),
+      true,
+    );
+    /*
+     * ⚠ **One band count replaces two proxies.** `sections.length > 0` and
+     * `sections.length > 1` both stood in for *is there more than one band on
+     * screen*, which was true while `Completed` was inside `sections` and stopped
+     * being so the moment it moved out. Left alone, a lone live kind beside the
+     * band would have gone unlabelled and the `Agents` heading would have
+     * disappeared whenever the band was the only other thing — and no driver
+     * anywhere reads `aria-labelledby`, `"Agents"` or `PanelHeading`, so nothing
+     * would have said a word.
+     */
+    check(
+      "the headings are gated on how many bands are on screen, not on the partition's length",
+      [/const bands = /.test(panelSrc), /const named = bands > 1;/.test(panelSrc), /sections\.length > 1/.test(panelSrc)],
+      [true, true, false],
+    );
+    /*
+     * ⚠ **Seeded closed, and *where* that state lives is the assertion.**
+     * `TaskPanel` renders nothing while `!shown`, so everything below `PanelBody`
+     * unmounts on every close and a `useState(false)` inside the section is read
+     * afresh on every open — the whole of "collapsed by default", with nothing
+     * stored. But `TaskPanel` itself is rendered unconditionally by `EventList`, so
+     * the same line in *its* body would survive every close and every session
+     * switch instead. The two are one character apart in a diff and opposite in
+     * behaviour, so the position is read rather than the value.
+     */
+    const finishedAt = panelSrc.indexOf("function FinishedSection(");
+    const finishedEnd = finishedAt < 0 ? -1 : panelSrc.indexOf("\nfunction ", finishedAt + 1);
+    const finishedBody = finishedAt >= 0 && finishedEnd > finishedAt ? panelSrc.slice(finishedAt, finishedEnd) : "";
+    report("the finished section's own body was isolated", finishedBody.length > 0 && finishedBody.length < 3000, `${String(finishedBody.length)} chars`);
+    check("it seeds itself closed, in the component the panel unmounts", /useState\(false\)/.test(finishedBody), true);
+    /*
+     * ⚠ **`aria-controls` is refused.** The body is `{open && …}`, so an attribute
+     * pointing at an id nothing renders names nothing — the defect `PanelBody`
+     * carries its own ⚠ about one region up.
+     */
+    check("and it claims no region it does not render", /aria-controls/.test(finishedBody), false);
+    /*
+     * ⚠ **The clear hands up *every* finished id, not the visible ones.** That is
+     * the prune: stored as exactly what is finished at that instant, the hidden set
+     * is always a subset of what the wire holds and can never name a row the daemon
+     * has already given up. `onClear={() => onClear(shown.map(…))}` is the natural
+     * mistake and it grows the set out of step with the wire.
+     */
+    check("the clear names every finished row rather than the visible ones", /onClear\(tasks\.map\(\(task\) => task\.id\)\)/.test(finishedBody), true);
+    /*
+     * ⚠ **The wire's partition stays the wire's.** The hidden set is a *display*
+     * filter and may not reach `tasks.ts`: pushed in there, `taskSections` would
+     * answer no `Completed` section once everything was cleared, the band would
+     * vanish with it, and the owner's rule — the option clears them, `Completed`
+     * does not disappear — would be reversed by a change that reads as a
+     * simplification.
+     */
+    const tasksSrc = stripComments(readFileSync(new URL("../src/tasks.ts", import.meta.url), "utf8"));
+    check(
+      "and the hidden set never reaches the partition, so the band stands at zero",
+      [/hidden/.test(tasksSrc), /export const FINISHED_LABEL/.test(tasksSrc)],
+      [false, true],
+    );
+    /*
+     * ⚠ **In memory, never stored, and forgotten with the session.** It is a claim
+     * about rows on a *remote machine*, not a preference about this client: a
+     * daemon restart, the agent's own `/clear` and eviction at the cap each destroy
+     * those rows with nothing to tell the browser, so a stored set would go on
+     * hiding ids that can never be seen again — and would hide a freshly spawned
+     * row that reused one. `groups.ts` persists its collapse set; this one may not,
+     * and `forgetSession`'s docblock says anything per-session belongs in it.
+     */
+    const finishedSrc = stripComments(readFileSync(new URL("../src/finishedTasks.ts", import.meta.url), "utf8"));
+    const storeSrc = stripComments(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"));
+    check(
+      "the cleared set is held in memory and released with the session",
+      [/localStorage/.test(finishedSrc), /forgetHiddenFinished\(key\)/.test(storeSrc)],
+      [false, true],
+    );
+    /*
+     * And the behaviour no source pin can see: that a second clear **replaces**
+     * rather than unions. Unioned, the set grows for ever with ids the wire cannot
+     * match again — every source assertion above stays green over it.
+     */
+    const { forgetHiddenFinished, hiddenFinished: hiddenFor, hideFinished } = await import("../src/finishedTasks.js");
+    const aKey = "m1 s1" as never;
+    check("nothing is hidden until somebody clears", hiddenFor(aKey).size, 0);
+    hideFinished(aKey, ["t1", "t2"]);
+    check("a clear hides exactly what it was handed", [...hiddenFor(aKey)].sort(), ["t1", "t2"]);
+    hideFinished(aKey, ["t2", "t3"]);
+    check("and a second clear replaces rather than accumulating", [...hiddenFor(aKey)].sort(), ["t2", "t3"]);
+    check("an empty clear is not a clear", (() => { hideFinished(aKey, []); return [...hiddenFor(aKey)].sort(); })(), ["t2", "t3"]);
+    check("another session is untouched", hiddenFor("m1 s2" as never).size, 0);
+    forgetHiddenFinished(aKey);
+    check("and a session that is gone takes its set with it", hiddenFor(aKey).size, 0);
+    /*
+     * ⭐ **The width is a custom property now, and the gutter is `calc` of the same
+     * one — so what used to be a pair of lists is a single relation.**
+     *
+     * It was `md:w-[20rem] xl:w-[26rem]` against `md:pr-[20.75rem]
+     * xl:pr-[26.75rem]`, and the driver walked both lists asserting the
+     * subtraction at every step, because a width without its gutter at the *same*
+     * breakpoint is the card lying over the end of every line. That pin is retired
+     * with the thing it pinned: a width somebody can drag cannot be a literal, and
+     * a gutter built from the same `var()` cannot disagree with it.
+     *
+     * ⚠ **What replaces it is the `calc`, read as text, plus the 12px appearing on
+     * both sides.** The inset is three `*-3` utilities and a `+ 0.75rem` — one
+     * distance in Tailwind's two spellings, with nothing in CSS relating them — so
+     * that is the one number here still written twice and it is asserted as an
+     * equality rather than trusted.
+     *
+     * ⚠ **And the literals are pinned *absent*.** Restoring `md:w-[20rem]` beside
+     * the property is a smaller diff than any of this and would leave the panel at
+     * a fixed width with the separator still dragging a variable nothing reads —
+     * a drag that does nothing at all, with every other check here green.
+     */
+    check(
+      "the panel's width is a property somebody can drag, and the conversation's gutter is that same property",
+      [
+        /md:w-\[var\(--task-fit\)\]/.test(panelSrc),
+        /md:pr-\[calc\(var\(--task-fit\)\+0\.75rem\)\]/.test(panelSrc),
+        /\w+:w-\[[\d.]+rem\]/.test(panelSrc),
+        /\w+:pr-\[[\d.]+rem\]/.test(panelSrc),
+      ],
+      [true, true, false, false],
+    );
+    /*
+     * ⭐ **What is *spent* is `--task-fit`, and what is *stored* is `--task-w`.**
+     * The two panes' clamps are independent and their sum is bounded nowhere:
+     * measured in a real browser at a 1024px window with both dragged to their
+     * maxima, the conversation's content box floored at 0px and the docked card lay
+     * 52px over the session rail. Neither module can see the other and neither may
+     * ask how wide the window is — the ban four checks down is by literal — so the
+     * clamp is in CSS, where the viewport is. The separator still reads and writes
+     * `--task-w`, which is why both spellings appear and why this pair is asserted
+     * rather than assumed: spending `--task-w` here is the revert, and it looks
+     * like a simplification.
+     */
+    const paneHandleSrc = stripComments(readFileSync(new URL("../src/ui/PaneHandle.tsx", import.meta.url), "utf8"));
+    check(
+      "and what it spends is clamped against the room there actually is",
+      [
+        /--task-fit:\s*min\(var\(--task-w\), calc\(var\(--task-room\) - [\d.]+rem\)\)/.test(taskCssEarly),
+        /@media \(min-width: 64rem\) \{\s*:root \{\s*--task-room: calc\(100vw - var\(--rail-w\)\)/.test(taskCssEarly),
+        /getPropertyValue\(pane\.prop\)/.test(paneHandleSrc),
+      ],
+      [true, true, true],
+    );
+    const insetSteps = Number(/md:right-(\d+)/.exec(panelSrc)?.[1] ?? Number.NaN);
+    const gutterRem = Number(/md:pr-\[calc\(var\(--task-fit\)\+([\d.]+)rem\)\]/.exec(panelSrc)?.[1] ?? Number.NaN);
+    report(
+      "the inset was found on both sides",
+      Number.isFinite(insetSteps) && Number.isFinite(gutterRem),
+      `right-${String(insetSteps)} against +${String(gutterRem)}rem`,
+    );
+    check(
+      "and the room the conversation leaves is the panel plus exactly the gap beside it",
+      gutterRem,
+      insetSteps * 0.25,
+    );
+    /*
+     * ⚠ **Both declared defaults live in the stylesheet and are derived from
+     * `taskWidth.ts`'s constants, not typed a second time.** Same pin
+     * `--rail-w`/`RAIL_DEFAULT` carries, for the same measured reason: `19.5rem`
+     * and `312` were asserted independently for a release, agreed only at a 16px
+     * root font, and cost every reader on Chrome's Large setting a 78px snap on
+     * load. px on both sides is the whole fix.
+     *
+     * ⚠ **And the order is the mechanism.** Both declarations are unlayered
+     * `:root` and `@media` adds no specificity — this stylesheet's own post-mortem,
+     * where every phone animation shipped onto the desktop for exactly this reason.
+     * The wide one wins because it comes later and for no other reason, so written
+     * above the base it would silently never apply, with both values still present
+     * and correct.
+     */
+    const taskCss = taskCssEarly;
+    const { TASK_DEFAULT, TASK_MAX, TASK_MIN, TASK_WIDE, taskPane } = await import("../src/ui/taskWidth.js");
+    const baseAt = taskCss.indexOf(`--task-w: ${String(TASK_DEFAULT)}px`);
+    const wideAt = taskCss.search(/@media \(min-width: 80rem\) \{\s*:root \{\s*--task-w:/);
+    check("both declared widths are the ones the module names", [baseAt >= 0, wideAt >= 0], [true, true]);
+    check(
+      "and the wide one is at the breakpoint, with the value the module names",
+      new RegExp(`@media \\(min-width: 80rem\\) \\{\\s*:root \\{\\s*--task-w: ${String(TASK_WIDE)}px`).test(taskCss),
+      true,
+    );
+    check("and it comes later, which is the only thing that makes it win", baseAt >= 0 && wideAt > baseAt, true);
+    check("neither declared width is in a unit that depends on the reader's font size", /--task-w:\s*[\d.]+r?em/.test(taskCss), false);
+    check("and a drag can reach either of them from both directions", [TASK_MIN < TASK_DEFAULT, TASK_WIDE < TASK_MAX], [true, true]);
     check("and the conversation makes room at the same breakpoint", /TASK_PANEL_GUTTER/.test(viewSrc), true);
-    check("and the scrim stops where the docking starts", /xl:hidden/.test(panelSrc), true);
     check(
       "and no breakpoint is read in JavaScript",
       /matchMedia|innerWidth|clientWidth/.test(panelSrc),
       false,
+    );
+
+    /*
+     * ⭐ **Two names for one pane, and the join between them was asserted
+     * nowhere.**
+     *
+     * The stored number and the spent one are both pinned above — the `min()` read
+     * out of the stylesheet, the separator's read of `pane.prop` read out of
+     * `PaneHandle` — and *which* property that second one is was left to a
+     * reviewer. `getPropertyValue(pane.prop)` says the separator spends **its
+     * pane's** property without saying which of the two that is.
+     *
+     * ⚠ **So `prop: "--task-fit"` in `taskWidth.ts` is a one-token edit that every
+     * check on this screen survives**, and it reads like removing an indirection.
+     * What it does is point the drag at the clamped variable: the separator would
+     * write it inline onto `documentElement`, where a declaration beats the `:root`
+     * `min()` outright, and the conversation's 240px floor would be gone — the
+     * floor whose absence was measured as a 0px content box with the card 52px over
+     * the session rail. The drag would keep working perfectly.
+     *
+     * Derived in one direction only: the clamped name is read back out of the
+     * stylesheet as *the property declared from the stored one*, so it is not typed
+     * here a third time, and the stored one is the single literal this pair rests
+     * on.
+     */
+    const widthClass = /TASK_PANEL_WIDTH = "([^"]+)"/.exec(panelSrc)?.[1] ?? "";
+    const gutterClass = /TASK_PANEL_GUTTER = "([^"]+)"/.exec(panelSrc)?.[1] ?? "";
+    const spentProp = new RegExp(String.raw`(--[a-z-]+):\s*min\(var\(${taskPane.prop}\)`).exec(taskCssEarly)?.[1] ?? "";
+    report(
+      "both class strings and the clamped property were found",
+      widthClass.length > 0 && gutterClass.length > 0 && spentProp.length > 0,
+      `${widthClass} / ${gutterClass} / ${spentProp} from ${taskPane.prop}`,
+    );
+    check(
+      "the separator writes the stored property and the stylesheet clamps a second one from it",
+      [taskPane.prop, spentProp.length > 0, spentProp === taskPane.prop],
+      ["--task-w", true, false],
+    );
+    check(
+      "and the clamped one is what the panel and the gutter spend, never the one a drag writes",
+      [
+        widthClass.includes(`var(${spentProp})`),
+        gutterClass.includes(`var(${spentProp})`),
+        widthClass.includes(`var(${taskPane.prop})`),
+        gutterClass.includes(`var(${taskPane.prop})`),
+      ],
+      [true, true, false, false],
+    );
+    /*
+     * ⭐ **And the separator's own fallback was a computed-style resolution per
+     * render, on the one screen where a render is per streamed token.**
+     *
+     * `aria-valuenow` falls back to the DOM's answer for the stored property, and
+     * it falls back for every reader who has never dragged — which is the default
+     * state rather than an edge. `TaskPanel` is rendered from `EventList`'s own
+     * body with no `memo` between them, so an open panel put
+     * `getComputedStyle(documentElement)` in the path of every arriving chunk. The
+     * rail never reached it at all, its unset state being a number.
+     *
+     * The first check below has **two** arms saying different things, and neither
+     * is the other's control: the count pins that `getComputedStyle(` appears
+     * **once**, so a second resolution added beside the cached one fails it while
+     * the `??=` stays true; the `??=` pins that the one site is the cached one, so
+     * a read that went back to resolving per render fails that arm while the count
+     * stays at 1.
+     *
+     * ⚠ **A cache is only safe if what drops it is complete, so it is a census of
+     * droppers rather than a check that one exists.** Three things can change the
+     * answer: a committed width, because that is written inline onto
+     * `documentElement` and is then what a computed read hands back; a resize,
+     * which is the only thing that moves the breakpoint; and `pointerdown`, so a
+     * gesture still begins from a reading taken for it — the read whose absence was
+     * measured as a 96px jump under the pointer on the panel's first drag at `xl`.
+     * A fourth dropper fails this as found-and-not-listed and a deleted one as
+     * listed-and-not-found; a count alone could see neither.
+     */
+    check(
+      "the separator holds the DOM's answer rather than resolving it once per streamed token",
+      [(paneHandleSrc.match(/getComputedStyle\(/g) ?? []).length, /cached\.current \?\?= resolve\(\)/.test(paneHandleSrc)],
+      [1, true],
+    );
+    check(
+      "and each of the three things that can change that answer drops it",
+      [
+        (paneHandleSrc.match(/cached\.current = null/g) ?? []).length,
+        /\}, \[announced\]\);/.test(paneHandleSrc),
+        /window\.addEventListener\("resize", forget\)/.test(paneHandleSrc),
+        /setPointerCapture\(event\.pointerId\);\s*cached\.current = null;/.test(paneHandleSrc),
+      ],
+      [3, true, true, true],
+    );
+    /*
+     * ⭐ **And every pointer event the separator answers belongs to the gesture in
+     * flight, which is a sweep rather than a spot check.**
+     *
+     * A second finger landing on the strip is refused entry by the one-at-a-time
+     * guard — and was refused entry only: the finger is still on an 8px strip, so
+     * its own `pointerup` arrived at this element and committed and ended the
+     * *first* pointer's drag, after which the first went on moving with no gesture
+     * recorded and the pane was frozen under a button still held down. A capture
+     * lost with no release at all — another element taking the same id — left the
+     * gesture recorded for ever, and the one-at-a-time guard then refused every
+     * later press: a separator that draws, hovers and focuses and moves nothing
+     * again for the rest of the session.
+     *
+     * ⚠ **The census is the attribute list differenced against the guard count**,
+     * because the failure is a handler somebody adds rather than a value somebody
+     * changes. A sixth pointer handler with no ownership test fails as a count that
+     * no longer matches; a guard deleted from one of the three fails the same
+     * comparison from the other side. The equality against a written-down member
+     * list is also this sweep's floor: a pattern that stopped matching answers the
+     * empty list, which is not the list.
+     */
+    const pointerAttrs = [...paneHandleSrc.matchAll(/\bon(?:Pointer\w+|LostPointerCapture)=/g)].map((m) => m[0].slice(0, -1)).sort();
+    check(
+      "the separator answers exactly these five pointer events",
+      pointerAttrs,
+      ["onLostPointerCapture", "onPointerCancel", "onPointerDown", "onPointerMove", "onPointerUp"],
+    );
+    const terminal = pointerAttrs.filter((name) => name !== "onPointerDown" && name !== "onPointerMove");
+    check(
+      "and every one of them that ends a drag asks first whether the pointer is the one that started it",
+      [
+        terminal.length,
+        (paneHandleSrc.match(/if \(owns\(event\)\)/g) ?? []).length,
+        /const owns = \(event: React\.PointerEvent<HTMLDivElement>\): boolean => from\.current\?\.id === event\.pointerId/.test(paneHandleSrc),
+        /from\.current = \{ id: event\.pointerId,/.test(paneHandleSrc),
+        /origin === null \|\| origin\.id !== event\.pointerId/.test(paneHandleSrc),
+      ],
+      [3, 3, true, true, true],
+    );
+    /*
+     * ⚠ **A capture lost with no release is a cancel, never a commit** —
+     * `pointercancel`'s own rule, a gesture taken away not being a smaller pane.
+     * `finish(true)` here is the plausible edit: it would commit a width nobody
+     * finished asking for, and on an ordinary release — where this fires after
+     * `pointerup` — it would commit a second time.
+     */
+    check(
+      "and a lost capture ends the gesture without committing it",
+      /const onLostPointerCapture = \(event: React\.PointerEvent<HTMLDivElement>\): void => \{\s*if \(owns\(event\)\) finish\(false\);/.test(paneHandleSrc),
+      true,
+    );
+    /*
+     * ⭐ **One copy of the gesture, and this is the half every other driver here
+     * is blind to by construction.**
+     *
+     * `AppShell`'s `RailHandle` is a two-line wrapper with no state, no handlers
+     * and no capture, and it kept **four** paragraphs describing all of them after
+     * the mechanism moved into `PaneHandle` — including the *pre-correction*
+     * version of the Chrome 151 measurement, which said a captured drag leaves
+     * nothing to leak when the element holding it is removed. That is precisely the
+     * claim `PaneHandle`'s unmount effect exists to repair, so a reader who found
+     * the wrapper's copy first was told the opposite of what was measured, in the
+     * file a reviewer opens to check where the strip sits.
+     *
+     * ⚠ **Read raw rather than through `stripComments`, because here the comments
+     * are the subject.** Every other assertion about this file strips them for the
+     * opposite reason. The sweep is the mechanism's own vocabulary rather than any
+     * sentence: a wrapper that only positions an element has no business naming a
+     * pointer verb, and the prose cannot be copied back without one of these words.
+     * It carries a positive control for the reason `webcheck.env.ts` records as a
+     * skip reading like a pass — a sweep whose predicate stopped matching answers
+     * the empty list, and the empty list is what passing looks like here. The
+     * control runs the **same** `includes` over `PaneHandle.tsx` read raw, the one
+     * file that has to name all six, and compares the result against those six
+     * written out a second time as a **literal**: an emptied, misspelled or
+     * reordered `GESTURE_WORDS` fails there instead of passing here. The literal
+     * is the whole of it, and this control was itself the defect once: the first
+     * version searched a string it had interpolated the word into and compared the
+     * count against `GESTURE_WORDS.length`, so both sides moved together and it
+     * answered `ok` for any list, `[]` included.
+     */
+    const shellRaw = readFileSync(new URL("../src/ui/AppShell.tsx", import.meta.url), "utf8");
+    const handleRaw = readFileSync(new URL("../src/ui/PaneHandle.tsx", import.meta.url), "utf8");
+    const GESTURE_WORDS = ["setPointerCapture", "releasePointerCapture", "pointerdown", "pointerup", "pointercancel", "aria-valuenow"];
+    report("the shell was read whole, comments and all", shellRaw.includes("function RailHandle"), `${String(shellRaw.length)} bytes`);
+    check(
+      "the sweep's own predicate finds every one of these words in the file that does implement the gesture",
+      GESTURE_WORDS.filter((word) => handleRaw.includes(word)),
+      ["setPointerCapture", "releasePointerCapture", "pointerdown", "pointerup", "pointercancel", "aria-valuenow"],
+    );
+    check(
+      "and the shell's wrapper names no part of a gesture it does not implement",
+      GESTURE_WORDS.filter((word) => shellRaw.includes(word)),
+      [],
+    );
+    /*
+     * ⚠ **And the sentence a reader sent here from that wrapper lands on first.**
+     * The clause the unmount effect repairs is still in `PaneHandle`'s opening
+     * docblock, uncorrected, two hundred lines above the effect — kept on purpose,
+     * because this repository states a correction once, at the code that acts on
+     * it, and `AppShell` deliberately no longer restates the measurement. What the
+     * clause may not be is *unmarked*: with the wrapper's copy gone, an unmarked
+     * one is the only thing a reader who follows that pointer would read, and the
+     * mark beside it is a shortening pass away from being tidied off as
+     * commentary-about-commentary.
+     *
+     * Raw for the sweep's own reason, and the stripped half is asserted with it:
+     * all three of these are comments, so a copy read through `stripComments` must
+     * find none of them. That is what stops this passing over code that happens to
+     * quote itself.
+     */
+    const leakAt = handleRaw.indexOf("nothing to leak when this unmounts");
+    const fixAt = handleRaw.indexOf("Unmounting mid-drag is not a `pointercancel`");
+    check(
+      "the uncorrected clause carries a mark forward to the correction it is wrong about",
+      [
+        leakAt >= 0,
+        fixAt > leakAt,
+        /read the unmount effect below/.test(handleRaw.slice(leakAt, fixAt)),
+        paneHandleSrc.includes("nothing to leak when this unmounts"),
+        paneHandleSrc.includes("Unmounting mid-drag is not a `pointercancel`"),
+        paneHandleSrc.includes("read the unmount effect below"),
+      ],
+      [true, true, true, false, false, false],
     );
     /*
      * ⚠ **One surface lists them, and the transcript's foot is a way in rather
@@ -762,36 +1378,173 @@ process.stdout.write("\na subagent's work, under the tool call that started it\n
      */
     const footAt = eventListSrc.indexOf("function WaitingFoot");
     const footBody = footAt < 0 ? "" : eventListSrc.slice(footAt, eventListSrc.indexOf("\n}\n", footAt));
+    /*
+     * ⚠ **The transcript's run fold keeps its 44px, and it is the third button of
+     * this shape rather than a survivor of an oversight.**
+     *
+     * Two folds lost `min-h-11` by the owner's call — the finished band and
+     * `bits.tsx`'s `Disclosure` — and this one wears the same class prefix, so the
+     * next sweep for "all buttons like that" reaches it. It must not be taken, and
+     * the reason is a *measurement about neighbours* rather than an argument about
+     * importance, which is what the other two fell to. These rows are full-width
+     * and stacked `space-y-1.5` apart, so an invisible expander grown 9px each way
+     * covers 6px of the row above's face — and the row above is another disclosure.
+     * There is no free direction here, which is why the box itself had to grow. It
+     * was 26px and its own note records what that cost: *"the only record of what
+     * the agent did, and until this they were 26px of machinery nobody could
+     * reliably hit."* Nor is there a trash beside it to look small against, which
+     * is the complaint the other two answered.
+     */
+    check(
+      "the transcript's own run fold keeps the height those two gave up",
+      /className="tap flex min-h-11 w-full items-center gap-1\.5 rounded-md px-1 py-1 text-left/.test(eventListSrc),
+      true,
+    );
     check("the foot's own component was found", footAt >= 0 && footBody.length > 0, true);
     check("the foot opens the panel", /aria-haspopup="dialog"/.test(footBody), true);
+    /*
+     * ⭐ **And it is no longer the only door, which is the whole point of the
+     * second one.** `footSays` answers `null` once nothing is outstanding, so the
+     * foot is not drawn — and `onOpenTasks` had exactly one call site, so the
+     * record the panel keeps became unreachable at the moment it became worth
+     * reading. The session header's kebab is the other door.
+     *
+     * ⚠ **Asserted on three files at once, because the failure is a missing
+     * connection rather than a wrong value.** A row in the menu that nothing
+     * mounts, or a mount that passes no callback, leaves every other check here
+     * green over a panel nobody can open.
+     */
+    const menuSrc = stripComments(readFileSync(new URL("../src/ui/SessionMenu.tsx", import.meta.url), "utf8"));
+    check(
+      "the panel has a second door in the session's own menu",
+      [
+        /label="Background tasks"/.test(menuSrc),
+        /onOpenTasks !== undefined && \(/.test(menuSrc),
+        /<SessionMenu\s+onOpenTasks=\{openTasks\}/.test(viewSrc),
+      ],
+      [true, true, true],
+    );
+    /*
+     * ⚠ **The kebab is mounted at every width, and the wrapper that hid it above
+     * `lg` is gone.** That wrapper was right for every row it was about — Rename,
+     * Pin, Resume and Stop are all on the session's row in the rail, so with the
+     * rail beside you the menu was a second door to a door. It is wrong for a row
+     * that is on **no** rail row at any width. Pinned in both directions, because
+     * restoring the wrapper is a two-word diff that reads like tidying and takes
+     * the desktop's only door with it.
+     *
+     * ⚠ **This pair was enforced nowhere.** Three prose sites rested on it —
+     * `SessionView`'s docblock and *two* paragraphs in `Header.tsx` arguing the
+     * 44px kebab from "neither control exists above `lg`" — and a sweep of every
+     * driver for `lg:hidden` found three hits, none of them about this header. So
+     * the change could have gone green with all three left lying, which is the
+     * failure this repository names as its worst.
+     */
+    const kebabAt = viewSrc.indexOf("<SessionMenu");
+    const before = kebabAt < 0 ? "" : viewSrc.slice(Math.max(0, kebabAt - 120), kebabAt);
+    report("the header's kebab mount was found", kebabAt >= 0, before.replace(/\s+/g, " ").trim().slice(-60));
+    check("and nothing hides it at the width where it is the only door", /lg:hidden/.test(before), false);
+    /*
+     * The menu row opens a dialog rather than acting, and says so — the same
+     * promise the foot above makes with the same attribute. A menu row that
+     * silently behaves like a second kind of control is the widget-role failure
+     * `web-shell.md` records about this app's two popovers.
+     */
+    check("and the row that opens it says what it opens", /haspopup="dialog"/.test(menuSrc), true);
     check("and no longer claims a region under it", /aria-expanded/.test(footBody), false);
     check("and draws no task rows of its own", /function TaskRow\(|function TaskHeading\(/.test(eventListSrc), false);
     /*
-     * ⚠ **The footer sentence lives on the surface it is about**, and exactly
-     * once: it explains why there is no per-task view, and a copy left at the foot
-     * of the transcript would be explaining the absence of a thing that is now one
-     * tap away.
+     * ⚠ **That sentence is gone from both surfaces now, by the owner's call, and
+     * this assertion is kept rather than deleted.**
+     *
+     * It used to read "on the panel and nowhere else": the line explained why there
+     * is no per-task view, and a copy at the foot of the transcript would have been
+     * explaining the absence of a thing one tap away. What the owner decided is
+     * that the *panel's* copy earns nothing either — it answers a question nobody
+     * asks twice, on every visit, for ever.
+     *
+     * The half worth keeping is the direction it was always guarding: a standing
+     * explanation of an absence must not come back, and least of all at the foot of
+     * the transcript, which is the surface with the widest audience and the least
+     * room. So both are pinned absent, and a reader who wants the fact it stated
+     * finds it in `TaskPanel.tsx`'s own note.
      */
     const footer = "Each task&apos;s output reaches the transcript when it finishes";
-    check("the sentence about output is on the panel and nowhere else", [
+    check("the standing sentence about output is on neither surface", [
       panelSrc.includes(footer),
       eventListSrc.includes(footer),
-    ], [true, false]);
+    ], [false, false]);
     /*
-     * ⚠ **`No tasks currently running` is Claude Code's sentence and it is a
-     * *claim*.** True for claude, false for the other three agents — kimi
-     * backgrounds shells, agents and cron jobs and reports none of it — so it is
-     * gated on the agent having said it would tell us, and the ungated arm says
-     * something weaker. A driver cannot render this, so the gate is read: the
-     * claim and the field must appear together.
+     * And its sibling: `N background tasks finished`, which stood at the foot for
+     * the rest of a session because terminal rows are kept by decision. Removed for
+     * the same reason and pinned the same way — the foot says what is *outstanding*
+     * and nothing else, which is what `footSays` answers and what the live region
+     * beside it now repeats exactly.
      */
-    const empty = panelSrc.slice(panelSrc.indexOf("No tasks currently running") - 200, panelSrc.indexOf("No tasks currently running"));
-    check("the empty state that makes a claim is gated on the agent reporting", /reports\s*$|reports\s*\n?\s*\?\s*$/.test(empty.trimEnd() + "\n") || /reports\s*\?/.test(empty), true);
+    check("and the foot makes no claim about work that is over", [
+      /background task\$\{retained === 1/.test(eventListSrc),
+      /foot\?\.line \?\? null/.test(eventListSrc),
+    ], [false, true]);
+    /*
+     * ⭐ **Three empty states, driven as a total partition — and the third arm is a
+     * defect this pair was green over.**
+     *
+     * `No tasks currently running` is Claude Code's sentence and it is a *claim*:
+     * true for claude, false for the other three, which is why it was gated on the
+     * agent having said it would tell us. What the boolean could not say is that
+     * `reportsBackgroundTasks: false` is **two** facts. The daemon's own docblock
+     * calls it *"nobody asked"*, and `doStop` sets it — which a daemon restart
+     * reaches for every session. So with no agent attached the panel asserted
+     * *"This agent doesn't report background work"* about claude, which does. An
+     * absent answer drawn as a negative one, reported from a screenshot.
+     *
+     * ⚠ **Driven rather than read, because the old pair was a *shape* check.** It
+     * sliced 200 characters before the claim and looked for a `reports ?` in them.
+     * Every arm can be wrong with that shape intact, and the missing arm was not
+     * expressible in it at all. Now the function is called.
+     *
+     * ⚠ **And the slice is gone with it.** `indexOf` answering -1 feeds
+     * `slice(-201, -1)`, which hands back the last 200 bytes of the file rather
+     * than nothing — so deleting the sentence would have turned this green over a
+     * message about something else entirely.
+     */
+    const { BACKGROUND_EMPTY, backgroundReporting } = await import("../src/tasks.js");
+    const snap = (status: string, reports: boolean | undefined): never =>
+      ({ status, reportsBackgroundTasks: reports }) as never;
+    check("an agent that reports is the only one an empty list is an answer about", backgroundReporting(snap("idle", true)), "reports");
+    check("one that does not is a different fact", backgroundReporting(snap("running", false)), "silent");
+    check("a restarted daemon has no agent to have asked", backgroundReporting(snap("interrupted", false)), "unasked");
+    check("nor does a parked one, whatever the flag says", backgroundReporting(snap("parked", true)), "unasked");
+    /*
+     * ⚠ **`stopping` is excluded from `hasLiveAgent` on a measured argument** —
+     * `doStop` fans a snapshot out both before and after it empties the agent's
+     * state, so a frame can legitimately read `stopping` with nothing on it.
+     * Inheriting that is the whole reason this reuses the predicate rather than
+     * testing `isTerminal` itself.
+     */
+    check("and an agent being torn down is not one that can be asked", backgroundReporting(snap("stopping", true)), "unasked");
+    check("a row that has not arrived lands in the same arm as no agent", backgroundReporting(null), "unasked");
+    /*
+     * The sentences, as a total partition: every arm has one, no two are the same,
+     * and only the arm that earned it makes the claim.
+     */
+    const arms = ["reports", "silent", "unasked"] as const;
+    check("every arm has a sentence, and no two share one", new Set(arms.map((arm) => BACKGROUND_EMPTY[arm])).size, arms.length);
+    check("only the answerable arm says nothing is running", arms.filter((arm) => BACKGROUND_EMPTY[arm] === "No tasks currently running"), ["reports"]);
     check(
-      "and the other arm says what it cannot know rather than that nothing is running",
-      /doesn't report background work/.test(panelSrc),
+      "the silent arm says what it cannot know rather than that nothing is running",
+      /doesn't report background work/.test(BACKGROUND_EMPTY.silent),
       true,
     );
+    /*
+     * ⚠ **And the unasked arm may not describe an agent at all**, which is the
+     * whole of what was wrong: it is reached with no agent *and* with no row, so
+     * any sentence about what "this agent" does is a claim about something nothing
+     * has heard from.
+     */
+    check("and the unasked arm makes no claim about any agent", /this agent|the agent/i.test(BACKGROUND_EMPTY.unasked), false);
+    check("while saying where the record went, which is what somebody there is asking", /restart/.test(BACKGROUND_EMPTY.unasked), true);
+    check("and the panel draws the table rather than a shape of its own", /BACKGROUND_EMPTY\[reporting\]/.test(panelSrc), true);
     /*
      * ⚠ **The spoken half says "not connected" rather than "reconnecting", and the
      * change of word is the fix rather than a rewording.** This arm is reached with

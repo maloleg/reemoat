@@ -52,11 +52,37 @@ RUN npm install -g --no-fund --no-audit pnpm@11.17.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/control-plane/package.json ./packages/control-plane/
 COPY packages/web/package.json ./packages/web/
+# ⚠ **`packages/protocol` is a workspace member, so its manifest belongs here even
+# though nothing in the *runtime* image imports it.** `--frozen-lockfile` verifies
+# the lockfile against every importer before installing the filtered subset, so a
+# missing manifest fails the install rather than the build — a different and much
+# more confusing error than the one a missing source directory gives.
+COPY packages/protocol/package.json ./packages/protocol/
 
 # ---------------------------------------------------------------------------
-# web — vite, in its own stage so its toolchain never reaches the runtime image
+# gate — vite, in its own stage so its toolchain never reaches the runtime image
 # ---------------------------------------------------------------------------
-FROM manifests AS web
+#
+# ⚠ **This builds the *gate*, not the app, and the distinction is the deployment.**
+# `packages/web` has two entry points: `index.html` is the whole product, which
+# Tauri compiles into the Reemoat app's binary and which this image deliberately
+# does not carry; `gate.html` is signing up, spending a mailed link, the legal
+# documents and the page that hands somebody over to the app.
+#
+# The gate is here because its flows have nowhere else to land: `/confirm`,
+# `/reset` and `/verify` are opened by a **mail client**, in a browser, and
+# `POST /v1/forgot` is the only remedy this service has for a forgotten password.
+# The app is not here because a fleet reached by the app needs no copy of it on
+# the server — and because an image that cannot serve the product is a smaller
+# thing to reason about than one that merely declines to.
+#
+# `vite.gate.config.ts` is a separate *build* rather than a second input to the
+# app's, and its docblock carries why: two inputs to one build share chunks, so
+# shipping only the gate would mean computing its reachable chunk set from Vite's
+# manifest and keeping that walk correct for ever. Two builds produce two
+# directories, and COPYing one of them cannot drag in any part of the other.
+
+FROM manifests AS gate
 
 # esbuild and rollup each link a prebuilt binary chosen by the *installing*
 # platform, and `pnpm-workspace.yaml` has `allowBuilds: {esbuild: true}` so
@@ -67,39 +93,42 @@ FROM manifests AS web
 RUN pnpm install --frozen-lockfile --filter @reemoat/web
 
 COPY tsconfig.json ./
-COPY packages/web/tsconfig.json packages/web/vite.config.ts packages/web/index.html ./packages/web/
+COPY packages/web/tsconfig.json packages/web/vite.gate.config.ts packages/web/gate.html ./packages/web/
 COPY packages/web/src ./packages/web/src
-# `public/` is copied to the root of `dist` by Vite, and `index.html` names both
-# files in it. Its own line rather than the one above, because that COPY takes a
-# file list and this is a directory — and it is the second half of the pair
-# `.dockerignore` states: missing from *that* list this fails here with "not
-# found", missing from *this* one the build succeeds and the page ships with two
-# `<link>`s pointing at 404s. Measured, in that order.
+# ⚠ **The gate's import closure reaches the crypto package, which is why this line
+# exists and why it is easy to miss.** `gate-main.tsx` → `store.ts` → `machine.ts`
+# → `e2ee.ts` → `@reemoat/protocol`, and the package is consumed as *source*: there
+# is no build step anywhere in this repository, so `exports` points at
+# `src/index.ts` and Vite compiles it here. Without this the gate build fails with
+# `Cannot find module`, and `webcheck`'s own closure walker cannot warn about it —
+# its resolver opens with `if (!spec.startsWith(".")) return null;`, so a bare
+# workspace specifier is invisible to it by design. `imagecheck` is what catches
+# this; nothing else can.
+COPY packages/protocol/src ./packages/protocol/src
+# `public/` is copied to the root of the build output by Vite, and `gate.html`
+# names both files in it. Its own line rather than the one above, because that
+# COPY takes a file list and this is a directory — and it is the second half of
+# the pair `.dockerignore` states: missing from *that* list this fails here with
+# "not found", missing from *this* one the build succeeds and the page ships with
+# two `<link>`s pointing at 404s. Measured, in that order.
 COPY packages/web/public ./packages/web/public
-RUN pnpm --filter @reemoat/web build
+RUN pnpm --filter @reemoat/web build:gate
 
 # What leaves this stage is smaller than what the build produced, and both halves
 # are here rather than in the runtime COPY because `COPY` cannot exclude a
 # pattern without `# syntax=docker/dockerfile:1.7-labs` — pruning at the source
 # is the same result without pinning this file to a labs frontend.
 #
-# **The maps do not ship.** `vite.config.ts` sets `sourcemap: "hidden"`, so
+# **The maps do not ship.** `vite.gate.config.ts` sets `sourcemap: "hidden"`, so
 # nothing in the bundle points at them and they exist only as build artifacts to
-# hand an error tracker — which this image is not. Measured on this bundle: 4.1 MB
-# across 15 files, the main one 4,017,366 bytes, served behind `/`, a route that
-# needs no credential, and re-gzipped from scratch on every request at 98.7 ms of
-# CPU each.
+# hand an error tracker — which this image is not.
 #
 # **Then the compressible assets get a `.gz` sidecar, at level 9, with the
 # original kept beside it** (`-k`). Compressing once at build time rather than
-# per request is the other half of that measurement: the byte count on the wire
-# is the same and the CPU is spent here — but only if `serveStatic` is asked for
-# it, so these files are inert unless the control plane passes `precompressed`.
-# Level 9 costs seconds in a stage that already runs vite and buys bytes on a
-# phone on LTE. The original has to stay: a client that did not send
-# `accept-encoding: gzip` still has to be served.
-RUN find /app/packages/web/dist -name '*.map' -type f -delete \
- && find /app/packages/web/dist -type f \
+# per request is what `serveStatic`'s `precompressed` reads; the original has to
+# stay for a client that did not send `accept-encoding: gzip`.
+RUN find /app/packages/web/dist-gate -name '*.map' -type f -delete \
+ && find /app/packages/web/dist-gate -type f \
       \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.svg' -o -name '*.json' \) \
       -exec gzip -9 -k {} +
 
@@ -188,7 +217,11 @@ COPY packages/control-plane/scripts ./packages/control-plane/scripts
 # in `.dockerignore`; without that this line fails with "not found".
 COPY deploy/bootstrap.sh ./deploy/
 
-COPY --from=web /app/packages/web/dist ./packages/web/dist
+# The gate: sign-up, mailed links, the legal documents, the handoff page. Not the
+# app — see the `gate` stage above. `main.ts` resolves this as
+# `../../web/dist-gate` from its own file URL, which is the same relative path in
+# a checkout and here, and `app.ts` serves it over a closed list of addresses.
+COPY --from=gate /app/packages/web/dist-gate ./packages/web/dist-gate
 
 # --- state -----------------------------------------------------------------
 #

@@ -7,7 +7,8 @@ paths:
   - packages/web/src/ui/Header.tsx
   - packages/web/src/ui/Sheet.tsx
   - packages/web/src/ui/ErrorBoundary.tsx
-  - packages/web/src/ui/ProfileMenu.tsx
+  - packages/web/src/ui/MenuDrawer.tsx
+  - packages/web/src/ui/MachineColumn.tsx
   - packages/web/src/ui/Toast.tsx
   - packages/web/src/ui/NewSession.tsx
   - packages/web/src/ui/groups.ts
@@ -61,11 +62,18 @@ belongs in the `[key]` effect beside `busy` and `applying`. `webcheck` asserts t
 ## The web UI
 
 `packages/web` is a plain React + Vite + Tailwind SPA, built by `pnpm web:build`
-and served by the control plane at `/`. No Electron, no service worker, no push.
+and served by the control plane at `/`. No service worker and no push — and **one
+bundle, two shells**: `packages/native` is a Tauri window around this same
+`dist`, so every screen here runs in a browser and in a native app with no second
+copy and no branch at a call site. `native-shell.md` is that area, and Q3.605 is
+why "no Electron" is narrowed rather than reversed.
 It is **adaptive**: below `lg` one screen at a time, list → detail; at `lg` and
-above the list becomes a permanent left rail. `AppShell` is the only place that
-knows, and it knows **in CSS** — no breakpoint state in JavaScript, so a resized
-window cannot render a rail that is not there.
+above the rail becomes permanent and is **two columns** — `MachineColumn`, 72px of
+machines, then the session list. `AppShell` is the only place that knows, and it
+knows **in CSS** — no breakpoint state in JavaScript, so a resized window cannot
+render a rail that is not there. Both columns are inside one `<aside>` on one
+`--rail-w`, which is what keeps `RailHandle` anchored on that property rather than
+on a `calc` of two lengths in two units.
 
 It is shaped around one question asked from a phone: **does anything anywhere need
 me** — and the answer travels *with the rows* rather than living in a mode you
@@ -109,17 +117,31 @@ have to enter. These are the rules a change here must not break:
   `ICON_BUTTON_TONE.ghost`, and the composer's box, whose own rule argues it.
   The exceptions are the two values you must read once — the one-time secret and
   the device code — which take a real fill. **`nav` is the size of a head row's
-  own leading control**, alone at its edge and 32px reaching 44.
+  own leading control**, alone at its edge and 32px reaching 44 under a finger
+  (Q3.634).
 - **What belongs to the row above it hangs off `border-l-2 border-edge`, and that
   is the transcript's only nesting idiom** — a subagent's steps, a folded run's
   children, an expanded tool call's own detail. A failure keeps neither a border
   nor any weight.
-- **`bg-fg` is the affirmative action inside a decision and nothing else** — Send,
-  and the reversible approval on the ask card; anything else wearing it becomes the
-  loudest object on screen. `raised` means **state**: a tab you are on, a toggle
-  that is on, a chosen menu row. Q3.209.
-- **The magnifier in the rail header is the fleet-wide search, not built, drawn
-  `disabled`.** The box below it filters *this machine's* chats by title. Q3.211.
+- **`bg-fg` is the affirmative action inside a decision, and otherwise a *mark*
+  under a stated size** — Send and the reversible approval; below that, only things
+  the size of a glyph: the tab underline, the bell dot, a blocked count, a selected
+  machine's 28px chip. A pill-sized fill is still the loudest object on screen.
+  `raised` means **state**: a tab you are on, a toggle on, a chosen menu row.
+  Q3.209, Q3.624.
+- **One search control, and it is the live one.** The header is a single row —
+  menu, field, filter, bell — so the *disabled* fleet-wide magnifier is gone:
+  forty pixels from a box you can type in it was the conflation Q3.211 drew it
+  apart to prevent, not the distinction. Fleet-wide search, when built, is a
+  **scope** of this box under the `All` entry rather than a second control.
+  Reverses Q3.211.
+- **The menu is a left drawer and the only thing in this app that is not a
+  route.** `MenuDrawer`, portaled, `useDismissible("sheet")` — never `"menu"`,
+  which would leave `j`/`k` walking the list behind it. Two triggers, one panel,
+  state in `App`; the `usePathname()` effect is what makes Android's Back close
+  it, at the cost of Back doing two things.
+  **No ✕, by the owner's call**, so VoiceOver on iOS reaches no exit — `webcheck`
+  pins the absence. Q3.628.
 - **`border-r` on the rail: the rule is the ratio**, measured in Q3.210.
 - **`visibleRows` in `groups.ts` is the single source of render order**, shared
   with `keyboard.ts` so `j` cannot land on a row nobody can see. The order is
@@ -140,9 +162,10 @@ have to enter. These are the rules a change here must not break:
 - **Anything that filters the list belongs beside the filter**, in `groups.ts`
   module state. A component `useState` makes `j`/`k` step onto rows the rail is not
   drawing. Q3.15.
-- **Tabs and folders are ordered by name, never by reachability or activity.**
-  Both flicker on the four-second poll, and a list reordering under a travelling
-  thumb is the one thing this cannot do. **Rows inside them are their reader's**:
+- **Ordered by name until a reader drags a tab (`machine-gestures.md`), and never
+  by reachability or activity.** Both of those flicker on the four-second poll, and
+  a list reordering under a travelling thumb is the one thing this cannot do —
+  which is why a *stored* order is allowed where a derived one is not. **Rows inside them are their reader's**:
   `sessions.rank`, a position clock defaulting to `createdAt`, descending. A drag
   writes it through `/meta`, with `pinned` beside it when the drop crossed Pinned;
   an absent `rank` is a daemon that cannot store one and freezes that gesture
@@ -176,23 +199,21 @@ have to enter. These are the rules a change here must not break:
   anywhere in this app, and the icon beside the search box is a live `Dropdown` on
   `setFilter`. Revert it to a placeholder and `groups.ts`'s initialiser and
   `webcheck`'s assertion go back to `"all"` in the same commit. Q3.212.
-- **Inside Telegram the client's own control follows the screen.** `upFrom`
-  answers where up goes, and `null` at the root — which is what draws ✕ Close
-  there and ‹ Back elsewhere, Telegram having **one** control. One rule for two
-  affordances, so its arrow cannot disagree with ours. Everything else about that
-  webview — the bridge, the launch fragment a `navigate` destroys, and where the
-  chrome actually is — is `telegram-mini-app.md`. Q3.443.
+- **`upFrom` answers where up goes, and `null` at the root.** One pure function
+  rather than a `switch` per screen — read in `App` for `LegalScreen` and for a
+  sheet's ◀, so the two cannot drift. Q3.443, Q1.649.
 - **There is no back button.** Every leading control goes to a fixed destination
   from the URL, never a history — `useUnder` for a ✕, `upFrom` for a ◀ — which is
   why one may be *drawn* as `ChevronLeft` without being one. None may become
   `history.back()`, which sent people to a session they had already left, or out
   of the app on a fresh load.
-- **The session header carries a kebab below `lg` and nothing above it.** Above it
-  Rename, Pin, Resume and Stop sit on the session's row in the rail; below it the
-  rail is not on screen, so "it is on the row" means leave, find, act, return.
-  `lg:hidden` in CSS rather than a prop, for `AppShell`'s reason. Rename stays on
-  the title as well: the title is the
-  discoverable path, the menu is the one a thumb finds without knowing it is one.
+- **The session header's kebab is at every width, and one row is why.** Rename,
+  Pin, Resume and Stop are on the session's rail row, so above `lg` the menu was a
+  door to a door and was `lg:hidden`. `Background tasks` is on no rail row at any
+  width and its other door — the transcript's foot — closes when nothing is
+  outstanding. The four stay at `lg` rather than hiding inside it: one control
+  holding different things at different widths is worse than a near duplicate.
+  Q3.631.
 - **The machine's name is on the subline, not a `Badge` in the title.**
   `WorkspaceLine` is the "where is this session" answer and the host is the first
   half of it, ahead of the path it is a path *on*. At every width, not below `sm`
@@ -251,8 +272,12 @@ have to enter. These are the rules a change here must not break:
 **A machine row carries its id only where the name is ambiguous**
 (`ambiguousNames`): `PUT /v1/machines/:id/grants` collides without naming
 anything, and `resolveMachineRef` picks the owned one. A machine that is not
-yours carries a **`shared` badge**, never a subline; one badge per row, and
-a limit or enrolment badge outranks it. Q3.543. It also carries **`enrolledBy`**
+yours carries a **`shared` badge**, never a subline; one badge per row, ranked
+**state · `this device` · `shared`**. `this device` is the machine the app runs
+on, read from the announce file through `AppState.localMachineId`, never from
+`route.kind === "local"` — a preference `setLocalOff` can switch off. The *label*
+is the ordinary host name: "local" is drawn per client, never stored on a row
+every client reads. Q3.543, Q7.139. It also carries **`enrolledBy`**
 on a subline of its own — never a badge, never a clause on the truncating
 `standing` line — since nothing else discloses a substitution no route may
 refuse; `enrolledByText` is that one string, `null` where there is nothing to
@@ -354,7 +379,7 @@ panel. `AgentConfigBar`'s hand-rolled panels are **not** covered.
 **Nothing a person taps to answer an agent is under 44px, and that is asserted on
 three files rather than on the UI.** A blanket rule would be false: most `tap`/
 `press` strings do not reach 44px and are right not to — a link inside a sentence,
-a `<summary>`, the 32px machine pills. `AskCard`, `PermissionCard` and
+a `<summary>`, the two disclosure folds (Q3.632). `AskCard`, `PermissionCard` and
 `ElicitationCard` are different because a mis-tap there *answers*: it approves a
 command, refuses one, or submits a form into the model's context. The convention
 was argued in `AskCard`'s own docblock and then violated on that card's own header
@@ -371,18 +396,18 @@ primitive adds `tap` itself and carries its own entry.
 | `packages/web/src/ids.ts` | Branded `MachineId`/`SessionId`/`SessionKey`, and the three rules that make `(machineId, sessionId)` structural |
 | `packages/web/src/store.ts` | All client state, and `resume()`, the single wake path. `loadAll` pages a conversation in and does not stop until it reaches the start of it; `loadStop` is where it may stop, the daemon's own floor included; `transcriptNotice` reads the same five fields from the other end and is asserted as a total partition rather than as booleans in JSX; `historyRetry` is what a failed page costs |
 | `packages/web/src/resume.ts` | Noticing the phone woke. Four triggers, one debounced call |
-| `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the four sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
+| `packages/web/src/settings.ts` | Which settings screen a URL names, who may see it, which heading precedes it. Not the guard — `requireAdmin` is. `SECTION_SPECS` is the **seven** sections in draw order; `navRows` pairs each with the heading it follows, at most once per group and only on that group's first *visible* row, which is the property `webcheck` asserts rather than the two rows |
 | `packages/web/src/ui/groups.ts` | Which machine tab is selected, which folders are collapsed, what has been typed into the search box — and every rule that follows: `foldersOf`, `machineTabs`, `waitingFloor`, and `visibleRows`, still the **single** source of render order, deduplicated by key |
 | `packages/web/src/ui/overlay.ts` | Who owns Escape, and what paints above what. A LIFO stack of dismissible layers, one capture-phase listener installed lazily inside `push()`, the `inert` refcount on `#root`, and `LAYER` — the z-order as full class strings, in one table a driver can assert. Also the **two** bare-key predicates |
-| `packages/web/src/ui/rail.ts` | How wide the rail is: the bounds, `clampRailWidth` — the one place a width is bounded, four ways in — and module state seeded from `localStorage`. Holds **no DOM**, so `webcheck` can import it. `AppShell`, the impure shell, writes `--rail-w`; the width travels as that property and must not become a React prop, which would snap back to the start of the drag on every poll |
+| `packages/web/src/ui/rail.ts` | How wide the rail is: `MACHINE_COLUMN_PX` plus the list's own three numbers, and the migration for a width stored before the column existed. The mechanism is `paneWidth.ts`, shared with the background panel; `docked-panels.md` is that area |
 | `packages/web/src/ui/Sheet.tsx` | Route-backed pop-up, portaled to `document.body`. A bottom sheet on a phone, a centred card above `sm`. **One element serves every route-backed pop-up**, owned by `OverlaySheet`, so two cross-dissolve rather than one unmounting and the next replaying `animate-sheet` (Q3.484); `sheetTitle`/`sheetUpLabel` decide its head; only a railless pop-up gets a ◀ there (Q3.432, Q3.473). `footer` suits one screen; with several each draws its bar inside `SHEET_BODY` via `SHEET_SCREEN`, or `sheet-body` morphs mid-slide (Q3.472). Its **box** is two strings in `bits.tsx`: `SHEET_PANEL` a **definite** height, never a `max-h` it can shrink under; `SHEET_BODY` a **flex column**, without which both callers' `min-h-0 flex-1` children mean nothing. `webcheck` pins both. Q3.223 |
-| `packages/web/src/ui/ProfileMenu.tsx` | Who you are signed in as, and the two things you can do about it. The sidebar's footer, and the only copy of the name in the chrome |
-| `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: the scroll is inside `SessionBrowser` so the account row can sit at the bottom and its popover can open upward without being clipped |
-| `packages/web/src/ui/SessionBrowser.tsx` | The whole left column: logo, machine tabs, the waiting floor, the chat search, Pinned above the selected machine's folders, orphans, the footer. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
-| `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, read by Telegram's arrow). Its own module because `router.ts` reads `window.location` in its module body |
-| `packages/web/src/telegram.ts` | The mini-app bridge, hand-written: the injected `TelegramWebviewProxy` only, no SDK, and **no iframe transport** while `frame-ancestors 'none'` stands |
-| `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — used from the header and every list row, plus `RenameField` |
-| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
+| `packages/web/src/ui/MenuDrawer.tsx` | Who you are, where you can go, and what build this is. Its foot draws the **build** and not the wordmark — the visible mark left the chrome entirely, and `webcheck` pins `<Mark` absent here — plus the rule for what a row here must be |
+| `packages/web/src/ui/MachineColumn.tsx` | The machines as folders at `lg`. Same `machineTabs`/`allTab`, other axis — and what a horizontal strip carries that a column may not |
+| `packages/web/src/ui/AppShell.tsx` | The adaptive layout, decided in CSS. The rail is always the sessions — it does not switch to settings, and it does not scroll: its two columns each own their scroller, so the New session button sits at the bottom of one of them |
+| `packages/web/src/ui/SessionBrowser.tsx` | The list column: one header row (menu · search · filter · bell, the `<h1>` `sr-only`), the waiting floor, the machine tabs **below `lg` only**, Pinned above the selected machine's folders, orphans, and a footer that is one button. Mounted twice — the `lg` aside and the `lg:hidden` screen — the breakpoint answered only in those two class strings. A pinned row is drawn **once**, in Pinned, with its own path |
+| `packages/web/src/nav.ts` | What a navigation moves (`depthOf`, `isSheet`, `navMove` — five values, two stacks never compared) and where "up" goes (`upFrom`, what a ◀ goes to). Its own module because `router.ts` reads `window.location` in its module body |
+| `packages/web/src/ui/SessionMenu.tsx` | What you can do to a session — rename, pin, stop, resume — plus `Background tasks` in the header's copy, the panel's second door. `RenameField` |
+| `packages/web/src/ui/settings/` | `SettingsNav` is the 224px column beside the section at `sm`, and the whole sheet body below it. One file per section — Account, **API keys**, Machines, **Logs**, then under an "Admin" heading Server, **Email**, Users, in that order; the last three `adminOnly` (Q3.543). **No neutral state at `sm`+**: the pane draws `DEFAULT_SECTION`, the rail highlights the same constant. `/settings` still parses to `section: null` (below `sm` it *is* the list), so the default feeds what is *drawn*, never `settingsUp`, and is never `adminOnly`. `ServerSection` holds registration, the domains, the machine limit and the provisioning key; `EmailSection` the SMTP form, the test send and delivery trouble, and no delivery log (Q3.225). **`LogsSection` is the one screen that lists program output**, and it exists because the setup notice stopped doing so (Q7.140): the supervisor's ring for the daemon *this app started on this computer*, and a sentence everywhere else — a browser, a `foreign` daemon, any other machine. Both change what `GET /v1/instance` reports, so each calls `store.refreshConfig()` beside its `setAnswer`. A list being read draws one `SkeletonRow` (Q3.548, Q3.544). **No row opens a form in place**: password, email and a new key are leaf screens (`SettingsLeaf`, Q3.549); keys are a `KeyTable`. Systems is **not** a section: `MachineSystemsSection` and `SystemsPanel` hang off a machine, two URL depths down |
 | `packages/web/scripts/webcheck.ts` | Offline driver for the browser client. Stubs `window`, uses a real loopback socket. **Every pure function it imports is one this repo promises to keep assertable** |
 
 ## Bounds

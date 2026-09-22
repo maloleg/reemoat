@@ -1,12 +1,11 @@
 import { createServer as createH2Server, type Http2Server, type ServerHttp2Stream } from "node:http2";
-import { connect as netConnect, type Socket } from "node:net";
 import { WebSocket, createWebSocketStream } from "ws";
 import {
   AGENT_CLIS_HEADER,
   AGENT_CLI_VERSION_RE,
   CONNECTION_WINDOW_BYTES,
   DAEMON_VERSION_HEADER,
-  LOOPBACK_DIAL_TIMEOUT_MS,
+  MACHINE_KEY_HEADER,
   MAX_CONCURRENT_STREAMS,
   MAX_TUNNEL_BUFFERED_BYTES,
   MAX_TUNNEL_MESSAGE_BYTES,
@@ -14,7 +13,7 @@ import {
   RELAY_PROTOCOL_MIN_VERSION,
   RELAY_PROTOCOL_VERSION,
   STREAM_ENCRYPTION_HEADER,
-  STREAM_ENCRYPTION_NONE,
+  STREAM_ENCRYPTION_NOISE_IK,
   STREAM_SUBJECT_HEADER,
   STREAM_VERSION_HEADER,
   STREAM_WINDOW_BYTES,
@@ -30,6 +29,9 @@ import {
   type AgentClis,
 } from "./protocol.js";
 import { DAEMON_VERSION } from "../version.js";
+import { serveSecureSession } from "../e2ee.js";
+import type { TokenVerifier } from "../auth.js";
+import type { StaticKey } from "@reemoat/protocol";
 import { AGENT_IDS } from "../acp/agents.js";
 import type { SessionRuntime } from "../runtime/types.js";
 
@@ -90,6 +92,59 @@ export interface TunnelOptions {
    * file's first property is that nothing here can break the daemon.
    */
   agentClis?: () => Promise<AgentClis>;
+  /**
+   * The X25519 static this machine answers on, base64url, announced as
+   * `MACHINE_KEY_HEADER`.
+   *
+   * A **value** rather than a function, unlike `agentClis` beside it, and the
+   * difference is a fact about the thing rather than a style: which CLI a launch
+   * would resolve moves under a running daemon, so it is asked at the handshake;
+   * a machine key is generated once and does not move, so asking again would be
+   * asking the same question repeatedly and pretending it might answer
+   * differently. Optional, and an absent one sends no header — which is what a
+   * daemon that has not generated one yet looks like on the wire.
+   *
+   * ⚠ **This is the key the *first* dial announces, not the key every dial
+   * announces.** `rotateMachineKey` below may replace it after a 409, which is
+   * the one thing that moves it and is not the daemon changing its mind — it is
+   * the Authority saying which of the keys already on this disk it pinned.
+   */
+  machineKey?: string;
+  /**
+   * This machine's static, for terminating an encrypted stream.
+   *
+   * The **private** half, unlike `machineKey` above, which is the public one the
+   * dial announces. Absent on a daemon that has not generated one, which is a
+   * state only a driver reaches; an encrypted stream is then refused with the same
+   * 501 an unknown mode gets, because a daemon with no key genuinely cannot speak
+   * this mode.
+   */
+  staticKey?: StaticKey;
+  /**
+   * After the relay answers 409: another key this machine holds, now live, or
+   * `null` when there is none left to try.
+   *
+   * ⚠ **A 409 is the only evidence anywhere about which key the Authority
+   * pinned, and without this it was thrown away.** A file that lost the
+   * two-daemon startup race holds two keys; `migrateMachineKeysToOneLive` has to
+   * leave one live and picks by `created_at`, which is right for a machine
+   * nobody repaired and backwards for one an operator already cleared the pin on.
+   * Rather than making that guess load-bearing, the guess is announced and the
+   * refusal is believed: the daemon promotes the other key and dials again.
+   * `machinekey.ts`'s `machineKeyRotation` is the one implementation and it is
+   * what makes the set finite — each `kth` is offered at most once per process,
+   * so this can never become a redial loop.
+   *
+   * Absent, or answering `null`, is the whole of the old behaviour: the 409
+   * sentence below, unchanged, and a backoff that outlasts nothing. That is what
+   * a machine with exactly one key gets, which is every legitimate 409 — a host
+   * restored from backup, a wiped `~/.reemoat`, a reused machine id.
+   */
+  rotateMachineKey?: () => { kth: string; machineKey: string; staticKey: StaticKey } | null;
+  /** What decides whether a capability entitles its holder to anything. */
+  verifier?: TokenVerifier;
+  /** Seam for `relaycheck`: how long a request may sit unanswered. See `e2ee.ts`. */
+  upstreamTimeoutMs?: number;
   /** `ANNOUNCE_TIMEOUT_MS`, injectable so a driver can pin the bound without waiting three seconds on it. */
   announceTimeoutMs?: number;
   /** Injectable so `relaycheck` can drive the backoff curve without waiting on it. */
@@ -159,10 +214,36 @@ export class RelayTunnel {
   private attempt = 0;
   private stopped = false;
   private stopping: Promise<void> | null = null;
-  /** Sockets opened for live streams, so a teardown does not strand them. */
-  private readonly locals = new Set<Socket>();
+  /*
+   * ⚠ **The set of loopback sockets is gone with the splice that opened them.**
+   *
+   * This tunnel used to dial `127.0.0.1` itself for every relayed stream and hold
+   * the sockets so a teardown did not strand them. It opens none now:
+   * `serveSecureSession` terminates the stream and makes its own loopback calls
+   * with Node's HTTP and WebSocket clients, and each session destroys what it
+   * holds on the h2 stream's `close` — which a tunnel teardown produces, because
+   * closing the session closes every stream under it. One owner for a socket's
+   * lifetime rather than two agreeing about it.
+   */
 
-  private constructor(private readonly options: TunnelOptions) {}
+  /**
+   * The static this tunnel is announcing and terminating streams with *now*.
+   *
+   * Two fields rather than reads of `options`, because `rotateMachineKey` moves
+   * them together and they must never come apart: the public half is what the
+   * Authority compares, the private half is what `serveSecureSession` opens
+   * message 1 with, and a dial announcing one key while the responder holds the
+   * other is a machine that is up, visible, and fails every handshake with no
+   * key to send a refusal under. Seeded from `options` so a tunnel that never
+   * sees a 409 is byte-identical to the one before this existed.
+   */
+  private machineKey: string | undefined;
+  private staticKey: StaticKey | undefined;
+
+  private constructor(private readonly options: TunnelOptions) {
+    this.machineKey = options.machineKey;
+    this.staticKey = options.staticKey;
+  }
 
   /**
    * Start dialling. Returns immediately — the first connection happens in the
@@ -194,8 +275,6 @@ export class RelayTunnel {
   private teardown(): void {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
-    for (const socket of this.locals) socket.destroy();
-    this.locals.clear();
     const { ws, h2 } = this;
     this.ws = null;
     this.h2 = null;
@@ -326,6 +405,11 @@ export class RelayTunnel {
           // nothing to say, so a pre-header daemon and one with no CLI installed
           // are the same silence on the wire. See `AGENT_CLIS_HEADER`.
           ...(announced === null ? {} : { [AGENT_CLIS_HEADER]: announced }),
+          // The static an app authenticates this machine by. Announced on every
+          // dial rather than only the first, because the row it pins lives on the
+          // control plane and a restored backup there must be able to catch up
+          // without anybody touching this host. See `MACHINE_KEY_HEADER`.
+          ...(this.machineKey === undefined ? {} : { [MACHINE_KEY_HEADER]: this.machineKey }),
         },
         perMessageDeflate: false,
         // h2 frames are already framed and mostly incompressible.
@@ -366,21 +450,137 @@ export class RelayTunnel {
     this.ws = ws;
 
     ws.on("unexpected-response", (_req, res) => {
-      // A status line rather than a close code, because the relay refuses a bad
-      // credential *before* completing the handshake — there is no WebSocket yet
-      // to carry a close code. 401 here means this daemon's tunnel key is wrong
-      // or revoked, which re-enrolling fixes.
-      //
-      // 426 is the one worth naming, because it is the only refusal here that
-      // re-enrolling cannot fix and updating can: this daemon speaks a protocol
-      // version older than anything the relay still accepts.
+      /*
+       * A status line rather than a close code, because the relay refuses a bad
+       * credential *before* completing the handshake — there is no WebSocket yet
+       * to carry a close code. 401 here means this daemon's tunnel key is wrong
+       * or revoked, which re-enrolling fixes.
+       *
+       * Two are worth naming, and they are the two a retry cannot outlast. Every
+       * refusal here ends in `terminate()` and therefore in `scheduleRetry`, so a
+       * status this handler does not explain becomes a daemon dialling on its
+       * backoff for ever while the app draws the machine as not connected — the
+       * symptom is identical to a relay that is merely down, and the remedy is
+       * nothing like waiting.
+       *
+       * ⚠ **That sentence is now something this handler has to hold rather than
+       * something it gets for free.** It was written when nothing between the
+       * status read and the `emit` could fail. The 409 arm below calls out of
+       * this file into an injected rotator that reads and writes SQLite, and the
+       * guard around that call is the only reason "every refusal here ends in
+       * `terminate()`" is still a true sentence — the measurement is beside it.
+       *
+       * 426: this daemon speaks a protocol version older than anything the relay
+       * still accepts. The one refusal here that re-enrolling cannot fix and
+       * updating can.
+       *
+       * 409: the key this daemon announced is not the one the control plane
+       * pinned for this machine. It means the machine's local database and the
+       * Authority's row disagree about which static an app should expect — a host
+       * restored from a backup, a wiped `~/.reemoat`, a machine id reused for a
+       * rebuilt box. Both remedies are named because which one is available
+       * depends on the build: re-enrolling sends this key with the code and
+       * replaces the pin, and an operator who cannot do that clears the pin so
+       * the next dial is a first use again.
+       *
+       * ⚠ **"It is permanent, because the daemon regenerates nothing and the
+       * Authority adopts nothing" was the rest of that paragraph, and it is now
+       * true only of a machine holding one key.** A machine holding more — the
+       * file that lost the two-daemon startup race, where
+       * `migrateMachineKeysToOneLive` had to *guess* which of two the Authority
+       * pinned — tries the other one instead of accepting the guess, because this
+       * 409 is the only evidence in the system about which guess was right. The
+       * daemon still regenerates nothing and the Authority still adopts nothing:
+       * what moves is only which key already on this disk is the live one, and
+       * the walk is finite because `rotateMachineKey` offers each `kth` at most
+       * once per process. The refusal below is what an exhausted walk reaches,
+       * and it is what the one-key machine reaches on its first 409.
+       */
       const status = res.statusCode ?? 0;
+      if (status === 409) {
+        /*
+         * ⚠ **This is the statement the guard exists for, and it is not the only
+         * one in this handler that can throw.** That is a correction: this read
+         * "the one statement here that runs code from outside this file, and the
+         * only one that can throw", and a sweep of the handler on 2026-09-19 —
+         * comments stripped, every statement read — says otherwise. Three
+         * `this.emit` calls run the injected `this.options.onEvent`, and two
+         * `ws.terminate()` calls are the `ws` library's; `teardown()` already
+         * wraps `terminate()` in a `try` for precisely that reason. A throw out of
+         * any of those five is the same class of failure as a throw out of this
+         * one, and none of them is guarded here.
+         *
+         * What singles this statement out is not that it is alone: it is that its
+         * one implementation has a *known* way to fail on an ordinary day, below.
+         * The other five are unguarded on the judgement that a callback this
+         * daemon injects and a `terminate()` on a socket that has not opened do
+         * not have one — a judgement, not a measurement, and nothing in the
+         * drivers holds it. `machinekey.ts`'s rotator —
+         * the one implementation — reads every row of `machine_keys` and then
+         * writes them inside a `BEGIN`/`COMMIT`. `SQLITE_BUSY` is not exotic
+         * here: this daemon's own writers — the event log, the session table —
+         * are live on the same file while it dials, and a dial is not a quiet
+         * moment. A private half that is not 32 bytes throws too, out of
+         * `localStaticKey`.
+         *
+         * A throw would escape into `ws`'s emit, which is an uncaught exception:
+         * no `terminate()`, no `scheduleRetry`, a socket nobody closes and a
+         * daemon that has stopped dialling. `machinekey.ts` swallows a `false`
+         * from `promote` on the grounds that "this file's whole contract is that
+         * the relay cannot break the daemon" — true of that file, and it was
+         * never true of the two store calls around it, which is what this guard
+         * is for.
+         *
+         * So a rotation that throws is a rotation that answered `null`: the
+         * terminal 409 sentence below, `terminate()`, `scheduleRetry` — byte for
+         * byte the behaviour of the build before any of this existed. And it is
+         * a lost dial rather than a lost capability, in both shapes the throw
+         * comes in. A read that failed left the tried set alone, so the next 409
+         * walks the same candidates again, which is what a transient
+         * `SQLITE_BUSY` wants. A *promotion* that failed had already added its
+         * candidate to that set — `machineKeyRotation` adds before it promotes —
+         * so the next 409 resumes past it rather than retrying it for ever.
+         *
+         * The cause is said rather than swallowed, because the sentence below
+         * names two remedies and neither of them is the remedy for a locked
+         * database. `onEvent` is the channel — nothing in `src/` prints, and it
+         * is the only callback this path has.
+         */
+        let promoted: { kth: string; machineKey: string; staticKey: StaticKey } | null = null;
+        try {
+          promoted = this.options.rotateMachineKey?.() ?? null;
+        } catch (error) {
+          this.emit(
+            "rejected",
+            "relay refused the tunnel with 409, and looking for another key this machine holds failed: " +
+              `${error instanceof Error ? error.message : String(error)}. ` +
+              "The next dial looks again, past the key this one gave up on. " +
+              "What follows is what an exhausted search reaches.",
+          );
+        }
+        if (promoted !== null) {
+          this.machineKey = promoted.machineKey;
+          this.staticKey = promoted.staticKey;
+          this.emit(
+            "rejected",
+            "relay refused the tunnel: the control plane did not pin the key this machine announced. " +
+              `This database holds another — ${promoted.kth} is live now and the next dial announces it. ` +
+              "Two daemons raced on this file once, and only the control plane knows which of them won.",
+          );
+          ws.terminate();
+          return;
+        }
+      }
       this.emit(
         "rejected",
         status === 426
           ? `relay refused the tunnel: it no longer speaks protocol v${RELAY_PROTOCOL_VERSION}. ` +
               "This daemon is too old for it — update this machine."
-          : `relay refused the tunnel with HTTP ${status}`,
+          : status === 409
+            ? "relay refused the tunnel: this machine announced an encryption key that does not match " +
+              "the one the control plane pinned for it, so nothing can reach it and retrying will not help. " +
+              "Re-enroll this machine, or have an operator run `cpctl admin clearkey <machineId>`."
+            : `relay refused the tunnel with HTTP ${status}`,
       );
       ws.terminate();
     });
@@ -541,12 +741,22 @@ export class RelayTunnel {
   }
 
   /**
-   * One CONNECT stream becomes one connection to this daemon's own listener.
+   * One CONNECT stream becomes one **encrypted session** with one app.
    *
-   * Nothing here parses HTTP. The stream carries whatever the client sent —
-   * a request, a WebSocket upgrade, anything the daemon will ever serve — and
-   * splicing it to a real socket means the daemon's own server does all of the
-   * interpreting, exactly as it would for a client on the LAN.
+   * ⚠ **There is no unencrypted arm here any more, and there is no way to ask for
+   * one.** This used to splice the stream straight to a fresh loopback socket and
+   * let the daemon's own server interpret whatever arrived — which worked, and
+   * meant the relay had the plaintext of every prompt, diff, file and terminal
+   * line in the fleet passing through it. The stream now terminates `Noise_IK`
+   * here instead: the app and this daemon hold the keys, the relay holds
+   * ciphertext, and `src/e2ee.ts` makes the loopback call itself with Node's own
+   * HTTP and WebSocket clients.
+   *
+   * What did **not** change is the property that argument rested on. The bytes
+   * reaching this daemon's listener are still the bytes Node produced from a real
+   * request on a real socket, so nothing in `server.ts`, `session.ts` or
+   * `registry.ts` knows any of this happened — the interpretation simply moved
+   * from the relay to the endpoint that is supposed to do it.
    */
   private accept(stream: ServerHttp2Stream, headers: Record<string, unknown>): void {
     if (String(headers[":method"] ?? "") !== "CONNECT") {
@@ -556,12 +766,13 @@ export class RelayTunnel {
     }
 
     /*
-     * The reserved encryption seam.
+     * The encryption seam, spent.
      *
-     * Today the only legal value is `none`. An unrecognised one is refused at the
-     * *stream* level — one failed request — rather than by dropping the tunnel,
-     * so a relay that learns a new mode before this daemon does degrades to
-     * "that request didn't work" instead of "this machine went offline".
+     * An unrecognised value is still refused at the *stream* level — one failed
+     * connection — rather than by dropping the tunnel, so a relay that learns a
+     * new mode before this daemon does degrades to "that request didn't work"
+     * instead of "this machine went offline". What changed is which values are
+     * recognised: there is exactly one, and `none` is not it.
      */
     // Advisory, and used only in the words below. The daemon verifies the real
     // token when the request reaches its own listener; this exists so a failing
@@ -595,50 +806,45 @@ export class RelayTunnel {
       return;
     }
 
-    const encryption = String(headers[STREAM_ENCRYPTION_HEADER] ?? STREAM_ENCRYPTION_NONE);
-    if (encryption !== STREAM_ENCRYPTION_NONE) {
+    const encryption = String(headers[STREAM_ENCRYPTION_HEADER] ?? "");
+    if (encryption !== STREAM_ENCRYPTION_NOISE_IK) {
       this.emit("stream_error", `refused a stream for ${subject}: unsupported encryption "${encryption}"`);
       stream.respond({ ":status": 501 });
       stream.end();
       return;
     }
 
-    const { host, port } = this.options.local;
-    const socket = netConnect({ host, port });
-    this.locals.add(socket);
+    // The rotated half, not `options.staticKey`: after a 409 promoted another key
+    // this is the one whose public half the app was handed, so it is the only one
+    // that can open message 1.
+    const staticKey = this.staticKey;
+    const verifier = this.options.verifier;
+    if (staticKey === undefined || verifier === undefined) {
+      /*
+       * A daemon with no machine key cannot speak the only mode there is, so it
+       * cannot serve a relayed connection at all — which is why `daemon.ts`
+       * generates one on first start and announces it on every dial. Answered on
+       * the *stream* rather than by dropping the tunnel, so the machine stays
+       * visible and the relay can say `501 encryption_unsupported` on the
+       * upgrade; the app turns that into a sentence about updating this host.
+       */
+      this.emit("stream_error", `refused an encrypted stream for ${subject}: this daemon has no machine key`);
+      stream.respond({ ":status": 501 });
+      stream.end();
+      return;
+    }
 
-    // A daemon that cannot reach its own listener resets the stream rather than
-    // leaving the browser waiting on a connection that will never be answered.
-    socket.setTimeout(LOOPBACK_DIAL_TIMEOUT_MS, () => {
-      if (!socket.connecting) return;
-      socket.destroy();
-    });
-
-    const cleanup = (): void => {
-      this.locals.delete(socket);
-      socket.destroy();
-      if (!stream.destroyed) stream.destroy();
-    };
-
-    socket.once("connect", () => {
-      // Once connected, the idle timer must go: a WebSocket that sits quiet
-      // between events is healthy, not stalled.
-      socket.setTimeout(0);
-      stream.respond({ ":status": 200 });
-      // Plain pipes, so backpressure propagates in both directions. This is the
-      // link that carries "the browser stopped reading" all the way back to
-      // `StreamConnection.flush`, where the bounded queue and the slow-consumer
-      // collapse already live.
-      stream.pipe(socket);
-      socket.pipe(stream);
-    });
-
-    socket.on("error", cleanup);
-    stream.on("error", cleanup);
-    stream.on("close", cleanup);
-    socket.on("close", () => {
-      this.locals.delete(socket);
-      if (!stream.destroyed) stream.destroy();
+    stream.respond({ ":status": 200 });
+    serveSecureSession({
+      stream,
+      staticKey,
+      verifier,
+      local: this.options.local,
+      ...(this.options.upstreamTimeoutMs === undefined ? {} : { upstreamTimeoutMs: this.options.upstreamTimeoutMs }),
+      onEvent: (kind, detail) => {
+        if (kind === "opened") return;
+        this.emit("stream_error", `${kind}: ${detail}`);
+      },
     });
   }
 }

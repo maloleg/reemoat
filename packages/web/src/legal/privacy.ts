@@ -141,16 +141,6 @@ export const PRIVACY_EN: LegalDocument = {
       ],
     },
     {
-      id: "telegram",
-      heading: "If you use the Telegram app",
-      blocks: [
-        {
-          kind: "para",
-          text: "Reemoat can run inside Telegram as a mini application. In that case Telegram passes the application information about the window it is drawn in, and your Telegram client knows you are using it. We do not receive your Telegram contacts, your chats or your phone number, and we do not link your Reemoat account to your Telegram identity. Telegram's own privacy policy governs what Telegram does.",
-        },
-      ],
-    },
-    {
       id: "who-else-processes",
       heading: "Who else processes it, and where",
       blocks: [

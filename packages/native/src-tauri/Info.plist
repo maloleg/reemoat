@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Why this app asks to reach the local network.
+
+	  ⚠ Measured 2026-09-15 on macOS 15: without this key the daemon Reemoat
+	  starts cannot reach a control plane on a private subnet at all. The daemon
+	  is a child of this app, so this app is the responsible process for Local
+	  Network Privacy — and until somebody grants it, a connect to a 10.x address
+	  fails with EHOSTUNREACH while the same address answers ping and curl from a
+	  terminal. macOS shows this sentence in the prompt; with no key it asks with
+	  its own generic wording, which explains nothing about a daemon the person
+	  was never told exists.
+
+	  Not a developer-only concern: a self-hosted control plane on a LAN is the
+	  ordinary shape this client is for.
+	-->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Reemoat needs this to reach a Reemoat server on your own network, and to talk to the Reemoat daemon running on this computer.</string>
+</dict>
+</plist>

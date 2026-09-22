@@ -51,7 +51,33 @@ export function Header({
 }): ReactNode {
   return (
     <header
-      className={`pt-safe sticky top-0 ${LAYER.header} flex items-center gap-2 border-b border-edge bg-surface/85 px-3 pb-3 backdrop-blur`}
+      /*
+       * ⚠ **No rule under this bar, a stronger veil instead, and the title sits
+       * lower. All three are one decision.**
+       *
+       * There was a `border-b` here and a `min-h-15` pinning this row to the
+       * background panel's head so the two rules met. The panel is an inset card
+       * now and meets nothing, and the line itself is gone: what separates a
+       * sticky bar from the conversation scrolling under it is that the
+       * conversation *stops being legible* as it passes behind, which a 1px rule
+       * does not do and an opaque-enough ground does. `bg-surface/95` over
+       * `backdrop-blur` rather than `/85`, because at 85 the words underneath were
+       * still readable through the bar — a line was doing the work the ground
+       * should have been doing.
+       *
+       * ⚠ **The top inset is written out rather than `pt-safe` plus a `pt-*`, and
+       * that pair would be a silent no-op.** `.pt-safe` is declared unlayered in
+       * `index.css`, so it beats any padding utility on this element whatever the
+       * class string says — the same cascade fact `Composer.tsx` measured for
+       * `.pb-safe` and the third surface in this app to need it stated. So the
+       * floor moves from `0.5rem` to `1rem` inside the one expression, and the
+       * safe-area term is unchanged: a notch still wins where there is one.
+       *
+       * `min-h-15` is gone with the alignment that wanted it; this row is
+       * content-derived again, which is what it was before and what its own
+       * paragraphs below describe.
+       */
+      className={`sticky top-0 ${LAYER.header} flex items-center gap-2 bg-surface/95 px-3 pt-[max(1rem,env(safe-area-inset-top))] pb-3 backdrop-blur`}
     >
       {close && (
         // "Back to sessions" and not "Back": the label has to name the fixed
@@ -108,15 +134,25 @@ export function Header({
        * inline `<input>` is 28px, so that bar is 46px whichever of these two sizes
        * the controls take.)
        *
-       * Neither control exists above `lg` (`lg:hidden` on both), so this pair is
-       * touch-only and there is no pointer for a 44px hover ground to look heavy
-       * to. Every *other* kebab in this app is `sm`, and correctly: those sit on
-       * list rows, where the box has to stay smaller than the row it is on. This
-       * one is one of three things in a navigation bar.
+       * ⚠ **This read "neither control exists above `lg` (`lg:hidden` on both), so
+       * this pair is touch-only and there is no pointer for a 44px hover ground to
+       * look heavy to", and half of it has stopped being true.** The chevron is
+       * still `lg:hidden`; the kebab is not, because it gained the one row that is
+       * on no rail row at any width — `Background tasks`, whose only other door
+       * closes the moment nothing is outstanding. So a desktop pointer does meet a
+       * 44px hover ground here. The size stays: it is a prop, and choosing a second
+       * one by width would be a breakpoint answered in JavaScript, which `AppShell`
+       * forbids outright. Accepted, and named so it is a decision rather than a
+       * leftover. Every *other* kebab in this app is `sm`, and correctly: those sit
+       * on list rows, where the box has to stay smaller than the row it is on.
        *
-       * At `lg` the chevron is `lg:hidden` and so is the kebab, so there is nothing
-       * on either side and centring would put the title in the middle of a wide pane
-       * for no reason, away from the rail it belongs beside. Left is right there.
+       * ⚠ **At `lg` the chevron is `lg:hidden` and the kebab is not**, so there is
+       * one control on the right and none on the left — which is why the title is
+       * left-aligned there rather than centred, and why that is now a *fix* rather
+       * than a convenience: centred between one control and no control is
+       * off-centre. This paragraph said "so is the kebab, so there is nothing on
+       * either side"; the conclusion survives its premise, and the reason it does
+       * is worth writing down rather than leaving as luck.
        *
        * The subtitle follows the title rather than being centred on its own: they
        * are one block, and a centred name over a left-aligned path reads as a

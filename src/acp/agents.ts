@@ -2,20 +2,28 @@ import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { probeText } from "../stall.js";
 
 /**
  * The harnesses this repository ships, pins and measures.
  *
- * ⚠ **Still exactly four, and it stays that way — this is not the list of what a
- * machine offers.** Everything that makes a built-in a built-in is written down
- * here and nowhere else: a `resolveAgent` arm, an `AGENT_LOGIN` row, a `pincheck`
- * entry where there is an adapter to pin, and a glyph. A machine may also offer
- * harnesses a plugin added — see {@link HarnessCatalogue} — and those have none of
- * those things and cannot: `pincheck` pins an adapter version this repository
- * depends on, and a program somebody named in a manifest is not one it can pin.
+ * ⚠ **Five, and this is not the list of what a machine offers.** Everything that
+ * makes a built-in a built-in is written down here and nowhere else: a
+ * `resolveAgent` arm, an `AGENT_LOGIN` row, a `pincheck` entry where there is an
+ * adapter to pin, and a glyph. A machine may also offer harnesses a plugin added —
+ * see {@link HarnessCatalogue} — and those have none of those things and cannot:
+ * `pincheck` pins an adapter version this repository depends on, and a program
+ * somebody named in a manifest is not one it can pin.
  *
- * ⚠ **None of the four CLIs is vendored any more, and the adapters that are pinned
- * cannot run without one.** `deploy/agents.sh` installs and refreshes all four —
+ * ⚠ **`grok` is the first that needs no adapter at all**, and it is what makes the
+ * clause above ("where there is an adapter to pin") load-bearing rather than
+ * defensive. claude and codex resolve a vendored `*-acp` package; kimi and opencode
+ * resolve a *subcommand* of the CLI a login drives; grok is a subcommand too, so
+ * `pincheck` has nothing to pin for it and `AgentCapabilities.cli` off
+ * `GET /agents/capabilities` is what records the build, as for those two. Q6.106.
+ *
+ * ⚠ **None of the five CLIs is vendored any more, and the adapters that are pinned
+ * cannot run without one.** `deploy/agents.sh` installs and refreshes all five —
  * with each vendor's own installer, or from the npm registry where those hosts are
  * blocked — and `LocalRuntime.agentCli` picks the copy that runs. Q4.114.
  *
@@ -24,9 +32,9 @@ import { fileURLToPath } from "node:url";
  * assertion because both halves are this list; re-pointing it at what a machine
  * currently offers would make that vacuous on the day it mattered.
  */
-export const AGENT_IDS = ["claude", "kimi", "codex", "opencode"] as const;
+export const AGENT_IDS = ["claude", "kimi", "codex", "opencode", "grok"] as const;
 
-/** One of the four. Exhaustive `switch`es narrow to this and keep their `never` arms. */
+/** One of the five. Exhaustive `switch`es narrow to this and keep their `never` arms. */
 export type BuiltinAgentId = (typeof AGENT_IDS)[number];
 
 /**
@@ -49,7 +57,7 @@ export type BuiltinAgentId = (typeof AGENT_IDS)[number];
  */
 export type AgentId = string;
 
-/** Whether this is one of the four this repository ships. */
+/** Whether this is one of the five this repository ships. */
 export function isBuiltinAgentId(value: string): value is BuiltinAgentId {
   return (AGENT_IDS as readonly string[]).includes(value);
 }
@@ -132,7 +140,7 @@ export interface AgentLaunchConfig {
  * Deferring those left the session "reconnecting" for the daemon's life with
  * nothing that could ever fix it, where spending the attempts settles it to
  * `failed` with the sentence and the Reconnect button the client already has. So
- * only the four CLI-missing refusals say `installable: true`, and everything else
+ * only the five CLI-missing refusals say `installable: true`, and everything else
  * costs attempts as it did before the installer existed.
  */
 export class AgentUnavailableError extends Error {
@@ -343,7 +351,7 @@ export type LoginStatusProbe = {
  * `status` runs non-interactively and answers the one question a PATH lookup
  * cannot: an agent can be installed and logged out, which used to report
  * `available: true` and then fail the first prompt with `502
- * agent_auth_required` — after a worktree had already been made. Two of the four
+ * agent_auth_required` — after a worktree had already been made. Two of the five
  * have such a command and they answer in **different formats**, which is why
  * {@link LoginStatusProbe} is a union rather than a pair of args: claude's
  * `auth status` prints `{"loggedIn": …}`, codex's `login status` prints a
@@ -425,7 +433,7 @@ export const AGENT_LOGIN: Record<
     args: ["auth", "login"],
     // Measured: the flow prints its URL wrapped in an OSC 8 hyperlink and then
     // waits on a paste prompt for the code the page gives back. It is the one of
-    // the four that needs the box — and, on BSD, the one `loginStdio` therefore
+    // the five that needs the box — and, on BSD, the one `loginStdio` therefore
     // cannot rescue.
     interactiveStdin: true,
     logoutArgs: ["auth", "logout"],
@@ -601,6 +609,142 @@ export const AGENT_LOGIN: Record<
      */
     credentialPath: ".local/share/opencode/auth.json",
   },
+  grok: {
+    command: "grok",
+    /*
+     * The device-code arm, spelled as codex's is. Measured 2026-09-21 against
+     * 1.0.40: `--device-auth` and `--device-code` are the same flag — `grok login
+     * --help` lists the second as an alias of the first — and the plain `grok
+     * login` opens a browser, which is the one thing a daemon on somebody else's
+     * machine cannot do.
+     */
+    /*
+     * ⚠ **`--no-auto-update` leads every grok argv in this file, not just the
+     * session launch.** It is a global flag, and `resolveAgent` already spells it
+     * that way. All four spawns run the same binary, and `status` runs on the
+     * login-probe TTL — so leaving it off here let grok's background updater
+     * replace the build underneath a live session, which is the exact case
+     * `deploy/agents.sh --skip` and this flag exist together to prevent.
+     */
+    args: ["--no-auto-update", "login", "--device-auth"],
+    // A device-code flow: the code is printed and nothing is typed back.
+    interactiveStdin: false,
+    logoutArgs: ["--no-auto-update", "logout"],
+    /*
+     * One, and it is a real slot rather than a hopeful one — but only through the
+     * door below. Measured 2026-09-21, 1.0.40: on a machine with no other
+     * credential, `XAI_API_KEY` in the environment does **not** admit a session by
+     * itself (`session/new` answers `-32000 "Authentication required" / "no auth
+     * method id provided"` with it set), and it does not even change what
+     * `initialize` advertises. What spends it is the ACP `authenticate` call —
+     * see {@link ACP_AUTH_METHOD}, which is also where the other half is recorded:
+     * a machine signed in by `grok login` opens a session with no `authenticate`
+     * at all, and sending one there is what breaks it.
+     */
+    envNames: ["XAI_API_KEY"],
+    /*
+     * ⚠ **The three strings, all measured on one machine and one binary**, which
+     * is what the earlier `null` was waiting for. `grok models` answers on
+     * **stdout**, exit 0, stderr empty, in every state — 1.0.40, 2026-09-21:
+     *
+     *   signed in with `grok login`   `You are logged in with grok.com.`
+     *   `XAI_API_KEY` in the env      `You are using XAI_API_KEY.`
+     *   neither                       `You are not authenticated.`
+     *
+     * The `signedIn` pattern takes both spellings because both are true answers
+     * to the question this field asks — *will a session open* — and they differ
+     * only in which credential answers it. The alternation is deliberately not
+     * `You are .*` with a negative lookahead: `signedOut` is tested against the
+     * same text, and two patterns that can both match one line is how the pair
+     * stops being a partition.
+     *
+     * ⚠ **It answers `You are using XAI_API_KEY.` for a bogus key too**, measured
+     * with a fabricated value, so this probe proves that a credential is *present*
+     * and never that it works. That is the gap `AGENT_LOGIN.codex` already records
+     * from the other side, and it is survivable for the same reason: the probe
+     * runs with the pasted credential in its environment, so its `false` is worth
+     * believing, and a key that is present but wrong shows up as
+     * `lastStartRefusal` — *would not start* — rather than as a silent nothing.
+     * `admit` refuses on `loggedIn === false` and never on a refusal record, so
+     * the optimistic direction is the safe one to be wrong in.
+     */
+    status: {
+      args: ["--no-auto-update", "models"],
+      stream: "stdout",
+      reads: "text",
+      signedIn: /^[ \t]*You are (?:logged in|using )/im,
+      signedOut: /^[ \t]*You are not authenticated\b/im,
+    },
+    // No adapter, so nothing for a variable to override — opencode's and kimi's
+    // situation. `resolveAgent` and `LocalRuntime.agentCli` resolve the same file.
+    executableEnv: null,
+    /*
+     * Written by `grok login`, `0600`. One-directional as ever: presence proves a
+     * login happened, absence proves nothing — and absence is the *normal* state
+     * for a machine driving grok on a pasted `XAI_API_KEY`, which writes no file
+     * at all. Measured: a fresh install creates `~/.grok/{bin,docs,config.toml}`
+     * and no `auth.json`.
+     */
+    credentialPath: ".grok/auth.json",
+  },
+};
+
+/**
+ * Which `authenticate` method id **spends a pasted key** for a harness, or absent
+ * where nothing does.
+ *
+ * ⚠ **Read the name of this table carefully: it is not "who needs an
+ * `authenticate`", and it said that for one release.** A row here is a *credential
+ * door*, and `SessionRuntime.authMethod` is what decides whether to walk through
+ * it — the id is sent only when a key for this harness is actually in the spawn
+ * environment. A table alone cannot make that call, because `resolveAgent` hands
+ * back `env: agentEnv()` and the credential is merged a layer down.
+ *
+ * ⚠ **Sending it unconditionally was a defect with a silent first half and a loud
+ * second, and Q6.20's original measurement is what produced it.** That measurement
+ * — `session/new` refuses until an `authenticate` has been sent — was taken on a
+ * **signed-out** machine and generalised. Re-measured 2026-09-21 against 1.0.40 in
+ * both states:
+ *
+ *   signed in (`grok login`)   `authMethods: [cached_token, grok.com]`,
+ *                              `_meta.defaultAuthMethodId: "cached_token"`,
+ *                              `session/new` with no `authenticate` **works**
+ *   signed out                 `authMethods: [grok.com]`, `defaultAuthMethodId:
+ *                              null`, `session/new` answers `-32000
+ *                              "Authentication required" / "no auth method id
+ *                              provided"`
+ *
+ * So the refusal is a fact about *having no credential*, not about the method
+ * never having been called. And on the signed-in machine the unconditional call
+ * was actively harmful: `authenticate({methodId: "xai.api_key"})` answers `{}`
+ * with no key present — which is why it read as harmless — but it **selects** an
+ * API-key auth mode, and the first `session/prompt` then comes back `-32603
+ * "Internal error"` carrying `Unauthorized (401) … auth_kind=none … reason=no auth
+ * context`, with `Auth: Oidc` in the same payload. The identical session with no
+ * `authenticate` answers `stopReason: "end_turn"`. Q6.110.
+ *
+ * ⚠ **The id is still not in `authMethods`, which is why it is written down rather
+ * than read.** `xai.api_key` is accepted, answers at once, and is documented in
+ * xAI's own headless example — and it is absent from the advertised list in both
+ * states above. The one method advertised to a signed-out machine is `grok.com`,
+ * whose `authenticate` prints `https://accounts.x.ai/oauth2/device?user_code=…` to
+ * **stderr** and then blocks until somebody authorizes it in a browser, which is
+ * not a call a daemon may make on the prompt path. So a client that picked from
+ * the advertised list would have the blocking arm as its only option.
+ *
+ * This is `ROUTED_MODEL_ENV`'s shape and for its reason: a per-harness measurement
+ * that cannot be read off the wire, kept as a table so the *absence* of a row is
+ * what decides, rather than a condition at a call site. An id an agent does not
+ * know is a clean `-32602 "unsupported auth method: <id>"`, which is what makes a
+ * wrong row loud rather than silent.
+ */
+export const ACP_AUTH_METHOD: Partial<Record<AgentId, string>> = {
+  grok: "xai.api_key",
+  // The other four are absent, and that is a measurement rather than a gap: each
+  // answers `session/new` with no `authenticate` at all. opencode advertises
+  // `opencode-login` ("Run `opencode auth login` in the terminal") and is never
+  // asked, which is the precedent this row was weighed against and the reason it
+  // took a measurement rather than an inference to settle grok.
 };
 
 /**
@@ -717,7 +861,8 @@ export function forgetPathHits(): void {
  * - `~/.opencode/bin` — opencode's installer assigns `INSTALL_DIR` outright.
  * - `~/.reemoat/toolchain/bin` — ours. kimi goes there always, because it has no
  *   relocatable native installer and is put there as an npm global with the node
- *   the bootstrap already installed; and all four go there under
+ *   the bootstrap already installed; grok goes there always too, for its own
+ *   reason (Q4.125); and all five go there under
  *   `REEMOAT_AGENT_SOURCE=npm`, the arm for a machine that cannot reach the
  *   vendors' hosts (Q4.114).
  *
@@ -732,6 +877,23 @@ export function forgetPathHits(): void {
 export const MANAGED_CLI_DIRS: readonly string[] = [
   join(homedir(), ".local", "bin"),
   join(homedir(), ".opencode", "bin"),
+  /*
+   * ⚠ **`~/.grok/bin` is deliberately *not* here, and it is the one directory grok
+   * actually keeps its binary in.** Measured 2026-09-21: `@xai-official/grok` is a
+   * launcher shim, and what it decompresses into `$GROK_HOME/bin` (`~/.grok/bin`
+   * by default) is the 145 MB native `grok-<version>`, with a `grok` symlink
+   * beside it. `deploy/agents.sh` installs the **shim** into the toolchain
+   * directory below, so that is where a copy this daemon can refresh lives, and
+   * the shim finds its own payload.
+   *
+   * Naming the payload's directory too would break the invariant `deploycheck`
+   * holds this list to — *every directory the daemon searches is one this script
+   * installs into* — and that invariant is the point rather than bookkeeping: a
+   * directory searched but not managed is where a build nothing updates gets
+   * picked up and run for ever. The vendor's own installer symlinks into
+   * `~/.local/bin`, which is the first entry here, so a machine somebody
+   * installed grok on by hand is still found.
+   */
   join(homedir(), ".reemoat", "toolchain", "bin"),
 ];
 
@@ -985,6 +1147,64 @@ export function resolveAgent(id: string, machine?: HarnessCatalogue): AgentLaunc
           "catalogue, OPENCODE_API_KEY for the rest of Zen's), or pick one of the free models.",
       };
     }
+    case "grok": {
+      // No adapter package, and this is the first built-in for which that is true
+      // by the vendor's own design rather than by a subcommand happening to exist:
+      // `grok agent stdio` is xAI's documented ACP entry point, listed in the ACP
+      // registry as `@xai-official/grok … ["agent","stdio"]`. One file, as for kimi
+      // and opencode, and `LocalRuntime.agentCli` asks `findOnPath` the same name,
+      // so a login and a session cannot pick differently.
+      const command = findOnPath("grok");
+      if (!command) {
+        throw new AgentUnavailableError(
+          "grok not found on this daemon's PATH. deploy/agents.sh installs it " +
+            "(or `npm i -g @xai-official/grok`).",
+          { installable: true },
+        );
+      }
+      return {
+        id,
+        // The vendor's own name for the product is "Grok Build"; the binary is
+        // `grok`. This string is the log line and the settings row title, so it
+        // carries the program, as `Kimi Code CLI` and `Opencode CLI` do.
+        displayName: "Grok Build CLI",
+        command,
+        /*
+         * ⚠ **`--no-auto-update` is not a preference.** Measured 2026-09-21:
+         * 1.0.40 checks for and installs updates in the background unless told not
+         * to, and xAI's own documentation recommends the flag for exactly this
+         * shape (CI, scripts, ACP). `src/agentupdate.ts` owns when a build moves on
+         * this fleet — it runs `deploy/agents.sh` on a timer and deliberately
+         * *keeps* a build a live session may be on, via `--skip` — and an agent
+         * that replaces its own binary underneath a running turn defeats both
+         * halves of that. The persistent form is `auto_update = false` under
+         * `[cli]` in `~/.grok/config.toml`, which is a file under somebody's home
+         * and therefore not ours to write; the flag is the half this repository
+         * controls.
+         *
+         * ⚠ **`--always-approve` must never appear here.** It is grok's `--yolo`,
+         * and it makes the agent run every tool without asking. The permission
+         * machinery is what this product is; an agent spawned with that flag would
+         * send no `session/request_permission` at all, and the cards would simply
+         * never appear. It is also a per-session `_meta.yoloMode`, which this
+         * daemon does not send either.
+         */
+        args: ["--no-auto-update", "agent", "stdio"],
+        env: agentEnv(),
+        /*
+         * ⚠ **The remedy here is a *paste*, and it is the only built-in where the
+         * key is spent through an ACP call rather than through the environment.**
+         * Measured 2026-09-21: `XAI_API_KEY` alone does not admit a session — see
+         * {@link ACP_AUTH_METHOD} — so the honest sentence names the key and
+         * not the variable, because what the operator does is paste it and what
+         * happens next is this daemon's business.
+         */
+        authHint:
+          "Grok refused this session. Sign in with the wizard on this machine, or paste an xAI " +
+          "API key under Settings → Machines → this machine. A key from console.x.ai is what " +
+          "works where no browser can be opened.",
+      };
+    }
   }
 }
 
@@ -1043,4 +1263,71 @@ function unknownHarness(id: string, machine: HarnessCatalogue | null): string {
     default:
       return `This agent came from the ${plugin} plugin, which is no longer installed on this machine.`;
   }
+}
+
+/**
+ * Where a claude session's opening permission mode comes from, when it comes from
+ * anywhere at all.
+ *
+ * ⚠ **This daemon sends no mode, and that is the whole reason this exists.**
+ * `session/new` carries `cwd`, `mcpServers` and — for ultracode only — `_meta`;
+ * nothing here has ever named a mode. So a session that opens in `Bypass
+ * permissions` opened that way because the *adapter* read
+ * `permissions.defaultMode` out of the user's own Claude settings, and the screen
+ * that lists agents is the only place that can say so. Reported after a person
+ * asked whether the daemon was switching it: it was not, and there was nothing on
+ * screen that could have answered them.
+ *
+ * ⚠ **The user-level file only, and the value exactly as written.** The adapter
+ * merges project settings over these and normalises through an alias table of its
+ * own (`bypass` → `bypassPermissions`, `manual` → `default`); replicating either
+ * would be a second implementation of somebody else's precedence rule, drifting
+ * the moment they change it. So this reports one file and one string and makes no
+ * claim about what the session will actually open in — the sentence on screen
+ * names the file, and the mode chip names the truth once an agent is running.
+ *
+ * `null` for absent, unreadable, oversized, not an object, or nothing set: every
+ * one of them means "nothing here explains anything", which is the ordinary case
+ * and needs no distinguishing.
+ */
+export async function claudeSettingsMode(options: { homeDir?: string } = {}): Promise<ClaudeSettingsMode | null> {
+  const file = join(options.homeDir ?? homedir(), ".claude", "settings.json");
+  const text = await probeText(file, MAX_CLAUDE_SETTINGS_BYTES);
+  if (text === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Somebody's hand-edited file mid-save. Nothing to report is the honest answer.
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const permissions = (parsed as { permissions?: unknown }).permissions;
+  if (typeof permissions !== "object" || permissions === null) return null;
+  const mode = (permissions as { defaultMode?: unknown }).defaultMode;
+  if (typeof mode !== "string" || mode.trim().length === 0) return null;
+  return { value: clipSettingsValue(mode.trim()), file };
+}
+
+/** What {@link claudeSettingsMode} found, or `null`. */
+export interface ClaudeSettingsMode {
+  /** The string as written, clipped. Never normalised — see the docblock. */
+  value: string;
+  /** The file it was read from, so the sentence on screen can name it. */
+  file: string;
+}
+
+/**
+ * How much of somebody's settings file this daemon will read to find one string.
+ *
+ * A settings file is a few kilobytes; this is far above anything measured and far
+ * below a size worth holding in memory on an HTTP handler. The point is that the
+ * path is **not one this daemon created**, so "as big as it happens to be" is not
+ * a bound — the same rule `MAX_AGENT_COMMANDS` states about a list an agent sends.
+ */
+const MAX_CLAUDE_SETTINGS_BYTES = 256 * 1024;
+
+/** A mode id is short; a file that says otherwise is not describing a mode. */
+function clipSettingsValue(value: string): string {
+  return value.length <= 64 ? value : `${value.slice(0, 64)}…`;
 }

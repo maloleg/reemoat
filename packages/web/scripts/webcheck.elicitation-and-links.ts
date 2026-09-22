@@ -491,18 +491,50 @@ process.stdout.write("\nthe question an agent asked\n");
     sessionOf({ status: "blocked", turn: 1, pendingPermissions: [permission], pendingElicitations: [question] }),
     sessionOf({ pendingElicitations: [] }),
     sessionOf({ status: "exited", exit: { reason: "stopped", at: 0, detail: null } }),
+    /*
+     * ⚠ **The row the partition below was missing.** `waitingCount` reads
+     * `SessionSnapshot.reduced` — the marker `fitSnapshotFrame` puts on a frame
+     * whose parked lists it had to halve — and on such a frame it is deliberately
+     * *larger* than `humanRequests().length`, because the rows it counts are not
+     * on the frame to be returned. The clause here was `!==` and stayed green for
+     * one reason only: no fixture in this matrix set the field. That is this
+     * repository's signature defect arriving through a new field rather than
+     * through a bad predicate, so the fixture comes with the clause.
+     */
+    sessionOf({
+      status: "blocked",
+      turn: 1,
+      pendingPermissions: [permission],
+      pendingElicitations: [question],
+      reduced: { pendingPermissions: 9, pendingElicitations: 4, blobs: true },
+    }),
   ];
 
   const broken = matrix.filter(
     (session) =>
       needsHuman(session) !== waitingCount(session) > 0 ||
-      waitingCount(session) !== humanRequests(session).length ||
+      // Never *fewer* than the rows there are to draw — equality was the rule
+      // until `reduced` existed, and a reduced frame is exactly the case where
+      // the count has to exceed the rows. See the fixture above.
+      waitingCount(session) < humanRequests(session).length ||
       // The clause that matters: a form is parked mid-turn, so `turn` stays set.
       // Without it the transcript blinks "working…" over a question nobody has
       // answered.
       (needsHuman(session) && showsWorking(session)),
   );
   check("the predicates are a partition", broken.length, 0);
+
+  /*
+   * And the direction, stated positively — the clause above only refuses the
+   * wrong side of the inequality, so on its own a `waitingCount` that had quietly
+   * stopped reading `reduced` would satisfy it by being equal.
+   */
+  check(
+    "a reduced frame counts the rows it left out, and returns only the ones it has",
+    [waitingCount(matrix[7]!), humanRequests(matrix[7]!).length],
+    [13, 2],
+  );
+  check("and it is still the oldest row that leads", humanRequests(matrix[7]!)[0]?.kind, "elicitation");
 
   check(
     "an older daemon's missing array behaves exactly as an empty one",

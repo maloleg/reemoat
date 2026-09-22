@@ -21,6 +21,7 @@ import {
   listedByBuild,
   searchModels,
   supportingHarnesses,
+  unreadSystemsNotice,
   type ModelChoice,
 } from "../agents";
 import { errorText } from "../http";
@@ -34,7 +35,7 @@ import type { MachineId } from "../ids";
 import { daemonRead } from "../machine";
 import { MACHINE_GONE } from "../plugins";
 import { store } from "../store";
-import { AGENT_IDS, type AgentCapabilities, type AgentId, type AgentInfo, type CustomAgent, type SystemInfo } from "../wire";
+import { AGENT_IDS, type AgentCapabilities, type AgentId, type AgentAvailability, type CustomAgent, type SystemInfo } from "../wire";
 import { AgentGlyph } from "./AgentIcons";
 import { harnessName } from "./agentCard";
 import {
@@ -166,7 +167,7 @@ export function AgentBuilder({
    * Only ever *widens* the harness row: with nothing yet, the picker draws the
    * four this product ships, which is what it drew before there were plugins.
    */
-  const [agents, setAgents] = useState<readonly AgentInfo[] | null>(null);
+  const [agents, setAgents] = useState<readonly AgentAvailability[] | null>(null);
   /**
    * The harness, or `null` until somebody picks one.
    *
@@ -207,7 +208,7 @@ export function AgentBuilder({
    * What to call a harness, anywhere on this screen.
    *
    * ⚠ **One function rather than `agentLabel` at six call sites, because
-   * `agentLabel` can only answer for the four this product ships.** It falls
+   * `agentLabel` can only answer for the five this product ships.** It falls
    * through to the raw id for anything else — which is right, and is what
    * `webcheck` pins — but a raw `acme:gemini` is not a name to put in *"Chats you
    * started with it are not deleted…"* or in an `aria-label`. `harnessName` is the
@@ -456,7 +457,7 @@ export function AgentBuilder({
          * every model row, and — because this catch deliberately says nothing —
          * nothing on screen explained any of it. `null` is *"still asking"*, which
          * is what a failed read leaves this screen in and is exactly today's
-         * behaviour: the four this product ships, drawn immediately.
+         * behaviour: the five this product ships, drawn immediately.
          *
          * It also keeps the seed recoverable. The effect below returns before it
          * burns its guard while this is `null`, so a Retry that succeeds still
@@ -683,6 +684,22 @@ export function AgentBuilder({
           orModels,
           systems?.find((one) => one.id === OPENROUTER_SYSTEM_ID)?.displayName ?? "OpenRouter",
         );
+  /**
+   * The same thing for a provider whose rows come from a harness on the machine,
+   * where the machine could not be asked.
+   *
+   * ⚠ **`listed` rather than `systems`, so this and the line above cannot both
+   * fire for OpenRouter.** `listed` is the substituted list: a successful browser
+   * fetch has already filled that table, which takes it out of
+   * `unreadSystemsNotice`'s set on its own, and a failed one is excluded by id so
+   * the sentence directly above is the only one drawn for it.
+   */
+  const unreadLine =
+    listed === null ? null : unreadSystemsNotice(listed, capabilities, [OPENROUTER_SYSTEM_ID]);
+  // Order is fixed rather than incidental: the browser's own failure first,
+  // because it is the one the reader can do something about without leaving the
+  // device.
+  const noticeLines = [openRouterLine, unreadLine].filter((one): one is string => one !== null);
   const current: ModelChoice | null =
     picked === null
       ? null
@@ -996,7 +1013,7 @@ export function AgentBuilder({
           setHarness(null);
           back();
         }}
-        notice={openRouterLine}
+        notice={noticeLines}
         value={picked}
         onPick={(choice) => {
           setPicked({ system: choice.system.id, model: choice.modelId });
@@ -1012,7 +1029,7 @@ export function AgentBuilder({
 
   /*
    * ⚠ **And the harness picker waits too, but only over a stored preset.** It has
-   * rows either way — the list falls back to the four this product ships until the
+   * rows either way — the list falls back to the five this product ships until the
    * cheap `GET /agents` widens it, so it never waits on a read — so what it draws
    * without the catalogue is worse than an empty screen: on the **edit** path
    * `picked` is already seeded while `current` is a lookup in a catalogue that has
@@ -1952,12 +1969,18 @@ function ModelPicker({
   /**
    * What is missing from an otherwise working list, or `null`.
    *
-   * Separate from `failure`, which is why the whole screen is empty. This one is
-   * drawn *above* a list that has rows: one provider's names are read from that
-   * provider's own host, and it being unreachable subtracts a section from a
-   * screen the other five still fill.
+   * Separate from `failure`, which is why the whole screen is empty. These are
+   * drawn *above* a list that has rows: a provider whose names are read somewhere
+   * else — that provider's own host, or the harness that ships for it — being
+   * unreachable subtracts a whole section from a screen the others still fill.
+   *
+   * ⚠ **A list rather than one string, because two of them can be true at once
+   * and they are about different machines.** OpenRouter's is a fetch *this
+   * browser* made; the other is a spawn *the daemon* could not make. Joining them
+   * into one sentence would claim a single cause for two independent failures,
+   * and picking one to draw would silence the other.
    */
-  notice: string | null;
+  notice: readonly string[];
   value: { system: string; model: string } | null;
   onPick: (choice: ModelChoice) => void;
   /**
@@ -2175,7 +2198,11 @@ function ModelPicker({
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-5 sm:px-5">
         {/* Where the missing rows would have been, and in the faint size a
             subline uses: it is a fact about the list, not a failure of it. */}
-        {notice !== null && <p className="mt-2 text-2xs text-faint">{notice}</p>}
+        {notice.map((line) => (
+          <p key={line} className="mt-2 text-2xs text-faint">
+            {line}
+          </p>
+        ))}
         {groups.length === 0 ? (
           // Says what was looked for rather than "no results", and which of the two
           // narrowings it was looked for under. See {@link nothingHere}.
@@ -2498,7 +2525,7 @@ function HarnessPicker({
            *
            * The two are told apart by the *query* rather than by the listing's
            * state, deliberately: this component never sees `null`, because the
-           * screen above it falls back to the four this product ships while the
+           * screen above it falls back to the five this product ships while the
            * read is in flight. So an empty list here is a machine that answered
            * with nothing — which is not a state a healthy daemon reaches, and is
            * exactly the state a person needs told rather than guessed at.

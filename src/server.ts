@@ -12,7 +12,7 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { WSContext } from "hono/ws";
 import type { WebSocket as RawWebSocket } from "ws";
-import { AgentUnavailableError, type AgentId } from "./acp/agents.js";
+import { AgentUnavailableError, claudeSettingsMode, isBuiltinAgentId, type AgentId } from "./acp/agents.js";
 import {
   hostable,
   routedModelNaming,
@@ -26,6 +26,7 @@ import { AgentAskError, type AgentCapabilityReader } from "./agentask.js";
 import type { AgentLoginSupport } from "./runtime/types.js";
 import { isAuthRequiredMessage, SystemRoutingError } from "./session.js";
 import { type AgentCredentialStore, type AgentLoginRuns } from "./agentauth.js";
+import type { AgentInstallRuns } from "./agentinstall.js";
 import { AUTH_LEEWAY_MS, hasScope, type Principal, type Scope, type TokenVerifier } from "./auth.js";
 import {
   importArchive,
@@ -67,6 +68,7 @@ import {
   safeRelPath,
 } from "./changes.js";
 import {
+  clampBlob,
   estimateBytes,
   keepsItsConversation,
   oldestAvailable,
@@ -143,7 +145,244 @@ const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
  */
 const ATTACH_REPLAY_MAX = 2_000;
 const BATCH_MAX_EVENTS = 200;
+/**
+ * The largest `events` frame this socket will write, **in the bytes it writes**.
+ *
+ * ⚠ **This was an estimate, and the gap between the estimate and the wire was a
+ * permanent transcript stall.** `flush` accumulated `estimateBytes`, which charges
+ * `String.length` — UTF-16 units of the *unescaped* string — while what goes out
+ * is `JSON.stringify` in UTF-8. Replaying that arithmetic over real events: four
+ * `text` events of CJK are charged 469 KiB and are **1406 KiB** on the wire, and
+ * four `agent_log` lines of ESC — which is what a coding CLI's stderr is made of,
+ * escaping to `\u001b`, six bytes per charged unit — are charged the same 469 KiB
+ * and are **2813 KiB**. Both are past `MAX_SOCKET_MESSAGE_BYTES`, so on the
+ * encrypted path the far end's `MessageAssembler` refused the message,
+ * `e2ee.ts` failed the whole channel, and `stream.ts` reconnected **with the
+ * cursor unchanged** onto the same batch, which split the same way and failed
+ * again: a transcript that never moves, with nothing logged, on large sessions
+ * only and never on loopback.
+ *
+ * So the number accumulated in {@link StreamConnection.flush} is
+ * `Buffer.byteLength` of the very string that is about to be sent, and each event
+ * is encoded **once** — the pieces are kept and joined rather than measured and
+ * then stringified a second time, which is the arrangement {@link controlItem}
+ * already makes for a control frame.
+ *
+ * **The first event is still taken whatever it weighs, and that is what keeps
+ * this from wedging in a different way.** A cut that could refuse every event
+ * would emit an empty batch for ever and drain nothing — the same stall with a
+ * different cause. Nothing is added once the running total is past this bound, so
+ * a batch is `max(this, one event)` rather than this plus one.
+ *
+ * **Half of `MAX_SOCKET_MESSAGE_BYTES`, and the half is the headroom that
+ * exemption spends.** `truncateEvent` clips an event toward
+ * `DEFAULT_MAX_EVENT_BYTES` — 128 KiB *charged*, so at most ~768 KiB once every
+ * unit escapes to six bytes — which fits inside the remaining half.
+ *
+ * ⚠ **That is a property of *some* of `truncateEvent`'s arms, and the hedge that
+ * used to stand here — "several of its arms deliberately keep an unshrinkable
+ * field and rely on an ingest bound instead" — described one group of three.**
+ * Re-counted 2026-09-17: **19 `case` labels over 14 return branches**, against a
+ * 19-member `SessionEvent` union, with no `default`, so the switch is exhaustive
+ * by the compiler. What the arms do partitions them three ways.
+ *
+ * *Cut to the budget here — 9 labels, 8 branches.* `text`, `prompt` (whose text
+ * budget is reduced by what its attachments already spend), `agent_log`,
+ * `file_change` (half each to `oldText` and `newText`), `tool_call`, `other`,
+ * `error`, and the `permission_request`/`permission_resolved` pair. These do
+ * converge on `maxBytes`.
+ *
+ * *Budgeted **per item** against a 64-byte floor — 4 labels, 4 branches.*
+ * `tool_call_update`'s content blocks, `plan`'s entries, `workspace`'s warnings
+ * and `agent_config`'s descriptions. What these charge scales with an item
+ * **count** rather than with `maxBytes`, so the floor is the bound and not the
+ * budget: at n entries `plan` charges `128 + Σ(content.length + 32)` however
+ * small the per-item budget goes.
+ *
+ * *Returned unchanged — 6 labels, 2 branches.* `context_cleared`,
+ * `session_started`, `status`, `turn_end`, and the
+ * `elicitation_request`/`elicitation_resolved` pair.
+ *
+ * ⚠ **The unshrinkable fields, and which of them an ingest bound actually
+ * covers.** Real, each verified: `text`'s `messageId` (`MAX_MESSAGE_ID_CHARS`,
+ * 256); `prompt`'s attachments (`MAX_PROMPT_ATTACHMENTS`, 10, plus `uploads.ts`'s
+ * name and mime caps); both tool arms' `parentToolCallId`
+ * (`MAX_PARENT_ID_CHARS`, 256) and `locations` (`MAX_TOOL_LOCATIONS`, 64, and
+ * cut here as well); the update's `images` (`MAX_IMAGES_PER_UPDATE`, 8) and its
+ * blocks' total (`MAX_TOOL_OUTPUT_BYTES`, 32 KiB, with a visible `break` at
+ * ingest); the permission pair's `options` (`MAX_PERMISSION_OPTIONS`, 24, under
+ * an 8 KiB `MAX_PERMISSION_SNAPSHOT_BYTES` refusal over `{title, options}`
+ * together); `elicitation_resolved`'s answers (`MAX_ELICITATION_ANSWER_CHARS`,
+ * 2048, clipped in `registry.ts` and refused on the route); and `agent_config`'s
+ * ids, names, values and *counts* (`toConfigOptions`, `session.ts` — the
+ * `MAX_CONFIG_*` family, under a `MAX_CONFIG_BYTES` backstop that cuts and marks
+ * `truncated` rather than refusing). `status` and `turn_end` need none — union
+ * literals and numbers.
+ *
+ * ⚠ **That `agent_config` clause is the newest and it was missing from this list
+ * while this list was being written**, which is the failure this whole inventory
+ * exists to prevent: the paragraph below said `plan.entries` was "the one door
+ * that reaches 1 MiB" on the same day {@link fitSnapshotFrame}'s residue note in
+ * this file said `agentConfig`'s choice ids were bounded nowhere. ⚠ **This list is
+ * still hand-derived and may still be short.** What is not hand-derived is the
+ * outcome: `daemoncheck.after-the-turn-and-config` replays every `truncateEvent`
+ * arm against `MAX_SOCKET_MESSAGE_BYTES` and differences the labels against
+ * `SessionEvent`'s union, so a field this paragraph forgets shows up there as a row
+ * over the ceiling.
+ *
+ * ⚠ **Two rely on nothing at all, and that is the correction.**
+ * `context_cleared` carries two agent-minted session ids whose real length
+ * `estimateBytes` charges, so this function is entered and has nothing to do —
+ * there is no `MAX_AGENT_SESSION_ID` anywhere in `src/`. `session_started` is
+ * sharper still: an agent-minted `sessionId`, the adapter's `agentInfo` and its
+ * `modes`, charged a **flat 192**, so the function is never entered on it at
+ * all. **It was four**, and the two that came back are the elicitation pair.
+ * `elicitation_request`'s own comment said its `message` was "clipped at ingest
+ * in `session.ts`" while `MAX_ELICITATION_MESSAGE_CHARS` was retired and
+ * `MAX_ELICITATION_FORM_BYTES` weighed the *form*, of which `message` is not a
+ * field — an arm naming a bound that did not exist, and the one field on this
+ * whole path that could be a frame by itself. The clip is restored at 4096 code
+ * units (`clipElicitationMessage`, `session.ts`), which is what makes the
+ * paragraph below hold for this arm as well. **And
+ * `elicitation_resolved` was the fourth**, easy to miss because it shares
+ * `truncateEvent`'s arm with `elicitation_request` (`events.ts:2085`, `return
+ * event`) while having its *own* `estimateBytes` case that charges
+ * `256 + message.length` plus every answer's key, label and value at their real
+ * lengths — so it carries strictly more than the request it answers and is
+ * shrunk by exactly as little. It is fixed by the same clip and not by a second
+ * one: both its call sites in `registry.ts` copy the `message` off the *parked*
+ * record, which is the string `onElicitation` already cut, so there is one
+ * bound for the pair rather than two numbers that can disagree. `plan.entries` is a
+ * fifth of a different kind: `session.ts` pushes the agent's array through
+ * uncapped, so the count that arm divides by is itself unbounded. **`agent_config`
+ * was a sixth, of that same cardinality kind and worse** — its arm nulls
+ * descriptions and leaves the ids, names and values it divides nothing by, so at
+ * 20 000 choices it weighed 1 318 159 bytes *after* truncation and its cliff sat
+ * at **7 766 choices**, below `plan`'s ~9 500. Closed at ingest on 2026-09-19;
+ * `plan.entries` is what is left of the two.
+ *
+ * The conclusion the old sentence reached is unchanged and only its premise was
+ * wrong: one event over the wire ceiling is still **sent** rather than dropped,
+ * because dropping it wedges the client's own cursor (see {@link encodeStored})
+ * and the transcript is what the daemon is for.
+ *
+ * ⚠ **What this inventory is worth to the reader on the other side, and the one
+ * sentence that may not be written from it.** `MAX_SOCKET_MESSAGE_BYTES` in
+ * `packages/protocol` describes the other half of this bound — 1 MiB against the
+ * 512 KiB here — as headroom, on the strength of a ~768 KiB worst case that is
+ * `DEFAULT_MAX_EVENT_BYTES` escaped six bytes to the unit. That figure is honest
+ * for the nine labels above that converge on `maxBytes` and for no others, so the
+ * headroom sentence is true of *those* and must be qualified rather than
+ * generalised. It was generalised once, on 2026-09-17, to "every arm that refuses
+ * to shrink is bounded at ingest" — written in the same change as the two
+ * paragraphs above saying `context_cleared` and `session_started` rely on nothing
+ * at all, so one commit carried both halves of a contradiction. It is corrected
+ * there rather than here, against numbers measured 2026-09-18 by replaying
+ * `truncateEvent` and weighing UTF-8: `plan.entries` at 10 000 entries is
+ * **1 100 027 bytes after truncation**, because the per-item budget floors at 64
+ * bytes and bounds an entry rather than the count — 3 entries of a megabyte each
+ * come out at 131 148. The two ids are the smaller hazard and cost more to close:
+ * bounding them at ingest was refused, since an agent session id is `AcpClient`'s
+ * routing key and rides every `session/prompt`, `session/cancel` and
+ * `session/close`, so a clip addresses a conversation that does not exist and a
+ * refusal at `session/new` turns a large event into a session that cannot start.
+ *
+ * ⚠ **On 2026-09-18 that sentence read "and is the one door that reaches 1 MiB",
+ * and it was wrong the day it was written.** `agent_config` was a nearer one —
+ * **7 766 choices** at a realistic value and name against `plan`'s ~9 500 — and it
+ * is named as unbounded three thousand lines further down this same file, in
+ * {@link fitSnapshotFrame}'s residue note, which was true and untouched while this
+ * paragraph said otherwise. One file carrying both halves of a contradiction, for
+ * the second time in two days. The `agent_config` half is closed now
+ * (`toConfigOptions`, `src/session.ts`), and what replaces the *count* is a driver
+ * rather than a better sentence: `daemoncheck.after-the-turn-and-config` replays
+ * every arm of `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES`, weighs each against
+ * `MAX_SOCKET_MESSAGE_BYTES`, and differences the labels it swept against
+ * `SessionEvent`'s own union in both directions. **Run it to enumerate the doors.
+ * Do not count them here, and do not write "the one" about a set nothing sweeps** —
+ * three comments in this tree did, and all three missed the same arm.
+ *
+ * ⚠ **Nothing compares this to `MAX_SOCKET_MESSAGE_BYTES`**, which lives in
+ * `packages/protocol`: `packages/web` may not import `src/`, so the app's copy is
+ * a literal, and deriving this one from the import while the app's stayed a
+ * literal would hide the pair rather than tie it. What holds this end is
+ * `daemoncheck.stream-and-events.ts`'s *"the outbound batch, cut on bytes rather
+ * than on an estimate"*, which reads `data.length` off a real `ws` client rather
+ * than re-serialising at the call site — measured 432,364 bytes widest with this
+ * cut and 3,026,371 with the estimate one restored. Driven on the **direct** path
+ * deliberately: over a channel the overflow is answered by `fail()`, which ends
+ * the stream, so exactly one frame crosses either way and no count taken at the
+ * peer could tell a refusal from a healthy socket.
+ *
+ * `log.read`'s third argument in `attach` is this number in the **store's** units
+ * — a different unit for the same idea, deliberately left alone: there it only
+ * decides how many rows one turn of a `for(;;)` that runs until the log is
+ * drained will materialise, so it bounds nothing.
+ */
 const BATCH_MAX_BYTES = 512 * 1024;
+/**
+ * The largest **control** frame this socket will write, in the bytes it writes.
+ *
+ * The same number as {@link BATCH_MAX_BYTES} and against the same ceiling, which
+ * only the *receiver* enforces: past `MAX_SOCKET_MESSAGE_BYTES` the far end's
+ * `MessageAssembler` refuses the message, `e2ee.ts` fails the whole channel, and
+ * `stream.ts` reconnects with its cursor unchanged onto the frame that just
+ * failed. On the event arm that was a transcript that stopped partway. Here it is
+ * worse: `hello` is **always the first frame of an attach** — see
+ * {@link StreamConnection.attach} — and it carries `managed.snapshot()`, so the
+ * transcript never starts at all, on whichever machine has the most going on.
+ *
+ * ⚠ **The control arm had no size test whatever**, and the ~93 KB a snapshot is
+ * quoted at elsewhere in this tree is the *background-task* bound rather than the
+ * whole record. Field by field, with the bound that actually applies to each:
+ *
+ * - `queuedPrompts` — `MAX_QUEUED_PROMPTS` (8) entries of `{id, seq, at}`, tens
+ *   of bytes each.
+ * - `backgroundTasks` — `MAX_TRACKED_ASYNC_TASKS` (32) × the 2 888 characters
+ *   `acp/asynctasks.ts`'s clips allow. That product *is* the ~93 KB, and it is
+ *   the largest **bounded** thing on the record.
+ * - `agentConfig` — `snapshotConfig` drops every description but the selected
+ *   one, clips that to 120 characters, and cuts each option's choices to
+ *   `MAX_SNAPSHOT_CHOICES` (40). Bounded in the two dimensions measured to grow.
+ * - `title` (`MAX_TITLE_CHARS`, 120), `exit.detail` (`MAX_EXIT_DETAIL_CHARS`,
+ *   512), `resume` (64 + 512). Scalars otherwise.
+ * - `pendingPermissions` — **unbounded in count.** One entry is at most 8 KiB of
+ *   `{title, options}` (`MAX_PERMISSION_SNAPSHOT_BYTES`, a refusal weighed in
+ *   real UTF-8 by `jsonBytes`) plus `rawInput` and `content` at
+ *   `MAX_PERMISSION_BLOB_BYTES` (8 KiB) each — about 24 KiB. The only gate on how
+ *   many may be parked at once is `refusalReason()`, which asks whether a turn is
+ *   running and never how many are already waiting, and nothing stops an agent
+ *   issuing them in parallel inside one turn. At 24 KiB an entry, 22 of them
+ *   pass this bound and 43 pass the ceiling it protects.
+ * - `pendingElicitations` — **unbounded in count** by the identical gate, which
+ *   `resolveElicitation` reuses verbatim, but bounded per entry: the form is not
+ *   on this record at all, and `message` is clipped at ingest to
+ *   `MAX_ELICITATION_MESSAGE_CHARS` (4096 code units, at most 16 KiB of UTF-8).
+ *   ⚠ It was **unbounded per entry as well** — `MAX_ELICITATION_FORM_BYTES`
+ *   weighs the **form**, `message` is not a field of it, and the clip had been
+ *   retired — so one question could be arbitrarily large on its own and defeat
+ *   every rung of the ladder below, whose halving floors at one row. That is the
+ *   worst case this bound was restored to remove.
+ * - `agentSessionId` and `agentHandle` — agent-minted, bounded nowhere.
+ *
+ * So {@link controlItem} **fits** the frame instead of guessing at it, and
+ * {@link fitSnapshotFrame} is the ladder. ⚠ Nothing compares this to
+ * `MAX_SOCKET_MESSAGE_BYTES`, for the reason {@link BATCH_MAX_BYTES} already
+ * gives from the other side: `packages/web` may not import `src/`, so the app's
+ * copy is a literal, and deriving one end while the other stayed a literal would
+ * hide the pair rather than tie it. This is the third literal in the fleet.
+ */
+export const CONTROL_MAX_BYTES = 512 * 1024;
+/**
+ * `JSON.stringify({ type: "events", events })`, split at the seam so
+ * {@link StreamConnection.flush} can join the encoded events itself and know the
+ * byte count as it goes. Both are ASCII, so `length` is the byte length — and the
+ * concatenation is byte-for-byte what stringifying the whole object would return,
+ * which is the property that lets the measurement replace the serialization
+ * rather than be added to it.
+ */
+const EVENTS_FRAME_OPEN = '{"type":"events","events":[';
+const EVENTS_FRAME_CLOSE = "]}";
 const SOCKET_HIGH_WATER = 1024 * 1024;
 const PING_INTERVAL_MS = 20_000;
 const COLLAPSE_WINDOW_MS = 30_000;
@@ -179,6 +418,29 @@ export const EVENTS_PAGE_LIMIT = 5_000;
  * input (deflate's stored-block worst case is ~0.01%), so `768 KiB < 1 MiB` holds
  * for the compressed bytes that actually cross the tunnel — with 256 KiB spare for
  * the response headers riding the same stream.
+ *
+ * ⚠ **That argument is stated in *bytes* and this number is charged UTF-16
+ * units, and the step between them is deliberately left open.** The budget is
+ * spent per row against `retained.bytes` in `MemoryEventStore.read`, and against
+ * the `bytes` column in `sqlite.ts`'s — both of which are `estimateBytes`, which
+ * charges `String.length` of the **unescaped** string. So an escape-heavy
+ * conversation makes a 768 KiB page some 4.6 MiB of UTF-8: the identical
+ * charged-vs-wire mismatch {@link BATCH_MAX_BYTES} was repaired for.
+ *
+ * **It is not the same defect, and "making the two consistent" would be a
+ * behaviour change rather than a fix.** That one bounded a WebSocket *frame*,
+ * where `MAX_SOCKET_MESSAGE_BYTES` is enforced by the receiver's
+ * `MessageAssembler`: over the ceiling the far end refused the message, the
+ * channel failed, and the client reconnected onto the same batch for ever.
+ * **There is no reassembler on this path.** A page body is an HTTP response;
+ * nothing refuses it for being large, and what is left is the h2 window above —
+ * a wedge risk that gzip closes, with the 437 390 bytes below as the only
+ * measurement on record. Recut on `Buffer.byteLength` this would shrink a page
+ * to a fraction of {@link EVENTS_PAGE_LIMIT} events and multiply round trips,
+ * which is exactly the cost that constant's own docblock says was just bought
+ * back — 68 requests down to 7. The unit is left as it is, knowingly, and this
+ * paragraph is here so the next reader does not spend that to fix a stall that
+ * cannot happen.
  *
  * It was 2 MiB, and at 2 MiB a real 2000-event page compressed to 437 390 bytes —
  * past the old 256 KiB window, which is how this was found. The cost of the change
@@ -438,6 +700,14 @@ export interface ServerOptions {
    */
   logins?: AgentLoginRuns;
   /**
+   * Installing a harness onto this machine, in progress.
+   *
+   * Optional exactly as `logins` is, and read by the same two shapes: the routes
+   * answer `503` without it, and `agentRowExtras` folds its absence into
+   * `installable` so a client with no route to press never draws the button.
+   */
+  installs?: AgentInstallRuns;
+  /**
    * Files staged for a prompt.
    *
    * Optional for the same reason as the two above: the offline drivers run with
@@ -477,6 +747,7 @@ export function createApp(options: ServerOptions): AppBundle {
   const machineSettings = options.machineSettings ?? null;
   const asks = options.asks ?? null;
   const logins = options.logins ?? null;
+  const installs = options.installs ?? null;
   const uploads = options.uploads ?? null;
   const roots = options.roots ?? [homedir()];
   const plugins = options.plugins ?? null;
@@ -959,14 +1230,60 @@ export function createApp(options: ServerOptions): AppBundle {
     };
   };
 
-  app.get("/agents", read, async (c) =>
-    c.json({
+  /**
+   * The fields an agent row carries that `availability()` does not, added in one
+   * place because there are now two routes that answer one.
+   *
+   * ⚠ **This exists because the second field repeated the first field's mistake.**
+   * `POST /agent-auth/:agent/recheck`'s own docblock already says it: `login` is
+   * built here and spread on by hand, *"so a third route answering an agent row
+   * has to spread it too"*. `settingsMode` was added to `GET /agents` alone, and
+   * the client replaces the whole row from the recheck answer — so one tap on
+   * *Check again* for the claude row erased the provenance line until a full
+   * re-read. A helper rather than a second hand-written spread, so the next field
+   * cannot make it three.
+   *
+   * ⚠ **Read once per answer, and only for claude.** `~/.claude/settings.json` is
+   * on the home directory, so it goes through `probeText`'s deadline rather than a
+   * `readFile` that could hold a route open for as long as a sleeping mount does;
+   * and it is claude's file, so asking it per agent would be three pointless
+   * probes. See {@link claudeSettingsMode} for why the daemon reports it at all:
+   * it sends no mode, so nothing else on any screen can explain a session that
+   * opened in one.
+   */
+  const agentRowExtras = async (): Promise<
+    (agent: { id: AgentId; installable?: boolean }) => Record<string, unknown>
+  > => {
+    const settingsMode = await claudeSettingsMode();
+    return (agent) => ({
+      login: loginSupportOf(agent.id),
+      /*
+       * ⚠ **Two questions folded into one field, exactly as `loginSupportOf`
+       * folds `logins === null` into `blocked`.** The runtime answers the first —
+       * is this absence one `deploy/agents.sh` repairs — and it knows nothing
+       * about whether this daemon will run one. A row that said yes to the first
+       * and no to the second is a button that answers `503`, which is the defect
+       * `loginSupported` exists to prevent, arriving a second time.
+       *
+       * ⚠ **`=== true`, so a runtime that has not learned the field yet is read
+       * as `false`.** The field is required on `AgentAvailability`, so this can
+       * only be reached by a stub; the direction to be wrong in is the one that
+       * draws no control.
+       */
+      installable: agent.installable === true && installs !== null,
+      ...(agent.id === "claude" && settingsMode !== null ? { settingsMode } : {}),
+    });
+  };
+
+  app.get("/agents", read, async (c) => {
+    const extras = await agentRowExtras();
+    return c.json({
       agents: (await registry.sessionRuntime.availability()).map((agent) => ({
         ...agent,
-        login: loginSupportOf(agent.id),
+        ...extras(agent),
       })),
-    }),
-  );
+    });
+  });
 
   /* ---------------------------------------------------------------- *
    * Systems, and the agents assembled out of them
@@ -1223,7 +1540,7 @@ export function createApp(options: ServerOptions): AppBundle {
      * requests metered through it rather than four spawns at once.
      */
     /*
-     * ⚠ **What this machine offers, not `AGENT_IDS`** — the four this repository
+     * ⚠ **What this machine offers, not `AGENT_IDS`** — the five this repository
      * ships plus whatever plugins added, and a *disabled* plugin's harness is not
      * in it. The bound on how long the sweep can get is
      * `MAX_CONTRIBUTED_HARNESSES`, refused at install rather than trimmed here:
@@ -2206,11 +2523,12 @@ export function createApp(options: ServerOptions): AppBundle {
      * sentence above would then have been false of the very first field a reader
      * of this response looks at.
      */
+    // Through `agentRowExtras` rather than spreading `login` by hand, which is what
+    // let `settingsMode` go missing here — see that helper's ⚠.
+    const extras = await agentRowExtras();
     return c.json({
       agent,
-      ...(found === null
-        ? { rechecked: false }
-        : { rechecked: true, info: { ...found, login: loginSupportOf(found.id) } }),
+      ...(found === null ? { rechecked: false } : { rechecked: true, info: { ...found, ...extras(found) } }),
     });
   });
 
@@ -2309,6 +2627,133 @@ export function createApp(options: ServerOptions): AppBundle {
     const cancelled = await logins.cancel(c.req.param("loginId"));
     if (!cancelled) return jsonError(c, 404, "login_not_found", "no such login");
     registry.sessionRuntime.forgetAvailability();
+    return c.json({ cancelled: true });
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Installing a harness onto this machine
+   *
+   * ⚠ **`machine:admin` on the writes, and the precedent is `POST /plugins`.**
+   * Putting new programs on somebody's computer is an act on the *machine*, and
+   * `packages/web/src/install.ts` already states the rule this follows: a grant
+   * that can drive every session on a host all day may not put code on it.
+   * Downloading and running a vendor's installer as this uid is at least that. A
+   * machine's owner holds every scope, so the button works for them; a shared
+   * grant gets `403`.
+   *
+   * ⚠ **The poll is `read`, unlike a login's.** A login transcript carries a
+   * one-time code; this one carries a vendor installer's output and a version
+   * number.
+   *
+   * ⚠ **Every handler here answers in milliseconds**, which is why none of them
+   * needs an entry in the client's `slowRoute` table: the start spawns and
+   * returns an id. A handler that held the connection for the length of an
+   * install would outlive the 15s budget, and a client abort there is a
+   * *transport* failure — which drops the route memo and draws a perfectly
+   * healthy machine as unreachable everywhere at once.
+   * ---------------------------------------------------------------- */
+
+  /** The run this daemon is holding, for a client that reloaded and has no id. */
+  app.get("/agent-install", read, (c) =>
+    c.json({ supported: installs !== null, run: installs?.live() ?? null }),
+  );
+
+  /**
+   * Start one, for the harnesses this repository ships and no others.
+   *
+   * ⚠ **`agentIdParam` is wider than the button, and that width reached the
+   * script.** It answers on `harnessState(value) === "enabled"`, and that is true
+   * of a harness a *plugin* contributed — `PluginContributions.harnessIds`
+   * returns the built-ins followed by its own — while `deploy/agents.sh` has never
+   * heard of one: it validates `--only` against its own five names and exits 2 by
+   * name for anything else. Nothing was ever injected (`spawn` takes an
+   * argv array and no shell), but the refusal landed in the wrong place and in the
+   * wrong shape. `spawnAgentsScript` maps every status but 3 to `"running"`, so
+   * `settle` went and asked the machine and reported the script's own by-name
+   * refusal as a **failed install** — a screen offering a retry for a name that
+   * can never work. And each attempt paid `onFinished` on the way out, which is
+   * `forgetAvailability()` plus a full `resumeInterrupted()` pass, so one HTTP
+   * request bought a fleet-wide cache flush and an auto-resume sweep.
+   *
+   * ⚠ **`isBuiltinAgentId` rather than the row's own `installable`, and the
+   * difference is a process.** `installable` is a fact out of `availability()`,
+   * which probes a CLI per harness; reading it here would put a spawn behind a
+   * handler this section's docblock promises answers in milliseconds, and it is
+   * `false` for a harness that is already present — so it would also refuse a
+   * deliberate re-install. The set that matters is the script's own argument list,
+   * and this predicate is exactly it.
+   *
+   * ⚠ **A `503` with a code of its own, and the three-valued discipline above is
+   * untouched.** An id nothing has heard of still earns {@link noSuchHarness}'s
+   * `400`, a plugin somebody switched off still earns its `503` naming the switch,
+   * and neither may become the other. This is the fourth state — a real, enabled
+   * harness this daemon will never install — so the `login_unsupported` /
+   * `logout_unsupported` pair under `/agent-auth/` is the precedent for both the
+   * status and the sentence shape: the request is fine and this daemon will not
+   * do it. A code distinct from `install_unsupported` because that one means the
+   * daemon installs *nothing*, and the two remedies are different sentences: run
+   * the script on that machine, against install it the way the plugin that added
+   * it says to.
+   */
+  app.post("/agent-install/:agent", admin, (c) => {
+    if (installs === null) {
+      return jsonError(
+        c,
+        503,
+        "install_unsupported",
+        "this daemon will not install agents; run deploy/agents.sh on this machine instead",
+      );
+    }
+    const agent = agentIdParam(c);
+    if (agent === null) return noSuchHarness(c);
+    if (!isBuiltinAgentId(agent)) {
+      return jsonError(
+        c,
+        503,
+        "harness_not_installable",
+        `${agent} was added by a plugin, and this daemon installs only the harnesses it ships; ` +
+          `put it on this machine the way that plugin documents`,
+      );
+    }
+    const started = installs.start(agent);
+    if (started.kind === "busy") {
+      /*
+       * ⚠ **`409` rather than `503`, and the difference is whether waiting helps.**
+       * This daemon answers `503` for "it does not do that" — `login_unsupported`,
+       * `harness_unavailable` — and `409` for a state conflict that passes on its
+       * own. One code carrying `holder` rather than two codes: the sentence differs
+       * between "the daily refresh is running" and "codex is installing", and the
+       * remedy is identical.
+       */
+      return jsonError(
+        c,
+        409,
+        "install_busy",
+        started.holder.kind === "update"
+          ? "this machine is refreshing its agents; try again in a moment"
+          : `this machine is installing ${started.holder.agent ?? "an agent"}; try again when it finishes`,
+        started.holder,
+      );
+    }
+    if (started.kind === "spawn_failed") {
+      return jsonError(c, 502, "install_failed", started.detail);
+    }
+    return c.json(started.view, 201);
+  });
+
+  app.get("/agent-install/runs/:installId", read, (c) => {
+    if (installs === null) return jsonError(c, 404, "install_not_found", "no such install");
+    const since = Number.parseInt(c.req.query("since") ?? "0", 10);
+    const chunk = installs.read(c.req.param("installId"), Number.isFinite(since) ? since : 0);
+    if (chunk === null) return jsonError(c, 404, "install_not_found", "no such install");
+    return c.json(chunk);
+  });
+
+  app.delete("/agent-install/runs/:installId", admin, (c) => {
+    if (installs === null) return jsonError(c, 404, "install_not_found", "no such install");
+    if (!installs.cancel(c.req.param("installId"))) {
+      return jsonError(c, 404, "install_not_found", "no such install");
+    }
     return c.json({ cancelled: true });
   });
 
@@ -2764,8 +3209,10 @@ export function createApp(options: ServerOptions): AppBundle {
   app.get("/sessions", read, (c) => {
     // `listing`, which is what takes `outputFilePath` off every background-task
     // row: this is the four-second poll the paragraph above is about, and that
-    // field is the largest thing in a record no client draws. The socket and
-    // `GET /sessions/:id` still carry it — see `ManagedSession.snapshot`.
+    // field is the largest thing in a record no client draws. `GET /sessions/:id`
+    // still carries it whole — see `ManagedSession.snapshot`. The socket carries
+    // it too, except on a frame `fitSnapshotFrame` had to reduce: its first rung
+    // nulls the same field, so that is a second site and it is conditional.
     const all = registry.list().map((session) => session.snapshot({ listing: true }));
     const limitParam = c.req.query("limit");
     const limit = limitParam === undefined ? null : Math.max(0, boundedInt(limitParam, 0));
@@ -4719,6 +5166,14 @@ class StreamConnection {
   /**
    * `replaying` is the attach's own drain saying so, and it decides nothing but
    * the honesty of a collapse. See {@link ATTACH_REPLAY_MAX}.
+   *
+   * ⚠ **`bytes` here is charged heap and is deliberately *not* the number the
+   * batch is cut on.** It feeds `MAX_QUEUE_BYTES`, which bounds what this process
+   * is **holding** for a client that has stopped reading — so UTF-16 units of the
+   * strings in memory is the right unit, the same argument {@link controlItem}
+   * makes about `length`. What goes on the wire is measured where it is written;
+   * see {@link BATCH_MAX_BYTES}. Making these two "consistent" would put the
+   * wrong unit on one of them.
    */
   private emit(stored: StoredEvent, replaying = false): void {
     if (this.closed || stored.seq <= this.cursor) return;
@@ -4809,24 +5264,50 @@ class StreamConnection {
     if (head.kind === "control") {
       this.queue.shift();
       this.queuedBytes -= head.bytes;
-      // Already encoded, by `controlItem`, which is where the byte count came
-      // from. Encoding it again here is what that arrangement exists to avoid.
+      // Already encoded — and already *fitted* to {@link CONTROL_MAX_BYTES} — by
+      // `controlItem`, which is where both the string and the byte count came
+      // from. Encoding it again here is what that arrangement exists to avoid,
+      // and the fit cannot move down here for the same reason: this method holds
+      // the payload string and nothing else. Keeping the frame *object* on the
+      // `QueueItem` so it could be fitted late would retain the whole snapshot
+      // the payload replaced, for as long as the queue holds it — which is the
+      // retention `MAX_QUEUE_BYTES` exists to stop.
       payload = head.payload;
     } else {
-      const events: StoredEvent[] = [];
-      let bytes = 0;
-      while (this.queue.length > 0 && events.length < BATCH_MAX_EVENTS) {
+      /*
+       * ⚠ **Measured, not estimated — see {@link BATCH_MAX_BYTES}.** Each event
+       * is encoded once here and the pieces are joined, so `bytes` is exactly
+       * `Buffer.byteLength(payload, "utf8")` and the cut happens on the number
+       * the far end's `MessageAssembler` will accumulate rather than on a count
+       * of the UTF-16 units inside it. The join is byte-for-byte what
+       * `JSON.stringify({ type: "events", events })` returned, so nothing
+       * downstream can tell the difference.
+       *
+       * The one event this breaks on is re-encoded on the next flush, and that
+       * is the whole cost of knowing the size of a string before writing it. It
+       * is paid back by no longer building the intermediate `StoredEvent[]` and
+       * by `safeStringify` no longer walking the same batch a second time.
+       */
+      const encoded: string[] = [];
+      let bytes = EVENTS_FRAME_OPEN.length + EVENTS_FRAME_CLOSE.length;
+      let lastSeq: number | null = null;
+      while (this.queue.length > 0 && encoded.length < BATCH_MAX_EVENTS) {
         const next = this.queue[0]!;
         if (next.kind !== "event") break;
-        if (events.length > 0 && bytes + next.bytes > BATCH_MAX_BYTES) break;
+        const one = encodeStored(next.stored);
+        // `+ 1` for the comma that separates it from the event before it.
+        const size = Buffer.byteLength(one, "utf8") + (encoded.length > 0 ? 1 : 0);
+        // The first is taken whatever it weighs, or one oversized event would
+        // produce an empty batch for ever — see {@link BATCH_MAX_BYTES}.
+        if (encoded.length > 0 && bytes + size > BATCH_MAX_BYTES) break;
         this.queue.shift();
         this.queuedBytes -= next.bytes;
-        events.push(next.stored);
-        bytes += next.bytes;
+        encoded.push(one);
+        bytes += size;
+        lastSeq = next.stored.seq;
       }
-      const last = events[events.length - 1];
-      if (last) this.lastSentSeq = last.seq;
-      payload = safeStringify({ type: "events", events });
+      if (lastSeq !== null) this.lastSentSeq = lastSeq;
+      payload = `${EVENTS_FRAME_OPEN}${encoded.join(",")}${EVENTS_FRAME_CLOSE}`;
     }
 
     this.sending = true;
@@ -4981,10 +5462,245 @@ function parseElicitationAnswer(body: Record<string, unknown>): ElicitationAnswe
  * UTF-16 code units rather than bytes — `jsonSize` measures the event side the
  * same way, and a ceiling on retained heap wants the string this process is
  * holding rather than what the socket will put on the wire.
+ *
+ * ⚠ **And the frame is *fitted* here as well as weighed, because the wire has a
+ * second ceiling this arm was not checked against at all.** `bytes` above is
+ * charged heap for `MAX_QUEUE_BYTES`; {@link CONTROL_MAX_BYTES} is the number the
+ * far end's `MessageAssembler` will accumulate, and a control frame past it fails
+ * the channel. The two are different units for different questions and both are
+ * now asked — the heap one off whatever string survives the fit, so `queuedBytes`
+ * still measures what is really held.
+ *
+ * The ordinary frame pays **one `Buffer.byteLength` over a string already in
+ * hand** and nothing else: no second encode, and {@link fitSnapshotFrame} is not
+ * entered. That gate matters because this runs on the emit path — `touchSafe()`
+ * fans a snapshot out to every attached client — which this class's own contract
+ * says may never slow the agent down.
  */
 function controlItem(frame: unknown): QueueItem {
-  const payload = safeStringify(frame);
+  const built = safeStringify(frame);
+  if (Buffer.byteLength(built, "utf8") <= CONTROL_MAX_BYTES) return heldFrame(built);
+  return heldFrame(fitSnapshotFrame(frame, built));
+}
+
+/** {@link controlItem}'s `+ 64` and its `length`, off the payload that survived the fit. */
+function heldFrame(payload: string): QueueItem {
   return { kind: "control", payload, bytes: payload.length + 64 };
+}
+
+/**
+ * A control frame over {@link CONTROL_MAX_BYTES}, reduced until it fits.
+ *
+ * ⚠ **Exported for `daemoncheck` and for nothing else.** Every rung below is
+ * reached only by a snapshot no offline fixture can assemble — pending
+ * permissions are minted by an ACP agent, and a driver that can raise one raises
+ * exactly one, well under this ceiling. So the alternative to exporting was a
+ * ladder nothing executes: measured, deleting this function and calling
+ * `safeStringify` alone left every driver in this repository green. That is the
+ * same shape as the plan-mode curation that stayed green for months over a card
+ * nobody could reach, and `CipherState.at` is the precedent for opening a seam
+ * rather than shipping one. Nothing in `src/` calls it but {@link controlItem}.
+ *
+ * Two rungs, each one re-encoded and re-measured on `Buffer.byteLength` rather
+ * than estimated — charging an estimate against a wire ceiling is the defect
+ * {@link BATCH_MAX_BYTES} records, and repeating it here would repeat it on the
+ * one frame that cannot afford it. The rung before both of them is the frame
+ * exactly as built, so **every frame that fits is byte-identical to what this
+ * daemon sent before** and no session that worked can tell this function exists.
+ *
+ * ⚠ **That rung is stated twice on purpose, and it stopped being redundant when
+ * the reduction became visible.** {@link controlItem} tests it first as a *gate*
+ * — an ordinary frame must pay one `Buffer.byteLength` over a string already in
+ * hand and nothing else, on the emit path `touchSafe()` fans out — and this
+ * function tests it again as its *contract*, because it is exported and because
+ * what it returns now carries {@link SessionSnapshot.reduced}. A caller reaching
+ * past the gate with a frame that fits would otherwise get a snapshot marked as
+ * cut with nothing cut out of it, and "marked means reduced" is the whole of what
+ * the client reads.
+ *
+ * **The first rung here reduces, and every shape it produces is one the client
+ * already handles.** `backgroundTasks[].outputFilePath` goes to `null` —
+ * precisely the projection `snapshot({listing: true})` already makes, and the one
+ * field in that record nothing draws. Each pending permission's `rawInput` and `content` become
+ * `clampBlob(…, 0)`, which is the `{truncated: true, bytes}` stand-in
+ * `PendingPermissionSnapshot` already declares both of them may be; `0` rather
+ * than a fresh literal because `clampBlob`'s own note forbids a second,
+ * subtly-different idea of what truncation looks like, and `jsonSize` of any
+ * non-nullish value is at least 1, so the bound always bites. What survives is
+ * every row with its title and its options — everything an Approve button needs,
+ * so a frame reduced this far is still answerable from the list.
+ *
+ * **The second halves the two parked lists until they fit, floor one each.** Both
+ * are `[...map.values()]` in insertion order and `raisedAt` is stamped at
+ * insertion, so a prefix is the *oldest* and `oldestWait` still names the real
+ * one; keeping at least one of a non-empty list keeps `needsHuman` true and keeps
+ * the card `SessionView` draws the right one. What is lost is real and visible
+ * rather than hidden — `waitingCount` under-reports, and the rows past the cut
+ * are gone from the frame — and it is recoverable: every one of them is in the
+ * log as a `permission_request` or `elicitation_request` event the transcript
+ * draws, and answering the oldest shrinks the next frame, so the cut lifts as
+ * work is done. Halved rather than cut flat to one, so a list that would nearly
+ * have fitted keeps nearly all of it, at a cost of at most ⌈log2 n⌉ encodes over
+ * a payload that halves as it goes.
+ *
+ * ⚠ **Measured 2026-09-17, this ladder run outside the daemon over a synthetic
+ * `hello`** carrying 32 background tasks at `acp/asynctasks.ts`'s clip ceilings
+ * and n permissions at theirs — 8 KiB of `{title, options}`, 8 KiB of `rawInput`,
+ * 8 KiB of `content`. n=5 is 184 392 bytes and goes out **byte-identical**; n=20
+ * is 546 917 and rung one alone brings it to 206 101 with **all twenty rows
+ * kept**; n=30 is 788 607 → 288 231, again all thirty, still rung one; n=60 is
+ * 1 513 677 and **one** halving brings it to 288 231 with 30 kept; n=200 is
+ * 4 897 537 and **two** halvings bring it to 452 491 with 50 kept. So the cut is
+ * proportional and not down to a single row: it spends the whole 512 KiB.
+ *
+ * ⚠ **The ladder terminates in practice and not in principle, and the residue is
+ * named rather than papered over.** `agentSessionId` and `agentHandle` are
+ * agent-minted and bounded nowhere (see {@link CONTROL_MAX_BYTES}), so a hostile or
+ * broken ACP binary defeats every rung with one enormous string. The fix for those
+ * is an ingest bound in `session.ts`, not another number here — which is exactly what **a surviving
+ * elicitation's `message` got**: it was on that list, and it was the sharpest
+ * member of it, because the halving rung floors at one row (`while (keep > 1)`
+ * never runs at `keep === 1`) so a single oversized question could not be cut by
+ * any rung at all. `clipElicitationMessage` bounds it at ingest now; the list
+ * above is what is left.
+ *
+ * ⚠ **`agentConfig`'s choice ids and names were on that list until 2026-09-19, and
+ * the way they came off is worth the sentence.** This note was right about them
+ * and stayed right while `BATCH_MAX_BYTES`'s own paragraph, three thousand lines
+ * up in this same file, said `plan.entries` was "the one door that reaches 1 MiB" —
+ * so a reader checking one half of this file against the other would have caught
+ * it, and nobody did. They are bounded at ingest now by `toConfigOptions` in
+ * `src/session.ts`, the same repair `clipElicitationMessage` is and for the same
+ * reason. What stays true of them here is only that this ladder could never have
+ * cut them: the bound is upstream of the frame, not a rung on it.
+ *
+ * What this ladder guarantees is that the **reachable** case — an agent parking
+ * permissions in parallel inside one turn — no longer wedges the attach. Whatever
+ * the last rung produced is sent rather than dropped, for {@link BATCH_MAX_BYTES}'s
+ * reason one arm over: a `hello` that never arrives is a transcript that never starts, which
+ * is the stall, not the cure for it.
+ *
+ * ⚠ **And what the ladder reduced is now *said on the frame*, which is a wire
+ * change rather than a tidy-up.** Every rung here
+ * produces a `session` that is a **lossy projection** of the one
+ * `GET /sessions/:id` serves whole, and nothing on the frame used to mark it.
+ * `store.ts` writes both into one `row.snapshot` — the 4s poll and `onSnapshot` —
+ * so past this ceiling `waitingCount`, the `more` count and `PermissionCard`'s
+ * *"Part of this request was too large to keep"* banner flipped on every
+ * poll/frame alternation, each flip re-arming an effect that fires
+ * `store.loadAll`. {@link SessionSnapshot.reduced} is set by the rungs that lose
+ * something and absent otherwise, so a client can add the cut rows back to a
+ * count and decline to clobber a fuller list it already holds. Marked rather than
+ * degrading the HTTP route to match, which is the conservative direction: a route
+ * cut to the frame's shape loses data no client can get back.
+ */
+export function fitSnapshotFrame(frame: unknown, built: string): string {
+  const session = snapshotOnFrame(frame);
+  if (session === null) return built;
+  // See the docblock: the gate in `controlItem` is a fast path and this is the
+  // contract. Nothing may come back marked as reduced without having been.
+  if (Buffer.byteLength(built, "utf8") <= CONTROL_MAX_BYTES) return built;
+  const rest = frame as Record<string, unknown>;
+
+  const trimmed: SessionSnapshot = {
+    ...session,
+    /*
+     * Written on the first rung rather than on the one that cuts rows, because
+     * the first rung already loses something — every permission's `rawInput` and
+     * `content` — and a frame that says nothing about that is the lossy
+     * projection this field exists to end. The counts are the record's **true**
+     * lengths, taken before either rung runs, so the halving below can slice the
+     * arrays without touching them; `...trimmed` carries this through every
+     * iteration of that loop.
+     */
+    reduced: {
+      pendingPermissions: session.pendingPermissions.length,
+      pendingElicitations: session.pendingElicitations.length,
+      blobs: true,
+    },
+    backgroundTasks: session.backgroundTasks.map((task) => ({ ...task, outputFilePath: null })),
+    pendingPermissions: session.pendingPermissions.map((pending) => ({
+      ...pending,
+      rawInput: clampBlob(pending.rawInput, 0),
+      content: clampBlob(pending.content, 0),
+    })),
+  };
+  let payload = safeStringify({ ...rest, session: trimmed });
+  if (Buffer.byteLength(payload, "utf8") <= CONTROL_MAX_BYTES) return payload;
+
+  // Both lists halve on the same counter: `slice` on the shorter one is a no-op
+  // once it is past its length, so the longer one goes on shrinking without a
+  // second loop, and a list of one is never cut to none.
+  let keep = Math.max(trimmed.pendingPermissions.length, trimmed.pendingElicitations.length);
+  while (keep > 1) {
+    keep = Math.floor(keep / 2);
+    payload = safeStringify({
+      ...rest,
+      session: {
+        ...trimmed,
+        pendingPermissions: trimmed.pendingPermissions.slice(0, keep),
+        pendingElicitations: trimmed.pendingElicitations.slice(0, keep),
+      },
+    });
+    if (Buffer.byteLength(payload, "utf8") <= CONTROL_MAX_BYTES) return payload;
+  }
+  return payload;
+}
+
+/**
+ * The snapshot a control frame carries, or `null` where it carries none.
+ *
+ * Hand-written, and it checks the three collections the rungs map over rather
+ * than only the `session` key: a frame whose `session` were some other shape
+ * falls back to being sent as built instead of throwing on the emit path. `hello`
+ * and `snapshot` are the two frames that reach the first answer today — and
+ * `collapse`'s own recovery snapshot is one of them, which is the frame that
+ * follows an overflow and had the same hole. `lagged`, `caught_up` and the rest
+ * reach the second and are nowhere near the bound.
+ */
+function snapshotOnFrame(frame: unknown): SessionSnapshot | null {
+  if (typeof frame !== "object" || frame === null) return null;
+  const session = (frame as { session?: unknown }).session;
+  if (typeof session !== "object" || session === null) return null;
+  const snapshot = session as SessionSnapshot;
+  return Array.isArray(snapshot.backgroundTasks) &&
+    Array.isArray(snapshot.pendingPermissions) &&
+    Array.isArray(snapshot.pendingElicitations)
+    ? snapshot
+    : null;
+}
+
+/**
+ * One stored event, encoded, and **never a hole**.
+ *
+ * {@link safeStringify}'s stand-in is a whole *frame* — `{type:"error",…}` — and
+ * this string goes **inside** a frame's `events` array, where that object is not a
+ * `StoredEvent` and `stream.ts`'s reducer would carry it as one. Nor may the event
+ * simply be dropped: the client checks `seq === lastAppliedSeq + 1` on **every**
+ * event in a batch and answers a hole by reconnecting at its own cursor, which
+ * replays the same event, which is skipped again — a reconnect loop with no end,
+ * i.e. the permanent stall {@link BATCH_MAX_BYTES} exists to remove, put back by
+ * the repair itself. So the seq is kept and the *event* becomes the stand-in,
+ * which is the same substitution `MemoryEventStore.append` already makes for an
+ * event it cannot weigh, in the same shape.
+ *
+ * Unreachable in practice — every event is parsed JSON out of an adapter or out of
+ * SQLite, so there is nothing cyclic and no `bigint` to throw on — which is
+ * precisely why it must not be the one path that stalls. The stand-in's own
+ * `JSON.stringify` cannot throw: every value in it is a primitive.
+ */
+function encodeStored(stored: StoredEvent): string {
+  try {
+    return JSON.stringify(stored);
+  } catch (error) {
+    // See above: not reachable from a parsed event, and a dropped seq is a client
+    // that reconnects onto the same batch for ever.
+    return JSON.stringify({
+      seq: stored.seq,
+      ts: stored.ts,
+      event: { type: "error", message: `event could not be encoded: ${describeError(error)}`, data: null },
+    });
+  }
 }
 
 function safeStringify(value: unknown): string {

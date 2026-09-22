@@ -1,4 +1,5 @@
 import { signupMode, type InstanceConfig, type SignupMode } from "./instance";
+import { LEGAL_DOCS, type LegalDoc } from "./legal";
 
 /**
  * The screens somebody reaches before there is a credential, and every rule
@@ -158,6 +159,45 @@ export function readGateToken(hash: string): string | null {
   return isGateToken(value) ? value : null;
 }
 
+/**
+ * The token out of whatever somebody pasted: a whole link, or the bare token.
+ *
+ * ⚠ **This exists because a mailed link needs somewhere to go on an instance
+ * that serves no web UI**, which is now the default deployment. `/confirm`,
+ * `/reset` and `/verify` are URLs a mail client opens in a **browser**, and with
+ * the bundle gone from the control plane's image there is nothing there to
+ * render them — so sign-up and password recovery would both dead-end at a JSON
+ * 404. The remedy is that the screens take the link by hand, which works
+ * identically in the app and in a browser and needs no deep-link handler, no
+ * Tauri plugin and no URL-scheme registration.
+ *
+ * **Three shapes accepted, and nothing else**: a full URL with the token in its
+ * fragment, a bare `#t=…` fragment, and the token on its own. Everything goes
+ * through {@link isGateToken} in the end, so a paste that is not token-shaped is
+ * `null` and the screen says the link is incomplete rather than the server
+ * answering about something nobody typed.
+ *
+ * `new URL` is tried and its throw is caught rather than guarded, because what
+ * arrives here is a string out of a chat app or a mail client and *"is this a
+ * URL"* has no cheaper honest test.
+ */
+export function readPastedGateToken(pasted: string): string | null {
+  const text = pasted.trim();
+  if (text.length === 0) return null;
+  // The bare token, which is what somebody copies when a mail client has
+  // helpfully turned the link into unclickable text.
+  if (isGateToken(text)) return text;
+  // A whole link. The fragment is where every one of these carries its token —
+  // deliberately, so it never reaches a server log — so the path is not read and
+  // the screen the person is *on* is what decides which flow this is.
+  try {
+    return readGateToken(new URL(text).hash);
+  } catch {
+    // Not a URL. It may still be a bare fragment somebody selected.
+    return text.startsWith("#") || text.startsWith("t=") ? readGateToken(text) : null;
+  }
+}
+
 /** Whether the screen can act. A token screen with no token cannot. */
 export function gateUsable(screen: GateScreen, token: string | null): boolean {
   return !gateNeedsToken(screen) || token !== null;
@@ -306,4 +346,54 @@ export type SignupScreen = SignupMode | "waiting" | "unavailable";
  */
 export function signupScreen(config: InstanceConfig | null, settled: boolean): SignupScreen {
   return signupMode(config) ?? (settled ? "unavailable" : "waiting");
+}
+
+/* ------------------------------------------------------------------ *
+ * The gate bundle's own routing
+ * ------------------------------------------------------------------ */
+
+/**
+ * Where somebody is, out of the three things the gate can draw.
+ *
+ * ⚠ **Not `router.ts`, and not an arm of `Route`.** That module parses a union
+ * covering sessions, machines, settings and plugins — every arm of which is a
+ * screen the gate bundle does not contain — so reaching for it would pull the
+ * app's whole vocabulary into a bundle built to be without it, and would offer a
+ * `Route` value somebody could navigate to and find nothing behind. What a
+ * browser can reach here is a short closed list.
+ *
+ * Here rather than beside `GateApp` because this file already owns every URL rule
+ * the gate has, and because a `.tsx` importing the store is not something a driver
+ * can load: `webcheck`'s barrel pins the order in which `../src` modules are
+ * first evaluated, and `router.ts` reads `window.location` in its module body.
+ * `nav.ts` and `market.ts` are their own modules for the same reason.
+ */
+export type GateRoute =
+  | { name: "gate"; screen: GateScreen }
+  | { name: "legal"; doc: LegalDoc }
+  | { name: "handoff" };
+
+export function parseGateRoute(pathname: string): GateRoute {
+  const segment = pathname.replace(/^\/+/, "").replace(/\/+$/, "");
+  const screen = GATE_SCREENS.find((s) => s === segment);
+  if (screen !== undefined) return { name: "gate", screen };
+  const doc = LEGAL_DOCS.find((d) => d === segment);
+  if (doc !== undefined) return { name: "legal", doc };
+  /*
+   * Anything else, including `/` and the handoff's own address.
+   *
+   * ⚠ **The fallback is the handoff rather than an error, and that is the one
+   * decision here.** Anything reaching this bundle at all was served a page by
+   * the control plane, which answers over a closed list — so a path arriving here
+   * came from a client-side navigation or a stray slash. The one thing this
+   * surface always has to say is where the product is; "not found" would be a
+   * dead end on a page whose entire job is to be a way forward.
+   *
+   * **Nothing decodes**, which is `router.ts`'s rule and its reason: a bare
+   * `decodeURIComponent` over a segment holding a lone `%` throws `URIError`
+   * during module evaluation — a blank page on a phone with no console, which
+   * reloading does not fix. Every value compared here is an ASCII literal, so
+   * there is nothing to decode.
+   */
+  return { name: "handoff" };
 }

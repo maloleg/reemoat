@@ -107,9 +107,10 @@ export const MAX_ACTION_TITLE_CHARS = 40;
  * not be reasoned about together.** An action costs a row in a menu. A *harness*
  * costs a **process** every time `GET /agents/capabilities` is read — that route
  * fans over every harness with `Promise.all` under `MAX_CONCURRENT_ASKS` of 2, and
- * the four built-ins already take 2531 ms overlapped (measured 2026-08-28; per
- * harness 627–2260 ms). So the sweep is roughly `(N + 4) / 2 × 1.3 s`, and the
- * builder opens that route on every visit.
+ * the built-ins already take 2531 ms overlapped (measured 2026-08-28 over the
+ * four there were then; per harness 627–2260 ms). So the sweep is roughly
+ * `(N + 5) / 2 × 1.3 s` — grok is the fifth and was not in that run, but it is a
+ * process like the rest — and the builder opens that route on every visit.
  *
  * ⚠ **And the cost is not only the wait.** A sweep holds both ask slots for its
  * whole length, while `model.complete` and `model.list` deliberately do *not*

@@ -1038,7 +1038,7 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
      * whatever either row is gated on. What made the order worth having is that the
      * cheap question is answered while the expensive read runs, so what has to be
      * pinned is that the harness *rows* fall back rather than blocking: with the
-     * listing still in flight the picker draws the four this product ships.
+     * listing still in flight the picker draws the five this product ships.
      */
     check(
       "and the harness rows fall back rather than waiting on that listing",
@@ -1046,4 +1046,76 @@ process.stdout.write("\nthe order and the hidden set a machine remembers for its
       true,
     );
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Where a claude session's opening mode comes from, and where that is said
+ *
+ * ⚠ **A placement, which is why it is read off the file.** The daemon sends no
+ * mode at `session/new`, so a session that opens in `Bypass permissions` opened
+ * that way because the adapter read the user's own `permissions.defaultMode` —
+ * and until this line there was no screen that could say so. Nothing typed can
+ * hold "this sentence is in the section and not in a row", and the row is where
+ * it would naturally have gone: its subline is **one line by construction**,
+ * because two kinds of row with different line counts is a list whose rows are
+ * different heights and a drag measures one and applies it to all.
+ * ------------------------------------------------------------------ */
+process.stdout.write("\nwhere the opening mode is explained\n");
+{
+  const pane = stripComments(
+    readFileSync(new URL("../src/ui/settings/MachineAgentsSection.tsx", import.meta.url), "utf8"),
+  );
+  check(
+    "the agents screen reads the provenance off the listing rather than fetching it",
+    /listing\?\.agents\.find\(\(one\) => one\.id === "claude"\)\?\.settingsMode \?\? null/.test(pane),
+    true,
+  );
+  check(
+    "and draws it only when something is actually set",
+    /settingsMode !== null && \(/.test(pane),
+    true,
+  );
+  /*
+   * The sentence names the file and quotes the value. It deliberately does not
+   * predict the mode: the adapter merges project settings over this one and
+   * normalises through aliases of its own, and the composer's chip is what says
+   * what a running session is really in.
+   */
+  check("naming the setting and the file it came from", /permissions\.defaultMode/.test(pane) && /settingsMode\.file/.test(pane), true);
+  /*
+   * ⚠ **And it is not in the row.** Asserted as an absence over the row's own
+   * render, because the failure this prevents is invisible in a screenshot of one
+   * machine: a second line appears only on a claude row, so a list with a claude
+   * row and an assembled one beside it has two heights and the drag misplaces
+   * every drop after the first.
+   *
+   * ⚠ **Bounded at both ends and on a named component, because the first version
+   * of this check could not observe what it forbids — twice over.** It read
+   * `pane.slice(pane.indexOf("<a class string>"))`: an unguarded `indexOf`, so a
+   * renamed class answers `-1` and `slice(-1)` yields **one character**, over
+   * which the absence is trivially true. And even when it matched, the anchor sat
+   * hundreds of lines *below* every `settingsMode` site, so the slice could never
+   * have contained one — the check passed on geometry rather than on the property.
+   *
+   * So: the component by name, both ends, each anchor asserted found before the
+   * absence is read, and a floor on the region's size — an absence over an empty
+   * or one-character string is the failure shape this whole file is careful about.
+   */
+  const rowStart = pane.indexOf("function StripRowView(");
+  check("the row's own component is where this is asserted", rowStart >= 0, true);
+  /*
+   * `StripRowView` is the last top-level declaration in the file today, so this
+   * resolves to the end of it — said out loud rather than left to `slice`, because
+   * "no next function" and "the anchor was not found" are the same `-1` and only
+   * one of them is fine. Add anything after it and the region tightens by itself.
+   */
+  const next = pane.indexOf("\nfunction ", rowStart + 1);
+  const rowEnd = next === -1 ? pane.length : next;
+  const rowRender = pane.slice(rowStart, rowEnd);
+  // A floor, so a region that collapsed to nothing cannot satisfy an absence.
+  check("which is a region big enough to be a component", rowRender.length > 2000, true);
+  // The positive control: the region really is the row, and not some other span
+  // that happens to lack the string.
+  check("and it really is the row that draws the one-line subline", rowRender.includes("min-h-[var(--text-2xs--line-height)] truncate"), true);
+  check("and never inside a row's one-line subline", rowRender.includes("settingsMode"), false);
 }

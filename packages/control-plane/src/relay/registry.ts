@@ -4,7 +4,6 @@ import { DEFAULT_RELAY_ID, type PresenceWriter } from "./presence.js";
 import {
   MAX_STREAMS_PER_SUBJECT,
   STREAM_ENCRYPTION_HEADER,
-  STREAM_ENCRYPTION_NONE,
   STREAM_SUBJECT_HEADER,
   STREAM_VERSION_HEADER,
 } from "../../../../src/relay/protocol.js";
@@ -148,8 +147,19 @@ export class RelayTunnel {
    * `subject` rides along as an advisory header for the daemon's logs. It confers
    * nothing — the proxied request still carries the caller's real token and the
    * daemon verifies it exactly as on the direct path.
+   *
+   * ⚠ **`encryption` is a parameter with no default, and both halves of that are
+   * deliberate.** This method wrote `"none"` unconditionally, which meant the
+   * *relay* decided whether a stream was encrypted — and the relay is the party
+   * the encryption exists to exclude. A carrier that chooses the mode can choose
+   * the weaker one. Requiring it at every call site means a future mode is a value
+   * somebody writes down rather than a default somebody forgets, and it means
+   * there is no spelling of this call that produces an unencrypted stream.
+   *
+   * The daemon refuses a mode it does not know at the *stream* level, so an
+   * unknown value costs one connection rather than the machine.
    */
-  open(subject: string): ClientHttp2Stream | null {
+  open(subject: string, encryption: string): ClientHttp2Stream | null {
     if (this.isClosed) return null;
     /*
      * **One caller's share of the tunnel, checked before the stream exists.**
@@ -175,7 +185,8 @@ export class RelayTunnel {
         [h2.HTTP2_HEADER_AUTHORITY]: "daemon",
         // What this tunnel agreed, never this build's maximum. See the field.
         [STREAM_VERSION_HEADER]: String(this.protocolVersion),
-        [STREAM_ENCRYPTION_HEADER]: STREAM_ENCRYPTION_NONE,
+        // Carried, not chosen. See the docblock.
+        [STREAM_ENCRYPTION_HEADER]: encryption,
         [STREAM_SUBJECT_HEADER]: subject,
       });
     } catch {

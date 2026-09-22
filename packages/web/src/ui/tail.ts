@@ -2403,6 +2403,20 @@ const STOP_REASON_TEXT: Record<string, string> = {
   max_tokens: "the agent ran out of room",
   max_turn_requests: "the agent hit its step limit",
   refusal: "the agent declined",
+  /*
+   * The daemon's second reason of its own, and the only one here that is about
+   * *this daemon* rather than about the agent — so it is phrased as an
+   * observation rather than as a verdict. `session/prompt` was never answered and
+   * an hour went by with nothing on the wire, so the daemon stopped claiming the
+   * turn was in flight. The agent was not stopped and was never told, which is
+   * why this does not read "the agent was stopped".
+   *
+   * Drawn, unlike `agent_error` — `showsInTranscript` excludes that one because
+   * the `error` event it ends is sitting immediately above it saying the same
+   * thing. Nothing sits above this: silence leaves no row, so this line is the
+   * only thing in the conversation that accounts for the gap. Q2.231.
+   */
+  abandoned: "the agent stopped answering",
 };
 
 export function stopReasonText(stopReason: string): string {

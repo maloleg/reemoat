@@ -407,7 +407,27 @@ export const DEFAULT_SMTP_PORT = 587;
  * discipline applied to a screen instead of stderr. `configured` is exactly
  * `problems.length === 0`, so the two can never disagree.
  */
-export function mailConfigured(db: DatabaseSync): { configured: boolean; problems: string[] } {
+export function mailConfigured(
+  db: DatabaseSync,
+  /**
+   * The origin this API answers on — **and only when it is serving no browser
+   * UI**. `null` or absent otherwise.
+   *
+   * ⚠ **One argument carrying a whole precondition, deliberately, rather than a
+   * `servesWeb` boolean and an origin.** The warning below needs both facts and
+   * is meaningless with either alone, so a caller that can supply one but not the
+   * other has nothing useful to pass — and two optional arguments is exactly the
+   * shape where somebody passes the origin, forgets the boolean, and gets a
+   * confident sentence about a correctly configured instance.
+   *
+   * Absent means *not asked*, which produces no warning: the readers here that
+   * cannot know — `registrationMode` and `mailUsable`, both of which want only
+   * `configured` — must not start reporting a problem they have no evidence for.
+   * `GET /v1/admin/settings` is the one caller that knows both, because the
+   * origin is a property of the request rather than of this process.
+   */
+  apiOriginServingNoWeb?: string | null,
+): { configured: boolean; problems: string[] } {
   const problems: string[] = [];
   if (readString(db, "smtp.host") === null) problems.push("smtp.host is not set");
   if (readString(db, "mail.from") === null) problems.push("mail.from is not set");
@@ -463,10 +483,53 @@ export function mailConfigured(db: DatabaseSync): { configured: boolean; problem
   }
 
   /*
+   * ⚠ **A link that will land on a JSON error, which nothing else can notice.**
+   *
+   * Every mailed link is `mail.public_url` plus `/confirm`, `/reset` or
+   * `/verify` — paths this service answers with a *page* only while it is serving
+   * a browser UI, and the default deployment serves none. Pointed here with no
+   * bundle, `POST /v1/forgot` — documented as the only remedy for a forgotten
+   * password — mails a link to an error envelope, and the first symptom is a
+   * person saying it is broken. `cpctl admin settings` and the admin screen both
+   * read this list, so the operator is told at the moment they can act.
+   *
+   * **A warning, not a refusal**, and the wording is what makes it one: `isMissing`
+   * keys on the words *"is not set"*, so a sentence carrying them would stop this
+   * instance sending mail at all — over a configuration that is merely pointed at
+   * the wrong host. The remedy is also not obvious enough to guess at: an operator
+   * may be serving the client from another origin, or relying on the app's own
+   * paste-a-link screens, and both are correct.
+   */
+  const publicUrl = readString(db, "mail.public_url");
+  if (apiOriginServingNoWeb !== null && apiOriginServingNoWeb !== undefined && publicUrl !== null) {
+    /*
+     * Compared as **origins**, so a trailing slash, a path or a port spelled its
+     * default way do not make one address look like two — `config.rs` makes the
+     * same argument for the server picker, one process over. A value neither side
+     * can parse simply does not match, which is the quiet direction and the right
+     * one: an unparseable `mail.public_url` is a separate problem and inventing a
+     * second sentence about it here would be guessing.
+     */
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(publicUrl).origin === new URL(apiOriginServingNoWeb).origin;
+    } catch {
+      sameOrigin = false;
+    }
+    if (sameOrigin) {
+      problems.push(
+        `mail.public_url (${publicUrl}) points at this control plane, which serves no browser UI — ` +
+          "links in messages answer an error rather than a page. Point it at wherever you serve the " +
+          "client, or tell people to paste the link into the Reemoat app, which takes one",
+      );
+    }
+  }
+
+  /*
    * `problems` is therefore not the same question as `configured`, and the split
    * is deliberate: the sender warning is advice, and letting it block delivery
    * would make a correct relay setup unusable. Everything that is *missing*
-   * blocks; the one thing that is merely *suspicious* does not.
+   * blocks; the two things that are merely *suspicious* do not.
    */
   return { configured: !problems.some(isMissing), problems };
 }

@@ -1,6 +1,9 @@
+import { readFile } from "node:fs/promises";
 import { PassThrough } from "node:stream";
+import { MAX_SOCKET_MESSAGE_BYTES } from "@reemoat/protocol";
 import type { AgentId, AgentLaunchConfig } from "../src/acp/agents.js";
-import { MemoryEventStore, endedWithDaemon } from "../src/events.js";
+import { DEFAULT_MAX_EVENT_BYTES, MemoryEventStore, endedWithDaemon, truncateEvent } from "../src/events.js";
+import type { AgentConfig, AnswerResolvedBy, SessionEvent } from "../src/events.js";
 import {
   SessionRegistry,
   autoResumable,
@@ -13,8 +16,29 @@ import { LocalRuntime } from "../src/runtime/local.js";
 import type { AgentAvailability, AgentProcess } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
 import { tmp } from "./tmp.js";
-import { check } from "./daemoncheck.env.js";
+import { check, report } from "./daemoncheck.env.js";
 import { now, tokenFor, verifier, credentials, stubAgentConfig } from "./daemoncheck.fixtures.js";
+
+/**
+ * One event in the bytes a WebSocket message would carry.
+ *
+ * `Buffer.byteLength` of the JSON rather than `estimateBytes`, because the
+ * estimate is what `flush` *budgets* with and this is what the socket *writes* —
+ * and the gap between the two is the defect every census below exists to catch.
+ * `session_started` is charged a flat 192 and weighs whatever its session id is.
+ */
+const weighEvent = (event: SessionEvent): number => Buffer.byteLength(JSON.stringify(event), "utf8");
+
+/**
+ * What a hostile agent's configuration looks like *after* `toConfigOptions`.
+ *
+ * Set by the section that drives one and read by the census below. Carried across
+ * rather than rebuilt from the caps, and that is the point: `MAX_CONFIG_CHOICES`
+ * and friends are not exported, so a census fixture restating them would be a
+ * second copy that drifts the moment somebody tunes one. The fixture for this one
+ * label is therefore the real ingest path's own output.
+ */
+let ingestedWideConfig: AgentConfig | null = null;
 
 /* ------------------------------------------------------------------ *
  * The one control that is not the agent's
@@ -110,7 +134,7 @@ process.stdout.write("\nwhat the agent says after its turn has ended\n");
 
   class TalkativeRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -267,7 +291,7 @@ process.stdout.write("\nwho owns a session's events\n");
 
   class HeldRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -638,6 +662,17 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     armed();
   };
 
+  /**
+   * An unsolicited `session/update` from the modal agent, pushed by the test.
+   *
+   * The same shape the talkative agent's `hook.emit` uses, and it is here for one
+   * reason: `current_mode_update` is the only ingest path onto `modes.current`
+   * that `toModes` does not stand in front of, so it cannot be reached through
+   * `session/new`, `session/resume` or a `set_mode` reply. Agent-first, outside a
+   * turn, which is exactly when a real one arrives.
+   */
+  const modalHook: { emit: (update: Record<string, unknown>) => void } = { emit: () => {} };
+
   const spawnModal = (): AgentProcess => {
     // Per *process*, which is the whole point: this is the state that does not
     // survive, exactly as a real agent's does not.
@@ -647,6 +682,8 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     const toAgent = new PassThrough();
     const toClient = new PassThrough();
     const send = (message: unknown): void => void toClient.write(`${JSON.stringify(message)}\n`);
+    modalHook.emit = (update) =>
+      send({ jsonrpc: "2.0", method: acp.methods.client.session.update, params: { sessionId: "conv_1", update } });
     let buffer = "";
     toAgent.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
@@ -721,7 +758,7 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
 
   class ModalRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "claude", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "claude", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -741,6 +778,45 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
 
   check("a fresh conversation starts on the agent's own mode", modeOf(), "default");
   check("and its own effort", effortOf(), "default");
+
+  /*
+   * ⭐ **The third door onto `modes.current`, driven agent-first.**
+   *
+   * `toModes` refuses a `currentModeId` over `MAX_CONFIG_ID_CHARS`, and it is on
+   * the `session/new` and `session/resume` paths only. A `current_mode_update`
+   * notification reaches `updateConfig` directly, and used to be written through
+   * with no bound at all — measured through a real registry and a stub over real
+   * streams, a 2 MB id produced a logged `agent_config` of 2,000,126 bytes after
+   * `truncateEvent`, against a `MAX_SOCKET_MESSAGE_BYTES` of 1,048,576. Past that
+   * the assembler refuses, the channel fails, and the client reconnects onto the
+   * same `seq` for ever.
+   *
+   * Both halves, because neither discriminates alone: an over-long id must be
+   * IGNORED (a bound that refuses everything would also pass the first check),
+   * and an ordinary one must still MOVE the mode (which is what fails against a
+   * guard written the wrong way round).
+   */
+  const modeSettle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+  /** The largest single event this session has logged, as the wire would weigh it. */
+  const widestLoggedEvent = (): number =>
+    managed.log
+      .read(0, 10_000, 64 * 1024 * 1024)
+      .reduce((most, stored) => Math.max(most, Buffer.byteLength(JSON.stringify(stored.event), "utf8")), 0);
+
+  modalHook.emit({ sessionUpdate: "current_mode_update", currentModeId: "m".repeat(2 * 1024 * 1024) });
+  await modeSettle();
+  check("a mode id past the id bound is ignored rather than published", modeOf(), "default");
+  report(
+    "and no event it would have ridden is past the socket ceiling",
+    widestLoggedEvent() <= MAX_SOCKET_MESSAGE_BYTES,
+    `widest logged event ${widestLoggedEvent()} against ${MAX_SOCKET_MESSAGE_BYTES}`,
+  );
+  modalHook.emit({ sessionUpdate: "current_mode_update", currentModeId: "plan" });
+  await modeSettle();
+  check("while an ordinary one still moves the mode", modeOf(), "plan");
+  modalHook.emit({ sessionUpdate: "current_mode_update", currentModeId: "default" });
+  await modeSettle();
+  check("and moves it back", modeOf(), "default");
 
   /*
    * ⭐ **What the restore may *not* put back, which is the half no driver reached.**
@@ -833,10 +909,24 @@ process.stdout.write("\nthe mode a person chose, across the restart a setting ca
     duringRestore[1] ?? "<the hook never fired>",
     "normal",
   );
+  /*
+   * ⚠ **The empty window is gone, and that is the point of the change rather than
+   * a side effect of it.** This read `["<none>", "0"]` — the frames between
+   * `doStop` clearing the controls and `onStarted` refilling them, over which a
+   * client drew its own faint memory. `config_changed` is a reason a message
+   * revives, so `doStop` keeps the controls now ({@link revivableByPrompt}) and
+   * `snapshotConfigSource` serves the held set through the whole restart: the strip
+   * reads as though nothing happened to it, which is exactly what that getter was
+   * written to achieve and what it could only do for part of the window before.
+   *
+   * What replaced the `409` the old emptiness was protecting against is the `busy`
+   * guard, moved **above** the deferred arm in `setConfigOption` and `setMode` —
+   * asserted three checks down, where a mode chosen mid-restart is refused.
+   */
   check(
-    "the window with no agent still reports none, so a client draws its own memory",
+    "the window with no agent no longer reports none: the strip does not blink",
     duringStop.slice(0, 2),
-    ["<none>", "0"],
+    ["acceptEdits", "2"],
   );
   check("which is the state it is drawn over", duringStop[2] ?? "<the hook never fired>", "starting");
   /*
@@ -1035,7 +1125,7 @@ process.stdout.write("\ntwo config changes at once\n");
 
   class PairRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -1184,7 +1274,7 @@ process.stdout.write("\na long model list, cut and whole\n");
 
   class LongRuntime extends LocalRuntime {
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "kimi", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);
@@ -1223,4 +1313,441 @@ process.stdout.write("\na long model list, cut and whole\n");
   check("both reads agree about the value", String(whole?.value), String(polled?.value));
 
   await longRegistry.shutdown();
+}
+
+/* ------------------------------------------------------------------ *
+ * A config list nothing bounded, and the census that would have found it
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\na config list nothing bounded\n");
+{
+  /*
+   * ⭐ **`agent_config` was a door past `MAX_SOCKET_MESSAGE_BYTES`, and a nearer
+   * one than the door the comments called "the one".** `truncateEvent`'s arm for
+   * it nulls descriptions and leaves ids, names and values alone on purpose — a
+   * picker missing a choice offers the agent less than it supports — so the arm
+   * could not shrink the large part at all, and nothing bounded it at ingest
+   * either. Measured 2026-09-19 by replaying `truncateEvent` at
+   * `DEFAULT_MAX_EVENT_BYTES`: 20 000 choices came out at **1 318 159 bytes**, one
+   * choice with a 2 MB `value` at **4 000 214**, and at a realistic 40-character
+   * value and name the cliff was **7 766 choices** — below `plan.entries`' ~9 500.
+   * Past the ceiling `MessageAssembler` refuses, the channel fails, and
+   * `stream.ts` reconnects onto the same event for ever.
+   *
+   * The bound is at ingest, in `toConfigOptions`. This drives it through a real
+   * `SessionRegistry` rather than calling the function, because the function is
+   * not exported and because what matters is what reaches a snapshot.
+   *
+   * The agent below is every measured shape at once.
+   */
+  const acp = await import("@agentclientprotocol/sdk");
+  const HUGE = 2_000_000;
+  const CHOICES = 20_000;
+
+  /** The config the stub answers `session/new` with; swapped between the two runs. */
+  const published: { options: () => unknown[]; modes: unknown } = { options: () => [], modes: null };
+
+  const hostileOptions = (): unknown[] => [
+    // Dropped whole: the id round-trips in `session/set_config_option`, so a
+    // clipped one names no control.
+    {
+      id: "i".repeat(HUGE),
+      name: "Unreachable",
+      description: null,
+      category: "model",
+      type: "select",
+      currentValue: "a",
+      options: [{ value: "a", name: "A", description: null }],
+    },
+    // Kept, with the 2 MB choice dropped out of it for the same reason and the
+    // rest cut to fit. The selected value sits **past** the cut on purpose.
+    {
+      id: "model",
+      name: "N".repeat(HUGE),
+      description: "D".repeat(HUGE),
+      category: "C".repeat(HUGE),
+      type: "select",
+      currentValue: `m${CHOICES - 1}`,
+      options: [
+        { value: "v".repeat(HUGE), name: "Enormous", description: null },
+        ...Array.from({ length: CHOICES }, (_, index) => ({
+          value: `m${index}`,
+          name: `Model ${index}`,
+          description: "p".repeat(400),
+        })),
+      ],
+    },
+  ];
+
+  /*
+   * ⚠ **The other end of `MAX_CONFIG_BYTES`, and it is the end that was wrong.**
+   * opencode publishes **362 models on one control** — the largest real list this
+   * repository knows of — and the first draft of the backstop weighed a model row
+   * at ~60 bytes, which is what a row costs with no prose on it. With a
+   * description on each it is ~450, so 362 rows is ~163 KiB and the 128 KiB draft
+   * cut the largest honest list in the world down to 256 rows while reporting
+   * `truncated`. A bound that bites on real data is a picker that lies, which is
+   * the exact failure `truncateEvent`'s own arm refuses to make. So this shape is
+   * driven too, and it must come through **whole and unflagged**.
+   */
+  const realOptions = (): unknown[] => [
+    {
+      id: "model",
+      name: "Model",
+      description: "AI model to use",
+      category: "model",
+      type: "select",
+      currentValue: "provider/model-361-2026-09-19",
+      options: Array.from({ length: 362 }, (_, index) => ({
+        value: `provider/model-${index}-2026-09-19`,
+        name: `Provider Model ${index} (latest)`,
+        description: "d".repeat(400),
+      })),
+    },
+  ];
+
+  const spawnWide = (): AgentProcess => {
+    const toAgent = new PassThrough();
+    const toClient = new PassThrough();
+    const send = (message: unknown): void => void toClient.write(`${JSON.stringify(message)}\n`);
+    let buffer = "";
+    toAgent.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line.trim().length === 0) continue;
+        const message = JSON.parse(line) as Record<string, any>;
+        const id = message["id"];
+        switch (message["method"]) {
+          case acp.methods.agent.initialize:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: { sessionCapabilities: { resume: {} } },
+                authMethods: [],
+              },
+            });
+            break;
+          case acp.methods.agent.session.new:
+          case acp.methods.agent.session.resume:
+            send({
+              jsonrpc: "2.0",
+              id,
+              result: { sessionId: "conv_wide", configOptions: published.options(), modes: published.modes },
+            });
+            break;
+          default:
+            if (id !== undefined) send({ jsonrpc: "2.0", id, result: {} });
+        }
+      }
+    });
+    return {
+      stdin: toAgent,
+      stdout: toClient,
+      stderr: new PassThrough(),
+      pid: 4322,
+      onceExit: () => () => {},
+      onceStartError: () => () => {},
+      hasExited: false,
+      waitForExit: async () => true,
+      endStdin: () => toAgent.end(),
+      kill: async () => {},
+    } as unknown as AgentProcess;
+  };
+
+  class WideRuntime extends LocalRuntime {
+    override async availability(): Promise<AgentAvailability[]> {
+      return [{ id: "kimi", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
+    }
+    override describe(agent: AgentId): AgentLaunchConfig {
+      return stubAgentConfig(agent);
+    }
+    override async launch(): Promise<AgentProcess> {
+      return spawnWide();
+    }
+  }
+
+  published.options = hostileOptions;
+  /*
+   * The legacy mode field, with a `currentModeId` nothing could match. Refused
+   * whole rather than clipped — a mode state with nothing selected is a control
+   * that draws blank.
+   */
+  published.modes = {
+    currentModeId: "c".repeat(HUGE),
+    availableModes: [{ id: "default", name: "Default", description: null }],
+  };
+  const wideRegistry = new SessionRegistry(new MemoryEventStore(), null, undefined, new WideRuntime());
+  const wide = await wideRegistry.create({ agent: "kimi", cwd: tmp("widecheck-") });
+  const config = wide.snapshot({ fullConfig: true }).agentConfig ?? { modes: null, options: [] };
+  ingestedWideConfig = config;
+  const model = config.options.find((option) => option.id === "model");
+
+  check("the option whose id round-trips and is 2 MB is dropped whole", config.options.length, 1);
+  check("the option beside it survives", model?.id, "model");
+  check("its name is clipped rather than dropped — it is a label, not an id", (model?.name.length ?? 0) <= 256, true);
+  check("so is its category", (model?.category?.length ?? 0) <= 256, true);
+  /*
+   * ⚠ **The 2 MB choice is *dropped* and the rest are *cut*, and both say so
+   * through the same flag.** `truncated` was already on the wire for the
+   * snapshot's own 40-row cut; setting it here is what keeps the arm's own
+   * argument — a picker must never silently offer less than the agent supports —
+   * true of a bound that does cut.
+   */
+  check("the 2 MB choice value is gone", model?.choices.some((one) => one.value.length > 256) ?? true, false);
+  check("and the list is cut", (model?.choices.length ?? 0) < CHOICES, true);
+  check("and says so", model?.truncated, true);
+  /*
+   * The assertion the cut exists to survive, and the one the halving rung is
+   * shaped around: taking a head would drop the selected model, and every screen
+   * that names the session reads it from here.
+   */
+  check(
+    "the selected choice survives even sitting past the cut",
+    model?.choices.some((one) => one.value === `m${CHOICES - 1}`),
+    true,
+  );
+  check("and is still what the control is set to", String(model?.value), `m${CHOICES - 1}`);
+  check("the mode state whose current id names nothing is refused whole", config.modes, null);
+
+  const asEvent: SessionEvent = { type: "agent_config", modes: config.modes, options: config.options };
+  const cut = weighEvent(truncateEvent(asEvent, DEFAULT_MAX_EVENT_BYTES));
+  report(
+    "and the event this produces no longer reaches the socket ceiling",
+    cut <= MAX_SOCKET_MESSAGE_BYTES,
+    `${cut} bytes after truncation against ${MAX_SOCKET_MESSAGE_BYTES}`,
+  );
+
+  await wideRegistry.shutdown();
+
+  published.options = realOptions;
+  published.modes = null;
+  const realRegistry = new SessionRegistry(new MemoryEventStore(), null, undefined, new WideRuntime());
+  const real = await realRegistry.create({ agent: "kimi", cwd: tmp("realcheck-") });
+  const realModel = real.snapshot({ fullConfig: true }).agentConfig?.options[0];
+  check("the largest real model list comes through whole", realModel?.choices.length ?? -1, 362);
+  check("and is not flagged as cut", realModel?.truncated ?? false, false);
+  /*
+   * And the fixture really is past the number that was wrong, or the two
+   * assertions above would pass over a list the draft would also have carried.
+   * The snapshot strips a non-selected choice's prose on the way out
+   * (`snapshotConfig`), so this is weighed as the agent published it, which is
+   * what the ingest backstop sees.
+   */
+  const realBytes = Buffer.byteLength(JSON.stringify(realOptions()), "utf8");
+  report(
+    "and the list it came through is past the 128 KiB the first draft used",
+    realBytes > 128 * 1024,
+    `${realBytes} bytes as the agent published them`,
+  );
+  await realRegistry.shutdown();
+}
+
+process.stdout.write("\nwhich events can still be too big for one WebSocket message\n");
+{
+  /*
+   * ⭐ **A census, because counting the doors by hand is how the wrong number got
+   * written down.** Two comments enumerated the events that can exceed one
+   * WebSocket message — `MAX_SOCKET_MESSAGE_BYTES` in `packages/protocol` and
+   * `BATCH_MAX_BYTES` in `src/server.ts` — each by reading `truncateEvent` by eye,
+   * and both missed `agent_config`; both called what they found "the one door". A
+   * third comment, `fitSnapshotFrame`'s residue note **in the same file as the
+   * second**, named `agentConfig`'s choice ids as bounded nowhere and was right the
+   * whole time. So the tree carried the contradiction inside one file and nobody
+   * read the two halves together. The arm was in the same switch throughout.
+   *
+   * So the enumeration is derived rather than typed. The labels come out of
+   * `SessionEvent`'s own union in `src/events.ts`, read off a **comment-stripped**
+   * copy — this repository deliberately restates code facts in prose, and a raw
+   * read matches the docblock rather than the union — and are differenced against
+   * the fixtures below in **both** directions. A label with no fixture fails here
+   * rather than being skipped silently, which a count could not tell apart.
+   *
+   * ⚠ **What a fixture is and is not.** Each is the largest event *this driver
+   * knows how to build*: where a field is bounded at ingest it is built at that
+   * bound, where it is bounded by nothing it is built enormous, and where the
+   * driver does not know — a `permissionId`, an `elicitationId` — it is built
+   * short. So this is a census with a stated construction, **not** a proof that
+   * no larger event of a given label exists. Somebody widening it should grep the
+   * minting site of the field they doubt and raise the fixture, not trust this
+   * paragraph. What the census does establish is the *partition*: which labels
+   * this repository already knows can exceed the ceiling, checked rather than
+   * remembered.
+   */
+  const source = await readFile(new URL("../src/events.ts", import.meta.url), "utf8");
+  const bare = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const unionAt = bare.indexOf("export type SessionEvent =");
+  const unionEnd = unionAt < 0 ? -1 : bare.indexOf(";", unionAt);
+  // Both ends guarded: a negative `indexOf` makes `slice` count from the end and
+  // *widen* the window instead of emptying it, which is how a census like this
+  // quietly starts sweeping the whole file.
+  if (unionAt < 0 || unionEnd < 0) throw new Error("could not find the SessionEvent union in src/events.ts");
+  const members = bare
+    .slice(unionAt, unionEnd)
+    .split("|")
+    .slice(1)
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+
+  const labelOf = (member: string): string => {
+    const at = bare.indexOf(`export interface ${member} {`);
+    const end = at < 0 ? -1 : bare.indexOf("\n}", at);
+    if (at < 0 || end < 0) throw new Error(`could not find interface ${member}`);
+    const match = /\n\s*type:\s*"([^"]+)";/.exec(bare.slice(at, end));
+    if (match?.[1] === undefined) throw new Error(`no type literal on ${member}`);
+    return match[1];
+  };
+  const declared = new Set(members.map(labelOf));
+
+  if (ingestedWideConfig === null) throw new Error("the wide-config section did not run");
+  const wideConfig = ingestedWideConfig;
+  const BIG = "x".repeat(2_000_000);
+  const by: AnswerResolvedBy = "client";
+  const fixtures: Record<string, SessionEvent> = {
+    // Clipped to `maxBytes`, so the size of the field cannot matter.
+    text: { type: "text", role: "agent", thought: false, text: BIG, messageId: null },
+    prompt: { type: "prompt", text: BIG, attachments: null },
+    agent_log: { type: "agent_log", line: BIG },
+    error: { type: "error", message: BIG, data: { blob: BIG } },
+    other: { type: "other", sessionUpdate: "unknown", raw: { blob: BIG } },
+    file_change: { type: "file_change", path: "/p", oldText: BIG, newText: BIG, source: "diff", toolCallId: null },
+    tool_call: {
+      type: "tool_call",
+      toolCallId: "t",
+      title: BIG,
+      kind: "other",
+      status: "pending",
+      // `cutLocations` slices to 32 and clips each path, so the count is bounded
+      // here rather than at ingest.
+      locations: Array.from({ length: 5_000 }, () => ({ path: BIG, line: 1 })),
+      rawInput: { blob: BIG },
+      parentToolCallId: null,
+      subagent: false,
+    },
+    /*
+     * Built at what `toolOutput` can actually emit rather than at what the type
+     * allows, and the difference is the whole point of the fixture. 40 000 blocks
+     * of 100 characters weighs 2 320 197 after truncation — the per-block budget
+     * floors at 64 the way `plan.entries`' does — but `toolOutput` spends one
+     * `MAX_TOOL_OUTPUT_BYTES` budget across the *array*, so the thinnest array it
+     * can produce is that many one-character blocks and no more.
+     */
+    tool_call_update: {
+      type: "tool_call_update",
+      toolCallId: "t",
+      title: null,
+      status: null,
+      locations: [],
+      rawInput: { blob: BIG },
+      images: null,
+      content: Array.from({ length: 32 * 1024 }, () => "y"),
+      parentToolCallId: null,
+      backgrounded: false,
+    },
+    // `MAX_ELICITATION_MESSAGE_CHARS` and the form caps, at their ceilings.
+    elicitation_request: { type: "elicitation_request", elicitationId: "e", toolCallId: null, message: "q".repeat(4 * 1024) },
+    elicitation_resolved: {
+      type: "elicitation_resolved",
+      elicitationId: "e",
+      toolCallId: null,
+      message: "q".repeat(4 * 1024),
+      action: "accept",
+      answers: Array.from({ length: 24 }, () => ({ key: "k", label: "l", value: "v".repeat(512) })),
+      by,
+    },
+    // `MAX_PERMISSION_SNAPSHOT_BYTES` and `MAX_PERMISSION_OPTIONS` at ingest; the
+    // title is clipped by the arm on top of that.
+    permission_request: {
+      type: "permission_request",
+      permissionId: "p",
+      toolCallId: null,
+      title: BIG,
+      options: Array.from({ length: 24 }, (_, i) => ({ optionId: `o${i}`, name: "n", kind: "allow_once" as const })),
+      decision: null,
+    },
+    permission_resolved: {
+      type: "permission_resolved",
+      permissionId: "p",
+      toolCallId: null,
+      title: BIG,
+      outcome: "selected",
+      optionId: "o",
+      by,
+    },
+    // Daemon-minted from a fixed set of push sites in `worktree.ts`, so the count
+    // is bounded by this repository's own code rather than by an agent.
+    workspace: {
+      type: "workspace",
+      mode: "worktree",
+      root: "/r",
+      requestedCwd: "/c",
+      branch: null,
+      baseCommit: null,
+      plainReason: null,
+      warnings: Array.from({ length: 5_000 }, () => ({ code: "c", message: "m".repeat(100) })),
+    },
+    /*
+     * Bounded at ingest as of this change — see `toConfigOptions`. The fixture is
+     * the **output of the real ingest path** on the hostile agent driven one
+     * section above (20 000 choices, a 2 MB choice value, a 2 MB option id, a 2 MB
+     * option name), rather than a hand-built object at the caps: the caps are not
+     * exported, and a fixture restating them would pass by agreeing with itself.
+     */
+    agent_config: { type: "agent_config", ...wideConfig },
+    // Fixed shapes: a status word and a token count.
+    status: { type: "status", status: "idle", exit: null },
+    turn_end: { type: "turn_end", stopReason: "end_turn", usage: null },
+    // The two agent-minted session ids, bounded nowhere — `src/server.ts`'s
+    // residue note says so and refuses to bound them, because an agent session id
+    // is `AcpClient`'s routing key and a clipped one names a conversation that
+    // does not exist.
+    context_cleared: { type: "context_cleared", agentSessionId: "a".repeat(600_000), previousAgentSessionId: "b".repeat(600_000) },
+    session_started: { type: "session_started", agent: "claude", sessionId: BIG, agentInfo: null, modes: null },
+    // The per-item budget floors at 64 bytes, so the arm bounds an entry and
+    // never the count, and `session.ts` pushes the agent's array through uncapped.
+    plan: {
+      type: "plan",
+      entries: Array.from({ length: 10_000 }, () => ({ content: "z".repeat(200), priority: "medium" as const, status: "pending" as const })),
+    },
+  };
+
+  const fixtured = new Set(Object.keys(fixtures));
+  const missing = [...declared].filter((label) => !fixtured.has(label));
+  const extra = [...fixtured].filter((label) => !declared.has(label));
+  /*
+   * Differenced both ways rather than counted. A count cannot tell a skipped
+   * label from a renamed one, and this census exists precisely because somebody
+   * enumerated a set by hand and got it wrong.
+   */
+  check("every label on the SessionEvent union has a fixture", missing, []);
+  check("and every fixture names a label that exists", extra, []);
+
+  /*
+   * ⚠ **The expected set is three, and it is a *claim about this repository's own
+   * unbounded fields*, not a claim that three is the natural number of doors.**
+   * `plan.entries` is uncapped at ingest and its arm budgets per item against a
+   * 64-byte floor; `context_cleared` and `session_started` carry agent session ids
+   * that `src/server.ts` names and deliberately declines to bound, because they
+   * round-trip as `AcpClient`'s routing key. Bounding any of them flips a row here
+   * and this list has to move with it — which is the whole reason it is a list
+   * somebody has to edit rather than a sentence somebody has to re-derive.
+   */
+  const expectedOver = ["context_cleared", "plan", "session_started"];
+  const over: string[] = [];
+  for (const label of [...declared].sort()) {
+    const fixture = fixtures[label];
+    if (fixture === undefined) continue;
+    const bytes = weighEvent(truncateEvent(fixture, DEFAULT_MAX_EVENT_BYTES));
+    process.stdout.write(`        ${label.padEnd(22)} ${String(bytes).padStart(9)} bytes after truncation\n`);
+    if (bytes > MAX_SOCKET_MESSAGE_BYTES) over.push(label);
+  }
+  check("exactly these labels can still exceed one WebSocket message", over.sort(), expectedOver);
+  report(
+    "and agent_config is no longer one of them",
+    !over.includes("agent_config"),
+    `ceiling ${MAX_SOCKET_MESSAGE_BYTES}; over: ${over.join(", ")}`,
+  );
 }

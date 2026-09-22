@@ -187,16 +187,33 @@ export interface AgentConfigOption {
   /**
    * Whether `choices` is a head rather than the whole list.
    *
-   * ⚠ **Set only on the snapshot that rides `GET /sessions`**, never on the
-   * `agent_config` event, which carries what the agent actually said. The list
-   * route returns sixty of these on a four-second poll to a phone, and opencode
-   * publishes 362 models in one control — see `MAX_SNAPSHOT_CHOICES` in
-   * `registry.ts`. The selected choice is always present regardless.
+   * **Two producers set it now, and until 2026-09-19 the docblock here said one
+   * did.** It said *"set only on the snapshot that rides `GET /sessions`, never on
+   * the `agent_config` event, which carries what the agent actually said"*, and
+   * that was true when it was written and is recorded rather than deleted because
+   * the second producer exists for a reason worth knowing:
    *
-   * Optional so that every producer that is *not* the snapshot keeps its shape and
-   * an older client reading `undefined` reads it as "the whole list", which is what
-   * it was before this field existed and is still true of every agent this
-   * repository ships. A client wanting the rest reads `GET /sessions/:id`.
+   * - **The snapshot's cut**, `clipChoices` in `registry.ts`, at
+   *   `MAX_SNAPSHOT_CHOICES`. The list route returns sixty of these on a
+   *   four-second poll to a phone, and opencode publishes 362 models in one
+   *   control. A client wanting the rest reads `GET /sessions/:id`, which answers
+   *   whole.
+   * - **The ingest backstop**, `toConfigOptions` in `session.ts`, at
+   *   `MAX_CONFIG_BYTES`. ⚠ **This one is not recoverable from another route**: it
+   *   runs before anything is stored, so `GET /sessions/:id` answers from the same
+   *   cut record and has no more to give. What forced it was a permanent stall —
+   *   an `agent_config` event past `MAX_SOCKET_MESSAGE_BYTES` is refused by
+   *   `MessageAssembler`, fails the channel, and is reconnected onto for ever —
+   *   and the numbers are at the constant.
+   *
+   * The selected choice is always present regardless, from either producer.
+   *
+   * Optional so that every producer that is *not* cutting keeps its shape and an
+   * older client reading `undefined` reads it as "the whole list", which is what it
+   * was before this field existed and is still true of every list any agent this
+   * repository ships has been measured publishing —
+   * `daemoncheck.after-the-turn-and-config` drives 362 models with prose on each
+   * and asserts they arrive unflagged.
    */
   truncated?: boolean;
 }
@@ -344,9 +361,9 @@ export interface TextEvent {
    * So the daemon numbers what the agent did not: once a connection has been seen
    * to use message ids, a chunk arriving without one is a message of its own and
    * is given a `~`-prefixed id here. The tilde is not a value any agent can send
-   * — it is not in the id space of any of the four — so a client can tell the two
+   * — it is not in the id space of any of the five — so a client can tell the two
    * apart, and a client that does not care simply compares for equality. An agent
-   * that never numbers anything (kimi, codex, opencode) keeps `null` throughout
+   * that never numbers anything (kimi, codex, opencode; grok is unmeasured) keeps `null` throughout
    * and every chunk joins exactly as it does today.
    */
   messageId: string | null;
@@ -702,7 +719,7 @@ export interface StatusEvent {
 }
 
 /**
- * ACP's five reasons, plus one of this daemon's own.
+ * ACP's five reasons, plus two of this daemon's own.
  *
  * ⚠ **`agent_error` is the turn that ended in an {@link ErrorEvent}**, which ACP
  * has no reason for because ACP never got that far: `session/prompt` rejected, so
@@ -715,8 +732,25 @@ export interface StatusEvent {
  * agent never gets to send one, and **a prompt with no turn end at all is the
  * shape this codebase calls a message that reached no model**. What it cost while
  * it was missing is Q2.218.
+ *
+ * ⚠ **`abandoned` is the turn the agent never answered at all**, and it is the
+ * third arrival of that same argument. `session/prompt` is the one RPC in
+ * `session.ts` fired with no deadline — deliberately, since a turn may legitimately
+ * run for hours — and `status === "running"` is *exactly* "a `session/prompt` this
+ * daemon issued has not settled". So an adapter that simply never answers pins a
+ * session at `running` for the life of the process: `cancelTurn` observes the same
+ * unsettled promise and cannot close it, and `parkable`'s first line refuses a
+ * session that is not `idle`, so the sweep cannot see it at any age. Reported as a
+ * panel reading *working* hours after the agent had finished.
+ *
+ * It is a reason of this daemon's own for the reason `agent_error` is: nothing in
+ * ACP's five fits. `cancelled` is something a person did, `refusal` is the model
+ * declining, `end_turn` is a reply ending — and this is none of those. It is the
+ * daemon saying, in the one row a reader trusts, *we stopped waiting*. What decides
+ * when is `TURN_SILENCE_MS` and `ManagedSession.wedged`; what writes it is
+ * `Session.abandonTurn`, locally, with nothing sent to the agent.
  */
-export type TurnStopReason = StopReason | "agent_error";
+export type TurnStopReason = StopReason | "agent_error" | "abandoned";
 
 export interface TurnEndEvent {
   type: "turn_end";
@@ -1020,7 +1054,7 @@ export function keepsItsConversation(
  * deleted on the rollback that `deploy/deploy.sh --ref` advertises as the way
  * back. A reason this build cannot name is one it may not act on.
  */
-const EXIT_REASON_MEMBERS: Record<ExitReason, true> = {
+export const EXIT_REASON_MEMBERS: Record<ExitReason, true> = {
   stopped: true,
   agent_exited: true,
   start_failed: true,
@@ -1338,6 +1372,46 @@ export interface PersistedSession {
    * cover both.
    */
   rank: number | null;
+  /**
+   * What the agent was offering when it went, or `null` where there is nothing to
+   * remember — a session that never started one, or one that is not coming back.
+   *
+   * See {@link AgentStateMemory} for why this is stored where `agentConfigState`
+   * is not, and `revivableByPrompt` in `registry.ts` for which stops write it.
+   */
+  agentState: AgentStateMemory | null;
+}
+
+/**
+ * What a session's agent was offering when it went, kept for a session a message
+ * would bring back.
+ *
+ * ⚠ **This is the one copy of agent state that outlives the process that learned
+ * it, and it exists because the alternative was visible.** `agentConfigState` and
+ * `agentCommandsState` describe a *process*, which is why `ManagedSession` refuses
+ * to restore either from disk — see the field. But `doStop` already keeps both for
+ * a stop the conversation returns from, on the argument that the options still
+ * describe what that conversation *is*; and that argument does not stop being true
+ * because the daemon restarted in between. Measured 2026-09-19 on this machine:
+ * every one of five parked rows answered `GET /sessions/:id/commands` with
+ * `revision 0, count 0`, so every one of them drew three `—` chips and an empty
+ * `/` menu — permanently, because nothing publishes again until somebody types.
+ *
+ * What makes it honest rather than a stale claim is that nothing here reaches an
+ * agent unchecked: a wake replays it through `Session.restoreConfig`, whose two
+ * withdrawal guards skip any option or mode the returning agent no longer offers.
+ * So the worst case is a control that accepts a tap and then quietly does not come
+ * back, which is the bound parking already had within one daemon life.
+ *
+ * Reduced rather than verbatim — see `reduceAgentState` in `registry.ts` — because
+ * opencode publishes 362 models and this blob rides the store's dirty-check key as
+ * well as the disk.
+ */
+export interface AgentStateMemory {
+  /** The raw `agentConfigState`, never the composed `snapshot().agentConfig`. */
+  config: AgentConfig;
+  /** The raw `agentCommandsState`, so the `/` menu is not empty on the way back. */
+  commands: AgentCommands;
 }
 
 export interface SessionStore {
@@ -1860,6 +1934,11 @@ export function estimateBytes(event: SessionEvent): number {
       // reach, each with a name and often a description.
       return (
         128 +
+        // `current` as well as `available`. It was charged nowhere, so a mode id
+        // this estimate could not see rode a batch whose cut is made from it —
+        // the ingest bound in `session.ts` is the real fix and this is the half
+        // that keeps the accounting honest about what it is about to write.
+        (event.modes === null ? 0 : event.modes.current.length) +
         (event.modes?.available.reduce((total, mode) => total + mode.id.length + mode.name.length + 32, 0) ?? 0) +
         event.options.reduce(
           (total, option) =>
@@ -2066,12 +2145,21 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
     case "agent_log":
       return { ...event, line: clip(event.line, maxBytes) };
     /*
-     * Two arms that return the event unchanged, which is what `default` below
-     * would already do — and that is precisely why they are written.
+     * Two arms that return the event unchanged. The switch is exhaustive and has
+     * no `default`, so they are written rather than left to fall through.
      *
-     * Both are bounded before they get here, in two different places — naming
-     * only one sent a reader to a file that has none. The message is clipped at
-     * ingest in `session.ts`; each answer is clipped in `registry.ts`'s
+     * ⚠ **Both are bounded again, and for a while only one of them was.** This
+     * read "The message is clipped at ingest in `session.ts`" while
+     * `MAX_ELICITATION_MESSAGE_CHARS` was retired and `MAX_ELICITATION_FORM_BYTES`
+     * weighed the *form*, of which `message` is not a field — so the question was
+     * bounded by the agent and by nothing in `src/`, and one over ~1 MiB is a
+     * batch this arm refuses to cut, taken whole by `flush`, refused by the far
+     * end and reconnected onto for ever. The clip is back, at
+     * `MAX_ELICITATION_MESSAGE_CHARS` (4096), applied by
+     * `clipElicitationMessage` in `session.ts`'s `onElicitation` — which is the
+     * one place it can be applied, since the same string goes on to
+     * `PendingElicitationSnapshot` as well as onto this event. Each answer is
+     * clipped in `registry.ts`'s
      * `settleElicitation` and refused outright over 2048 on the route; and the
      * form they came from is refused past its own caps. So neither can reach the per-event ceiling. And if one somehow did,
      * there is nothing here to cut: a truncated question is an unanswerable
@@ -2154,11 +2242,36 @@ export function truncateEvent(event: SessionEvent, maxBytes: number): SessionEve
         warnings: event.warnings.map((warning) => ({ ...warning, message: clip(warning.message, budget) })),
       };
     }
+    /*
+     * A configuration, with its prose removed and its structure left alone.
+     *
+     * Ids, names and current values are the identity of a control and are never
+     * clipped here — a picker missing a choice would silently offer the agent less
+     * than it supports. Only the prose goes, which is the same trade the
+     * `workspace` arm above makes for the same reason.
+     *
+     * ⚠ **That argument is right and it left this arm unable to shrink the large
+     * part, which was a door past `MAX_SOCKET_MESSAGE_BYTES` for as long as nothing
+     * bounded the structure at ingest.** Measured 2026-09-19 by replaying this
+     * function at `DEFAULT_MAX_EVENT_BYTES`: 20 000 choices came out at **1 318 159
+     * bytes**, one choice with a 2 MB `value` at **4 000 214**, and at a realistic
+     * 40-character value and name the cliff was **7 766 choices** — nearer than
+     * `plan.entries`' ~9 500, while three separate comments elsewhere were calling
+     * `plan` "the one door". Past the ceiling `MessageAssembler` refuses the
+     * message, `e2ee.ts` fails the channel, and `stream.ts` reconnects with its
+     * cursor unchanged onto the same event.
+     *
+     * The repair is at ingest and not here, because *here* is where the identity
+     * argument above holds: `toConfigOptions` in `session.ts` drops what
+     * round-trips, clips what does not, and marks `truncated` on anything it cut,
+     * so the "silently" is what was fixed rather than the trade.
+     * `daemoncheck.after-the-turn-and-config` now replays **every** arm of this
+     * switch against `MAX_SOCKET_MESSAGE_BYTES` and differences the labels against
+     * `SessionEvent`'s own union, so a claim about which arms can still be too big
+     * is checked instead of counted by hand. Counting by hand is how this one was
+     * missed three times.
+     */
     case "agent_config":
-      // Ids, names and current values are the identity of a control and are never
-      // clipped — a picker missing a choice would silently offer the agent less
-      // than it supports. Only the prose goes, which is the same trade the
-      // `workspace` arm above makes for the same reason.
       return {
         ...event,
         options: event.options.map((option) => ({

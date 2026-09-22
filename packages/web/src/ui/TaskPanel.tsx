@@ -1,9 +1,11 @@
-import { Bot, Square, X } from "lucide-react";
+import { Bot, ChevronRight, Square, Trash2, X } from "lucide-react";
 import { memo, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { errorText } from "../http";
 import {
+  BACKGROUND_EMPTY,
   dotCells,
+  FINISHED_LABEL,
   TASK_CHIPS,
   taskDuration,
   taskElapsedMs,
@@ -11,50 +13,137 @@ import {
   taskSections,
   taskTitle,
   taskTokens,
+  type BackgroundReporting,
 } from "../tasks";
 import { taskFinished, type BackgroundTask } from "../wire";
 import type { OutstandingTask } from "./tail";
-import { Icon, IconButton, SETTINGS_HEADING, SHEET_HEAD } from "./bits";
+import { Icon, IconButton, SETTINGS_HEADING } from "./bits";
+import { useLeaving } from "./leaving";
+import { PaneHandle } from "./PaneHandle";
 import { LAYER, useDismissible } from "./overlay";
+import { taskPane } from "./taskWidth";
 
 /**
- * How wide the docked panel is at `xl`, and the gutter the conversation opens for
- * it — **one length, and the two class strings that spend it.**
+ * The **longest** this panel may outlive a close, and it is one number in two
+ * files.
  *
- * ⚠ **They have to be equal and nothing can derive one from the other**, because a
- * Tailwind class only exists if it survives a scan of the source *as a literal*:
- * `` `xl:w-[${W}]` `` emits no CSS at all, so neither half can be built from a
- * number and there is no single string both can be cut from. What is available is
- * putting both copies on two adjacent lines under one docblock, so that changing
- * one is done with the other on screen. They were written out instead — the width
- * here, the padding four hundred lines into `SessionView` — and the *conversation's*
- * half was the one a driver grepped for, as a literal, in `SessionView`'s source.
- * So the watched half was the gutter and **nothing at all watched this width**: a
- * 28rem panel over a 26rem gutter was the direction that could go out of step in
- * silence. Moving both here does not by itself fix that — what does is the driver
- * now reading the two rem values out of these two lines and asserting they are
- * equal, which is a pin neither half ever had.
+ * It is a ceiling on the wait rather than the wait: `leaving.ts` ends the exit on
+ * the panel's own `animationend`, and this decides only what happens when that
+ * never arrives — an animation cancelled by a class change, a tab backgrounded
+ * across the exit, a browser that fires nothing for a `0.01ms` duration. What it
+ * costs to get wrong is not a stuck animation but a panel that never unmounts,
+ * sitting over the conversation with nothing left to explain why.
  *
- * `SessionView` imports {@link TASK_PANEL_GUTTER} and puts it on the column
- * holding the header, the transcript and the composer, because the panel is
- * `position: fixed` and displaces nothing by itself. Below `xl` neither applies:
+ * ⚠ **It is the longer of the panel's two exits, not the one it plays most.** The
+ * phone's sheet leaves on `--animate-sheet-out` at 260ms and the docked card on
+ * `--animate-rise-out` at 140, and a backstop is only a backstop if it outlasts
+ * both. `webcheck` reads both tokens out of the stylesheet and asserts this
+ * against the longer while requiring the shorter to be under it — neither file can
+ * see the other's number.
+ *
+ * Declared here rather than imported from `MenuDrawer`, which is this repository's
+ * standing pattern for these: `DRAWER_EXIT_MS` and `SHEET_EXIT_MS` are each
+ * written beside the class strings they are the ceiling for and each asserted
+ * against its own token. One constant shared across three surfaces would be a
+ * single number standing for durations that are not the same.
+ */
+const TASK_PANEL_EXIT_MS = 260;
+
+/**
+ * How wide the docked panel is, and the gutter the conversation opens for it —
+ * **one length, spent twice, and it is a custom property now rather than a pair of
+ * literals.**
+ *
+ * ⭐ **The panel is draggable from `md` up, on the rail's own mechanism.** It was
+ * two Tailwind literals — `md:w-[20rem] xl:w-[26rem]` here and
+ * `md:pr-[20.75rem] xl:pr-[26.75rem]` for the conversation — with a driver reading
+ * the two lists and asserting the subtraction at every step. That pin did its job
+ * and is gone with the thing it pinned: a width somebody can drag cannot be a
+ * literal at all.
+ *
+ * ⚠ **The gutter is `calc` of the same property rather than a second number**,
+ * which is what retires the whole class of defect the old pair was built around. A
+ * width and a gutter that had to agree, in two files, four hundred lines apart, is
+ * replaced by one declaration and one `+ 0.75rem` — the 12px the card stands off
+ * the right edge, so its *left* edge is that much further in and a gutter equal to
+ * the width alone would be overlapped by precisely that much. There is no second
+ * copy left to drift.
+ *
+ * ⚠ **They still cannot be built from a number.** A Tailwind class only exists if
+ * it survives a scan of the source *as a literal*, so `` `md:w-[${W}]` `` emits no
+ * CSS — which is exactly why the two declared defaults live in `index.css`, where a
+ * breakpoint belongs, and `taskWidth.ts` keeps the driver's copy of them.
+ *
+ * `SessionView` imports {@link TASK_PANEL_GUTTER} and puts it on the column holding
+ * the header, the transcript and the composer, because the panel is
+ * `position: fixed` and displaces nothing by itself. Below `md` neither applies:
  * the panel is a sheet *over* the conversation and there is nothing to make room
  * for.
+ *
+ * ⭐ **It docks from `md`.** The sheet is for a phone — every phone in portrait is
+ * under 768px, and a phone in *landscape* is better served by the card anyway,
+ * since a bottom sheet at `h-[92dvh]` over a short landscape viewport is the whole
+ * screen.
+ *
+ * ⚠ **The conversation's width is not monotonic in the window's**, which is why
+ * `index.css` declares two defaults rather than one. At `lg` the rail arrives and
+ * takes `RAIL_DEFAULT` — 384px — so the 20rem panel leaves the conversation **308px
+ * at 1024, narrower than the 436px the same panel leaves at 768**. Measured across the three:
+ *
+ * | | rail | panel | conversation |
+ * |---|---:|---:|---:|
+ * | `md` 768 | — | 20rem | 436px |
+ * | `lg` 1024 | 384 | 20rem | 308px |
+ * | `xl` 1280 | 384 | 26rem | 468px |
+ *
+ * A reader who drags overrides both — an inline declaration on `documentElement`
+ * beats both media blocks — and a double-click on the separator hands them back.
+ * `taskWidth.ts` argues why that is the honest shape rather than one number.
  */
-export const TASK_PANEL_WIDTH = "xl:w-[26rem]";
-/** The other half of {@link TASK_PANEL_WIDTH}: the same length, as padding. */
-export const TASK_PANEL_GUTTER = "xl:pr-[26rem]";
+export const TASK_PANEL_WIDTH = "md:w-[var(--task-fit)]";
+/**
+ * How far the docked panel stands off every edge it is near: 12px, `*-3`.
+ *
+ * ⚠ **It used to sit flush — `inset-y-0 right-0`, square, no shadow — and that is
+ * what made it impossible to line up.** Flush against the viewport it is a second
+ * surface claiming the same edges as the window's own chrome, so its head's rule
+ * and the header's had to be the same height to the pixel or the eye read one
+ * broken line. They were 4px apart. Pinning the two heights fixed that instance
+ * and left the arrangement: any future change to either row reopens it.
+ *
+ * Inset, the question stops being asked. A card that touches nothing lines up with
+ * nothing, so there is no edge to meet and nothing to keep in step — which is why
+ * this is a *shape* change rather than a second measurement.
+ *
+ * ⚠ **`0.75rem` appears once more, inside {@link TASK_PANEL_GUTTER}'s `calc`**, and
+ * that is the one number here a driver still has to read out of two strings and
+ * compare. Three `*-3` utilities and a `+ 0.75rem` are the same 12px written in
+ * Tailwind's two spellings, and nothing in CSS relates them.
+ */
+export const TASK_PANEL_INSET = "md:top-3 md:right-3 md:bottom-3";
+/**
+ * The room the conversation leaves for it: the panel's own width **plus the inset
+ * on the side it is docked to**.
+ *
+ * ⚠ **Not the same length as {@link TASK_PANEL_WIDTH}, and the difference is
+ * load-bearing.** While the panel was flush the two were one length and `webcheck`
+ * asserted exactly that. Standing it 12px off the right edge moves its *left* edge
+ * 12px further in, so a gutter still equal to the width would be overlapped by
+ * precisely that much — the card lying over the last 12px of every line of the
+ * conversation.
+ */
+export const TASK_PANEL_GUTTER = "md:pr-[calc(var(--task-fit)+0.75rem)]";
 
 /**
  * Everything this session left running, on a surface of its own.
  *
  * ⚠ **Two placements, one element, and the breakpoint is answered only in CSS.**
- * Below `xl` this is a bottom sheet over the conversation — the geometry the
+ * Below `md` this is a bottom sheet over the conversation — the geometry the
  * settings pop-up uses on a phone, because that is the shape somebody asked for
- * and the shape this app already teaches. At `xl` it docks against the right edge
+ * and the shape this app already teaches. From `md` it docks against the right edge
  * and `SessionView` pads itself out of the way, so the conversation is beside it
  * rather than under it. `AppShell`'s rule holds here: nothing in JavaScript knows
- * what `xl` is, so a resized window cannot end up drawing a docked panel over a
+ * what `md` is, so a resized window cannot end up drawing a docked panel over a
  * conversation that did not make room for it.
  *
  * ⚠ **Portaled, and not because it is modal — because `fixed` has to mean the
@@ -70,7 +159,7 @@ export const TASK_PANEL_GUTTER = "xl:pr-[26rem]";
  *
  * ⚠ **It is `menu` in the overlay stack rather than `sheet`, and that is the
  * whole of what "not modal" means here.** A `sheet` puts `inert` on `#root`,
- * which would switch off the conversation this panel is docked *beside* at `xl` —
+ * which would switch off the conversation this panel is docked *beside* from `md` —
  * and there is no way to make that conditional without asking JavaScript what the
  * breakpoint is. So: Escape closes the topmost layer as everywhere else, the ask
  * card's digit shortcuts stand down while it is open exactly as they do under any
@@ -92,8 +181,10 @@ export function TaskPanel({
   onClose,
   tasks,
   background,
-  reports,
+  reporting,
   onStopTask,
+  hiddenFinished,
+  onClearFinished,
 }: {
   open: boolean;
   onClose: () => void;
@@ -102,32 +193,73 @@ export function TaskPanel({
   /** What the agent said it left running, from the snapshot. */
   background: readonly BackgroundTask[];
   /**
-   * Whether this agent reports background work at all.
+   * Whether anybody has been able to ask this session about background work.
    *
-   * ⚠ **The only thing that can tell an empty list from an unasked question.**
-   * claude is the one agent of the four with a lifecycle on the wire; kimi
-   * backgrounds shells, agents and cron jobs and says nothing, codex leaves a PTY
-   * running behind an ordinary tool call, and opencode cannot background at all.
-   * `No tasks currently running` is Claude Code's sentence and it is a *claim* —
-   * true for claude, false for the other three, and this is the field that keeps
-   * it from being said about them.
+   * ⚠ **The only thing that can tell an empty list from an unasked question**, and
+   * it is three-valued rather than a boolean because *unasked* is two different
+   * situations. claude is the one agent of the four with a lifecycle on the wire;
+   * kimi backgrounds shells, agents and cron jobs and says nothing, codex leaves a
+   * PTY running behind an ordinary tool call, and opencode cannot background at
+   * all — that is `silent`. And after a daemon restart there is no agent at all
+   * until one is resumed, which read as `silent` and put a sentence about claude on
+   * screen that was false. `tasks.ts` carries the derivation and the three
+   * sentences.
    */
-  reports: boolean;
+  reporting: BackgroundReporting;
   /** `null` where nothing can stop one — an older daemon, or a session with no agent. */
   onStopTask: ((task: BackgroundTask) => Promise<void>) | null;
+  /**
+   * Which finished rows this reader has cleared — a set, not a filtered list, so
+   * the wire's own partition stays the wire's. `finishedTasks.ts` owns it.
+   */
+  hiddenFinished: ReadonlySet<string>;
+  onClearFinished: (ids: readonly string[]) => void;
 }): ReactNode {
-  useDismissible("menu", onClose, open);
-  if (!open) return null;
+  /*
+   * ⭐ **The sheet collapses rather than disappearing, and on a phone that was the
+   * whole complaint.** Opening is a CSS animation on mount and needs no state;
+   * leaving cannot be, because an unmounted element does not animate — so the
+   * panel stays on screen with the outgoing animation on it and is dropped when
+   * the movement reports. `leaving.ts` is the mechanism and carries every
+   * paragraph of it; what is here is this panel's own two exits and its own
+   * ceiling.
+   *
+   * ⚠ **`shown`, never `open`, in both places below.** The layer's lifetime and
+   * the element's are one statement: registered on `open` the layer pops at the
+   * *start* of the exit, so the ask card's digit shortcuts come back and Escape
+   * stops being swallowed while an opaque sheet is still covering the screen.
+   * `MenuDrawer` measured that one layer kind over, where it costs `inert` as
+   * well.
+   */
+  const { shown, leaving, onAnimationEnd } = useLeaving(open, TASK_PANEL_EXIT_MS);
+  useDismissible("menu", onClose, shown);
+  if (!shown) return null;
   return createPortal(
     <>
-      {/* The scrim exists only where the panel covers the conversation. At `xl`
+      {/* The scrim exists only where the panel covers the conversation. From `md`
           the panel is beside it and there is nothing to dim — and a scrim that
           followed it there would grey out the transcript somebody opened this to
-          read alongside. */}
+          read alongside. `md:hidden` is `display: none`, so at those widths no
+          animation runs here and nothing takes a click: the docked arrangement
+          needs nothing from this element.
+
+          ⚠ **It had no animation in *either* direction**, which is half of what
+          "it disappears" was about — the ground snapped to 25% ink on open and
+          blinked out on close while the sheet slid. It is on the sheet's clock now,
+          which is what makes the two read as one movement.
+
+          ⚠ **`pointer-events-none` the moment it starts leaving.**
+          `--animate-scrim-out` ends at `opacity: 0` while the element lives on, so
+          without it the tail of every close is an invisible viewport-sized
+          click-eater. `MenuDrawer` measured that; it is a belt here rather than the
+          fix, and removing it restores the eater precisely on the path that is
+          hardest to see. */}
       <div
         aria-hidden={true}
-        className={`fixed inset-0 bg-fg/25 xl:hidden ${LAYER.overlay}`}
-        onClick={onClose}
+        className={`${
+          leaving ? "animate-scrim-out pointer-events-none" : "animate-scrim"
+        } fixed inset-0 touch-manipulation bg-fg/25 md:hidden ${LAYER.overlay}`}
+        onClick={leaving ? undefined : onClose}
       />
       {/*
        * ⚠ **The material tokens are `SHEET_PANEL`'s, in `SHEET_PANEL`'s order, and
@@ -136,13 +268,25 @@ export function TaskPanel({
        * retire an idiom" is knowingly not obeyed.** The shared twelve are
        * `pb-safe animate-sheet flex h-[92dvh] min-h-0 flex-col overflow-hidden
        * rounded-t-2xl border-t border-edge bg-surface shadow-2xl`, and the `aside`
-       * below writes them in that order, so a diff against `bits.tsx` lines up.
+       * below writes them in that order — with **one substitution**, which is the
+       * exception that proves the rule rather than a drift: the leading `pb-safe`
+       * is spelled as its own value, `pb-[max(0.75rem,env(safe-area-inset-bottom))]`.
+       * `.pb-safe` is declared **unlayered** in `index.css` while Tailwind emits
+       * every utility inside `@layer utilities`, and an unlayered rule beats a
+       * layered one regardless of specificity — so the `md:pb-0` at the end of this
+       * string was a silent no-op and the docked card carried 12px of phone padding
+       * at every desktop width. Measured at 1280: `padding-bottom` computed 12px
+       * with `md:pb-0` asking for 0, leaving the body 28px above the card's bottom
+       * border against 16px below its top. Written as a utility it is the same
+       * value in the same layer, so the `md:` variant can finally win.
+       * `Composer.tsx` records the identical cascade fact and names `SHEET`'s
+       * `sm:pb-0` as still losing it, which is this defect one surface over.
        *
        * **The positioning is deliberately not shared, and that is the half that
        * cannot be composed even in principle.** `SHEET_PANEL` carries `relative
        * w-full` because `Sheet.tsx` hands it to a `fixed inset-0 flex flex-col
        * justify-end` scrim that does the positioning for it; here the scrim is a
-       * sibling that exists only below `xl`, so this element is the positioned one
+       * sibling that exists only below `md`, so this element is the positioned one
        * and takes `fixed inset-x-0 bottom-0` instead. Those three are not
        * `SHEET_PANEL` tokens and its two are absent — which is why the question to
        * ask of this string later is *"are the twelve still the constant's, in its
@@ -150,50 +294,142 @@ export function TaskPanel({
        * true of. `SHEET_PANEL` is a bottom
        * sheet *and* a centred card: `sm:h-[min(44rem,88dvh)] sm:max-w-2xl
        * sm:rounded-2xl sm:border sm:pb-0 sm:animate-rise`. This surface is a bottom
-       * sheet at every width below `xl` — it has a rail beside it, not a backdrop
+       * sheet at every width below `md` — it has a rail beside it, not a backdrop
        * around it — so composing that string means cancelling six utilities in the
        * `sm:` variant, and a cancellation of the *same property in the same
        * variant* is exactly the trap `SETTINGS_HEADING` carries its own warning
        * about: `sm:h-[92dvh]` against `sm:h-[min(44rem,88dvh)]` is resolved by
        * Tailwind's emission order and not by the order of the string, so the height
        * of this panel would be decided by which file the scanner reached first.
-       * `SHEET_HEAD` below has no such half and *is* composed.
+       * ⚠ **The head below has the same half on the `min-h-*` axis and is spelled
+       * out for it**, so this file now refuses composition in both places for one
+       * reason. That paragraph read "`SHEET_HEAD` below has no such half and *is*
+       * composed", which was true when it was written and is the claim
+       * {@link PANEL_HEAD} reverses — a second `min-h` is resolved by emission
+       * order exactly as a second `h` is, and in a direction that only ever adds.
        *
        * What is shared is therefore shared by writing the same tokens: `h-[92dvh]`
        * rather than the `top-[8dvh] bottom-0` it replaces, which is the same
-       * geometry and the same grep. `xl:h-auto` is what that costs — with `top`,
+       * geometry and the same grep. `md:h-auto` is what that costs — with `top`,
        * `bottom` and a definite `height` all set, the height wins and `bottom` is
        * ignored, so the docked panel would stop 8dvh short of the floor.
        */}
       <aside
         aria-label="Background"
-        className={`pb-safe animate-sheet fixed inset-x-0 bottom-0 flex h-[92dvh] min-h-0 flex-col overflow-hidden rounded-t-2xl border-t border-edge bg-surface shadow-2xl ${TASK_PANEL_WIDTH} xl:inset-y-0 xl:right-0 xl:left-auto xl:h-auto xl:animate-none xl:rounded-none xl:border-t-0 xl:border-l xl:pb-0 xl:shadow-none ${LAYER.overlay}`}
+        /*
+         * ⚠ **This is what ends the exit, and {@link TASK_PANEL_EXIT_MS} is what
+         * happens if it never fires.** The aside is the element both outgoing
+         * keyframes are on, so it is the only node here that knows when the
+         * movement is over — which under `prefers-reduced-motion` is a frame rather
+         * than either constant. `leaving.ts` carries why it compares targets rather
+         * than keyframe names, which matters more here than on the drawer: this
+         * panel has a pulsing meter cell inside it, and `animationend` bubbles.
+         */
+        onAnimationEnd={onAnimationEnd}
+        /*
+         * ⚠ **Two arms, and each variant carries exactly one `animation` utility in
+         * each of them.** `md:animate-none` used to sit in the shared run, which
+         * was correct while there was no exit: it cancels `animate-sheet`, whose
+         * `translateY(100%)` would otherwise slide the docked card up from the
+         * bottom of the screen. It cannot stay there now. Written
+         * `md:animate-rise-out` beside a standing `md:animate-none` it is two
+         * utilities setting one property in one variant, resolved by Tailwind's
+         * emission order rather than by the order of this string — the trap
+         * `SETTINGS_HEADING` carries its own warning about. So the cancellation
+         * moved onto the non-leaving arm, where it has since become a real arrival:
+         * a card at a width with no edge to have come from is what `rise` is for,
+         * and `SHEET_PANEL` already answers it that way.
+         *
+         * ⚠ **And it is not optional at `md`.** An element carrying
+         * `animation: none` fires no `animationend`, so the exit would fall to the
+         * backstop and leave a fully visible card over the conversation for its
+         * whole duration — the mirror of the defect the backstop exists to prevent,
+         * arriving at one breakpoint only.
+         */
+        className={`pb-[max(0.75rem,env(safe-area-inset-bottom))] ${leaving ? "animate-sheet-out" : "animate-sheet"} fixed inset-x-0 bottom-0 flex h-[92dvh] min-h-0 flex-col overflow-hidden rounded-t-2xl border-t border-edge bg-surface shadow-2xl ${TASK_PANEL_WIDTH} ${TASK_PANEL_INSET} ${leaving ? "md:animate-rise-out" : "md:animate-rise"} md:left-auto md:h-auto md:rounded-2xl md:border md:pb-0 md:shadow-lg ${LAYER.overlay}`}
         role="dialog"
       >
         <PanelHead onClose={onClose} />
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
           <PanelBody
             background={background}
+            hiddenFinished={hiddenFinished}
+            onClearFinished={onClearFinished}
             onStopTask={onStopTask}
-            reports={reports}
+            reporting={reporting}
             tasks={tasks}
           />
         </div>
-        {/* Claude Code's own footer, one word changed, and it is true here for the
-            same reason theirs is: `outputFilePath` points at
-            `/private/tmp/claude-<uid>/…/tasks/<id>.output`, outside the workspace,
-            which `files-paths-git.md` containment refuses to read. There is no
-            detail view to build and this sentence is what says so, rather than an
-            absence nobody can explain. Gated on there being something to say it
-            about: under `No tasks currently running` it explains the absence of a
-            detail view for tasks that do not exist. */}
-        {background.length > 0 && (
-          <p className="shrink-0 border-t border-edge px-4 py-3 text-2xs text-faint sm:px-5">
-            Each task&apos;s output reaches the transcript when it finishes; a per-task view
-            isn&apos;t sent to this app.
-          </p>
-        )}
+        {/* ⚠ **There was a footer here explaining that a per-task view is not sent
+            to this app, and it is gone by the owner's call.** The sentence was true
+            — `outputFilePath` points outside the workspace and there is no detail
+            view to build — but it answered a question nobody on this screen was
+            asking, on every visit, for ever. A standing explanation of an absence
+            costs more than the absence does once somebody has opened the panel
+            twice. The fact it stated is in `plugins.md`'s neighbourhood and in this
+            file's own history; what it may not be is a permanent line. */}
       </aside>
+      {/*
+       * ⭐ **The card can be made wider or narrower, on the rail's own separator.**
+       *
+       * `PaneHandle` is `AppShell`'s `RailHandle` generalised rather than a second
+       * one — `sign: -1` is the whole of the difference, this pane being to the
+       * *right* of its handle, so leftwards is wider. Everything measured on the
+       * rail comes with it: capture rather than `window` listeners, the committed
+       * width restated on cancel, the keyboard steps, and the reset on
+       * double-click, which here hands back the two breakpoints instead of a single
+       * default.
+       *
+       * ⚠ **A sibling of the `<aside>`, not a child of it.** That element is
+       * `overflow-hidden`, so a strip on its edge would be clipped away entirely;
+       * and it is the element both exit keyframes are on, so a handle inside it
+       * would ride the card off the screen on every close.
+       *
+       * ⚠ **`md:top-6 md:bottom-6`, not the card's own `*-3`.** The panel is
+       * `md:rounded-2xl` — a 16px radius — so a strip run its full height overhangs
+       * the corner at both ends and its top and bottom 16px sit over the
+       * conversation, where a click meant for a line of text resizes the panel
+       * instead. 24px in clears the radius with room to spare.
+       *
+       * ⚠ **`LAYER.overlay`, not `LAYER.header`.** The rail's strip has to beat two
+       * sticky bars in the page; this one has to beat the card it is attached to,
+       * which is itself at `overlay` — and it is portaled to `document.body`, so it
+       * is `fixed` rather than `absolute`.
+       *
+       * `hidden md:…:block` for `AppShell`'s reason: below `md` this panel is a
+       * sheet covering the conversation, there is nothing beside it to take width
+       * from, and the breakpoint is answered in CSS and nowhere else.
+       *
+       * ⚠ **`[@media(pointer:fine)]` nested inside the width, because an 8px strip
+       * is not a control a finger may reach.** `md` is 768px and `lg` is 1024,
+       * which every tablet clears — so without this the separator is a tabbable,
+       * capture-taking, `touch-action: none` strip lying across the edge of the
+       * conversation on an iPad, with `bg-transparent group-hover:` as its only
+       * appearance and therefore no appearance at all. A flick that begins within
+       * four pixels of that edge resized a pane instead of scrolling, silently,
+       * and committed the result.
+       *
+       * ⚠ **Nested rather than a competing `[@media(pointer:coarse)]:hidden`.**
+       * Two `display` utilities in one string are resolved by Tailwind's emission
+       * order rather than by the order of the string — the trap this repository
+       * records on three other properties. Narrowing the one that turns it *on*
+       * has no such contest: `hidden` is the base and exactly one thing overrides
+       * it. Verified in the built stylesheet.
+       *
+       * This is what the docblock above already claims — *"these separators exist
+       * only where the pointer is a mouse"* — which is also the standing argument
+       * for an 8px target under this app's 44px tap floor. It was a claim rather
+       * than a mechanism until now. The cost is that a coarse-pointer device has
+       * no way to change either width; the stylesheet's declared answers stand,
+       * which is the same trade the rail already made below `lg`.
+       */}
+      <PaneHandle
+        pane={taskPane}
+        label="Background panel width"
+        sign={-1}
+        className={`fixed hidden w-2 translate-x-1/2 md:top-6 md:bottom-6 md:[@media(pointer:fine)]:block ${LAYER.overlay}`}
+        style={{ right: "calc(var(--task-fit) + 0.75rem)" }}
+      />
     </>,
     document.body,
   );
@@ -209,24 +445,79 @@ export function TaskPanel({
  * is not any section's figure either. Claude Code's own dialog has no total here;
  * what it puts in this slot is a *subtitle* naming the live kinds.
  */
+/**
+ * `SHEET_HEAD`'s row at this panel's own height, and the number is the only
+ * difference.
+ *
+ * ⚠ **It was that constant, composed, and un-composing it reverses a decision
+ * this file recorded rather than drifting from one.** The paragraph here argued
+ * that the row being a second copy of an idiom is what composing fixed —
+ * `web-typography.md`'s rule, and still true of the row. What it never weighed is
+ * that 56px is a height argued for a *sheet's* head: a `text-lg` `<h1>` beside a
+ * 32px `nav` control. This head carries a `text-xs` `<h2>` and a 24px `sm` button,
+ * so it was forty pixels of band around twenty-four of content — which is what was
+ * reported.
+ *
+ * ⚠ **`` `${SHEET_HEAD} min-h-11` `` is a silent no-op, and it is measured rather
+ * than feared.** Two `min-h-*` utilities on one element are resolved by the
+ * stylesheet's emission order rather than by the order of the class string, and
+ * that order is **numeric and ascending**: in the built sheet `.min-h-9`,
+ * `.min-h-10`, `.min-h-11`, `.min-h-12`, `.min-h-14` appear in that sequence
+ * inside one layer. So composition can only ever make this head *taller*. `h-10`
+ * is no escape either — a `min-height` of 56px beats a `height` of 40 by the box
+ * algorithm rather than by the cascade — and `min-h-[2.75rem]` is the same bet in
+ * a less legible form, there being no arbitrary `min-h` anywhere in the sheet to
+ * say where one would land.
+ *
+ * ⚠ **Inverting `SHEET_HEAD` to 44 and letting `Sheet` compose 56 back on would
+ * work, and is refused for that reason.** Upward composition is the direction
+ * emission order permits, so it is a smaller diff that happens to land — and it
+ * makes a head's height depend on which of two numbers is larger, which is the
+ * trap `BUTTON_SIZE` and `DRAWER_HEADING` each spent a docblock closing. It also
+ * hands the next person who wants a shorter sheet head a revert that fails in
+ * silence. `SHEET_HEAD` stays 56 and stays one thing.
+ *
+ * **44 rather than 40, and the two pixels are the whole of the reason.** Every
+ * entry in `ICON_BUTTON_SIZE` reaches this app's 44px floor through a positioned
+ * `::after` that costs no layout — `sm` is 24px of ink plus `after:-inset-2.5`.
+ * At 40 that target overhangs the band by 2px top and bottom, and the `<aside>`
+ * carries `overflow-hidden`, which clips hit-testing along with paint: a 42px
+ * target with nothing on screen to explain the missing strip. At 44 it ends flush,
+ * bar a corner lens the card's own 16px radius takes at the point furthest from
+ * the glyph. It is also the one value on `webcheck`'s own reaches-44 list that
+ * `min-h-10` is not, and it still takes 12px — a fifth — off the band.
+ *
+ * Every other token is `SHEET_HEAD`'s, in `SHEET_HEAD`'s order, `sm:px-5`
+ * included: the scroller below carries the same inset, and a head inset further
+ * than its own contents is the one visible thing spelling this out could break.
+ * `webcheck` differences the two strings rather than trusting the sentence.
+ *
+ * ⚠ **Not named with a capital-S `Sheet` in any spelling.** `webcheck` pins
+ * `/\bSheet\b/` **absent** from this file's code, which is what says this panel is
+ * not the app's modal pop-up.
+ */
+const PANEL_HEAD = "flex min-h-11 shrink-0 items-center gap-2 border-b border-edge px-4 sm:px-5";
+
 function PanelHead({ onClose }: { onClose: () => void }): ReactNode {
   return (
     /*
-     * `SHEET_HEAD` itself, and the title at the step every other sheet head draws.
-     *
-     * This row was written out — the same utilities minus `sm:px-5` — and then the
-     * title diverged to `text-sm`, two steps under the `text-lg` of the `<h1>` in
-     * `Sheet.tsx`, on a surface that below `xl` is visually the same bottom sheet
-     * above the same `SHEET_HEAD` row. A quieter title is a claim that this pop-up is a
-     * lesser one, which is not true of it and was not argued anywhere; what it
-     * actually was is a second copy of an idiom drifting, which is what
-     * `web-typography.md` says extracting the constant does not by itself stop.
-     * The `sm:px-5` that arrives with the constant is why the scroller and the foot
-     * above carry it too — a head inset further than its own contents is the one
-     * visible thing composing this could have broken.
+     * ⚠ **`xl:min-h-15` was here and is gone with the flush edges.** It made this
+     * head exactly as tall as the window's own header so their two rules read as
+     * one line. A card that stands 12px off every edge meets no line, so the
+     * number had nothing left to agree with — and a number kept past its reason is
+     * the next thing to drift. {@link PANEL_HEAD} is the height that replaced it,
+     * argued from what the row holds rather than from what it sits beside.
      */
-    <div className={SHEET_HEAD}>
-      <h2 className="min-w-0 flex-1 truncate text-lg font-semibold">Background</h2>
+    <div className={PANEL_HEAD}>
+      {/* ⚠ **`text-xs`, and the rule is the comparison rather than the size.** This
+          is a sub-window *inside* the app, so its name may not compete with the
+          name of the screen it is inside: `SessionTitle` is `text-sm`, and this was
+          `text-lg` — a panel announcing itself more loudly than the conversation it
+          is about. `webcheck` asserts it is strictly the smaller of the two rather
+          than asserting either number, which is what keeps the claim true when
+          either moves. The band's height is the other half of that decision and did
+          not move with it for a release; {@link PANEL_HEAD} is where it did. */}
+      <h2 className="min-w-0 flex-1 truncate text-xs font-semibold">Background</h2>
       <IconButton icon={X} label="Close background tasks" onClick={onClose} size="sm" />
     </div>
   );
@@ -235,12 +526,16 @@ function PanelHead({ onClose }: { onClose: () => void }): ReactNode {
 function PanelBody({
   tasks,
   background,
-  reports,
+  hiddenFinished,
+  onClearFinished,
+  reporting,
   onStopTask,
 }: {
   tasks: readonly OutstandingTask[];
   background: readonly BackgroundTask[];
-  reports: boolean;
+  hiddenFinished: ReadonlySet<string>;
+  onClearFinished: (ids: readonly string[]) => void;
+  reporting: BackgroundReporting;
   onStopTask: ((task: BackgroundTask) => Promise<void>) | null;
 }): ReactNode {
   /*
@@ -254,6 +549,39 @@ function PanelBody({
    * announce — so the reference is a sound key.
    */
   const sections = useMemo(() => taskSections(background), [background]);
+  /*
+   * ⭐ **The finished band is the panel's, not the partition's**, and it is drawn
+   * even when there is nothing in it — which is the owner's rule and the reason
+   * the kebab's door exists at all: a record you can only reach while something
+   * else is running is not a record.
+   *
+   * ⚠ **Gated on `reports`, like the sentence below and for the same reason.**
+   * `Completed (0)` is a *count*, and a count of finished background work is an
+   * **answer**. claude is the one agent of the four that reports a lifecycle;
+   * kimi backgrounds shells and says nothing, codex leaves a PTY behind an
+   * ordinary tool call, opencode cannot background at all. So on three of the four
+   * a zero here would assert exactly what the sentence below is careful to
+   * disclaim. The `||` arm is belt rather than a second behaviour: a non-reporting
+   * agent's `background` is always empty, so it never fires.
+   *
+   * ⚠ **`"unasked"` is on the barred side with `"silent"`, and for the same
+   * reason.** After a restart the daemon's own rows are gone — `asyncTasks` is a
+   * `Map` in memory, emptied at `doStop` — so a zero there would say *nothing
+   * finished* about a session that may have finished ten things before the process
+   * died. The band comes back the moment an agent does, which is when the count
+   * starts meaning something again.
+   */
+  const finished = useMemo(() => background.filter((task) => taskFinished(task.state)), [background]);
+  const showFinished = reporting === "reports" || finished.length > 0;
+  /*
+   * ⚠ **One count where there were two proxies.** The `Agents` heading was gated
+   * on `sections.length > 0` and a live section's own heading on
+   * `sections.length > 1`, both standing in for *is there more than one band on
+   * screen* — which was true while `Completed` was inside `sections` and stopped
+   * being the moment it moved out. Counting the bands says the thing directly.
+   * `FinishedSection` names itself unconditionally, so it counts.
+   */
+  const bands = (tasks.length > 0 ? 1 : 0) + sections.length + (showFinished ? 1 : 0);
   /*
    * ⚠ **One interval for the whole panel, and it used to be one per card.**
    * `useTick` was called inside `TaskCard`, so a panel at the daemon's own
@@ -278,20 +606,18 @@ function PanelBody({
    * first.
    */
   const headings = useId();
-  if (tasks.length === 0 && sections.length === 0) {
+  if (tasks.length === 0 && sections.length === 0 && !showFinished) {
     /*
-     * Two empty states, because there are two reasons to be empty and only one of
-     * them is a fact about this machine. See `reports` above: the first sentence
-     * is Claude Code's, verbatim, and it is only sayable about an agent that
-     * would have told us.
+     * ⭐ **Three empty states, because there are three reasons to be empty and only
+     * one of them is a fact about the work.** It was a ternary over a boolean, and
+     * the missing third arm is what put *"This agent doesn't report background
+     * work"* on screen about claude after every daemon restart: the flag is `false`
+     * while no agent is attached, and that is *nobody asked* rather than *it does
+     * not report*. `tasks.ts` holds the derivation and the sentences, as a table
+     * over the union rather than a shape here, so a fourth state is a compile
+     * error and `webcheck` can sweep the partition.
      */
-    return (
-      <p className="text-2xs text-faint">
-        {reports
-          ? "No tasks currently running"
-          : "This agent doesn't report background work, so nothing here can say whether any is running."}
-      </p>
-    );
+    return <p className="text-2xs text-faint">{BACKGROUND_EMPTY[reporting]}</p>;
   }
   return (
     <div className="space-y-5">
@@ -301,7 +627,7 @@ function PanelBody({
            at all, which is worse than the unnamed region it was meant to fix. The
            two conditions are therefore literally the same expression. */
         <section
-          aria-labelledby={sections.length > 0 ? `${headings}-agents` : undefined}
+          aria-labelledby={bands > 1 ? `${headings}-agents` : undefined}
           className="space-y-1.5"
         >
           {/* `Agents` heads its list only when something else is populated —
@@ -309,9 +635,7 @@ function PanelBody({
               single labelled group is a label with nothing to distinguish it
               from, and this list was unlabelled for its whole life before the
               second source arrived. */}
-          {sections.length > 0 && (
-            <PanelHeading count={tasks.length} id={`${headings}-agents`} label="Agents" />
-          )}
+          {bands > 1 && <PanelHeading count={tasks.length} id={`${headings}-agents`} label="Agents" />}
           {tasks.map((task) => (
             <p className="flex items-center gap-2 text-2xs" key={task.key}>
               <span className="shrink-0 text-muted">
@@ -335,11 +659,11 @@ function PanelBody({
         </section>
       )}
       {sections.map((section, index) => {
+        const headingId = `${headings}-${index}`;
         /* From the other side: a machine running only shells draws the cards it
            always would have, unlabelled — and then names no region either, for
            the reason the `Agents` section above states. */
-        const named = tasks.length > 0 || sections.length > 1;
-        const headingId = `${headings}-${index}`;
+        const named = bands > 1;
         return (
           <section
             aria-labelledby={named ? headingId : undefined}
@@ -355,6 +679,19 @@ function PanelBody({
           </section>
         );
       })}
+      {/* Last, always named, and drawn whether or not it holds anything — the one
+          band whose job is saying that work is over rather than that it is going. */}
+      {showFinished && (
+        <FinishedSection
+          headingId={`${headings}-finished`}
+          hidden={hiddenFinished}
+          label={FINISHED_LABEL}
+          now={now}
+          onClear={onClearFinished}
+          onStop={onStopTask}
+          tasks={finished}
+        />
+      )}
     </div>
   );
 }
@@ -391,9 +728,184 @@ function PanelBody({
  * as a region at all, so the heading would have been announceable while the group
  * under it stayed anonymous. Its caller points `aria-labelledby` here.
  */
-function PanelHeading({ label, count, id }: { label: string; count: number; id: string }): ReactNode {
+/**
+ * The finished band's type: `SETTINGS_HEADING`'s idiom one tone down.
+ *
+ * ⚠ **Written out rather than `` `${SETTINGS_HEADING} text-faint` ``, which is a
+ * silent no-op.** Two members of one colour family on one element are resolved by
+ * Tailwind's alphabetical emission rather than by the order of the string —
+ * `RETIRE_HEADING`, `HIDDEN_PROVIDER_HEADING` and `DRAWER_HEADING` are each spelled
+ * out for exactly this, and `webcheck.typography.ts` sweeps every shared class
+ * string for the form. This is the sixth documented site of the idiom, and that
+ * driver carries a **census** rather than a count, so a sixth reddens it as *found,
+ * not listed* until the table names it.
+ *
+ * **Faint rather than muted, and the distinction is the band's whole subject.**
+ * Every other heading in this panel names work that is *going*; this one names work
+ * that is *over*. A reader scanning a live panel is scanning past it, and by the
+ * owner's call it should look like it.
+ *
+ * ⚠ **Both arms of the band spend it** — the fold and the empty heading — or the
+ * band changes colour at the moment it empties, which is the one moment nothing
+ * about it has changed.
+ */
+const FINISHED_HEADING = "text-2xs font-semibold tracking-wider text-faint uppercase";
+
+/**
+ * `Completed (n)`, folded, with the one control that empties it.
+ *
+ * ⭐ **A workflow that ended while this panel was open used to just sit there.**
+ * `taskSections` did move it to `Completed`, correctly — but `PanelBody` draws a
+ * section's heading only when something else is populated, so with one workflow
+ * and no delegations the finished card was drawn in the same place, at the same
+ * size, with its chip changed from `(running)` to `(done)` and **nothing on screen
+ * saying the word**. Reported as the panel not letting go of it. A band that folds
+ * is what says the row moved.
+ *
+ * ⚠ **Seeded closed, and the mechanism is the panel's early return rather than a
+ * prop.** `TaskPanel` renders nothing while `!shown`, so everything from
+ * `PanelBody` down is unmounted on every close and this `useState(false)` is read
+ * afresh on every open — the whole of *collapsed by default*, with no state to
+ * store and nothing to keep in step. It matters that this lives **here** and not
+ * in `TaskPanel`'s own body: that component is rendered unconditionally by
+ * `EventList`, so state written there would survive every close and every session
+ * switch instead.
+ *
+ * ⚠ **No `aria-controls`.** The body is `{open && …}`, and an attribute pointing
+ * at an id nothing renders names nothing — the defect `PanelBody` carries its own
+ * ⚠ about one region up. `aria-expanded` alone, which is what the transcript's own
+ * fold does.
+ *
+ * ⚠ **The `<h3>` is outside the `<button>`, not inside it.** A `<button>` takes
+ * phrasing content only, and the heading element carrying the id is what makes
+ * this `<section>` a named region at all — `PanelHeading`'s whole docblock is
+ * about that. So this is `PanelHeading`'s type and role, reached through a control.
+ *
+ * ⚠ **The count is what this reader is shown, and the band stands at `(0)`.** The
+ * clear hides rows; it does not destroy them, so `Completed` does not disappear
+ * when somebody empties it — which is the owner's rule. It goes only when the
+ * daemon's own rows go — a restart, the agent's `/clear`, an eviction at the cap —
+ * and that is right: there is nothing left for it to be the record of.
+ */
+function FinishedSection({
+  headingId,
+  hidden,
+  label,
+  now,
+  onClear,
+  onStop,
+  tasks,
+}: {
+  headingId: string;
+  hidden: ReadonlySet<string>;
+  label: string;
+  now: number;
+  onClear: (ids: readonly string[]) => void;
+  onStop: ((task: BackgroundTask) => Promise<void>) | null;
+  tasks: readonly BackgroundTask[];
+}): ReactNode {
+  const [open, setOpen] = useState(false);
+  const shown = tasks.filter((task) => !hidden.has(task.id));
+  /*
+   * ⭐ **Nothing to show is a heading, not a fold**, and that is a repair rather
+   * than a concession to the always-drawn band.
+   *
+   * It is already reachable without it: clear the list and `tasks.length > 0`
+   * while `shown.length === 0`, so the control stayed pressable over an empty
+   * body — verbatim the defect `EventList` names one file over, *a disclosure
+   * whose body is empty is a control that lies about having something behind it*,
+   * which is why the transcript's foot draws an inert paragraph in that state. The
+   * never-backgrounded session reaches the same arm by the same test, so one
+   * condition covers both.
+   *
+   * No clear control either: there is nothing to clear, and a trash beside a zero
+   * is an act with no object.
+   */
+  if (shown.length === 0) {
+    return (
+      <section aria-labelledby={headingId} className="space-y-1.5">
+        <PanelHeading count={0} id={headingId} label={label} tone={FINISHED_HEADING} />
+      </section>
+    );
+  }
   return (
-    <h3 className={SETTINGS_HEADING} id={id}>
+    <section aria-labelledby={headingId} className="space-y-1.5">
+      {/* `gap-3` rather than the `gap-1.5` this panel's sections use: the control
+          beside the fold is `sm`, 24px of ink carrying 10px of invisible target on
+          every side, and the fold itself is a `flex-1` button. At any gap under
+          12px that target lies on the fold's own face, which is the mis-tap pair
+          `ICON_BUTTON_SIZE`'s docblock calls the classic one. */}
+      <div className="flex items-center gap-3">
+        <h3 className="min-w-0 flex-1" id={headingId}>
+          {/* ⚠ **No `min-h`, so the band is exactly the height of its own words** —
+              it carried `min-h-11` on the argument that this is the only way into
+              the record and the panel is used from a phone. Reversed by the owner,
+              and the app's own rule is on their side: the 44px floor here is
+              scoped to controls that *answer an agent* — the ask, permission and
+              elicitation cards, asserted on those three files — and
+              `web-shell.md` says outright that a blanket version would be false,
+              naming a `<summary>` and a link inside a sentence as things that are
+              right not to reach it. A fold that reveals a list is one of those, and
+              a mis-tap costs one tap. It also read wrong: 44px of band beside the
+              24px of ink in the control next to it. The type is this band's own
+              constant, never a colour composed onto the shared one. */}
+          <button
+            aria-expanded={open}
+            className={`tap flex w-full items-center gap-1.5 rounded-md px-1 text-left hover:bg-raised ${FINISHED_HEADING}`}
+            onClick={() => setOpen(!open)}
+            type="button"
+          >
+            <span className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}>
+              <Icon as={ChevronRight} size={13} />
+            </span>
+            <span className="min-w-0 flex-1 truncate">
+              {label} ({shown.length})
+            </span>
+          </button>
+        </h3>
+        {/* ⚠ **This destroys nothing on the machine.** The daemon has exactly one
+            background-task route — stopping one — and no forget, no delete, no
+            clear; it keeps every terminal row on purpose so this panel can answer
+            *did that build finish*. Another tab still sees them, and so does this
+            one after a reload. `finishedTasks.ts` carries the whole argument for
+            why that is in memory rather than stored.
+
+            Every finished id is handed up, not just the visible ones — that is the
+            prune, and it is why the hidden set can never name a row the wire has
+            already lost. */}
+        <IconButton
+          icon={Trash2}
+          label="Clear the finished list"
+          onClick={() => onClear(tasks.map((task) => task.id))}
+          size="sm"
+        />
+      </div>
+      {open && shown.map((task) => <TaskCard key={task.id} now={now} onStop={onStop} task={task} />)}
+    </section>
+  );
+}
+
+function PanelHeading({
+  label,
+  count,
+  id,
+  tone = SETTINGS_HEADING,
+}: {
+  label: string;
+  count: number;
+  id: string;
+  /**
+   * The whole class string rather than a colour to append.
+   *
+   * ⚠ **A tone cannot be composed onto one of the caps constants** — two members
+   * of one family on one element are resolved by Tailwind's emission order, not by
+   * the string — so the caller hands the finished band's own spelled-out idiom
+   * instead. Defaulted, so every live section is unchanged.
+   */
+  tone?: string;
+}): ReactNode {
+  return (
+    <h3 className={tone} id={id}>
       {label} ({count})
     </h3>
   );

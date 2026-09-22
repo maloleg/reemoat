@@ -115,10 +115,10 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
    * passes whenever both are wrong.
    */
 
-  // The four answers the pinned adapters actually gave — claude, codex and kimi
-  // measured 2026-08-25, opencode 2026-08-27. Written out here so the matrix below
-  // is driven against reality rather than against whatever the table would like to
-  // be true.
+  // The five answers the agents actually gave — claude, codex and kimi measured
+  // 2026-08-25, opencode 2026-08-27, grok 2026-09-21. Written out here so the
+  // matrix below is driven against reality rather than against whatever the table
+  // would like to be true.
   const routings = {
     claude: { providerId: "main", supported: ["anthropic", "bedrock", "vertex"] },
     codex: { providerId: "custom-gateway", supported: ["openai"] },
@@ -129,6 +129,17 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     // not reach by itself. That is the whole reason `openrouter` names it as a
     // `nativeHarness` rather than leaving it to the routed path.
     opencode: null,
+    /*
+     * grok is opencode's answer, measured twice on 1.0.40 (2026-09-21) — once
+     * signed out and once with `XAI_API_KEY` set, because a capability that
+     * appeared only for a keyed agent would be a fact about the key rather than
+     * about the binary. `agentCapabilities` carries `loadSession`,
+     * `promptCapabilities`, `mcpCapabilities`, `sessionCapabilities`, `auth` and a
+     * vendor `_meta` — and **no `providers` marker** either way. So grok reaches
+     * xAI and nothing else, which is why `SYSTEMS.xai` names it as a
+     * `nativeHarness` and leaves `baseUrl` null.
+     */
+    grok: null,
   } as const;
 
   /*
@@ -159,6 +170,12 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     // beside its OpenAI-shaped one — probed 2026-08-27, both answer 401 in their
     // own envelope. Same answer as `moonshot`'s cell, which is the next one along.
     "claude x openrouter: yes",
+    // ⚠ **`no`, and it is the cell that would flip first.** `SYSTEMS.xai` names
+    // no `baseUrl`, so this is the "can only be reached by the CLI it ships
+    // with" arm rather than a protocol refusal — the same arm `zen` takes four
+    // lines down. The day a real key shows `api.x.ai/v1/messages` answering in
+    // Anthropic's shape, this becomes `yes` and nothing else in the column moves.
+    "claude x xai: no",
     "claude x moonshot: yes",
     "claude x zhipu: yes",
     "claude x minimax: yes",
@@ -169,6 +186,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "kimi x anthropic: no",
     "kimi x openai: no",
     "kimi x openrouter: no",
+    "kimi x xai: no",
     "kimi x moonshot: yes",
     "kimi x zhipu: no",
     "kimi x minimax: no",
@@ -176,6 +194,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "codex x anthropic: no",
     "codex x openai: yes",
     "codex x openrouter: no",
+    "codex x xai: no",
     "codex x moonshot: no",
     "codex x zhipu: no",
     "codex x minimax: no",
@@ -187,11 +206,32 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     "opencode x anthropic: no",
     "opencode x openai: no",
     "opencode x openrouter: yes",
+    "opencode x xai: no",
     "opencode x moonshot: no",
     "opencode x zhipu: no",
     "opencode x minimax: no",
     // The one it reaches with no credential at all.
     "opencode x zen: yes",
+    /*
+     * grok is opencode's row exactly: it declares no `providers` capability, so
+     * every cell but its own is the "only runs its own models" refusal, and its own
+     * is native and needs no routing. Measured 2026-09-21 on 1.0.40, signed out and
+     * with a key — the capability is absent either way.
+     *
+     * ⚠ **`grok x xai: yes` is the *native* arm, not a routed one.** `hostable`
+     * answers before it consults routing at all when `nativeHarness === harness`,
+     * which is the branch kimi has always depended on. So this cell says nothing
+     * about `api.x.ai` being reachable from anywhere else, and the `claude x xai`
+     * cell above is where that question lives.
+     */
+    "grok x anthropic: no",
+    "grok x openai: no",
+    "grok x openrouter: no",
+    "grok x xai: yes",
+    "grok x moonshot: no",
+    "grok x zhipu: no",
+    "grok x minimax: no",
+    "grok x zen: no",
   ]);
 
   /*
@@ -444,7 +484,17 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   check(
     "which systems name a key of their own",
     SYSTEM_IDS.filter((id) => SYSTEMS[id].keyEnv !== null).map((id) => `${id}: ${SYSTEMS[id].keyEnv ?? ""}`),
-    ["openrouter: OPENROUTER_API_KEY", "zen: OPENCODE_API_KEY"],
+    [
+      "openrouter: OPENROUTER_API_KEY",
+      // ⚠ Named although this row is not routable, and that is the *opposite* of
+      // what makes `zen`'s legal — `zen` names one because its harness reads it,
+      // and so does grok. Measured 2026-09-21: `XAI_API_KEY` is what grok spends;
+      // it just spends it one ACP method later than the other four spend theirs.
+      // It is also what makes `systemSecretFor` borrow correctly the day this row
+      // grows a `baseUrl`.
+      "xai: XAI_API_KEY",
+      "zen: OPENCODE_API_KEY",
+    ],
   );
   /*
    * ⚠ **And every one it names is a variable that harness actually reads.** A

@@ -11,7 +11,7 @@ relay up beside the API and asks no extra questions.
 | Typically lives | a Linux box with a public address | the same box | wherever the code you work on lives, usually behind NAT |
 | Runs as | **a container**, under Docker | the same image, second container | a launchd / systemd *user* unit |
 | Needs | Docker with the compose plugin, git, node (for `deploy/`'s own probes) | — | Node ≥ 24, pnpm and git |
-| Builds on update | its image, which contains `packages/web` → `dist` | the same image | nothing |
+| Builds on update | its image — the API and the relay, no web bundle | the same image | nothing |
 | Holds | the Ed25519 key that signs every token | every daemon's tunnel, and nothing durable | your sessions, their worktrees, your agents' logins |
 | Restart costs | nothing anyone is holding | **every tunnel in the fleet**: ~10–45s of reconnecting per open session, every in-flight request | **every live session becomes `interrupted`** |
 
@@ -28,10 +28,9 @@ They share a repository because `packages/control-plane` imports the root `src/`
 (`../../../src/token.js` and friends), so neither can be checked out alone.
 That is the whole of what they have in common.
 
-Neither has a build step *in the checkout*: both run from source under `tsx`. The
-control plane's image builds `packages/web` into itself, which is the one thing
-either service compiles and the reason a control-plane host needs no pnpm, no
-`node_modules` and no particular Node version — see
+Neither has a build step *in the checkout*: both run from source under `tsx`, and
+neither compiles anything at all now that the web bundle has left the image — a
+control-plane host needs no pnpm, no `node_modules` and no particular Node version — see
 [`docker/README.md`](docker/README.md), which is where everything about that
 service's deployment now lives.
 
@@ -171,11 +170,12 @@ deploy/install.sh daemon
 Run it once per role. **From a terminal it is a wizard** and walks the whole way;
 run by a script it is a plain installer (see below).
 
-`install.sh control-plane` no longer offers to build the web UI: the bundle is
-built inside the image on every build, so there is no state in which this service
-starts without one. The corollary is worth knowing — running `pnpm web:build` on
-the host changes nothing that is served, because `.dockerignore` denies `dist`
-and nothing mounts it. It asks who should be able to reach the service,
+`install.sh control-plane` does not ask about the web UI. The gate is built into
+the image and served with no switch — it has to be, since password recovery
+depends on it — and the *app* is not in the image at all. The corollary is worth
+knowing: running `pnpm web:build` on the host changes nothing that is served,
+because nothing mounts `dist` unless you uncomment the line
+`docker/compose.yml` carries for it. It asks who should be able to reach the service,
 **including where the relay is published**, which is a second listener separate from the API: leaving that
 to its `0.0.0.0` default is how an operator who chose "this machine only" ended up
 publishing one anyway. It writes the answers, starts it, and catches the admin API
@@ -184,7 +184,7 @@ key the control plane prints exactly once on its first start, saving it to
 it the only way back is deleting the database — and it is still in the service's
 log afterwards, which the installer now says out loud and chmods accordingly. It
 then offers to create the first person and prints their API key, which is what
-they paste into the web UI.
+they paste into the app.
 
 `install.sh daemon` asks how the daemon should decide who is asking. If a control plane was installed on
 the same machine, the first option registers this host and mints an enrollment
@@ -270,6 +270,48 @@ between them or the pair does not work at all — a second file would be a secon
 place for them to disagree, silently, with a relay answering 401 to every request
 because its `iss` no longer matches.
 
+#### What a browser is served
+
+**The gate, and nothing else.** Nine addresses — `/register`, `/confirm`,
+`/forgot`, `/reset`, `/verify`, the three legal documents, and `/app` — served by
+the control plane itself, from a bundle in its image. Not a separate service:
+same process, same port, same container.
+
+They are served because their flows *begin in a mail client*: `/confirm`,
+`/reset` and `/verify` are links somebody opens in a browser, and
+`POST /v1/forgot` is the only remedy this service has for a forgotten password.
+`/app` is where each of them ends — the page saying the product is an app, with a
+download link where `REEMOAT_CP_APP_DOWNLOAD_URL` names one.
+
+**The app itself is not in the image and cannot be served from it.** The Reemoat
+app carries its own copy of the interface, compiled into its binary, and never
+downloads one. `/` and every address belonging to the app answer the JSON error
+envelope — a **closed list** rather than an SPA fallback, so this is a property of
+the image rather than of routing.
+
+What does not change either way: `/health`, every `/v1` route, `/install.sh`, the
+relay listener, the tunnel endpoint, enrollment, tokens, grants. `docs/API.md` has
+the table.
+
+⚠ **`mail.public_url` must point at whatever serves those nine addresses.** Every
+confirmation, reset, verify and invitation link is built from it. Pointed
+somewhere that does not serve them, they land on the error envelope —
+`GET /v1/admin/settings` and `cpctl admin settings` report it as a problem when it
+names a control plane with no gate. The gate also takes a **pasted link or code**,
+for the case a mail client rewrites the URL and drops the fragment the token rides
+on.
+
+⚠ **Serving the whole app is not an option any more, and the variable that offered
+it is deleted.** A browser holds no device key, so it cannot open the encrypted
+channel a daemon is reached through — it could load the client and reach no machine
+at all. `pnpm web` in dev is what replaced the checkout case; nothing serves a built
+copy over HTTP. Q1.649.
+
+`REEMOAT_CP_INSTALL=0` turns off `GET /install.sh`, which is how the next machine
+joins. It is the only variable of its shape left — *either* a boolean *or* a path —
+and `=1` means the built-in default, because `deploy/bootstrap.sh` really is in the
+image.
+
 Two more overrides exist and are install-time rather than runtime.
 `REEMOAT_CPCTL_ENV` moves the admin-key file. `REEMOAT_UNIT_PATH` replaces the
 `PATH` baked into the unit outright — needed only on a machine with two copies of
@@ -331,24 +373,22 @@ changed**:
 
 Two things in that table are worth reading twice.
 
-**A web-only change costs a recreate of the API and nothing else.** The control
-plane re-reads `index.html` from disk on every request, and `deploy.sh` used to
-restart *nothing* for a change under `packages/web` because of it. With the
-bundle inside the image that became a rebuild and a recreate — which, while the
-relay lived in the same container, dropped every tunnel in the fleet. It does not
-any more: the relay is recreated only when the image moved **and** something the
-relay is actually built from moved with it, so a `packages/web` deploy leaves
-every session connected. The rebuild itself is unchanged, and the alternative to
-baking the bundle in is still worse: bind-mounting `dist` from the host would
-keep the old behaviour and mean the image is no longer the deployment.
-There is **no escape hatch today**, and an earlier draft of this paragraph
-claimed one. `REEMOAT_CP_WEB` can point the process at another directory, but
-`compose.yml` declares a single volume and `read_only: true` and `compose.sh`
-execs one fixed `-f`, so there is no way to get a host directory into the
-container through the environment — an absolute host path simply does not exist
-in there, and `app.ts` then answers `/` with a plain 404 whose only trace is one
-line in `docker logs`. Making the trade available means adding a
-`${REEMOAT_CP_WEB}:/srv/web:ro` volume, which nobody has done.
+**A change under `packages/web` costs a rebuild, and what it rebuilds is the
+gate.** That directory is still on `CP_IMAGE_INPUTS` as a whole prefix, because
+the gate is built from `packages/web/src` plus `gate.html`, `vite.gate.config.ts`,
+`tsconfig.json` and `public/` — a narrower pattern is one that misses a rebuild,
+and `cp_image_fingerprint` would then inspect an image that was never built and
+report "unchanged". What *has* changed is the blast radius: a screen somebody sees
+after signing in is in the app's bundle, which this image does not carry, so it
+costs no deploy here at all. And the relay is recreated only when the image moved
+**and** something the relay is actually built from moved with it, so none of this
+drops a tunnel.
+
+What is left of the old escape-hatch paragraph is its one true half: a host
+directory still cannot reach the container through the environment alone, because
+`compose.yml` declares the volumes and `compose.sh` execs one fixed `-f`. The
+commented web-bundle mount it argued about is gone with the variable that would have
+named it — there is no browser UI to mount.
 
 **The recreate is decided by what the image is, not by the paths.** A rebuild
 whose layers all came from cache produces byte-identical layers and config and
@@ -543,10 +583,13 @@ is also the trigger.
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-`.github/workflows/release.yml` decides nothing, the same way `deploy.yml` does
-not. `deploy/ci-release.sh` holds every gate, in four verbs — `plan`, `image`,
-`manifest`, `publish` — and each of them re-runs all of them, because a workflow is
-a graph somebody can re-run one job of. It refuses:
+`.github/workflows/release.yml` decides nothing but the shape of its own graph,
+the same way `deploy.yml` does not. `deploy/ci-release.sh` holds every gate, in
+five verbs — `plan`, `image`, `manifest`, `app`, `publish` — and each of them
+re-runs all of them, because a workflow is a graph somebody can re-run one job of.
+`deploycheck` compares that list against the workflow's `run:` lines in both
+directions, which is how the `app` verb came to be noticed: nine refusals, ~125
+lines and no caller, with four documents describing the wiring anyway. It refuses:
 
 - a tag the **six** places the version is written disagree with — the root
   manifest, both packages, `app.ts`'s `VERSION` and the newest dated heading in

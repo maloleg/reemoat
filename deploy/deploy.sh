@@ -7,9 +7,11 @@
 #
 # It is one script for two services because they share a repository and nothing
 # else. What each one does on an update has almost no overlap — the control plane
-# builds the web UI it serves and the daemon builds nothing at all — so the
-# per-service work is separated below rather than merged into a list of steps that
-# happen to be skipped half the time.
+# builds an image and the daemon builds nothing at all — so the per-service work
+# is separated below rather than merged into a list of steps that happen to be
+# skipped half the time. (What that image builds is the **gate** — sign-up, the
+# mailed-link screens, the legal documents — and not the app, which the Reemoat
+# binary carries itself.)
 #
 # CI is wired to this now, and it calls exactly this script with `--ref <sha>` —
 # `.github/workflows/deploy.yml`, for the control plane only. Keeping the logic
@@ -68,7 +70,7 @@ done
 #
 # Derived from what is installed, not from a flag with a default. A host running
 # only the daemon should not have to remember to say so on every deploy, and a
-# default of "all" would have it building a web UI nothing there serves.
+# default of "all" would have it building an image nothing there runs.
 
 # **Refused before anything else, because the next step deletes the program the
 # old unit runs.** A host whose control plane is still a launchd plist or a
@@ -77,7 +79,7 @@ done
 # success, and `git reset --hard` would remove `deploy/run-cp.sh`, which is
 # `@EXEC@` in every already-rendered control-plane unit. Nothing breaks until the
 # next reboot, at which point launchd execs a missing file and retries it every
-# ten seconds for ever, taking the fleet's identity, relay and web UI with it.
+# ten seconds for ever, taking the fleet's identity and its relay with it.
 #
 # Not a warning. The whole point of the refusal is that the damage is invisible
 # at the time and unattributable later.
@@ -387,14 +389,20 @@ UNITS="^deploy/$INIT_SYSTEM/"
 # decided by the cost, not by the artifact**, and once that is said out loud it
 # is fine for the two services to disagree about `pnpm-lock.yaml`.
 #
-# `^packages/web/` is on this list, and it is the row that gets worse. A web-only
-# change used to restart *nothing* — the SPA fallback re-reads index.html from
-# disk per request precisely so it could — and with the bundle baked into the
-# image it becomes a rebuild and a recreate. The alternative, bind-mounting
-# `dist` from the host, preserves the old behaviour and destroys the property
-# that makes containerising worth doing, because the image would no longer be the
-# deployment. There is no escape hatch today — `REEMOAT_CP_WEB` names a path
-# inside the container and nothing mounts a host directory there.
+# `^packages/web/` is on this list, and what it now covers is the **gate** rather
+# than the app: sign-up, the mailed-link screens, the legal documents and the
+# handoff page, built by the Dockerfile's `gate` stage. The app itself is not in
+# the image at all — it is compiled into the Reemoat binary — so a change to a
+# screen somebody sees *after* signing in costs no deploy here.
+#
+# It stays the whole prefix rather than a narrower pattern, and that is deliberate
+# after being got wrong once: the gate is built from `packages/web/src`, which is
+# most of that directory, and `gate.html`, `vite.gate.config.ts`, `tsconfig.json`
+# and `public/` are all COPYed too. A pattern naming only some of them is a
+# pattern that misses a rebuild — and `cp_image_fingerprint` then inspects an image
+# that was never built, the deploy prints "unchanged", and what is running is not
+# what was shipped. That is the green-deploy-of-stale-bytes failure recorded above
+# for the duplicated image-ref default, reached from a different direction.
 #
 # `tsconfig.json` is on the list because the image copies it and `tsx` resolves
 # it: `packages/control-plane` has no tsconfig of its own, so the root one is
@@ -402,7 +410,16 @@ UNITS="^deploy/$INIT_SYSTEM/"
 # ran no build, and the image-id comparison below cannot catch what was never
 # built — so the log said "nothing that goes into it moved" about a file that
 # had.
-CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/web/|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
+#
+# ⚠ **`packages/protocol` is on this list even though no *runtime* file in the
+# image imports it**, and leaving it off is exactly the failure this comment
+# describes one paragraph up. The gate's import closure reaches it —
+# `gate-main.tsx` → `store.ts` → `machine.ts` → `e2ee.ts` → `@reemoat/protocol`,
+# consumed as source because nothing here has a build step — so a change to the
+# handshake changes the bytes of `dist-gate`. Off the list, that commit runs no
+# build, `cp_image_fingerprint` inspects an image that was never rebuilt, and the
+# deploy prints "unchanged" about a file that moved.
+CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/protocol/|^packages/web/|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
 
 # What goes into the **relay**, which is a subset of the image and the reason the
 # split is worth anything.
@@ -434,7 +451,14 @@ CP_IMAGE_INPUTS='^src/|^packages/control-plane/|^packages/web/|^package\.json$|^
 # keep carrying traffic for machines the API considers switched off — which is
 # precisely the silent skew this list exists to prevent, and `deploycheck` caught
 # the omission the moment the import landed.
-RELAY_INPUTS='^src/relay/|^src/(token|auth|http|cors)\.ts$|^packages/control-plane/src/relay/|^packages/control-plane/src/(store|keys|quota|settings|machines)\.ts$|^packages/control-plane/src/mail/address\.ts$|^packages/control-plane/src/schema\.sql$|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
+#
+# `machinekeys.ts` is here for the same reason and it caught the same way. The
+# relay pins a machine's announced X25519 static on the dial and refuses a later
+# disagreement; a relay left running the old rule would pin nothing, so every app
+# would be handed a null key for a machine that had in fact announced one — and
+# the failure would read as "this machine has not been updated" about a machine
+# that had.
+RELAY_INPUTS='^src/relay/|^src/(token|auth|http|cors)\.ts$|^packages/control-plane/src/relay/|^packages/control-plane/src/(store|keys|quota|settings|machines|machinekeys)\.ts$|^packages/control-plane/src/mail/address\.ts$|^packages/control-plane/src/schema\.sql$|^package\.json$|^tsconfig\.json$|^pnpm-lock\.yaml$|^pnpm-workspace\.yaml$|^deploy/docker/|^\.dockerignore$'
 
 # Both tsx binaries, not just the root one — `packages/control-plane` is a
 # separate workspace package with its own node_modules, so a tree wiped by a
@@ -749,7 +773,17 @@ for svc in $TARGETS; do
       # bootstrap puts it, so the script's npm arm finds an `npm` and a `node`;
       # `provenance` reads this shell's PATH, which is the daemon's only for the
       # daily run. Every prune is withheld, because this script does not know which
-      # harnesses have a live agent and the daemon's next run does. Cheap when
+      # harnesses have a live agent and the daemon's next run does.
+      #
+      # ⚠ **`--refresh-only`, and this is the half of the posture change a deploy
+      # carries.** A deploy used to *install* whatever this repository had learned
+      # to install — so adding a harness here put it on every machine in the fleet
+      # on its next update, offering a sign-in nobody had asked for. That was the
+      # reported symptom. A harness arrives on a machine when somebody presses a
+      # button about it now; what a deploy does is move the copies that are
+      # already there.
+      #
+      # Cheap when
       # everything is current, since a refresh that finds nothing newer is a no-op;
       # and a refresh with no restart is seen by nothing in the daemon, so its
       # version report lags the binary by up to ten minutes. Never fatal, for the
@@ -776,12 +810,12 @@ for svc in $TARGETS; do
           [ "$_agent_channel" = stable ] || _agent_channel=latest
           _agent_claude=$(file_value "$_daemon_env" CLAUDE_CODE_EXECUTABLE)
           _agent_codex=$(file_value "$_daemon_env" CODEX_PATH)
-          echo "  agents ($_agent_source)"
+          echo "  agents ($_agent_source, refresh only)"
           (
             PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"; export PATH
             [ -z "$_agent_claude" ] || { CLAUDE_CODE_EXECUTABLE=$_agent_claude; export CLAUDE_CODE_EXECUTABLE; }
             [ -z "$_agent_codex" ] || { CODEX_PATH=$_agent_codex; export CODEX_PATH; }
-            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel" --skip claude --skip codex --skip opencode --skip kimi
+            "$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel" --refresh-only --skip claude --skip codex --skip opencode --skip kimi --skip grok
           ) || echo "  agents: the script did not finish; the daemon retries daily" >&2
           ;;
       esac

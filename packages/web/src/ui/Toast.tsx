@@ -127,7 +127,13 @@ export function ToastHost(): ReactNode {
             // cannot be bought with layout. It matters more here than it looks:
             // this button sits over the composer, and a miss lands in the text
             // field of a message somebody is part-way through writing.
-            className="tap relative -mt-0.5 -mr-1 flex h-6 w-6 items-center justify-center rounded-sm opacity-70 after:absolute after:-inset-2.5 after:content-[''] hover:opacity-100"
+            //
+            // ⚠ And it is gated on a coarse pointer for the reason `sm` now is:
+            // the pad grows `:hover` with the target, so on a mouse the glyph
+            // brightened 10px before the pointer reached it. Same mechanism,
+            // same repair, copied here because this square never went through
+            // the primitive.
+            className="tap relative -mt-0.5 -mr-1 flex h-6 w-6 items-center justify-center rounded-sm opacity-70 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-2.5 [@media(pointer:coarse)]:after:content-[''] hover:opacity-100"
             aria-label="Dismiss"
           >
             <Icon as={X} size={13} />

@@ -25,11 +25,11 @@
  * ------------------------------------------------------------------ */
 
 /**
- * The four harnesses this product ships, mirrored as a **closed** union — because
+ * The five harnesses this product ships, mirrored as a **closed** union — because
  * that is what the daemon's `AGENT_IDS` is, and it stayed closed when `AgentId`
  * did not.
  *
- * `src/acp/agents.ts` still derives this tuple from four literals, `resolveAgent`
+ * `src/acp/agents.ts` still derives this tuple from five literals, `resolveAgent`
  * still switches over it with no `default` arm, and `AGENT_LOGIN` is still a
  * `Record` keyed on it. What changed is that a *machine* may now offer more than
  * this repository ships, so the list of what exists and the list of what is
@@ -42,8 +42,8 @@
  * `startsBare`'s built-in arm is a literal. Every one of those would become
  * unsatisfiable — not merely weaker — against a list that grows at runtime.
  */
-export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode"];
-export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode";
+export const AGENT_IDS: readonly BuiltinAgentId[] = ["claude", "kimi", "codex", "opencode", "grok"];
+export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode" | "grok";
 
 /**
  * A harness id, which is a string.
@@ -65,7 +65,7 @@ export type BuiltinAgentId = "claude" | "kimi" | "codex" | "opencode";
  */
 export type AgentId = string;
 
-/** Whether this is one of the four this product ships. Never "does this machine have it". */
+/** Whether this is one of the five this product ships. Never "does this machine have it". */
 export function isBuiltinAgentId(value: string): value is BuiltinAgentId {
   return (AGENT_IDS as readonly string[]).includes(value);
 }
@@ -1107,6 +1107,53 @@ export interface BackgroundTask {
   endedAt: number | null;
 }
 
+/**
+ * How much of a snapshot a frame is actually carrying. See
+ * {@link SessionSnapshot.reduced}.
+ *
+ * The two counts are the **true** lengths of the daemon's own arrays — what
+ * `GET /sessions/:id` would return — and not the lengths of the arrays beside
+ * them on the frame, so `reduced.pendingPermissions > pendingPermissions.length`
+ * is the readable form of "rows were cut". `blobs` says the frame emptied every
+ * surviving permission's `rawInput` and `content`, which is the one thing that
+ * looks identical to the agent's own payload having been over 8 KiB at ingest and
+ * is the only one of the two that asking the route can fix.
+ *
+ * ⚠ **`blobs` is narrowed once this record reaches a row**, and the two readings
+ * are set out at {@link SessionSnapshot.reduced}: what the daemon sends is what
+ * the ladder emptied, what `store.ts` keeps is what this client could not put
+ * back. Anything reading it off a `store` row is reading the second.
+ *
+ * Mirrored from `SnapshotReduction` in `src/registry.ts`; named as the daemon
+ * names it, or the hand-mirror sweep never compares it. ⚠ **One field below is
+ * not mirrored and never arrives from the daemon** — it is said so at the field
+ * rather than left to be discovered.
+ */
+export interface SnapshotReduction {
+  pendingPermissions: number;
+  pendingElicitations: number;
+  blobs: boolean;
+  /**
+   * ⚠ **Written by `store.unreduceSnapshot`, never sent by any daemon.** The one
+   * field here with no counterpart in `src/registry.ts`. It lives on `reduced`
+   * rather than on the row because `reduced` is already the record that means two
+   * different things either side of that merge ({@link SessionSnapshot.reduced}),
+   * and because it is only ever read together with {@link blobs}.
+   *
+   * The parked permission ids this client holds a **whole-record** copy of, in
+   * the order they sit in `pendingPermissions`. A `{truncated, bytes}` stand-in
+   * on one of those was cut by the daemon's 8 KiB ingest clamp and nothing
+   * anywhere has more of it; a stand-in on a row absent from here may instead be
+   * the socket frame's ladder, and the record may still hold it whole. That is
+   * the distinction `blobs` and `PermissionCard`'s two sentences turn on, and it
+   * cannot be read off the row: the two stand-ins are byte-identical.
+   *
+   * Absent reads as empty, which draws the *recoverable* sentence — the
+   * conservative half, and the one a poll corrects within seconds.
+   */
+  onRecord?: string[];
+}
+
 export interface SessionSnapshot {
   id: string;
   agent: AgentId;
@@ -1214,6 +1261,46 @@ export interface SessionSnapshot {
    * `undefined` behave as `[]` in one place instead of nine.
    */
   pendingElicitations?: PendingElicitationSnapshot[];
+  /**
+   * What a socket frame had to leave out to fit under the wire ceiling.
+   *
+   * ⚠ **Absent means whole, and it is absent almost always.** The daemon sets it
+   * only on a `hello`/`snapshot` frame its `fitSnapshotFrame` ladder had to cut —
+   * past roughly 512 KiB of parked requests — and never on `GET /sessions` or
+   * `GET /sessions/:id`, which still serve the record whole. An older daemon
+   * sends nothing here and reads the same way, which is this file's usual
+   * degrade: every count below falls back to the array lengths, i.e. to exactly
+   * what this client did before the field existed.
+   *
+   * ⚠ **Why it has to be read at all.** `store.ts` writes the poll's snapshot and
+   * the frame's snapshot into the same `row.snapshot`. Without this field the two
+   * are indistinguishable — a halved list is a well-formed list — so the approval
+   * count, the `more` line and `PermissionCard`'s "Part of this request was too
+   * large to keep" banner alternated on every poll/frame swap, and each swap
+   * re-armed an effect that fires `store.loadAll`.
+   *
+   * ⚠ **This said "what it does not do is put the missing rows back: they are
+   * not on the frame", and that is now only half true.** They are not on the
+   * frame, and {@link waitingCount} is still the honest count of how many there
+   * are — but `store.unreduceSnapshot` puts back the rows and the payloads this
+   * client is *already holding* from the poll, which is what stopped a frame
+   * clobbering a fuller row. What no client can recover is a row it has never
+   * seen; that one is still one `GET /sessions/:id` away, and the 4s poll is what
+   * makes the request.
+   *
+   * `reduced` therefore means two slightly different things either side of that
+   * merge, and the difference is deliberate. **As the daemon sends it**, the
+   * counts are the record's true lengths, `blobs` says the ladder emptied every
+   * surviving payload, and {@link SnapshotReduction.onRecord} is absent. **As
+   * `store.ts` keeps it on a row**, the counts are unchanged, `onRecord` names the
+   * parked permissions this client holds a whole-record copy of, and `blobs` has
+   * been narrowed to *"a stand-in sits on a row this client has no record copy
+   * of"*. ⚠ **That is a reconstruction and not a fact off the wire** — the two
+   * stand-ins are byte-identical and the daemon sends nothing that separates
+   * them, so this is as close as `PermissionCard` can get to *"the record still
+   * has this payload"*, and it errs towards saying so.
+   */
+  reduced?: SnapshotReduction;
   exit: SessionExit | null;
   /**
    * The agent's controls, on the snapshot rather than only in the log.
@@ -1644,6 +1731,15 @@ export type HumanRequest =
  *
  * `pendingElicitations` is optional on the wire, so this is also the single place
  * an older daemon's `undefined` becomes `[]`.
+ *
+ * ⚠ **This one deliberately does **not** read {@link SessionSnapshot.reduced},
+ * unlike {@link waitingCount}.** It returns rows, and the rows a reduced frame
+ * left out are not on it to return — inventing a placeholder would put a card on
+ * screen with no id to answer. What the daemon's ladder guarantees is that what
+ * survives is a *prefix in `raisedAt` order*, so the first element here is still
+ * the real oldest and `SessionView` still draws the right card; the count beside
+ * it is `waitingCount`'s job, which is why that one is the function that had to
+ * learn about the field.
  */
 export function humanRequests(session: SessionSnapshot): HumanRequest[] {
   const requests: HumanRequest[] = [];
@@ -1668,12 +1764,44 @@ export function humanRequests(session: SessionSnapshot): HumanRequest[] {
 
 /** Whether anything is waiting on a person. Replaces `pendingPermissions.length > 0`. */
 export function needsHuman(session: SessionSnapshot): boolean {
-  return session.pendingPermissions.length + (session.pendingElicitations?.length ?? 0) > 0;
+  return waitingCount(session) > 0;
 }
 
-/** How many. Replaces `pendingPermissions.length`. */
+/**
+ * How many. Replaces `pendingPermissions.length`.
+ *
+ * ⚠ **Counted off {@link SessionSnapshot.reduced} where the daemon set it, and
+ * off the arrays otherwise** — the two are the same number on every snapshot but
+ * a socket frame the daemon's ladder had to cut, and on one of those the arrays
+ * are a *prefix*. Reading the arrays there made the count fall and rise on every
+ * poll/frame alternation over an unchanged session: `SessionView` draws
+ * `waitingCount(session) - 1` as its `more` line, so *4 more waiting* became *1
+ * more waiting* and back, twice a poll interval.
+ *
+ * `Math.max` rather than the field outright, because the field is the daemon's
+ * claim about a list this client also holds, and the two disagreeing in the other
+ * direction — a count below what is actually on the record — would under-report
+ * something visible. Whichever is larger is the honest floor.
+ *
+ * ⚠ **`waitingCount(session) === humanRequests(session).length` stopped being an
+ * invariant the moment this function learned to read `reduced`, and the check
+ * that asserted it went on passing because no fixture set the field.** That is
+ * this repository's own commonest defect — a partition losing a case through a
+ * new field rather than through a bad predicate — so it is recorded here as well
+ * as repaired. `webcheck.elicitation-and-links.ts`'s "the predicates are a
+ * partition" **refuses** `waitingCount(session) < humanRequests(session).length`
+ * now — that expression is a clause of the `matrix.filter` that collects broken
+ * rows, so what is asserted is its negation: the count may never be *fewer* than
+ * the rows there are to draw. (Written the other way round here for one release,
+ * which is a docblock quoting a driver's failure predicate as its property.) Its
+ * matrix carries a row whose `reduced` is larger than its arrays, and a separate
+ * positive check pins that row's pair outright, which is what makes the clause an
+ * assertion rather than a formality.
+ */
 export function waitingCount(session: SessionSnapshot): number {
-  return session.pendingPermissions.length + (session.pendingElicitations?.length ?? 0);
+  const permissions = Math.max(session.pendingPermissions.length, session.reduced?.pendingPermissions ?? 0);
+  const questions = Math.max(session.pendingElicitations?.length ?? 0, session.reduced?.pendingElicitations ?? 0);
+  return permissions + questions;
 }
 
 /**
@@ -1814,9 +1942,41 @@ export interface DaemonHealth {
   protocol?: number;
 }
 
-export interface AgentInfo {
+/**
+ * One harness row as `GET /agents` answers it.
+ *
+ * ⚠ **Named `AgentAvailability` because that is what the daemon calls it, and the
+ * name is load-bearing.** It was `AgentInfo`, and nothing compared the two sides
+ * for it: `webcheck.plugin-protocol.ts` looks each mirror up **by name** in
+ * `src/`, so a mirror under a different name hits the `continue` and is never
+ * checked — the fourth occurrence of that, after `MachineSettings`/`MachineSettingsView`,
+ * `CustomAgent`/`AgentRouting` and `QueuedPromptSnapshot`/`QueuedPrompt`. This was
+ * the richest row on the wire to be uncompared, and `installable` was added to
+ * both sides while the guard was blind to it. Renaming took the sweep from 63
+ * interfaces to 64. A count floor cannot catch the next one — a skipped pair does
+ * not lower `compared`, it fails to raise it — so the rule lives here, at the
+ * declaration, where the check site structurally cannot state it: **before adding
+ * any `export interface` to this file, grep `src/` for the daemon's own name and
+ * use it.**
+ */
+export interface AgentAvailability {
   id: AgentId;
   displayName: string;
+  /**
+   * What the user's own Claude settings say a session should open in, and the file
+   * that says it — `null`/absent for the ordinary case, where nothing does.
+   *
+   * ⚠ **A provenance line, never a claim about the session.** This daemon sends no
+   * mode at `session/new`: the adapter reads `permissions.defaultMode` itself,
+   * merges project settings over it and normalises through an alias table of its
+   * own. So `value` is the string as written and the screen names the file rather
+   * than predicting an outcome — the mode chip is what says what a running session
+   * is actually in. It exists because somebody asked whether the daemon was
+   * switching sessions to `Bypass permissions`, and no screen could answer them.
+   *
+   * Only ever present on `claude`, and absent on an older daemon.
+   */
+  settingsMode?: ClaudeSettingsMode | null;
   available: boolean;
   /** The install or auth instruction when unavailable. Render it. */
   hint: string | null;
@@ -1831,7 +1991,7 @@ export interface AgentInfo {
    * whose agent works. Absent on an older daemon, which is the same as `null`.
    *
    * ⚠ **A harness with no sign-in can never answer `false` here**, however often
-   * it has refused to start — that record is {@link AgentInfo.lastStartRefusal},
+   * it has refused to start — that record is {@link AgentAvailability.lastStartRefusal},
    * which is a different question and has a different reader.
    */
   loggedIn?: boolean | null;
@@ -1869,14 +2029,36 @@ export interface AgentInfo {
    */
   login?: AgentLoginSupport;
   /**
+   * Whether this machine can put this harness on itself, from here.
+   *
+   * ⚠ **Absent means `false`, which is the opposite of `AgentRouting.pinsModel`
+   * and the same as `SystemInfo.routable`.** A daemon that has never registered
+   * the install routes answers a bare `404` with no error envelope — there is
+   * nothing to render — so a button drawn on an optimistic reading is a control
+   * that looks broken. For a *control*, "keep working against an older daemon"
+   * means not drawing it.
+   *
+   * ⚠ **Read `=== true`, never `!== false`**, and the counter-example is twelve
+   * lines away in `AgentsPanel`: `login.canSignOut !== false` is deliberate,
+   * because *that* control's refusal is a `503` carrying the route's own
+   * sentence, so offering it costs a clean error. This one's costs a dead button.
+   * Somebody will try to make the two match; they are different for a reason.
+   *
+   * ⚠ **And it is narrower than `!available`.** The daemon sets it only where
+   * `deploy/agents.sh` is the remedy — a built-in's CLI missing from PATH — never
+   * for a missing ACP adapter, an unknown harness id, or a contributed harness
+   * whose program is gone. None of those is something a download repairs.
+   */
+  installable?: boolean;
+  /**
    * What a screen calls this harness, or absent for one this product ships.
    *
-   * ⚠ **Deliberately not {@link AgentInfo.displayName}, and reaching for that
+   * ⚠ **Deliberately not {@link AgentAvailability.displayName}, and reaching for that
    * instead is the mistake this field exists to prevent.** The daemon's
    * `displayName` is a log line and a settings-list row title — literally
    * `Claude (claude-agent-acp)` and `Kimi Code CLI` — while `agentCard.ts`'s own
    * rule is that a label names neither a package nor a CLI, because it is drawn on
-   * a 96px tile. Two of the four built-ins fail that rule outright, so a client
+   * a 96px tile. Three of the five built-ins fail that rule outright, so a client
    * that used `displayName` as a label would put "Codex (codex-acp)" on a strip.
    *
    * Absent for a built-in, where `AGENT_LABEL` is the answer and is hand-written
@@ -1897,6 +2079,23 @@ export interface AgentInfo {
    * it, and what a refusal names when the plugin is switched off.
    */
   contributedBy?: { pluginId: string; pluginName: string };
+}
+
+/**
+ * Where a claude session's opening permission mode came from.
+ *
+ * ⚠ **Mirrored from `ClaudeSettingsMode` in `src/acp/agents.ts`; named as the
+ * daemon names it, or the hand-mirror sweep never compares it.** It was written
+ * here first as an anonymous inline object, which the sweep is blind to twice
+ * over: it iterates `export interface` declarations, and `src/acp/agents.ts` was
+ * not among the files it reads. Both halves are fixed — the name here, the file
+ * there — because either alone still buys nothing.
+ */
+export interface ClaudeSettingsMode {
+  /** The string as written, clipped. Never normalised — see the daemon's docblock. */
+  value: string;
+  /** The file it was read from, so the sentence on screen can name it. */
+  file: string;
 }
 
 /** One environment variable an agent reads a pasted credential from. */
@@ -1936,7 +2135,7 @@ export interface AgentLoginSupport {
   canSignOut?: boolean;
 }
 
-export interface AgentAuthInfo extends AgentInfo {
+export interface AgentAuthInfo extends AgentAvailability {
   credentials: AgentCredentialSlot[];
 }
 
@@ -2142,6 +2341,68 @@ export interface LoginRunView {
 export interface LoginChunk extends LoginRunView {
   chunk: string;
   /** The requested cursor pointed at output that has since been discarded. */
+  gap: boolean;
+}
+
+/** What happened to an install, once it has ended. `src/agentinstall.ts`'s own. */
+export type InstallOutcome =
+  | "running"
+  | "installed"
+  | "failed"
+  | "locked"
+  | "timeout"
+  | "cancelled"
+  | "spawn_failed";
+
+/** Where the installer has got to, as its own checkpoints report it. */
+export type InstallPhase = "start" | "download" | "install" | "link" | "done" | "failed";
+
+export interface InstallRunView {
+  installId: string;
+  agent: AgentId;
+  startedAt: number;
+  endedAt: number | null;
+  done: boolean;
+  /**
+   * ⚠ **Never derived from `exit`, on either side of the wire.** The installer
+   * exits 0 having printed that it failed — it must, because three of its four
+   * callers contract it never fails — so the daemon decides this by asking the
+   * machine again afterwards. A client that read `exit.code === 0` as success
+   * would draw "installed" over a harness that is not there.
+   */
+  outcome: InstallOutcome;
+  exit: { code: number | null; signal: string | null } | null;
+  phase: InstallPhase | null;
+  /** The tail of what the installer said, for a client that lost the transcript. */
+  detail: string | null;
+  dropped: number;
+  /** Total output produced so far. Poll with this as the next `since`. */
+  cursor: number;
+  /**
+   * Whether a Stop would be honoured right now.
+   *
+   * ⚠ **Read it, and hide the control rather than offer one that refuses.** The
+   * daemon will not signal a run whose installer is writing outside its staging
+   * directory — a killed vendor installer leaves a truncated binary that the
+   * daemon then executes as a harness — and the cancel route's only refusal is a
+   * bare `404 install_not_found`, which for a run that plainly exists is a false
+   * sentence. So the truth arrives before the press. An older daemon sends no
+   * such field, which is why this is optional here and required there.
+   */
+  cancellable?: boolean;
+}
+
+export interface InstallChunk extends InstallRunView {
+  chunk: string;
+  /**
+   * The requested cursor pointed at output that has since been discarded.
+   *
+   * ⚠ **Read here, unlike on a login.** `LoginWizard` ignores its own copy of
+   * this flag, which is survivable for a transcript that is a few lines of a
+   * device-code prompt. An installer's is far likelier to overflow the daemon's
+   * 64 KiB ceiling, and a raw pane that silently claims to be the whole record
+   * undoes the one thing the fallback rests on.
+   */
   gap: boolean;
 }
 
@@ -2432,6 +2693,22 @@ export interface IssuedToken {
     name: string;
     relayUrl: string | null;
     relayOnline: boolean;
+    /**
+     * The machine's X25519 static public key, base64url, or `null`.
+     *
+     * ⚠ **Beside the route rather than on `GET /v1/machines`, and for the route's
+     * own reason.** Minting is how a client learns where a machine is; a key and
+     * an address are the same kind of fact — *how to reach this thing* — and
+     * splitting them would create two answers that can disagree about one
+     * machine. They move together or not at all.
+     *
+     * `null` for a machine that has not dialled since it learned to announce one,
+     * which on a fleet mid-update is every machine. The client turns that into a
+     * sentence about updating that daemon and refuses the route: there is no mode
+     * without it. Optional so a control plane older than this reads as "not
+     * reported" rather than as `undefined` reaching a handshake.
+     */
+    key?: string | null;
   };
   /**
    * The control plane's own clock when it answered, in epoch milliseconds.
@@ -2547,7 +2824,108 @@ export interface SessionRecord {
    */
   ip?: string | null;
   userAgent?: string | null;
+  /**
+   * The installation this sign-in belongs to, or `null`.
+   *
+   * Optional for `ip`'s reason — a control plane that predates devices sends
+   * neither key — and nullable because a sign-in from a browser or a mailed link
+   * belongs to no registered installation and says so.
+   *
+   * ⚠ **`deviceName` is the one field on this row that is not caller-supplied in
+   * `userAgent`'s sense**, and the list prefers it for exactly that: a `User-Agent`
+   * is a claim a request makes about itself, while a device name was written by
+   * somebody who had already signed in. It is still not *evidence* — a stolen
+   * session can register a device and call it anything — but it is the string a
+   * person can recognise, which is the only question this list answers.
+   */
+  deviceId?: string | null;
+  deviceName?: string | null;
   /** Whether this row is the credential making the request. */
+  current: boolean;
+}
+
+/**
+ * One installation signed in to this account.
+ *
+ * **Not a session and not a credential.** A session is a bearer token with an
+ * expiry; a device is the computer or phone that keeps producing them, and it
+ * outlives every one of them — which is the whole point, because "sign this laptop
+ * out and leave my phone alone" had nothing to act on before. Holding the id
+ * authorizes nothing: every request still carries the session token, and the id is
+ * read only after that token has resolved.
+ *
+ * **It is not an authorization subject either.** A grant is `(user, machine)`, so
+ * every device of one person reaches the same fleet — `web-shell.md`'s "one bearer
+ * credential, short-lived per-machine tokens" is unchanged by any of this.
+ */
+export interface DeviceRecord {
+  id: string;
+  name: string;
+  platform: string;
+  createdAt: number;
+  /**
+   * When it was retired, or `null`.
+   *
+   * Retired rows are **listed**, deliberately: the question this screen gets
+   * opened for is usually asked after something has gone wrong, and a list one row
+   * shorter cannot tell "I retired that laptop on Tuesday" from "that laptop was
+   * never registered".
+   */
+  revokedAt: number | null;
+  /**
+   * When a sign-in on it was last used, or `null` for one that never held a live
+   * session.
+   *
+   * Derived by the control plane from the sessions bound to it rather than stored
+   * on the row — see the `devices` table comment in `schema.sql`. So it moves at
+   * most once every fifteen minutes, like everything else that reads it.
+   */
+  lastSeenAt: number | null;
+  /**
+   * Whether this installation has registered an X25519 public key, and when.
+   *
+   * ⚠ **Not the key**, and the control plane's own docblock says why: the
+   * question this row exists to answer is *can this installation reach a machine*
+   * — one word — and 43 characters of base64url on a row is a value somebody
+   * copies, compares, or pastes into a support conversation, none of which is a
+   * thing to do with a key. `false` covers a row registered before device keys
+   * existed and one whose credential store lost the key, and both draw the same
+   * sentence because both have the same remedy.
+   *
+   * ⚠ **This is the fifth feature this hand mirror has silently dropped, and the
+   * guard is not what catches it.** `webcheck.plugin-protocol.ts` sweeps every
+   * interface here whose original it can find, and it looks each one up in a
+   * hard-coded list of `src/` files with no control-plane file in it — so this
+   * type hits the sweep's `continue` and is compared against nothing at all. The
+   * control plane has been answering `hasKey` on **every** device row since the
+   * column landed, and the screen whose whole purpose is that question could not
+   * read it.
+   *
+   * **Optional on the type as well as boolean, for `SessionRecord.ip`'s reason.**
+   * `public_key` and `key_set_at` are `migrate()` additions onto a `devices` table
+   * that shipped without them, so a control plane older than that release lists
+   * devices and sends neither key. `cp.ts`'s own `registerDevice` already reads
+   * `hasKey?: boolean` off the registration answer for exactly this reason.
+   * `undefined` means *nobody said*, which is not the same claim as `false` and
+   * must not be drawn as one — a client that declared them required would mark
+   * every device on such a server as unable to reach anything.
+   */
+  hasKey?: boolean;
+  /**
+   * When that key was last written, or `null` for a row that has never had one.
+   *
+   * Mirrored because the control plane sends it on every row and this file is the
+   * copy — the whole failure being fixed here is a field served and not declared,
+   * and declaring one of a pair repeats it at half size. **Nothing draws it yet**,
+   * and that is deliberate rather than an oversight: the screen's question is
+   * *can this installation reach a machine*, which `hasKey` answers on its own,
+   * and a second date beside `last used` on a row this narrow would compete with
+   * the one somebody actually came to read. It is here for the day a row has to
+   * say *re-keyed on Tuesday* — the state `wrong_device` recovery produces — and
+   * for `pnpm cpctl devices`, which prints rows rather than laying them out.
+   */
+  keySetAt?: number | null;
+  /** Whether this row is the installation making the request. */
   current: boolean;
 }
 

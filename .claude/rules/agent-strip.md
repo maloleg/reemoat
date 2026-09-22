@@ -337,6 +337,18 @@ reorder is a control a keyboard cannot reach at all.
 - **`moveRow` splices and never swaps**, or the pointer and the keyboard disagree
   about what "move down" means. **`dropIndex` rounds**, so a row swaps when the
   dragged one is more than half over it rather than a full row late.
+- ⭐ **`moveRow` has a second subject now, and `dropIndex` deliberately does
+  not.** The machine folders reorder through this same `moveRow`, generic over its
+  element rather than copied — the splice semantics are exactly what both lists
+  need, and nothing in `agentStrip.ts` knows or needs to know what an agent is.
+  (Widening it surfaced a latent bug: the emptiness test read a *value*, which is
+  correct only while the element type cannot itself be `undefined`.) `dropIndex`
+  stayed, because it divides travel by **one** measured row — exact on a uniform
+  column, drifting on a strip where a tab is its label's width. A function that is
+  right on one axis and quietly wrong on the other is worse than two, so it keeps
+  its single caller and `machineOrder.ts`'s `dropSlot` answers the other axis by
+  counting midpoints. `driftFor` travelled too, axis-free, which also ended the
+  near-copy of it that lived here. `machine-gestures.md` is that area.
 - **A refused write restores what the daemon last confirmed**, not the list as it
   was one edit ago, under a sequence guard — the keyboard emits one write per key.
 

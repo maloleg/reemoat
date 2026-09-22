@@ -9,17 +9,21 @@ import {
   stripKey,
   type StripRow,
 } from "../../agentStrip";
+import { driftFor } from "../rowDrag";
 import { customAgentSubline, harnessSubline, startableHere } from "../../agents";
+import type { DaemonClient } from "../../daemon";
 import { rememberRemoval } from "../../agentPick";
 import { ApiError, errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { daemonRead } from "../../machine";
 import { MACHINE_GONE } from "../../plugins";
+import { shortPath } from "../../paths";
 import { agentEditPath, agentFromHarnessPath, agentPath, navigate } from "../../router";
 import { settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
-import type { AgentId, AgentInfo, AgentStripEntry, CustomAgent, SystemInfo } from "../../wire";
+import type { AgentId, AgentAvailability, AgentStripEntry, CustomAgent, SystemInfo } from "../../wire";
 import { agentBadge, agentStance, harnessName, startsBare } from "../agentCard";
+import { installElapsed, installFailure } from "../agentInstall";
 import { AgentGlyph } from "../AgentIcons";
 import { Badge, Button, Empty, Icon, IconButton, Menu, NotReachable, RowAction, Spinner, TwoStep } from "../bits";
 
@@ -51,7 +55,7 @@ import { Badge, Button, Empty, Icon, IconButton, Menu, NotReachable, RowAction, 
 
 /** Everything the screen reads, so "still loading" is one flag rather than four. */
 interface Listing {
-  agents: AgentInfo[];
+  agents: AgentAvailability[];
   presets: CustomAgent[];
   systems: SystemInfo[];
   stored: AgentStripEntry[];
@@ -66,53 +70,44 @@ interface Drag {
 }
 
 /**
- * How close to a scroller's edge the pointer has to get before the list follows
- * it.
+ * Why the edge bands and the ceiling are `rowDrag.ts`'s and not this file's.
  *
- * ⚠ **Without this the drag was a control a phone could not finish.** `dropIndex`
- * clamps the target to the rows that exist and `move()` writes a transform —
- * nothing scrolled the pane the list is inside. Rows are 61px and the pane's
- * scroller is 92dvh less a head, this screen's prose and its status line, so with ten
- * agents on a 390px phone the bottom row's journey to the top is a drag into a
- * region the finger cannot reach: the row travels, the list does not. The keyboard
- * path worked and was the only one that did, which is backwards for an app whose
- * whole shape is a phone.
+ * ⚠ **Without a scroll-follow the drag was a control a phone could not
+ * finish.** `dropIndex` clamps the target to the rows that exist and `move()`
+ * writes a transform — nothing scrolled the pane the list is inside. Rows are
+ * 61px and the pane's scroller is 92dvh less a head, this screen's prose and its
+ * status line, so with ten agents on a 390px phone the bottom row's journey to
+ * the top is a drag into a region the finger cannot reach: the row travels, the
+ * list does not. The keyboard path worked and was the only one that did, which is
+ * backwards for an app whose whole shape is a phone.
  *
- * 60px is roughly a finger's width inside the edge, so the zone is reachable
- * without being somewhere a normal drag lands by accident: the rows are 61px, so
- * it is about one row deep at each end.
+ * `SCROLL_EDGE` is 60px, roughly a finger's width inside the edge, so the zone is
+ * reachable without being somewhere a normal drag lands by accident — about one
+ * row deep at each end. `SCROLL_MAX` is 14px per frame, ~840px/s at 60Hz: fast
+ * enough to cross a twenty-row list without being a scroll nobody can stop
+ * inside, and a *ceiling* rather than a speed, since `driftFor` ramps from
+ * nothing at the edge of the zone to it at the boundary itself.
+ *
+ * ⚠ **Three copies of that ramp was one copy too many, and the two bodies had
+ * already drifted.** `driftFor`'s own docblock one file over says so — it was
+ * `({top, bottom}, y)` here and a near-copy there — and the copy this file used
+ * to hold rounded each step up with `Math.ceil` while the shared one does not.
+ * The fractional answer is the right one: `scrollTop` takes it, and rounding
+ * turned the bottom of the ramp into a 1px-per-frame floor where the intent was
+ * *nothing yet*. Imported axis-free, as `near`/`far`/`at`, because the machine
+ * folders drag on the other axis with the same numbers.
  */
-const SCROLL_EDGE = 60;
 
 /**
- * The fastest the list travels under a held finger, in pixels per frame.
+ * How often a live install run is re-read from this screen.
  *
- * 14 is ~840px/s at 60Hz — a little over one phone screen per second, which is
- * fast enough to cross a twenty-row list without being a scroll nobody can stop
- * inside. It is a *ceiling*: {@link driftFor} ramps from nothing at the edge of the
- * zone to this at the boundary itself, so how fast the list moves is how far in
- * the finger has pushed, which is the only control there is over it.
+ * ⚠ **Slower than the card's 700ms on purpose, because there is no transcript
+ * here.** `InstallPane` polls at a reading pace: bytes arrive and a person is
+ * watching them. All this screen draws is one word and a clock that ticks once a
+ * second, so anything faster changes nothing anybody can see and costs a request
+ * through the tunnel for it.
  */
-const SCROLL_MAX = 14;
-
-/**
- * How fast the list should travel, given where the pointer is over it.
- *
- * Signed: negative walks the list towards its start. Zero everywhere but the two
- * bands, so a drag in the middle of the pane costs nothing at all.
- *
- * ⚠ **Clamped at the boundary rather than falling off it.** A finger dragged
- * *past* the top of the scroller reports a negative depth, which without the
- * `Math.max` would accelerate without limit — and past the pane's edge is exactly
- * where somebody puts their thumb when the row will not go any further.
- */
-function driftFor(box: DOMRect, y: number): number {
-  const above = y - box.top;
-  const below = box.bottom - y;
-  if (above < SCROLL_EDGE) return -Math.ceil(((SCROLL_EDGE - Math.max(above, 0)) / SCROLL_EDGE) * SCROLL_MAX);
-  if (below < SCROLL_EDGE) return Math.ceil(((SCROLL_EDGE - Math.max(below, 0)) / SCROLL_EDGE) * SCROLL_MAX);
-  return 0;
-}
+const INSTALL_POLL_MS = 1_000;
 
 /**
  * The box this list actually scrolls inside, or `null` if nothing does.
@@ -279,6 +274,36 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * again in `failure` below, which is the one line that draws either.
    */
   const [writeFailure, setWriteFailure] = useState<string | null>(null);
+  /**
+   * Harnesses being installed right now, each with the moment it was pressed.
+   *
+   * A `Map` rather than a single id: the daemon refuses a second concurrent run
+   * with `409`, so at most one is ever live — but the *screen* must be able to
+   * report a press that has not been answered yet without inventing a state, and
+   * a map is what makes the row's subline a lookup rather than a comparison.
+   *
+   * ⚠ **The value is the press, not the latest poll**, or the clock restarts on
+   * every tick. `MachineInstalls`' measured rule.
+   *
+   * ⚠ **And for a run this screen *adopted* it is the daemon's own `startedAt`**,
+   * which is the field `InstallPane` has always drawn its clock from. A browser
+   * `Date.now()` there would restart a five-minute-old install at zero seconds,
+   * which is the same defect as the rule above arriving through the other door;
+   * the two clocks disagree by NTP drift and the press disagreed by minutes.
+   */
+  const [installing, setInstalling] = useState<ReadonlyMap<string, number>>(new Map());
+  /**
+   * The shared clock. One interval, re-reading `Date.now()`, torn down when
+   * nothing is running — so a phone that slept through half an install comes back
+   * with the true elapsed time rather than the number of ticks it was awake for.
+   */
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    if (installing.size === 0) return;
+    setNow(Date.now());
+    const clock = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(clock);
+  }, [installing.size]);
   /**
    * The assembled agent whose `DELETE` is out and unanswered, by id.
    *
@@ -580,6 +605,149 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
       .catch((cause: unknown) => setWriteFailure(errorText(cause)));
   };
 
+  /** One row out of the running set, however the run ended. Three callers. */
+  const forget = (id: string): void => {
+    setInstalling((was) => {
+      const next = new Map(was);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  /**
+   * Run ids this screen is already polling.
+   *
+   * ⚠ **Because two things can arrive at the same run.** The adoption read below
+   * lands a moment after mount, and a press made inside that window is answered
+   * by a `POST` whose run the read may also name — two poll loops on one run,
+   * two `setAttempt` bumps and, on a failure, the sentence written twice. An id
+   * is `in_<hex>` from the daemon and never reused, so nothing is ever removed
+   * from this and it dies with the screen.
+   */
+  const followed = useRef<Set<string>>(new Set());
+
+  /**
+   * Watch one run to its end, from wherever it was found.
+   *
+   * ⚠ **The cursor is threaded, and re-reading from zero was the whole
+   * transcript every second.** This polled `readInstall(installId, 0)` and threw
+   * `chunk.chunk` away — so a run whose output reaches the daemon's 64 KiB
+   * ceiling was re-sending up to 64 KiB *per tick*, through the E2EE tunnel, for
+   * a row that draws `Installing… · 42s`. `InstallRunView.cursor` is documented
+   * on both sides as "Total output produced so far. Poll with this as the next
+   * `since`", the card honours it, and this is the same contract read the same
+   * way: the first `since` is the one the `POST` (or the live-run read) answered
+   * with, so the bytes this screen never draws are never sent at all.
+   *
+   * ⚠ **Which is also why `gap` is not read here.** Threading makes the flag
+   * *rarer* rather than newly possible: `readFrom` answers `since < dropped`, so
+   * a read from zero raised it on every poll once the daemon had front-dropped
+   * anything at all, and a threaded read raises it only where the front went
+   * past a cursor between two polls. Either way there is nothing on this screen
+   * for it to qualify: the record it says is incomplete is the transcript, and
+   * the transcript is on the harness's card. Reading it here would be a notice
+   * about something nobody can see.
+   */
+  const watch = (daemon: DaemonClient, id: string, installId: string, cursor: number): void => {
+    if (followed.current.has(installId)) return;
+    followed.current.add(installId);
+    const poll = (since: number): void => {
+      void daemon
+        .readInstall(installId, since)
+        .then((chunk) => {
+          if (!chunk.done) {
+            setTimeout(() => poll(chunk.cursor), INSTALL_POLL_MS);
+            return;
+          }
+          forget(id);
+          if (chunk.outcome !== "installed") {
+            setWriteFailure(installFailure(chunk.outcome, harnessName({ id })) ?? `That didn't install ${harnessName({ id })}.`);
+          }
+          // Re-read rather than patch: `available` is the daemon's answer and
+          // this screen may not assert it from a process having exited.
+          setAttempt((one) => one + 1);
+        })
+        .catch((cause: unknown) => {
+          forget(id);
+          setWriteFailure(errorText(cause));
+        });
+    };
+    poll(cursor);
+  };
+
+  /*
+   * ⚠ **The run this machine is already holding, adopted rather than ignored.**
+   * There is one install run daemon-wide and this screen kept its running set in
+   * component state alone — so walking off this list and back, or arriving after
+   * somebody pressed Install on the harness's own card, drew a row with no
+   * subline and a menu offering an Install that answers `409 install_busy`.
+   * `GET /agent-install` is the only thing that can say otherwise.
+   *
+   * ⚠ **`[machineId]` and nothing else**, deliberately unlike the listing read
+   * above: `attempt` is bumped when a run *finishes*, and adopting on that would
+   * be a screen that re-asks about an install every time one ends.
+   */
+  useEffect(() => {
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) return;
+    let cancelled = false;
+    void daemon
+      .liveInstall()
+      .then((live) => {
+        if (cancelled) return;
+        const running = live.run;
+        if (running === null || running.done) return;
+        setInstalling((was) =>
+          was.has(running.agent) ? was : new Map(was).set(running.agent, running.startedAt),
+        );
+        watch(daemon, running.agent, running.installId, running.cursor);
+      })
+      .catch(() => {
+        // An older daemon has no such route and answers a bare `404`; a dropped
+        // request looks the same. Neither is evidence about a run, and this
+        // screen may not draw one it has not been told about.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `watch` and `forget` are redeclared every render and neither reads a
+    // value this effect could go stale on — both only ever set state, through
+    // updaters. Listing them would re-ask the daemon on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machineId]);
+
+  /**
+   * Start an install, and say only what this screen can say about it.
+   *
+   * ⚠ **No transcript here, and that is the trade rather than an omission.** This
+   * is a list somebody drags to reorder, not a terminal: the row's subline says a
+   * run is going and the shared status line under the list says if it failed. The
+   * installer's own bytes are on the harness's card, which is where somebody who
+   * needs them goes. Growing the row to carry them is the one thing this list may
+   * not do — a row that gains a control moves every row beside it, and a drag
+   * measures one row at `pointerdown` and applies that number to all of them.
+   *
+   * ⚠ **`403` is the ordinary answer for a shared grant**, since installing is
+   * `machine:admin`: putting new programs on somebody's machine is an act on the
+   * machine. `errorText` carries the route's own sentence for it.
+   */
+  const install = (id: string): void => {
+    const daemon = store.daemonFor(machineId);
+    if (daemon === undefined) {
+      setWriteFailure("That machine is not reachable right now.");
+      return;
+    }
+    setWriteFailure(null);
+    setInstalling((was) => new Map(was).set(id, Date.now()));
+    void daemon
+      .startInstall(id)
+      .then((view) => watch(daemon, id, view.installId, view.cursor))
+      .catch((cause: unknown) => {
+        forget(id);
+        setWriteFailure(`Couldn't start the install — ${errorText(cause)}.`);
+      });
+  };
+
   const remove = (id: string): void => {
     const daemon = store.daemonFor(machineId);
     if (daemon === undefined) {
@@ -643,6 +811,13 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
    * operand somebody has to remember to add to.
    */
   const failure = writeFailure ?? readFailure;
+  /*
+   * Read off the listing rather than fetched again: `GET /agents` already carries
+   * it, and only ever on the claude row — see `AgentAvailability.settingsMode`. `?? null`
+   * so an older daemon, which sends no such field, reads as the ordinary case
+   * rather than as `undefined` in a `!==` test.
+   */
+  const settingsMode = listing?.agents.find((one) => one.id === "claude")?.settingsMode ?? null;
   // Ten words with the dash, the caveat cap (review D10): the fact, and the one
   // remedy. "This machine's" went — the screen is the machine's.
   const statusText =
@@ -757,6 +932,9 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
               }
               onAnnounce={setMoved}
               onRecheck={(agent) => recheck(agent)}
+              onInstall={(agent) => install(agent)}
+              installing={installing}
+              now={now}
               onRemove={() => remove(row.id)}
             />
           ))}
@@ -806,6 +984,51 @@ function StripEditor({ machineId }: { machineId: MachineId }): ReactNode {
       >
         {statusText}
       </p>
+      {/*
+       * ⚠ **Where a claude session's opening mode comes from, and it is a
+       * *section* line rather than a row's.** The subline inside a row is one line
+       * by construction — two kinds of row with different line counts is a list
+       * whose rows are different heights, and a drag measures one and applies it to
+       * all — and this is not a fault about a row anyway. It is a fact about this
+       * machine's Claude configuration, which is what this screen is.
+       *
+       * Drawn only when something is actually set. The daemon sends no mode at
+       * `session/new`, so with nothing here the honest number of sentences is zero:
+       * a line reading "nothing is configured" would be this screen explaining a
+       * mechanism nobody asked about. It exists because somebody asked whether the
+       * daemon was switching sessions to `Bypass permissions` — it is not, and
+       * before this there was no screen that could have said so.
+       *
+       * It names the file and quotes the value rather than predicting the mode:
+       * the adapter merges project settings over this one and normalises through
+       * aliases of its own, and the composer's mode chip is what says what a
+       * running session is really in.
+       *
+       * ⚠ **Three mono runs in a sans sentence, and it shipped as one sans
+       * string.** `web-typography.md` claims `ui/settings/*` and its rule is *"a
+       * machine-written string a person may retype or compare character by
+       * character is drawn in mono"* — a settings **key**, the **value** written
+       * against it and a **path** are three of the four things that list names.
+       * The line inherits `text-2xs` rather than stating a size, which is the
+       * sanctioned case for a mono run whose sans line is already at the 12px
+       * floor: the import sheet's footer and the session header's subtitle are the
+       * other two.
+       *
+       * ⚠ **And the path goes through `paths.ts`, never interpolated raw** — the
+       * same rule, and the same reason `ImportCode`'s footer gives at its own
+       * call site. `shortPath` rather than `displayCwd` because this file is not
+       * under a browse root and this screen fetches none: it is a home-relative
+       * path, so `…/.claude/settings.json` is the honest short form and the whole
+       * of it rides `title`. Mono is also what retires the quotation marks the
+       * value used to carry — the family is what says "this is a literal".
+       */}
+      {settingsMode !== null && (
+        <p className="mt-2 text-2xs text-muted wrap-anywhere" title={settingsMode.file}>
+          New claude sessions follow <span className="font-mono">permissions.defaultMode</span> —{" "}
+          <span className="font-mono">{settingsMode.value}</span> — from{" "}
+          <span className="font-mono">{shortPath(settingsMode.file)}</span>.
+        </p>
+      )}
       {/*
        * ⚠ **The one remedy that is not already on screen** — `AgentBuilder`'s
        * argument, one pop-up over. A refused write is re-run by doing the thing
@@ -909,6 +1132,9 @@ function StripRowView({
   onToggle,
   onAnnounce,
   onRecheck,
+  onInstall,
+  installing,
+  now,
   onRemove,
 }: {
   row: StripRow;
@@ -966,6 +1192,11 @@ function StripRowView({
    * are two different things and the record is kept against the harness.
    */
   onRecheck: (agent: string) => void;
+  onInstall: (agent: string) => void;
+  /** Harnesses with a run in flight, each keyed to the moment it was pressed. */
+  installing: ReadonlyMap<string, number>;
+  /** The shared clock's latest reading. `0` before the first tick. */
+  now: number;
   onRemove: () => void;
 }): ReactNode {
   const node = useRef<HTMLLIElement | null>(null);
@@ -1110,10 +1341,10 @@ function StripRowView({
   const behind = harness ? info : (listing.agents.find((one) => one.id === preset?.harness) ?? null);
   /*
    * ⚠ **`harnessName` over the listing row, not `agentLabel` over its id.** That
-   * function answers only for the four this product ships and falls through to the
+   * function answers only for the five this product ships and falls through to the
    * raw id for anything else — right, and pinned — so a harness a plugin added
    * would have drawn `acme:gemini` here beside `Kimi Code`. The label rides
-   * `AgentInfo`, and the `?? {id}` arm is the impossible case `glyph` above already
+   * `AgentAvailability`, and the `?? {id}` arm is the impossible case `glyph` above already
    * refuses to cast away.
    */
   const name = harness ? harnessName(info ?? { id: row.id }) : (preset?.name ?? row.id);
@@ -1132,13 +1363,25 @@ function StripRowView({
    * the vendor — `agentBadge` answers `null` for `no_login` and a plain tone for
    * the two states that are not faults, and only a `strong` one is worth the line.
    */
-  const under = harness
-    ? badge?.tone === "strong"
-      ? badge.text
-      : harnessSubline(row.id, listing.systems, info?.contributedBy)
-    : preset === null
-      ? ""
-      : customAgentSubline(preset, listing.systems);
+  /*
+   * ⚠ **A run in flight displaces the badge, which displaces the vendor** — one
+   * slot, three sources, most-urgent-first. It goes in the line the row already
+   * reserves rather than in anything new: this is a list somebody drags to
+   * reorder, and a row that grows an element moves every row beside it, which
+   * `agent-strip.md` makes a correctness claim rather than a preference (a drag
+   * measures *one* row at `pointerdown` and applies that number to all of them).
+   */
+  const since = installing.get(row.id) ?? null;
+  const elapsed = since === null ? null : installElapsed(since, now);
+  const under = since !== null
+    ? `Installing…${elapsed === null ? "" : ` · ${elapsed}`}`
+    : harness
+      ? badge?.tone === "strong"
+        ? badge.text
+        : harnessSubline(row.id, listing.systems, info?.contributedBy)
+      : preset === null
+        ? ""
+        : customAgentSubline(preset, listing.systems);
 
   /**
    * Put the row where the pointer is, and work out which slot it is over.
@@ -1201,7 +1444,8 @@ function StripRowView({
   /** Start, keep or stop the list travelling, from where the pointer now is. */
   const chase = (y: number): void => {
     const box = scroller.current;
-    drift.current = box === null ? 0 : driftFor(box.getBoundingClientRect(), y);
+    const seen = box === null ? null : box.getBoundingClientRect();
+    drift.current = seen === null ? 0 : driftFor(seen.top, seen.bottom, y);
     if (drift.current !== 0 && rolling.current === null) rolling.current = requestAnimationFrame(roll);
   };
 
@@ -1536,7 +1780,10 @@ function StripRowView({
          * the position announcement, which is the half a keyboard move needs.
          */}
         <span className="inline-flex w-4 shrink-0 justify-center">
-          {pending && <Spinner />}
+          {/* The same reserved slot, for the second thing that takes time on this
+              row. Its width is fixed and must stay so: it is one of the two
+              numbers the drag arithmetic above depends on. */}
+          {(pending || since !== null) && <Spinner />}
         </span>
 
         {/*
@@ -1657,6 +1904,31 @@ function StripRowView({
                * off-screen entirely: run its own program once on the machine. This
                * is the only control in the app that says "I did that, look again".
                */}
+              {/*
+               * ⚠ **Inside the kebab, never a button on the row**, for the reason
+               * the whole menu exists: `web-shell.md`'s rule that everything else
+               * a settings row can do sits behind one square, and
+               * `agent-strip.md`'s stronger one that a row which loses or gains a
+               * control moves every control beside it — on a list you drag, that
+               * is the one thing that must not happen.
+               *
+               * ⚠ **And this screen is the only place it can be offered.**
+               * `offersStripTile` keeps a `not_installed` harness off the New
+               * session row entirely, so without this the remedy for the state
+               * this list is *reporting* would be off-screen. The card behind
+               * `Edit` has the full flow with the installer's own output; this is
+               * the one press from the list that is already saying it is missing.
+               */}
+              {behind?.installable === true && behind.available === false && (
+                <RowAction
+                  label={since === null ? `Install ${harnessName(behind)}` : "Installing…"}
+                  disabled={since !== null}
+                  onClick={() => {
+                    close();
+                    onInstall(behind.id);
+                  }}
+                />
+              )}
               {behind?.lastStartRefusal != null && (
                 <RowAction
                   label="Check again"

@@ -232,7 +232,8 @@ const CATEGORY_ICON: Record<string, ComponentType<{ size?: number | string; clas
  *
  * The one bound left after the fixed reserve was withdrawn (Q3.564). 128px is
  * about eighteen characters at `text-2xs`, which clears every ordinary value the
- * four agents publish — `Accept Edits`, `GPT-5.6-Luna`, `Ultracode` — and clips
+ * five agents publish — `Accept Edits`, `GPT-5.6-Luna`, `Ultracode`, and grok's
+ * `Extra High Effort` at seventeen — and clips
  * the rare long one rather than letting it take the row. The full text is in the
  * menu and in the chip's `title` either way.
  */
@@ -457,7 +458,10 @@ export function AgentConfigBar({
   );
   // Above the early return because the registration below reads it, and a hook
   // cannot sit under one. Pure, and the same call it was two lines lower.
-  const slots = splitOptions(options);
+  // The unavailable set travels with the options, so a `mode` chip routed to
+  // `Absent` stops counting as a host and its nested control is demoted to `…`
+  // rather than drawn nowhere. See `splitOptions`.
+  const slots = splitOptions(options, unavailable);
 
   /*
    * The `…` panel is a layer like every other menu, and registering it fixes two
@@ -579,7 +583,7 @@ export function AgentConfigBar({
      * dismissal are the same objects as everywhere else on this strip.
      */
     if (unavailable.has(option.id)) {
-      return <Absent key={option.id} option={option} />;
+      return <Absent key={option.id} option={option} never={controls.never.has(option.id)} />;
     }
     // The chosen value, drawn at once — on the host *and* on anything nested in
     // its menu, since one of those is what a tap on the host's rows changes.
@@ -821,10 +825,21 @@ function chipInner(option: AgentConfigOption, parts: ChipParts): ReactNode {
  * its icon, its position, and its `title`/`aria-label`, which do carry the name;
  * what opens is a menu headed with it.
  */
-function Absent({ option }: { option: AgentConfigOption }): ReactNode {
+function Absent({
+  option,
+  never,
+}: {
+  option: AgentConfigOption;
+  /**
+   * Whether this agent has answered without this control — `DrawnControls.never`,
+   * membership-tested by the caller rather than the whole set passed down, so this
+   * component still renders from one option plus one fact about it.
+   */
+  never: boolean;
+}): ReactNode {
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
-  const hint = unavailableHint(option);
+  const hint = unavailableHint(option, never);
 
   // A layer like every other menu, for `Select`'s reason: an unregistered
   // popover leaves the ask card's digit shortcuts live underneath it.

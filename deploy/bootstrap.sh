@@ -115,6 +115,18 @@ AGENT_SOURCE_GIVEN=0
 AGENT_CHANNEL=latest
 # The same memory as `AGENT_SOURCE_GIVEN`, for the same refusal.
 AGENT_CHANNEL_GIVEN=0
+# Which harnesses to install on the way in, as a comma-separated list. **Empty by
+# default, and that is the posture change**: nothing puts a coding-agent CLI on a
+# machine but a person pressing a button about it, so a fresh machine enrols with
+# none and the app says so with a control under it.
+#
+# ⚠ **The flag exists for the one caller with nobody to press anything.** A fleet
+# provisioned by cloud-init drives this script non-interactively — it has since
+# before the flag it is named after — and "open the app and press Install" is not
+# an instruction a provisioner can follow. Each name is forwarded as `--only`, so
+# `deploy/agents.sh` validates it and a typo is an `exit 2` rather than a machine
+# that quietly installed nothing.
+INSTALL_AGENTS=""
 LABEL=""
 CHECKOUT="$HOME/srv/reemoat"
 GIT_REF=""
@@ -425,6 +437,13 @@ Set up a Reemoat daemon on this machine and add it to the app.
                         Claude only: codex's and opencode's installers have no
                         channel. Written into the daemon's settings, and
                         re-applied by every daily refresh
+  --install-agents <a,b> install these coding-agent CLIs on the way in. **Nothing
+                        is installed by default**: a harness arrives on a machine
+                        when somebody presses Install in the app, which is the
+                        whole of what keeps a new one from appearing on every
+                        machine in the fleet by itself. This flag is for a caller
+                        with nobody to press it — a provisioner. Names are the
+                        ones `deploy/agents.sh --only` takes, and it validates them
   --yes                 do not ask to confirm anything
   --uninstall           stop and remove the service and the node this script
                         installed. Names your data; deletes none of it. Exits
@@ -455,6 +474,41 @@ parse_flags() {
                        vendor | npm) ;;
                        *) die "--agent-source takes vendor or npm, not $AGENT_SOURCE" ;;
                      esac ;;
+      --install-agents)
+                     INSTALL_AGENTS="${2:-}"; need_value "--install-agents" "$@"; shift 2
+                     # Only the shape is checked here; each name is validated by
+                     # `deploy/agents.sh --only`, which owns the list. Two places
+                     # naming the same five is how they come to disagree.
+                     #
+                     # ⚠ **A value that names nothing has to die here, and for a
+                     # release this arm let one through.** Reproduced in `sh`:
+                     # `--install-agents ,,,` holds no character outside the first
+                     # pattern, so the shape passed; the `-n` guard in
+                     # `install_agents` passed too, the value being non-empty; and
+                     # its loop then built **no** `--only` argument, so
+                     # `deploy/agents.sh` ran with none at all — which that script
+                     # documents as the flag being *absent*, meaning every harness.
+                     # So a provisioner handing this a computed-and-empty list got
+                     # all five CLIs, ~700 MB and a sign-in prompt for programs
+                     # nobody asked for: exactly the posture the paragraph above
+                     # `install_agents` exists to end, inverted by the one flag
+                     # that was meant to be the narrow door into it.
+                     #
+                     # The two values a caller can compute that name nothing are
+                     # the empty string and a string of nothing but separators,
+                     # and only one of them was ever caught — by a different
+                     # guard, in a different function, which is why the other was
+                     # invisible. One refusal here covers both, and the middle arm
+                     # is what makes it one: a value holding a name is accepted,
+                     # and whatever reaches the last arm holds none. Omitting the
+                     # flag is how a caller asks for no harness, and is the
+                     # default.
+                     case "$INSTALL_AGENTS" in
+                       *[!a-z,]*) die "--install-agents takes a comma-separated list of agent names, not $INSTALL_AGENTS" ;;
+                       *[a-z]*) ;;
+                       *) die "--install-agents names no agent in \"$INSTALL_AGENTS\"; omit the flag to install none" ;;
+                     esac
+                     ;;
       --agent-channel)
                      AGENT_CHANNEL="${2:-}"; need_value "--agent-channel" "$@"; shift 2
                      AGENT_CHANNEL_GIVEN=1
@@ -941,8 +995,8 @@ wait_for_confirmation() {
   die "still not signed in after five tries, and five is the whole budget before
   this control plane starts blocking sign-ins for the account you just made.
 
-  Open the link, then sign in at $CP/ and add a machine there — or re-run this
-  with --api-key once you have one."
+  Open the link, then sign in to the Reemoat app pointed at $CP and add a
+  machine there — or re-run this with --api-key once you have one."
 }
 
 register() {
@@ -1272,28 +1326,53 @@ install_dependencies() {
 # them here and the daemon re-runs it on a timer, which is what keeps a model released
 # last week from being simply absent with no error.
 #
+# ⚠ **It installs nothing unless somebody named a harness, and that is the change
+# rather than a regression.** This used to install all five, which is how a harness
+# added to this repository arrived on every machine in the fleet by itself — offering
+# a sign-in for a program nobody had asked for. A machine now enrols with no agent
+# CLIs at all, ~700 MB and several minutes lighter, and the app's own Install button
+# is what puts one there. `--install-agents claude,codex` is the door for a caller
+# with nobody to press it.
+#
 # ⚠ **Before `hand_off`, which is where the unit is rendered and the daemon started.**
-# After it, the first thing somebody sees is an app whose agents are missing.
+# After it, the first thing somebody sees is an app whose named agents are missing.
 #
 # ⚠ **A warning rather than a death**, which is `check_script_binary`'s shape: a
 # vendor being down must not fail an install that has already made a machine, cloned
-# a checkout and written an env file. What it costs now is real — a harness that could
-# not be installed is absent from the app rather than merely stale — and the script
-# says which on stderr; the daemon tries again within the day, and the tile says so
-# until then. `--agent-source` is passed here and written into the env file below, so
-# the run that installs and the run that refreshes never disagree about where from;
-# `--agent-channel` rides the same two lines for the same reason, and one more —
-# the script's refresh *re-applies* the channel on every run (Q4.115), so a value
-# the install used and the env file did not carry would be undone within a day.
+# a checkout and written an env file. The script says which on stderr, and the app's
+# Install button is the retry — the daemon's daily run is a *refresh* now and will
+# not fetch a harness that is not there. `--agent-source` is passed here and written
+# into the env file below, so the run that installs and the run that refreshes never
+# disagree about where from; `--agent-channel` rides the same two lines for the same
+# reason, and one more — the script's refresh *re-applies* the channel on every run
+# (Q4.115), so a value the install used and the env file did not carry would be
+# undone within a day.
 install_agents() {
-  note "agents        installing (~700 MB, a few minutes)"
+  # ⚠ **This guard is the *absent flag*, and it is not the check that keeps a
+  # nameless list out.** Reading it as one is how `--install-agents ,,,` reached
+  # the script with no `--only` and installed all five: a string of separators is
+  # non-empty, so this line waves it through. `parse_flags` refuses a value that
+  # names no harness, which is the only place that can — by the time anything is
+  # reachable from here the flag has already been accepted.
+  [ -n "$INSTALL_AGENTS" ] || { note "agents        none installed; open the app and press Install"; return 0; }
+  # One `--only` per name, so `deploy/agents.sh` validates each against its own
+  # list and a typo exits 2 rather than producing a run that touches nothing.
+  _only=""
+  _rest=$INSTALL_AGENTS
+  while [ -n "$_rest" ]; do
+    _one=${_rest%%,*}
+    [ "$_one" = "$_rest" ] && _rest="" || _rest=${_rest#*,}
+    [ -z "$_one" ] || _only="$_only --only $_one"
+  done
+  note "agents        installing ${INSTALL_AGENTS} (a few minutes)"
   # Node's directory in front, as `install_dependencies` puts it: the script's npm
   # arm needs an `npm` and a `node`, and with `--node` naming one off PATH there
-  # would otherwise be neither — kimi, and all four under `--agent-source npm`,
+  # would otherwise be neither — kimi, and all five under `--agent-source npm`,
   # "skipped: no npm to install it with" on a machine that has just installed one.
-  ( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" ) || warn "
-  some agent CLIs could not be installed. The daemon retries daily; until then that
-  harness is absent from the app. The lines above say which and why."
+  # shellcheck disable=SC2086 # `_only` is a built argument list, deliberately split.
+  ( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" $_only ) || warn "
+  some agent CLIs could not be installed. Open the app and press Install to try
+  again. The lines above say which and why."
 }
 
 # ---------------------------------------------------------------------------

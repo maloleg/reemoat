@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What this app is allowed to talk to, and why each clause is here.
+
+  ⚠ **In no Tauri template, and that is the hazard rather than the comfort.**
+  `tauri android init` does not write this file, so it survives one intact —
+  but `init` does rewrite `AndroidManifest.xml`, and
+  `android:networkSecurityConfig` there is the only thing that reaches this
+  file at all. An `init` re-run therefore leaves it on disk, pointed at by
+  nothing, with every symptom below back. `nativecheck` asserts the attribute
+  and this file as a **pair**, against comment-stripped source, because the
+  paragraph below quotes the very element it is about.
+
+  ⚠ Cleartext is permitted, and it is not laziness. `config.rs`'s
+  `normalize_origin` keeps `http://` and `https://` as *different trust
+  boundaries* rather than upgrading one to the other, because a self-hosted
+  control plane on a LAN, a dev stand, and `local.rs`'s `http://127.0.0.1` daemon
+  route are all ordinary shapes for this software. Android blocks cleartext by
+  default from API 28 up, so without this file every one of them fails with a
+  message about the server being down.
+
+  This file is the whole policy, for every build type. android:usesCleartextTraffic
+  used to sit on the manifest's application element with a per build type
+  placeholder and decided nothing: the platform ignores it from API 24 up wherever
+  a network security config is present, and minSdk is 24. It is deleted, and the
+  manifest says why.
+
+  ⚠ `<certificates src="user" />` is the half that decides whether a private CA
+  works at all. `reqwest` resolves to rustls with `rustls-platform-verifier` on
+  this platform, which calls Android's own trust manager over JNI — so this one
+  file governs the `/v1` leg and the webview's relay and daemon legs alike. Drop
+  the `user` entry and a control plane behind a CA somebody installed on their own
+  phone is refused, while the same URL works in Chrome.
+
+  ⚠ It sits in `<base-config>`, which means every origin and every build type,
+  and those are **two** decisions rather than one. Only the first of them is
+  forced.
+
+  ⚠ **By origin there is genuinely no narrower place.** `<domain-config>` is
+  the mechanism for scoping a trust anchor and it takes literal hostnames at build
+  time. This app has none: `REEMOAT_DEFAULT_SERVER` is a fork's compile time seed
+  and is unset in this repository, the address is otherwise typed into the server
+  picker at run time, and the relay is learned per machine from
+  `POST /v1/tokens` — two machines of one account legitimately sit on different
+  relays. There is no set of hostnames to enumerate here, and one invented at
+  build time would be precisely the self hosted deployment this clause exists for,
+  broken.
+
+  ⚠ **By build type there is one, and it is deliberately not taken.**
+  `<debug-overrides>` carries trust anchors and needs no second resource file, so
+  a `<debug-overrides><trust-anchors><certificates src="user" /></trust-anchors>`
+  block would scope the widening to debuggable builds with one edit to this file
+  and nothing else. It is not done, and that is the **owner's call** rather than a
+  measurement: a private CA is the ordinary shape for a self hosted control plane,
+  and somebody installing a release build and pointing it at their own box behind
+  their own CA is the deployment this software exists for. What keeping it costs
+  is named in full below, leg by leg, and Q7.144 is where the decision was argued.
+
+  ⚠ **The cleartext argument in `AndroidManifest.xml` does not cover this
+  one.** That paragraph is about `cleartextTrafficPermitted`, which really has
+  nowhere narrower to go — `<debug-overrides>` has no such attribute at all, so
+  expressing a per build type cleartext policy needs a second resource file under
+  `src/debug`. The two clauses share `<base-config>` for different reasons and only
+  that one is actually stuck. Reading them as one argument makes the anchor look
+  forced when it is chosen.
+
+  So what it loosens, named rather than implied. All three legs, because somebody
+  who installs a hostile CA profile gets all three:
+
+    1. `proxy.rs`'s `/v1` calls, which carry the account's bearer credential in an
+       authorization header. This is the sharpest one: a CA that intercepts it
+       reads and can replay that credential against the control plane. Nothing
+       under the TLS layer protects it — it is an ordinary HTTPS API call.
+    2. The webview's relay leg. The bytes inside it are a Noise_IK session keyed
+       on the device key and the daemon's announced machine key, so an
+       intercepting CA sees relay framing and ciphertext it holds no key for and
+       cannot reach a session's contents. What it does see is who is talking to
+       which machine, and when.
+    3. The webview's daemon leg. Over the relay this is case 2. Over a LAN or a
+       loopback address it is cleartext by the clause above, which a user CA is
+       not needed to read at all.
+
+  The honest summary is that this clause trades leg 1 for the private CA
+  deployment, that legs 2 and 3 are already end to end encrypted underneath it,
+  and that the mitigation is the one Android already has: a user CA is an
+  explicit, per device install that the system warns about persistently.
+  `docs/DECISIONS.md` Q7.144 is the argument and what was tried instead.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

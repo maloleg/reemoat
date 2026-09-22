@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -15,6 +15,7 @@ import {
   type AgentLaunchConfig,
 } from "../src/acp/agents.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
+import { AgentScriptGate } from "../src/agentscript.js";
 import { MemoryEventStore } from "../src/events.js";
 import { sameBackgroundTasks, SessionRegistry, sameCommands } from "../src/registry.js";
 import type { BackgroundTask } from "../src/acp/asynctasks.js";
@@ -675,7 +676,19 @@ process.stdout.write("\nis this agent signed in\n");
    */
   check(
     "and no other binary was consulted while an override named one",
-    [...spawned.values()].filter((entry) => entry.command !== codexStub && entry.command !== claudeStub).length,
+    [...spawned.values()]
+      .filter((entry) => entry.command !== codexStub && entry.command !== claudeStub)
+      /*
+       * ⚠ **Narrowed to the two harnesses this section is about, and that is not
+       * the assertion being weakened.** It counted *every* spawn, which held only
+       * while claude and codex were the only rows with a status probe — this
+       * walks `availability()`, so a third harness gaining one legitimately
+       * spawns its own binary and the count went to 2 with nothing wrong. grok
+       * was that harness. What must stay zero is another copy of **these two**:
+       * the `claude` on PATH, or the one in `MANAGED_CLI_DIRS` that
+       * `deploy/agents.sh` keeps current, spawned despite the override.
+       */
+      .filter((entry) => /(^|[/\\])(claude|codex)$/.test(entry.command)).length,
     0,
   );
   if (priorCodexPath === undefined) delete process.env["CODEX_PATH"];
@@ -751,7 +764,7 @@ process.stdout.write("\nthe login pty, on both platforms\n");
     AGENT_IDS.filter((id) => loginStdio("darwin", AGENT_LOGIN[id].interactiveStdin) === "ignore"),
     // opencode joins them by having no sign-in flow at all rather than a
     // non-interactive one — a different reason for the same absence of a box.
-    ["kimi", "codex", "opencode"],
+    ["kimi", "codex", "opencode", "grok"],
   );
   check(
     "claude is the one it cannot rescue, because its flow reads a code back",
@@ -778,6 +791,13 @@ process.stdout.write("\nthe login pty, on both platforms\n");
     [
       ["claude", ["auth", "logout"]],
       ["codex", ["logout"]],
+      // grok's is non-interactive and clears `~/.grok/auth.json`, which is the
+      // same shape codex's has — and unlike kimi's and opencode's, which do not
+      // exist (kimi) or would remove a key this daemon never put there (opencode).
+      // ⚠ `--no-auto-update` leads every grok argv, not just the session launch:
+      // `status` runs on the login-probe TTL, so without it grok's background
+      // updater could replace the binary underneath a live session.
+      ["grok", ["--no-auto-update", "logout"]],
     ],
   );
   /*
@@ -823,8 +843,44 @@ process.stdout.write("\nthe login pty, on both platforms\n");
       // Both halves deliberate: no command because `false` would be a lie, and a
       // file because presence still proves somebody configured a provider.
       "opencode: no command / .local/share/opencode/auth.json",
+      // grok answers on stdout *and* keeps a file, which no other row does: the
+      // file is `grok login`'s and the command also covers a pasted key, so the
+      // two halves are about different credentials rather than one twice.
+      "grok: --no-auto-update models on stdout / .grok/auth.json",
     ],
   );
+  /*
+   * ⚠ **grok's three strings, because `LoginStatusProbe`'s `text` arm is a
+   * *partition* and one command answering three ways is how a partition stops
+   * being one.** Measured 2026-09-21 on 1.0.40: `grok models` exits 0 with an
+   * empty stderr in every state and names the credential it is about to use on
+   * its first line. Driven here rather than described, so a pattern edited to
+   * catch a fourth wording cannot quietly start matching two at once.
+   */
+  {
+    const probe = AGENT_LOGIN.grok.status;
+    const reads = probe !== null && probe.reads === "text" ? probe : null;
+    const against = (line: string): string =>
+      reads === null
+        ? "no text probe"
+        : reads.signedIn.test(line)
+          ? reads.signedOut.test(line)
+            ? "BOTH"
+            : "in"
+          : reads.signedOut.test(line)
+            ? "out"
+            : "cannot tell";
+    check(
+      "grok's status strings are a partition, not an overlap",
+      [
+        against("You are logged in with grok.com."),
+        against("You are using XAI_API_KEY."),
+        against("You are not authenticated."),
+        against("Default model: grok-4.7"),
+      ],
+      ["in", "in", "out", "cannot tell"],
+    );
+  }
   /*
    * And the property that made the choice: `admit` refuses on `=== false`, so an
    * agent that runs without credentials must never be able to produce one. With
@@ -879,7 +935,7 @@ process.stdout.write("\neach agent's login, as it is written down\n");
   check(
     "which agents have a sign-in to run at all",
     AGENT_IDS.filter(hasLoginFlow),
-    ["claude", "kimi", "codex"],
+    ["claude", "kimi", "codex", "grok"],
   );
   check(
     "and the one that does not is refused before anything is spawned",
@@ -1043,6 +1099,26 @@ process.stdout.write("\nthe environment an agent is spawned with\n");
    */
   check("but CODEX_HOME survives, because it is an override and not a session", env["CODEX_HOME"], "/somewhere/else");
   check("and CODEX_PATH survives, which is the binary rather than the credentials", env["CODEX_PATH"], "/opt/codex");
+  /*
+   * ⚠ **And `USER` reaches the agent, which is the second half of a bug whose
+   * first half was in the desktop shell.** Measured 2026-09-15: `claude` derives
+   * its macOS **Keychain account** from `USER` and falls back to the literal
+   * `unknown`, so an agent spawned without it looks up a credential nobody has,
+   * writes an empty one there on first start, and then fails every turn with
+   * `OAuth session expired and could not be refreshed` — while the same binary
+   * works in a terminal. The shell's `Supervisor::start` now sets it; this is the
+   * assertion that the daemon does not then take it away again.
+   *
+   * It is a **negative about `SESSION_SCOPED_ENV`** rather than a positive about
+   * some code: `agentEnv` strips an explicit list plus `REEMOAT_*`, so `USER`
+   * survives today by not being on that list. Nothing said so, and "add the
+   * session-ish looking names" is exactly the edit that would put it there.
+   */
+  process.env["USER"] = "ada";
+  process.env["LOGNAME"] = "ada";
+  const identified = agentEnv();
+  check("USER reaches the agent, because a credential store is keyed on it", identified["USER"], "ada");
+  check("and LOGNAME with it, since POSIX has two spellings and tools read either", identified["LOGNAME"], "ada");
   check("and so does CLAUDE_CODE_EXECUTABLE", env["CLAUDE_CODE_EXECUTABLE"], "/opt/claude");
 
   for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
@@ -1124,6 +1200,41 @@ process.stdout.write("\nhow each agent is launched\n");
        * together; the shared lookup is what does now.
        */
       check("and the binary a session runs is the one a login drives", config.command, findOnPath("opencode"));
+      continue;
+    }
+    if (id === "grok") {
+      /*
+       * **opencode's shape, skip included — and the arguments are the assertion.**
+       * grok ships no adapter either: `grok agent stdio` is xAI's own ACP entry
+       * point, which is why this is not the `config.args === []` line below.
+       *
+       * ⚠ **`--no-auto-update` is pinned here because nothing else can see it.**
+       * Measured 2026-09-21 on 1.0.40: grok checks for and installs updates in the
+       * background when it runs, and `src/agentupdate.ts` owns when a build moves
+       * on this fleet — it keeps a build a live session may be on, by `--skip`.
+       * Dropping the flag is a silent change: sessions keep working, and the
+       * binary underneath them moves whenever xAI publishes.
+       *
+       * ⚠ **And `--always-approve` must be absent.** It is grok's `--yolo`; an
+       * agent spawned with it sends no `session/request_permission` at all, so
+       * every permission card in this product would simply stop appearing, with
+       * nothing failing. Asserted as an absence for that reason.
+       */
+      if (config === null) {
+        process.stdout.write("  skip  grok is not installed here, so its launch shape is unasserted\n");
+        continue;
+      }
+      check("grok is launched as an ACP subcommand of the CLI itself", config.args, [
+        "--no-auto-update",
+        "agent",
+        "stdio",
+      ]);
+      check(
+        "and it is never spawned with the flag that would silence every permission card",
+        config.args.some((arg) => arg === "--always-approve" || arg === "--yolo"),
+        false,
+      );
+      check("and the binary a session runs is the one a login drives", config.command, findOnPath("grok"));
       continue;
     }
     // Both adapters — pinned dependencies of this repository, unlike the CLIs
@@ -1701,7 +1812,18 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   check("firing it runs the script once", ran.length, 1);
   // The channel is always said, default included — the block on it below says
   // why — and nothing is skipped when nothing is live.
-  check("with the channel spelled out and nothing skipped when nothing is live", ran[0], ["--channel", "latest"]);
+  check("with the channel spelled out and nothing skipped when nothing is live", ran[0], ["--channel", "latest", "--refresh-only"]);
+  /*
+   * ⚠ **`--refresh-only` on every run, and the assertion is that it is
+   * unconditional rather than that it is present on this one.** It is what makes
+   * "nothing installs a harness by itself" true: the timer moves what is already
+   * on a machine and fetches nothing new, so a harness added to this repository
+   * no longer arrives on every machine in the fleet a day later. That was the
+   * reported symptom — xAI appearing, offering a sign-in, on machines nobody had
+   * asked. Driven over every combination of the two options that shape a run,
+   * because "present in the default case" is exactly what a conditional would
+   * also satisfy.
+   */
   check("and the cached CLI choice is dropped afterwards", updated.length, 1);
   // With what the script said, so a run that changed nothing still leaves a line
   // — a daily run with no trace was measured as invisible, seven minutes of
@@ -1741,7 +1863,7 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   const busy = make({ busy: () => ["kimi", "claude"] });
   armed[0]?.fire();
   await new Promise((r) => setTimeout(r, 0));
-  check("a live harness is passed through as a skip, after the channel", ran[0], ["--channel", "latest", "--skip", "kimi", "--skip", "claude"]);
+  check("a live harness is passed through as a skip, after the channel", ran[0], ["--channel", "latest", "--refresh-only", "--skip", "kimi", "--skip", "claude"]);
   await busy.shutdown();
 
   /*
@@ -1768,7 +1890,7 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   const fromNpm = make({ source: "npm", busy: () => ["kimi"] });
   armed[0]?.fire();
   await new Promise((r) => setTimeout(r, 0));
-  check("the npm source is named to the script, ahead of the channel and the skips", ran[0], ["--source", "npm", "--channel", "latest", "--skip", "kimi"]);
+  check("the npm source is named to the script, ahead of the channel and the skips", ran[0], ["--source", "npm", "--channel", "latest", "--refresh-only", "--skip", "kimi"]);
   await fromNpm.shutdown();
 
   /*
@@ -1785,7 +1907,7 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   const fromVendor = make({ source: "vendor", busy: () => ["kimi"] });
   armed[0]?.fire();
   await new Promise((r) => setTimeout(r, 0));
-  check("the vendor source is the script's own default, and is not spelled out to it", ran[0], ["--channel", "latest", "--skip", "kimi"]);
+  check("the vendor source is the script's own default, and is not spelled out to it", ran[0], ["--channel", "latest", "--refresh-only", "--skip", "kimi"]);
   await fromVendor.shutdown();
 
   /*
@@ -1805,8 +1927,69 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
   const onStable = make({ channel: "stable", busy: () => ["kimi"] });
   armed[0]?.fire();
   await new Promise((r) => setTimeout(r, 0));
-  check("a chosen stable channel is named to the script, ahead of the skips", ran[0], ["--channel", "stable", "--skip", "kimi"]);
+  check("a chosen stable channel is named to the script, ahead of the skips", ran[0], ["--channel", "stable", "--refresh-only", "--skip", "kimi"]);
   await onStable.shutdown();
+
+  /* ------------------------------------------------------------------ *
+   * The gate: an install wins, and the refused tick comes back soon
+   *
+   * ⚠ **`deploy/agents.sh`'s own `mkdir` lock is not enough, because of what it
+   * answers with.** A contended run there is `exit 0` with a warning — right for
+   * the three callers that contract this script never fails, and
+   * indistinguishable, for an install somebody pressed, from a successful run
+   * that found nothing to do. The gate keeps the two from meeting; the script's
+   * `--fail-if-locked` is the backstop for the orphan no gate in this process can
+   * see.
+   * ------------------------------------------------------------------ */
+  ran.length = 0;
+  armed.length = 0;
+  warnings.length = 0;
+  updated.length = 0;
+  const gate = new AgentScriptGate();
+  check("an install can take the gate", gate.tryHold("install", "kimi"), true);
+  const yielding = make({ gate });
+  armed[0]?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  /*
+   * ⚠ **Nothing at all, rather than a run that reports a failure.** A daily
+   * refresh skipped because somebody is installing is not an error, and warning
+   * about it would teach an operator to ignore the channel that carries the
+   * vendor outages this counter exists for.
+   */
+  check(
+    "a tick refused by the gate spawns nothing, warns nothing and reports nothing",
+    [ran.length, warnings.length, updated.length],
+    [0, 0, 0],
+  );
+  /*
+   * ⚠ **Five minutes, not a day** — `arm(nextDelay())` at the foot of `tick` is
+   * what this is asserted against. A fleet that lost a day's refresh every time
+   * somebody spent three minutes installing would do so with nothing on any
+   * screen saying why, and the loss is invisible precisely because the next run
+   * still happens.
+   */
+  check("and comes back soon rather than tomorrow", armed.at(-1)?.delay, FIRST_RUN_DELAY_MS);
+  /*
+   * ⚠ **And it did not spend the one nudge a machine gets.** `runOnce` sets
+   * `ran` on its first line, so a gate test placed *inside* it would have
+   * disarmed `nudge()` for the life of the process on behalf of a run that never
+   * happened — and the auto-resume pass's whole remedy for a session waiting on a
+   * missing harness is that nudge.
+   */
+  yielding.nudge();
+  await new Promise((r) => setTimeout(r, 0));
+  check("and a nudge is still available afterwards", armed.at(-1)?.delay, FIRST_RUN_DELAY_MS);
+  gate.release("install");
+  armed.at(-1)?.fire();
+  await new Promise((r) => setTimeout(r, 0));
+  check("and once the install is done the refresh runs", ran.length, 1);
+  /*
+   * The gate is given back, or the next tick is refused by a run that has already
+   * finished — a leak whose symptom is a fleet that never refreshes again.
+   */
+  check("and the gate is released afterwards", gate.tryHold("update"), true);
+  gate.release("update");
+  await yielding.shutdown();
 
   /*
    * **The spelling read off `REEMOAT_AGENT_CHANNEL`**, the same posture as the
@@ -2084,17 +2267,41 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
    * starts a second installer over whatever this one is still writing.
    */
   const stall = join(sandbox, "agents-stall.sh");
-  writeFileSync(stall, "#!/bin/sh\nsleep 30 &\necho \"grandchild=$!\"\nsleep 30\n");
+  /*
+   * ⚠ **The pid goes to a file, not to stdout.** Reading it back out of
+   * `cut.detail` raced the 300 ms deadline: `runScript` appends the child's
+   * output only `text.length > 0` (`src/agentupdate.ts`'s `close` handler), so a
+   * run killed before the pipe was drained carried no `grandchild=` at all and
+   * the parse fell back to `0` — which then made `alive(0)` answer **true**,
+   * because POSIX `kill(0, sig)` addresses *the caller's own process group*. That
+   * pair failed roughly one run in four with `[false, true]`, and a flaky driver
+   * in a tree whose whole safety net is drivers is worse than an absent one.
+   * `printf` into a file is written before the first `sleep` and survives the kill.
+   */
+  const pidFile = join(sandbox, "grandchild.pid");
+  writeFileSync(stall, `#!/bin/sh\nsleep 30 &\nprintf %s "$!" > ${pidFile}\nsleep 30\n`);
   chmodSync(stall, 0o755);
   const before = Date.now();
-  const cut = await runScript(stall, [], 300);
-  // Named, because the detail also carries "timed out after 0 min" and a bare
-  // number would read the deadline as the pid.
-  const grandchild = Number.parseInt(/grandchild=(\d+)/.exec(cut.detail ?? "")?.[1] ?? "0", 10);
+  /*
+   * ⚠ **The budget is 1500 ms rather than 300, and that is a fix for a flake
+   * rather than a loosening.** The script has to reach its `printf` before the
+   * deadline kills it, or `grandchild` parses to `0` and the two assertions below
+   * are about nothing. Measured on a loaded machine, 300 ms missed that write in
+   * **2 runs of 5** — a driver that is red two times in five hides whatever it
+   * was pointing at. What the number may not do is approach the 5000 ms the
+   * assertion below uses to separate "the deadline ended this" from "the
+   * installer finished on its own", and 1500 is comfortably under it.
+   */
+  const cut = await runScript(stall, [], 1500);
+  const grandchild = Number.parseInt(existsSync(pidFile) ? readFileSync(pidFile, "utf8").trim() : "0", 10);
   check("the deadline ends the run", [cut.ok, cut.detail?.includes("timed out")], [false, true]);
   check("within the deadline rather than the installer's own patience", Date.now() - before < 5000, true);
   await new Promise((r) => setTimeout(r, 50));
+  // Guarded, because `process.kill(0, 0)` signals this process's own group and
+  // always succeeds — the exact accident that made the old parse failure read as
+  // a surviving grandchild.
   const alive = (pid: number): boolean => {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
       process.kill(pid, 0);
       return true;
@@ -2102,7 +2309,8 @@ process.stdout.write("\nkeeping the agent CLIs current\n");
       return false;
     }
   };
-  check("and reaches the grandchild the script left behind", [grandchild > 0, alive(grandchild)], [true, false]);
+  check("the script's grandchild was recorded at all", grandchild > 0, true);
+  check("and the deadline reaches it", alive(grandchild), false);
 
   await runs.shutdown();
 }

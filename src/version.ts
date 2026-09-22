@@ -26,7 +26,7 @@
  * anywhere sends a version *to* a daemon, and adding that is a different decision
  * from this one.
  *
- * ⚠ **The coding-agent CLIs beneath it are a different subject, and all four now
+ * ⚠ **The coding-agent CLIs beneath it are a different subject, and all five now
  * move on a timer.** `src/agentupdate.ts` runs `deploy/agents.sh` daily. Every
  * reason the paragraph above exists is about *this* process: a daemon restart
  * interrupts every turn in flight and drops every pending approval. Replacing a
@@ -34,4 +34,4 @@
  * restart, and changes nothing in this repository — so it neither contradicts this
  * nor is a step toward it.
  */
-export const DAEMON_VERSION = "0.9.0";
+export const DAEMON_VERSION = "0.10.0";

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ⚠ Exactly one directory, and it is the one wry's generated chrome client
+  actually writes into. This file is androidx.core.content.FileProvider's
+  allowlist: every path named here is a directory the provider will mint a
+  content URI for and hand to another application.
+
+  Tauri's template shipped an external-path entry over "." and a cache-path entry
+  over ".". The first resolves to Environment.getExternalStorageDirectory() — the
+  whole of shared external storage, so every file on the device's user visible
+  volume was inside this provider's reach. The second is this app's cache root,
+  and nothing in this tree has ever asked for a URI into it.
+
+  What is real: RustWebChromeClient.kt creates a temporary JPEG under
+  getExternalFilesDir(Environment.DIRECTORY_PICTURES) and passes it to
+  FileProvider.getUriForFile, to give a camera app somewhere to write when a
+  page's file input carries the capture attribute. That directory is
+  external-files-path's Pictures/, and it is the only thing here that has ever
+  needed a content URI. host_save_file is not a second consumer: it opens the
+  platform's own save panel and writes with std::fs::write, so no URI is minted
+  and no other application is involved.
+
+  The provider is narrowed rather than removed because that chrome client is
+  generated — `tauri android init` rewrites it — so the capture path can come back
+  without anybody editing it, and a missing provider there degrades to a logged
+  exception and the plain file picker rather than to anything a person sees. No
+  input in packages/web carries capture today, which is why this is a narrowing
+  and not a deletion. nativecheck compares the entries as an exact list.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+  <external-files-path name="captured_images" path="Pictures/" />
+</paths>

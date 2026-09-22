@@ -88,12 +88,42 @@ is, in `SOURCE_URL`'s shape.
 
 ## Cryptography
 
-Every cryptographic primitive is a Node.js built-in — `node:crypto` for Ed25519
-token signing and scrypt password hashing, `node:tls` for the SMTP client. This
-project bundles no cryptographic library of its own and implements no algorithm.
+⚠ **This section changed, and the change is the reason it exists.** It read *"this
+project bundles no cryptographic library of its own and implements no algorithm"*
+for as long as there was no end-to-end encryption. Both halves of that are now
+qualified rather than true, and a legal review that found the old sentence beside
+the current tree would rightly stop.
 
-That last sentence is here for export control rather than for tidiness: this is
-publicly available open-source software, published as source to anybody who wants
-it, which is the category most jurisdictions treat as needing no license for
-distribution. It is stated because "uses cryptography" is a question a legal
-review asks and an unanswered one costs somebody a week.
+**Primitives still come from libraries, and no algorithm is implemented here.**
+`node:crypto` does Ed25519 token signing and scrypt password hashing; `node:tls`
+carries the SMTP client. The end-to-end encryption between the app and a daemon
+adds four audited, zero-dependency packages, all MIT:
+
+| Package | Version | Provides |
+|---|---|---|
+| [`@noble/curves`](https://github.com/paulmillr/noble-curves) | 2.4.0 | X25519 |
+| [`@noble/ciphers`](https://github.com/paulmillr/noble-ciphers) | 2.4.0 | ChaCha20-Poly1305 |
+| [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) | 2.4.0 | BLAKE2s, HMAC |
+| [`x25519-dalek`](https://github.com/dalek-cryptography/curve25519-dalek) | 3.0.0 | X25519 in the native shell, so a device's private key never crosses into the webview |
+
+That is a real change in posture for a project whose control plane runs on three
+dependencies in total, and it is recorded here rather than left in a manifest.
+
+**What *is* assembled here is a published protocol, not a primitive.**
+`packages/protocol/src/noise.ts` implements the handshake described by the Noise
+Protocol Framework (revision 34), pattern `IK`, suite
+`Noise_IK_25519_ChaChaPoly_BLAKE2s`. No primitive is written: the state machine is
+the part a library would otherwise have supplied, and `pnpm protocolcheck` drives
+it byte-for-byte against the official cross-implementation test vectors in both
+roles, with fixed ephemerals. The vectors themselves are vendored at
+`packages/protocol/vectors/noise.txt` from the `snow` project's published
+cross-implementation file (Noise is a public-domain specification; the vector file
+is distributed under snow's own permissive terms).
+
+**And for export control**, which is what the paragraph below was always for: the
+algorithms used are standard, published and widely available — X25519, ChaCha20-
+Poly1305, BLAKE2s, Ed25519, scrypt — and none is authored here. This is publicly
+available open-source software, published as source to anybody who wants it, which
+is the category most jurisdictions treat as needing no license for distribution. It
+is stated because "uses cryptography" is a question a legal review asks and an
+unanswered one costs somebody a week.

@@ -1170,7 +1170,7 @@ process.stdout.write("\nwhat an assembled session is launched as\n");
     // `create` asks before it builds anything, and the real answer depends on
     // whether this machine happens to have a `claude` on its PATH.
     override async availability(): Promise<AgentAvailability[]> {
-      return [{ id: "claude", displayName: "fake", available: true, loggedIn: true, hint: null, lastStartRefusal: null }];
+      return [{ id: "claude", displayName: "fake", available: true, installable: false, loggedIn: true, hint: null, lastStartRefusal: null }];
     }
     override describe(agent: AgentId): AgentLaunchConfig {
       return stubAgentConfig(agent);

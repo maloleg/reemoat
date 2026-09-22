@@ -19,10 +19,15 @@ curl -fsSL https://github.com/rends-east/reemoat/releases/latest/download/instal
   … | sh -s -- --enroll-code ec_…    #   with a code already minted, and no account credential
   … | sh -s -- --uninstall           #   stop it and take the unit away; names your data, deletes none
   … | sh -s -- --uninstall --purge   #   and delete it, after naming the database, checkout and worktrees it would take
-deploy/agents.sh --check             # what the agent CLIs would install or refresh, changing nothing.
-                                     #   Run for real by the bootstrap once, by `deploy.sh` on every
-                                     #   daemon update, and by the daemon daily
-deploy/agents.sh --source npm        #   the same four from the npm registry rather than the vendors'
+deploy/agents.sh --check             # what the agent CLIs would install or refresh, changing nothing
+deploy/agents.sh --only kimi         #   that harness alone. What `src/agentinstall.ts` passes when
+                                     #   somebody presses Install; its value is checked, --skip's is not
+deploy/agents.sh --refresh-only      #   move what is here, fetch nothing new. What `deploy.sh` and the
+                                     #   daemon's daily run pass — **nothing installs a harness but a
+                                     #   press**, so a new one does not arrive on the fleet by itself
+deploy/agents.sh --fail-if-locked    #   exit 3 rather than 0 when another run holds the lock, so a
+                                     #   press can tell a contended run from a successful no-op
+deploy/agents.sh --source npm        #   the same five from the npm registry rather than the vendors'
                                      #   hosts — what the daemon passes under REEMOAT_AGENT_SOURCE=npm
 deploy/agents.sh --channel stable    #   claude from its stable channel rather than latest, the default —
                                      #   what the daemon passes under REEMOAT_AGENT_CHANNEL=stable, and
@@ -279,7 +284,7 @@ nothing**: every decision is in `deploy/ci-deploy.sh`, driven by `deploycheck`
 through the `SSH` and `GH` seams. The ssh itself is unmeasured. Q7.94.
 
 **A release is a tag push, and `release.yml` decides nothing either.** Everything
-is in `deploy/ci-release.sh`, four verbs — `plan`, `image`, `manifest`, `publish`
+is in `deploy/ci-release.sh`, five verbs — `plan`, `image`, `manifest`, `app`, `publish`
 — **each of which re-runs every gate**, because a workflow is a graph somebody can
 re-run one job of. It refuses a tag the **six** version sites disagree with (both
 manifests, the root, `app.ts`'s `VERSION`, `src/version.ts`'s `DAEMON_VERSION`,
@@ -304,6 +309,51 @@ fork to change its §13 source, so a fork that obeys the licence gets a correct
 image label for free — and since the web client stopped drawing a source notice,
 this label and `GET /v1/instance` are the only two places the URL surfaces at all.
 Neither is a reason to change `SOURCE_URL`; both are reasons not to delete it.
+
+**The native app rides the same tag, and `app` is the verb for it.**
+`.claude/rules/native-packaging.md` owns which platform carries a daemon and which
+carries a client; this half is what a *release* does with the answer. One matrix
+leg per desktop target and a job of its own for android, each building and naming
+one artifact; `publish` puts every one of them on the same `gh release create`
+call as the installer, and **refuses a release missing an artifact its own list
+named** — by name, never by count. `manifest`'s "a silently-skipped matrix leg"
+argument, one act over and sharper: a page missing the Windows build looks
+finished to everybody except the people it was missing for.
+
+**The matrix is `plan`'s output, not a list in the YAML.** `app_runner` joins
+`app_triple`, `app_profile` and `app_artifacts` as the fourth column of one table;
+`plan` emits it as JSON and `release.yml` reads it through `fromJSON`, so adding a
+target is `RELEASE_APP_TARGETS` plus a `check.yml` leg and **no** workflow edit.
+Android is a job rather than a leg because it is the only target that reads a
+signing key and a matrix cannot scope a secret to one entry — the four
+`RELEASE_ANDROID_*` names appear in that job and nowhere else, which is `plan`'s
+whole reason for not checking them. ⚠ `deploycheck` reads `release.yml` against
+the script's `case` in **both** directions now: the `app` verb shipped with nine
+refusals, ~125 lines and no caller, and four documents described the wiring
+anyway.
+
+⚠ **`RELEASE_APP_TARGETS` is empty until `check.yml` builds something**, and it is
+the one knob spelled `${VAR-…}` rather than `${VAR:-…}` — for a list, an explicit
+empty is a request rather than an omission. `deploycheck` asserts every name in it
+has a `check.yml` leg, so a platform joins the list in the same change that gives
+it one. That is `RELEASE_PLATFORMS`' own argument about arm64, made mechanical:
+the first build of a platform in this project's history may not happen on the
+release path.
+
+⚠ **Empty means both app jobs are *skipped*, and three lines are what make that
+safe.** `plan` emits an empty matrix; each app job carries an `if:`, because an
+empty matrix in GitHub Actions is a job that **fails** rather than one that skips;
+and `publish` carries the only `if:` in a file whose header says it decides
+nothing, because GitHub skips a job whose `needs` includes a skipped one. Without
+that third line, wiring the app jobs up would have stopped every release creating
+a release page at all — after `manifest` had already pushed the image tags.
+`deploycheck` reads all three back.
+
+**And the §6 offer rides the notes.** `bundle.licenseFile` is read by the `dmg`
+and `nsis` bundlers and by nothing that builds a macOS `.app`, so the artifact most
+people download would carry no licence and no source offer. `plan` appends one
+naming this **tag** — `main` is routinely ahead of every tag — derived from
+`SOURCE_URL` so a fork gets a correct offer for free.
 
 ⚠ Two traps, both measured. **`publish` deliberately does not ask the
 image-exists question** — `manifest` has just created that tag, so asking would
@@ -359,12 +409,12 @@ untouched, because that function inspects the *local* image either way.
 | `deploy/lib.sh` | The **only** place that knows one machine from another: `service_backend`, `compose_service` (so no verb writes a compose service name by hand), where the tools are, what a unit is called, where it lives and how one is rendered and reloaded, `service_origin` and `health_probe_path` |
 | `deploy/install.sh` | One-time setup for **one** service. A wizard on a terminal, a plain installer without one |
 | `deploy/ci-deploy.sh` | What a runner does before `deploy.sh`: the secrets it must have, the daemon it may not touch, the CI verdict it will not go around. A script rather than YAML so `deploycheck` can drive every branch, through `SSH` and `GH` as seams |
-| `deploy/ci-release.sh` | What a runner does to publish one: the six versions that must agree, the CI verdict it will not go around, the tag it will not move, and the labels it derives rather than writes. Four verbs, three seams, and every gate re-run by each |
+| `deploy/ci-release.sh` | What a runner does to publish one: the six versions that must agree, the CI verdict it will not go around, the tag it will not move, the labels it derives rather than writes, and the app artifacts it names. Five verbs, five seams, and every gate re-run by each |
 | `deploy/ci-freshness.sh` | What a runner does once a week to say how stale the adapter pins are: the pins read off `package.json` by shape, three registry questions per adapter through `NPM_VIEW`, and five outcomes with the exit code each earns written in its header — behind reports, unpublished refuses, unreachable is its own code. Driven by `deploycheck` with no network |
-| `deploy/deploy.sh` | The update path. Refuses a dirty tree, builds the image once, then restarts only what the diff touched — with `RELAY_INPUTS` as the one list that decides whether the fleet's tunnels drop. On the daemon it runs `deploy/agents.sh` **before** deciding the restart, with the source read off the env file and every prune withheld, so a machine upgraded from a release that vendored the CLIs comes back with its harnesses rather than five minutes later; a script that did not finish is a line on stderr, never a failed deploy |
+| `deploy/deploy.sh` | The update path. Refuses a dirty tree, builds the image once, then restarts only what the diff touched — with `RELAY_INPUTS` as the one list that decides whether the fleet's tunnels drop. On the daemon it runs `deploy/agents.sh` **before** deciding the restart, with the source read off the env file, every prune withheld and **`--refresh-only`** — so an update moves the copies a machine already has and installs nothing new, which is what stops a harness added to this repository appearing on every machine in the fleet; a script that did not finish is a line on stderr, never a failed deploy |
 | `deploy/run-daemon.sh` | What the supervisor runs. Standalone by design — it must work when the environment is at its strangest |
 | `deploy/run-cp.sh` | ⚠ On no code path, and **kept until the last host has migrated**: a rendered unit's `@EXEC@` points here, so deleting it takes the fleet down at the next reboot rather than the next deploy |
-| `deploy/agents.sh` | The coding-agent CLIs — the only copies there are, since `pnpm install` vendors none (Q4.114): install what is missing, refresh what is there. `--source vendor` (the default) is each vendor's own installer into the vendors' own directories for three of them and the npm registry for kimi; `--source npm` is all four from the npm registry with everything under `~/.reemoat/toolchain`, and is what the daemon passes when `REEMOAT_AGENT_SOURCE=npm` — a choice, never a fallback. `--source` decides how an *absent* harness is installed and nothing about one that is present, which is refreshed through the door it came in by — `provenance` reads where the file is; the one case a switch cannot refresh, a vendor-installed copy under `npm`, is named on stderr until it is removed. `--channel stable\|latest` is which of claude's release channels the vendor arm installs *and* re-applies on every refresh (`claude install "$CHANNEL"`, since `claude update` follows whichever channel the last install wrote into claude's own settings), what the daemon passes under `REEMOAT_AGENT_CHANNEL` and `latest` by default (Q4.115). One script, three callers — the bootstrap once, `deploy.sh` on every update, `src/agentupdate.ts` daily — `--check` to preview and `--skip <agent>` per live harness; always exit 0, so a vendor being down is a line on stderr rather than a failed install. Holds a `mkdir` lock under the toolchain so any two of those callers — or an orphan a previous daemon left running — serialise rather than prune each other's staging; ignores SIGPIPE so a run outlives the daemon that spawned it; and keeps the npm build it just replaced for one run, because the daemon's `--skip` list is sampled once at run start and a session that started mid-run resolved the launcher to the old build. The directories it writes into are `MANAGED_CLI_DIRS`, which `deploycheck` imports rather than restates |
+| `deploy/agents.sh` | The coding-agent CLIs — the only copies there are, since `pnpm install` vendors none (Q4.114): install what is missing, refresh what is there. `--source vendor` (the default) is each vendor's own installer into the vendors' own directories for three of them and the npm registry for kimi; `--source npm` is all four from the npm registry with everything under `~/.reemoat/toolchain`, and is what the daemon passes when `REEMOAT_AGENT_SOURCE=npm` — a choice, never a fallback. `--source` decides how an *absent* harness is installed and nothing about one that is present, which is refreshed through the door it came in by — `provenance` reads where the file is; the one case a switch cannot refresh, a vendor-installed copy under `npm`, is named on stderr until it is removed. `--channel stable\|latest` is which of claude's release channels the vendor arm installs *and* re-applies on every refresh (`claude install "$CHANNEL"`, since `claude update` follows whichever channel the last install wrote into claude's own settings), what the daemon passes under `REEMOAT_AGENT_CHANNEL` and `latest` by default (Q4.115). One script, **four** callers — the bootstrap once and only for harnesses `--install-agents` named, `deploy.sh` on every update and `src/agentupdate.ts` daily (both `--refresh-only`), and `src/agentinstall.ts` `--only <agent>` when somebody presses Install. `--check` to preview and `--skip <agent>` per live harness; exit 0 whatever the vendors said, so one being down is a line on stderr rather than a failed install — and **exit 3 only under `--fail-if-locked`**, which exists because `exit 0` with nothing installed cannot be told from a run that found nothing to do, and a screen would draw that as installed. `--only`'s value is validated against the script's own `AGENTS` list (`deploycheck` compares it with `AGENT_IDS` as a set) where `--skip`'s is not: a bad `--skip` withholds a prune that did not matter, a bad `--only` is a run that touches nothing and reports success. `step: <agent> <phase>` is the one machine-readable line it prints, read by `readStep` in `src/agentinstall.ts` and by nothing else — it exists because `attempt` and `ensure_npm` send every installer's output to `/dev/null`, so a run is otherwise silent for minutes. Holds a `mkdir` lock under the toolchain so any two of those callers — or an orphan a previous daemon left running — serialise rather than prune each other's staging; ignores SIGPIPE so a run outlives the daemon that spawned it; and keeps the npm build it just replaced for one run, because the daemon's `--skip` list is sampled once at run start and a session that started mid-run resolved the launcher to the old build. The directories it writes into are `MANAGED_CLI_DIRS`, which `deploycheck` imports rather than restates |
 | `deploy/compose.sh` | `docker compose` with the project name, directory, env file and tag pinned. **Not** the repo root as project directory — compose would load the daemon's `.env` |
 | `deploy/docker/*` | The control plane as an image: a filtered install, the web bundle built in, a reachability walk that prunes what the root workspace dragged in — and **two services from that one image**, sharing a volume, with no `depends_on` between them |
 | `deploy/launchd/*.in`, `deploy/systemd/*.in` | One template per init system |

@@ -41,16 +41,16 @@ import { AGENT_IDS, type AgentId, type CatalogueState, type ContributedHarness, 
  * is the half of the question a daemon can answer, since which keys a machine
  * holds is not a property of the table.
  *
- * The shape is **the two vendors a harness reaches natively, then the widest
- * router, then the single-vendor endpoints**. Anthropic and OpenAI serve claude
- * and codex and are what most people are actually choosing between. OpenRouter is
+ * The shape is **the vendors a harness reaches natively, then the widest router,
+ * then the single-vendor endpoints**. Anthropic and OpenAI serve claude and codex
+ * and are what most people are actually choosing between. OpenRouter is
  * next: it is the widest catalogue and the commonest reason to scroll at all, and
  * it sat below Moonshot for a revision — never a released one — which put one
  * vendor's three table rows, or seven with kimi signed in, above the list most
- * searches end in. Moonshot follows — native to kimi, but a
- * single-vendor endpoint like the two under it. Z.ai and MiniMax are ones far
- * fewer people hold a key for. OpenCode Zen is last: it is the free tier one
- * harness falls back to when nothing is configured, which makes it the least
+ * searches end in. xAI and Moonshot follow — each native to a harness that ships
+ * here, but a single-vendor endpoint like the two under them. Z.ai and MiniMax are
+ * ones far fewer people hold a key for. OpenCode Zen is last: it is the free tier
+ * one harness falls back to when nothing is configured, which makes it the least
  * likely thing anybody came here to choose — and it is last *by default only*,
  * since a machine holding a Zen key floats it like any other.
  */
@@ -58,13 +58,14 @@ export const SYSTEM_IDS = [
   "anthropic",
   "openai",
   "openrouter",
+  "xai",
   "moonshot",
   "zhipu",
   "minimax",
   "zen",
 ] as const;
 
-/** One of the seven this repository ships. */
+/** One of the eight this repository ships. */
 export type BuiltinSystemId = (typeof SYSTEM_IDS)[number];
 
 /**
@@ -267,6 +268,94 @@ export const SYSTEMS: Record<BuiltinSystemId, SystemConfig> = {
     models: [],
     nativeModelPrefix: null,
     keyEnv: null,
+  },
+  xai: {
+    displayName: "xAI",
+    /*
+     * ⚠ **Inert while `baseUrl` is `null`, and written down anyway because the
+     * row is one measurement away from needing it.** {@link hostable} never reads
+     * `apiType` on a row it has already refused for having nowhere to route, so
+     * this value decides nothing today. What it records is which arm the row
+     * *would* take — and `anthropic` rather than `openai` is the half that is not
+     * obvious, since xAI's documented API is OpenAI-shaped. See `baseUrl`.
+     */
+    apiType: "anthropic",
+    /*
+     * ⚠ **`null`, and this row is where that was hardest to decide.** Probed
+     * 2026-09-21 with no credential and with a bogus one:
+     * `POST api.x.ai/v1/messages` answers `401
+     * {"code":"unauthenticated:no-credentials"}` keyless and `400
+     * {"code":"invalid-argument","error":"Incorrect API key provided…"}` with a
+     * bogus key, in **both** the `x-api-key` and `authorization: Bearer`
+     * conventions — identically, so neither is diagnosed — while a path that does
+     * not exist (`/v1/nonsense-abc`, and `/anthropic/v1/messages`) answers `404`
+     * in a different envelope naming docs.x.ai. So something is routed at
+     * `/v1/messages` and it is behind auth.
+     *
+     * That is **not enough**. Every other routed row here rests on the vendor
+     * publishing an Anthropic-compatible endpoint; xAI documents none — the string
+     * `anthropic` does not occur anywhere in `docs.x.ai`'s own `llms.txt`, and the
+     * REST reference describes the API as OpenAI-compatible (`/v1/responses`,
+     * `/v1/chat/completions`). A bogus key is refused *before* any body-shape
+     * check, so the one thing the probe cannot show is the thing that matters.
+     * Naming the base on that evidence would offer a pairing the picker draws,
+     * `POST /custom-agents` accepts, and somebody's first turn discovers is wrong.
+     *
+     * What opens it is one call with a real key: an Anthropic body to
+     * `api.x.ai/v1/messages` coming back with a `content` array. Then this becomes
+     * `"https://api.x.ai"` — the SDK appends `/v1/messages`, which is the path the
+     * `openrouter` row is pinned against — with `authHeader` set to
+     * `authorization`/`Bearer ` (both conventions read, so it follows the four
+     * rows above) and a written-down `models` list, since `GET /v1/models` answers
+     * `401` unauthenticated and so fails the browser door `openrouter` goes
+     * through.
+     *
+     * Until then Grok is reached by the CLI that ships for it, which is the whole
+     * of what has been driven.
+     */
+    baseUrl: null,
+    authHeader: null,
+    nativeHarness: "grok",
+    /*
+     * grok has a real sign-in — a device-code wizard this daemon can drive — and a
+     * key slot beside it, so this names the harness and the screen draws that
+     * card. Unlike `zen` next door, both readings of this field agree here.
+     */
+    loginVia: "grok",
+    /*
+     * Empty for the first of the three reasons: the CLI publishes its own list.
+     * Measured 2026-09-21 on grok 1.0.40, `session/new` answers `configOptions`
+     * carrying `{id: "model", category: "model", currentValue: "grok-4.6",
+     * options: [grok-4.6, grok-4.5]}` — so these arrive as `source: "published"`
+     * and need no key of their own, exactly as Anthropic's and OpenAI's do.
+     *
+     * ⚠ A list written here would be the *routed* spelling, and there is nothing
+     * routed at this row — see `baseUrl`. It becomes non-empty on the same day
+     * that does.
+     */
+    models: [],
+    /*
+     * `null`: measured, grok publishes bare ids (`grok-4.6`), which is what the
+     * endpoint answers to. Nothing to put back and nothing to strip — the
+     * `openrouter`/`zen` split exists because one CLI serves two systems, and this
+     * one serves one.
+     */
+    nativeModelPrefix: null,
+    /*
+     * ⚠ **The slot is real, and it is the one credential in this table that is not
+     * spent by the CLI reading the variable on its own.** Measured 2026-09-21:
+     * `XAI_API_KEY` in grok's environment does not by itself admit a session —
+     * `session/new` still answers `-32000 "Authentication required"` — it is the
+     * ACP `authenticate` call named by `ACP_AUTH_METHOD` that spends it, and that
+     * call's own refusal without one reads *"Set XAI_API_KEY or add api_key/env_key
+     * to config.toml."* So the variable is what grok reads; it just reads it one
+     * method later than the other four do.
+     *
+     * Naming it here is also what makes `systemSecretFor` borrow correctly on the
+     * day `baseUrl` is set: one xAI account, one key, and not a second empty box
+     * under a second name.
+     */
+    keyEnv: "XAI_API_KEY",
   },
   moonshot: {
     displayName: "Moonshot",

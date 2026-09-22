@@ -1398,7 +1398,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
   /*
    * ⚠ **The harnesses come from the *listing*, and reading `AGENT_IDS` here was
    * the clearest way a harness a plugin added could have been made a second-class
-   * row.** That constant is the four this product ships — so a contributed harness
+   * row.** That constant is the five this product ships — so a contributed harness
    * would have drawn no glyph on any model row, and a model only *it* can run would
    * have drawn **none at all**, silently, on the row whose whole job is to say what
    * will run it. `supportingHarnesses`' own claim that it is "never empty in
@@ -1431,7 +1431,7 @@ process.stdout.write("\nwhich harness can be pointed at which system\n");
     ["acme:gemini"],
   );
   check(
-    "while the default is still the four this product ships, in their own order",
+    "while the default is still the five this product ships, in their own order",
     supportingHarnesses(tabled, withPlugin as never),
     ["claude"],
   );

@@ -30,6 +30,24 @@ import { IDLE_PARK_SWEEP_MS } from "./registry.js";
  * status they are derived from, while "how often to look" is a policy that a
  * driver has to be able to fake.
  *
+ * ⚠ **It drives two sweeps now, and that is one clock rather than a second job.**
+ * The other is `SessionRegistry.abandonWedgedTurns` — giving up on a turn the
+ * agent has never answered, `TURN_SILENCE_MS`. It belongs on this timer and not on
+ * one of its own for the reason this class's own docblock gives about shapes: a
+ * second self-rescheduling `unref`'d `setTimeout` with its own re-entrancy guard
+ * and its own idempotent shutdown is a second set of the same mistakes. What the
+ * two sweeps share is the clock and nothing else — each has its own port, its own
+ * `enabled` thunk and its own report, because a machine that keeps its agents
+ * resident has not thereby asked to keep a session claiming to be working for
+ * ever.
+ *
+ * They run in one tick, park first. The order is deliberate and it is the only
+ * coupling between them: abandoning a turn makes a session `idle`, which is the
+ * state `parkable` requires — so running the reaper first would offer the park
+ * sweep a session that became eligible one statement ago and had not been quiet
+ * for a second. Half an hour later it goes, measured from the ending, which is
+ * what the threshold means.
+ *
  * Shaped on `AgentUpdates`, deliberately and down to the details — a static
  * factory, though unlike `AgentUpdates` it always arms, because `enabled` is a
  * thunk read at every tick rather than a mode fixed at construction (see
@@ -53,8 +71,24 @@ export interface IdleParkOptions {
    * ⚠ **A thunk, not a boolean, for the reason `elicitationAllowed` is one:**
    * `daemon.ts` builds the registry before it has finished reading the
    * environment, and a value captured at construction would be stale.
+   *
+   * ⚠ **It gates {@link park} alone.** It used to gate the tick, which was the
+   * same thing while there was one sweep and is a trap now: reading it for both
+   * would make `REEMOAT_IDLE_PARK_MINUTES=0` switch off a policy nobody pointed
+   * it at.
    */
   enabled?: () => boolean;
+  /**
+   * Give up on the turns no agent has answered, and answer which.
+   *
+   * `SessionRegistry.abandonWedgedTurns` fills this, a port for the reason
+   * {@link park} is one. Synchronous, unlike its neighbour, and that is a fact
+   * about what it does rather than a convenience: it pushes one event into a queue
+   * a generator is already parked on, where parking stops a process.
+   */
+  reap?: () => readonly string[];
+  /** Whether *that* one runs. Its own switch; see {@link enabled}. */
+  reapEnabled?: () => boolean;
   /** Injected so a driver can run this with no clock. Must answer an `unref`-able handle or a fake. */
   schedule?: (fn: () => void, ms: number) => { cancel: () => void };
   /** How often to look. Defaults to {@link IDLE_PARK_SWEEP_MS}. */
@@ -69,6 +103,17 @@ export interface IdleParkOptions {
    * operator reading a daemon log needs the fleet-level line.
    */
   onParked?: (ids: readonly string[]) => void;
+  /**
+   * Told which turns were given up on, for {@link onParked}'s reason and one of
+   * its own.
+   *
+   * A session's own transcript carries the `turn_end{abandoned}`, so the person
+   * reading that conversation is told. Nobody else is — and an agent that stops
+   * answering is a fleet-level fact about an adapter or a build, which is exactly
+   * the kind of thing an operator finds by reading a daemon log and cannot find
+   * any other way.
+   */
+  onAbandoned?: (ids: readonly string[]) => void;
 }
 
 export class IdleParking {
@@ -141,11 +186,25 @@ export class IdleParking {
      * `schedule` that fires twice, where the second pass would otherwise be
      * stopping sessions the first is already inside `stop()` on.
      */
-    if (!this.running && (this.options.enabled?.() ?? true)) {
+    if (!this.running) {
       this.running = true;
       try {
-        const parked = await this.options.park();
-        if (parked.length > 0) this.options.onParked?.(parked);
+        if (this.options.enabled?.() ?? true) {
+          const parked = await this.options.park();
+          if (parked.length > 0) this.options.onParked?.(parked);
+        }
+        /*
+         * After the park and inside the same guard. ⚠ **Not in a second `try`**:
+         * one throw must not cost the other sweep its turn, and it does not —
+         * `abandonWedgedTurns` is synchronous and touches no process, so the only
+         * way it throws is a bug, and a bug there that silently skipped parking
+         * would be a memory leak nobody could see. If it ever grows an await, this
+         * is the line that needs splitting.
+         */
+        if (this.options.reapEnabled?.() ?? true) {
+          const abandoned = this.options.reap?.() ?? [];
+          if (abandoned.length > 0) this.options.onAbandoned?.(abandoned);
+        }
       } catch {
         // A sweep is housekeeping and the next one is a minute away. There is
         // nothing to report that the session's own transcript does not already

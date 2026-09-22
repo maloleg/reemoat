@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { check, report, storage } from "./webcheck.env.js";
-import { stripComments } from "./webcheck.source.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 
 /* ------------------------------------------------------------------ *
  * What the tab says to somebody who is not looking at it
@@ -676,22 +676,117 @@ process.stdout.write("\nnothing names a colour that no longer exists\n");
   );
 
   /*
-   * **A pointer over anything pressable, and the rule is layered.**
+   * ⭐ **One control in this client changes the mouse, by name**, and the check is
+   * a sweep rather than a negated regex on the stylesheet.
    *
-   * Tailwind v3's preflight set it and v4 dropped it, so every button in this
-   * app drew the ordinary arrow — invisible on a phone, and on a desktop the
-   * only cue an unfilled button has left, since with the accent gone a control
-   * is drawn in the colour of what it sits on.
+   * What this replaces asserted the opposite: an `@layer base` rule putting the
+   * hand shape on every enabled `button`, every `[role="button"]` and the one
+   * `<summary>`, restored on purpose after Tailwind v4's preflight dropped it. The
+   * owner's rule is that no module here changes the mouse from its default, so the
+   * assertion is inverted rather than deleted — a default Tailwind no longer ships
+   * is exactly the kind that creeps back in as a two-line fix for "the buttons
+   * don't feel like buttons".
    *
-   * Both halves are asserted because each fails silently on its own: without
-   * `:disabled` the arrow stops distinguishing a control that will not act, and
-   * **unlayered it would beat every utility regardless of specificity** — the
-   * trap the focus-ring docblock in this same file was written for — making
-   * `cursor-default` a dead class wherever somebody needs one.
+   * ⚠ **Four different wrong states satisfy a regex on `index.css` alone**, which
+   * is why this walks the tree: the declaration written unlayered, the same one
+   * with other whitespace, a `cursor-*` utility in a `.tsx` — which Tailwind emits
+   * from *source text*, so it never reaches the stylesheet to be found there — and
+   * `style={{ cursor: … }}`, which is the form React code actually reaches for and
+   * which the first version of this pattern could not see at all. That one is not
+   * hypothetical: `AppShell` already passes `style={{ left: "var(--rail-w)" }}` on
+   * the very element whose `col-resize` shape this change deleted, so restoring it
+   * is one token inside an object literal that is already there.
+   * `files` above is the one walk in this driver that takes `.css` as well as
+   * `.tsx`; `srcFiles()` is `.ts`/`.tsx` only, so a sweep built on it would leave
+   * the stylesheet unread and the rule could survive behind a green check.
+   *
+   * ⚠ **The declaration arm is anchored on a cursor *value*, never on `cursor:`
+   * alone.** `wire.ts` declares `cursor: number` for the transcript's byte cursor,
+   * and a bare colon makes the wire protocol an offender — a red gate whose only
+   * available repair is loosening this pattern. The third control below pins that
+   * it does not, so a future loosening fails here instead of widening in silence.
+   *
+   * ⚠ **The allow-list is the decision, and it holds exactly one file.**
+   * `PaneHandle` is both separators, and `col-resize` there is the owner's call and
+   * the right one: the ban is about a *pointer* shape claiming that ordinary text
+   * is pressable, and an arrow pair over the 1px division between two panes is the
+   * opposite of that — it is the only thing saying an 8px transparent strip can be
+   * dragged at all. Listed by **path**, so a second file wearing a cursor fails
+   * here rather than arriving as a precedent somebody finds later.
+   *
+   * Comments are stripped for the reason the retired-colour check above gives —
+   * this codebase keeps its history in its docblocks, and `index.css`'s paragraph
+   * explaining the removal necessarily describes what was removed.
    */
-  const cursorRule = /@layer base \{[\s\S]*?cursor: pointer;[\s\S]*?\}/.exec(css)?.[0] ?? "";
-  check("a pressable thing shows a pointer", cursorRule.length > 0, true);
-  check("and a disabled one does not", /button:not\(:disabled\)/.test(cursorRule), true);
+  const CURSOR_VALUES =
+    "pointer|default|not-allowed|text|move|grab|grabbing|wait|help|crosshair|" +
+    "zoom-in|zoom-out|none|auto|progress|cell|alias|copy|context-menu|no-drop|" +
+    "all-scroll|[a-z]+-resize";
+  const cursorPattern = new RegExp(
+    `\\bcursor\\s*[:=]\\s*["'\`]?(?:${CURSOR_VALUES})\\b|\\bcursor-(?:${CURSOR_VALUES})\\b`,
+  );
+  const CURSOR_ALLOWED: readonly string[] = ["src/ui/PaneHandle.tsx"];
+  const cursorOffenders = files
+    .filter((file) => cursorPattern.test(stripped(readFileSync(file, "utf8"))))
+    .map((file) => file.slice(file.indexOf("/packages/web/") + "/packages/web/".length));
+  /*
+   * The floor and the three controls, because a sweep whose pattern stopped
+   * matching is a green check over nothing — the shape `webcheck.env.ts` records
+   * as a skip reading like a pass.
+   */
+  check("the sweep can see a declaration", cursorPattern.test("cursor: pointer;"), true);
+  /*
+   * ⚠ **Assembled rather than written out, because Tailwind scans this file.**
+   * `@tailwindcss/vite` auto-detects its sources from the Vite root — `packages/web`,
+   * which includes `scripts/` — so a literal class name here is a candidate like any
+   * other. Measured: it compiled to a live `pointer` rule in **both** build
+   * outputs, the one inside the native binary and the one in the control plane's
+   * image — the single thing the sweep below exists to keep out of the artefact,
+   * put there by the check that asserts it is gone, and invisible to that sweep
+   * because comments are stripped before it runs.
+   *
+   * ⚠ **The same hazard applies to prose, and it is the sharper half.** This
+   * repository keeps its history in its docblocks, so the natural way to record a
+   * deleted utility is to name it — and Tailwind's scanner does not strip comments.
+   * Writing the class out in any file under `packages/web` compiles it back into
+   * the stylesheet. So the rule is: describe the *value* (`col-resize`, `pointer`)
+   * and never the class, and the assertion below enforces it over **raw** source.
+   */
+  const utilityProbe = "cursor" + "-pointer";
+  check("and one written as a utility", cursorPattern.test(`className="tap ${utilityProbe}"`), true);
+  check("and one written as an inline style", cursorPattern.test('style={{ cursor: "pointer" }}'), true);
+  check("and it does not see the wire's byte cursor", cursorPattern.test("  cursor: number;"), false);
+  check("nor its assignments", [cursorPattern.test("cursor = next;"), cursorPattern.test("cursor?: string;")], [false, false]);
+  check("one control changes the mouse, and it is named", cursorOffenders.sort(), [...CURSOR_ALLOWED].sort());
+  /*
+   * ⭐ **And the class spelling may not appear even in a comment**, which is the one
+   * place this sweep and Tailwind's disagree on purpose. The sweep strips comments
+   * so a docblock may record what was removed; the scanner does not, and it reads
+   * every file under `packages/web` — `scripts/` included, which is how the
+   * positive control three lines up put the class back into both build outputs
+   * while printing `ok`. So the *utility* arm is run a second time over raw text
+   * across both trees a person authors here.
+   *
+   * ⚠ **Only the utility arm.** The declaration arm stays comment-stripped, or this
+   * paragraph and `index.css`'s would be offenders for describing the rule that was
+   * deleted — which is the record the repository is for.
+   */
+  const rawUtility = new RegExp(`\\bcursor-(?:${CURSOR_VALUES})\\b`);
+  const authored: string[] = [...files];
+  const scriptsDir = new URL("./", import.meta.url);
+  for (const entry of readdirSync(scriptsDir, { withFileTypes: true })) {
+    if (entry.isFile() && /\.tsx?$/.test(entry.name)) authored.push(new URL(entry.name, scriptsDir).pathname);
+  }
+  report("both authored trees are in the second sweep", authored.length > files.length, `${authored.length} files`);
+  check("the raw sweep can see the class spelling", rawUtility.test(`x ${utilityProbe} y`), true);
+  check(
+    "and nobody writes it, comments included, since the scanner reads those too",
+    authored
+      .filter((file) => rawUtility.test(readFileSync(file, "utf8")))
+      .map((file) => file.slice(file.indexOf("/packages/web/") + "/packages/web/".length))
+      .sort(),
+    [...CURSOR_ALLOWED].sort(),
+  );
 
   /*
    * ⭐ **One way to copy, because the browser API is missing on the deployment
@@ -1289,13 +1384,57 @@ process.stdout.write("\nthe three lines a daemon is started with\n");
 
 process.stdout.write("\nhow wide the rail is\n");
 {
-  const { RAIL_DEFAULT, RAIL_MAX, RAIL_MIN, clampRailWidth } = await import("../src/ui/rail.js");
+  const { MACHINE_COLUMN_PX, RAIL_DEFAULT, RAIL_MAX, RAIL_MIN, clampRailWidth } = await import("../src/ui/rail.js");
 
   check("the bounds leave a usable range and the default is inside it", [RAIL_MIN < RAIL_DEFAULT, RAIL_DEFAULT < RAIL_MAX], [
     true,
     true,
   ]);
-  check("the default is the width this shipped at", RAIL_DEFAULT, 312);
+  /*
+   * ⚠ **A rail nobody has dragged is at its default rather than unset**, which is
+   * the one field this pane sets differently from the background panel and the
+   * only thing keeping `aria-valuenow` on its separator from being absent until the
+   * first drag. Read before anything in this section commits a width, because after
+   * that it is true for the wrong reason.
+   */
+  check("a rail nobody has dragged has a width to announce", (await import("../src/ui/rail.js")).rail.width(), RAIL_DEFAULT);
+  /*
+   * ⚠ **The three bounds asserted by subtraction, where one literal used to be.**
+   *
+   * `check("the default is the width this shipped at", RAIL_DEFAULT, 312)` was the
+   * whole of it, and it was right for a rail that was one column. The rail is two
+   * now — the machine folders and the session list — so every bound is the column
+   * plus the number it used to be, and a literal would have had to be re-typed
+   * three times with the reason living nowhere.
+   *
+   * Subtracting is what keeps the *old* claims assertable: `rail.ts` argues its
+   * floor from the content of a session row, and that argument is about the list,
+   * which is `RAIL_MIN - MACHINE_COLUMN_PX`. It also pins something the literals
+   * could not — that the column was added **exactly once** to each bound, so a
+   * fourth column, or a second addition to one of the three, fails here rather
+   * than shipping as a rail that is 72px too wide at one end of its range.
+   */
+  check(
+    "the bounds are the machine column plus the list's own three numbers",
+    [RAIL_MIN - MACHINE_COLUMN_PX, RAIL_DEFAULT - MACHINE_COLUMN_PX, RAIL_MAX - MACHINE_COLUMN_PX],
+    [240, 312, 480],
+  );
+  /*
+   * And the column is drawn at the width the arithmetic above assumes. Tailwind v4
+   * generates nothing from an interpolated utility, so this number is a literal in
+   * a class string by necessity; the pair is what stops the two drifting, and the
+   * `rem` ban beside it is `index.css`'s own `19.5rem`/`312` defect read one file
+   * over — a column in `rem` inside a rail in device pixels reopens it exactly.
+   */
+  const columnSrc = stripComments(readFileSync(new URL("../src/ui/MachineColumn.tsx", import.meta.url), "utf8"));
+  check(
+    "and the machine column is drawn at that width, in that unit",
+    [
+      new RegExp(`w-\\[${MACHINE_COLUMN_PX}px\\]`).test(columnSrc),
+      /w-\[[\d.]+r?em\]/.test(columnSrc),
+    ],
+    [true, false],
+  );
 
   check("a width inside the bounds is kept", clampRailWidth(360), 360);
   check("too narrow is refused rather than allowed", clampRailWidth(10), RAIL_MIN);
@@ -1356,27 +1495,207 @@ process.stdout.write("\nhow wide the rail is\n");
   check("and an unsubscribed listener stops hearing", notified, 2);
   check("while the value still moved", railWidth(), RAIL_DEFAULT);
 
-  const shell = readFileSync(new URL("../src/ui/AppShell.tsx", import.meta.url), "utf8");
+  /*
+   * ⚠ **Comment-stripped, unlike the same-named variable further up this file.**
+   * It was raw, and that made five of the assertions below satisfiable by a
+   * docblock merely *quoting* the expression — which stopped being hypothetical
+   * the moment the drag moved to `PaneHandle.tsx` and this file gained a paragraph
+   * describing what used to be here.
+   */
+  const shell = stripComments(readFileSync(new URL("../src/ui/AppShell.tsx", import.meta.url), "utf8"));
   check(
     "the width reaches the rail as a custom property, not a React style prop",
     /lg:w-\[var\(--rail-w\)\]/.test(shell),
     true,
   );
   check("and nothing sets an inline width on the aside", /<aside[^>]*style=/.test(shell), false);
-  check("the drag writes that property directly", /setProperty\("--rail-w"/.test(shell), true);
+  check("the committed width is synced onto documentElement by the shell", /setProperty\("--rail-w"/.test(shell), true);
+  /*
+   * ⭐ **One separator, two panes**, since the background panel became draggable on
+   * the same mechanism. Everything below moved to `PaneHandle.tsx` with it, and the
+   * pair here is what stops that extraction becoming a check about a component
+   * nobody mounts: the behaviour is read out of the shared file, and **both**
+   * mounts are asserted. A rail that quietly went back to its own copy would leave
+   * this whole section green over a component it no longer uses.
+   *
+   * ⚠ **`sign` is the whole of the difference between the two**, and it is read
+   * rather than left to a reviewer: the rail is to the left of its handle and the
+   * panel to the right, so one of them grows with the pointer and the other against
+   * it. Reversed, a drag makes the panel narrower as it is pulled wider, and
+   * nothing else here would notice.
+   */
+  const paneHandle = stripComments(readFileSync(new URL("../src/ui/PaneHandle.tsx", import.meta.url), "utf8"));
+  const panelForHandle = stripComments(readFileSync(new URL("../src/ui/TaskPanel.tsx", import.meta.url), "utf8"));
+  check(
+    "the two draggable panes share one separator, and each says which way it grows",
+    [
+      /<PaneHandle pane=\{rail\} label="Sidebar width" sign=\{1\}/.test(shell),
+      /pane=\{taskPane\}[\s\S]{0,120}sign=\{-1\}/.test(panelForHandle),
+    ],
+    [true, true],
+  );
+  /*
+   * ⚠ **The drag's own write, which was asserted nowhere after the extraction.**
+   * The check above reads `AppShell`'s *sync effect* — the thing its own docblock
+   * says "is not what a drag talks to" — so the name was true of the file and false
+   * of the mechanism. Measured: replacing `apply`'s body with a `setState` that
+   * owns the width, which is precisely the defect this module's docblock calls
+   * load-bearing ("a width React owns is reset to where the drag started every time
+   * a poll lands"), left `typecheck` and the whole of `webcheck` green.
+   */
+  check("the drag writes the pane's property directly", /style\.setProperty\(pane\.prop,/.test(paneHandle), true);
   check(
     "the handle is bounded by the same helper the store is",
-    /clampRailWidth\(origin\.width \+ event\.clientX - origin\.x\)/.test(shell),
+    /pane\.clamp\(origin\.width \+ sign \* \(event\.clientX - origin\.x\)\)/.test(paneHandle),
     true,
+  );
+  /*
+   * ⭐ **A press that never moved commits nothing**, which on the background panel
+   * is the difference between "the stylesheet decides" and a number that beats both
+   * declared widths for ever. One click on the separator was enough.
+   */
+  check(
+    "a press that never moved commits no width",
+    [/moved\.current = false;/.test(paneHandle), /if \(commit && moved\.current\)/.test(paneHandle)],
+    [true, true],
+  );
+  /*
+   * ⚠ **And unmounting mid-drag is not a `pointercancel`** — measured on Chrome
+   * 151, removing the element holding the capture delivers no `pointerup`, no
+   * `pointercancel` and not even `lostpointercapture` to it. The panel's separator
+   * unmounts on every close, Escape closes it mid-drag, and `AppShell`'s effect
+   * cannot repair it: nothing was committed, so its value never changes and it
+   * never re-runs.
+   */
+  check("and a pane that unmounts mid-drag gives its property back", /\(\) => \(\) => \{\s*if \(from\.current === null\) return;/.test(paneHandle), true);
+  /*
+   * WAI-ARIA 1.2 makes `aria-valuenow` **required** on a focusable separator and,
+   * unlike `slider`, names no repair — so engines synthesise one, and the
+   * synthesised value is not inside the range this element advertises. It read
+   * `?? undefined` while the panel's width was unchosen, which is every reader who
+   * has not dragged it.
+   */
+  check("a focusable separator always has a position to announce", /aria-valuenow=\{announced \?\? declared\(\)\}/.test(paneHandle), true);
+  /*
+   * ⚠ **An 8px strip is not a control a finger may reach**, and both separators
+   * said so in prose while neither enforced it. `md` is 768 and `lg` is 1024, which
+   * every tablet clears — so each was a tabbable, capture-taking,
+   * `touch-action: none` strip lying across the edge of the conversation, with
+   * `bg-transparent group-hover:` as its whole appearance. Nested inside the width
+   * rather than written as a competing `[@media(pointer:coarse)]:hidden`, because
+   * two `display` utilities in one string are resolved by Tailwind's emission order.
+   */
+  check(
+    "and neither separator is reachable by a finger",
+    [
+      /lg:\[@media\(pointer:fine\)\]:block/.test(shell),
+      /md:\[@media\(pointer:fine\)\]:block/.test(panelForHandle),
+      /\blg:block\b/.test(shell),
+      /\bmd:block\b/.test(panelForHandle),
+    ],
+    [true, true, false, false],
   );
   /*
    * Capture rather than `window` listeners, and this is the half that is invisible
    * to every other check here: released outside the browser window, an uncaptured
    * pointer delivers no `pointerup` to the document at all, so the strip stays
-   * armed and the next click anywhere resizes the rail.
+   * armed and the next click anywhere resizes the pane. It also makes teardown
+   * structural, which the panel's separator relies on — it unmounts every time the
+   * panel is closed, including mid-drag.
    */
-  check("the drag captures its pointer", /setPointerCapture\(event\.pointerId\)/.test(shell), true);
-  check("and adds no window listener to leak", /window\.addEventListener\("pointer/.test(shell), false);
+  check("the drag captures its pointer", /setPointerCapture\(event\.pointerId\)/.test(paneHandle), true);
+  check(
+    "and adds no window listener to leak",
+    /window\.addEventListener\("pointer/.test(paneHandle) || /window\.addEventListener\("pointer/.test(shell),
+    false,
+  );
+  /*
+   * ⚠ **No breakpoint is read in JavaScript here either**, and the one DOM read
+   * this file makes is the exception that proves it: `getComputedStyle` on
+   * `documentElement` for the pane's own property, once per gesture, is CSS
+   * *answering* rather than JavaScript deciding — the same licence `machineSwipe`'s
+   * `offsetParent` read is granted. Without it the first drag of the panel at `xl`
+   * would begin from the `md` default and jump 96px under the pointer.
+   */
+  check(
+    "the separator asks CSS what it declared rather than asking how wide the window is",
+    [/getComputedStyle\(document\.documentElement\)/.test(paneHandle), /matchMedia|innerWidth|clientWidth/.test(paneHandle)],
+    [true, false],
+  );
+  /*
+   * ⚠ **A cancelled *first* drag is the one path with nothing to restore to**, and
+   * it is the only place the two panes' shapes can bite. `pointercancel` restates
+   * the committed width; with none committed there is none to restate, and asking
+   * the DOM again would read the inline value **this gesture just wrote** and keep
+   * the abandoned width — precisely what a cancel exists to undo. Removing the
+   * property is what hands the stylesheet back. Asserted as source text because
+   * every other check here is green over it: the drag works, the commit works, and
+   * only an abandoned gesture on a pane nobody has ever dragged is wrong.
+   */
+  check(
+    "a cancelled gesture on a pane with no committed width gives the property back",
+    /if \(settled === null\) document\.documentElement\.style\.removeProperty\(pane\.prop\);/.test(paneHandle),
+    true,
+  );
+
+  /* ---- and the second pane, whose unset state is a state ---- */
+
+  /*
+   * ⭐ **`null` is *nobody has chosen*, and it is the one thing this pane has that
+   * the rail does not.**
+   *
+   * The rail has one width at every size, so unset and default are the same rail
+   * and `railWidth()` answers a number. The background panel has two declared
+   * widths and a breakpoint between them, because the conversation's width is not
+   * monotonic in the window's — at `lg` the rail arrives and takes 384px of it. So
+   * an unset width has to mean *the stylesheet decides*, or the two breakpoints
+   * could not exist; and a chosen one is written onto `documentElement`, which
+   * beats both media blocks.
+   *
+   * ⚠ **Driven rather than read off the source**, because every source pin here
+   * stays green with `reset()` reduced to `committed = min`: the separator would
+   * still drag, the width would still persist, and a double-click would silently
+   * pin the panel to its floor at every size instead of handing the breakpoints
+   * back. The two halves that cannot be seen from a file are that the key is
+   * *removed* and that the value goes back to `null`.
+   */
+  const { TASK_DEFAULT, TASK_MAX, TASK_MIN, subscribeTaskWidth, taskPane, taskWidth } = await import(
+    "../src/ui/taskWidth.js"
+  );
+  check("the bounds leave a usable range around both declared widths", [TASK_MIN < TASK_DEFAULT, TASK_DEFAULT < TASK_MAX], [true, true]);
+  check("a width nobody has chosen is unset rather than a default", taskWidth(), null);
+
+  let toldTask = 0;
+  const stopTask = subscribeTaskWidth(() => void (toldTask += 1));
+  taskPane.setWidth(TASK_DEFAULT + 24);
+  check("a committed width is readable back", taskWidth(), TASK_DEFAULT + 24);
+  check("and every subscriber is told", toldTask, 1);
+  check("and it is written where a reload will find it", storage.get("reemoat.taskWidth"), String(TASK_DEFAULT + 24));
+  taskPane.setWidth(9999);
+  check("a width past the bound commits the bound", taskWidth(), TASK_MAX);
+  taskPane.setWidth(1);
+  check("and too narrow is refused rather than allowed", taskWidth(), TASK_MIN);
+  /*
+   * The case no pointer produces: `Number.parseInt` answers `NaN` for a
+   * hand-edited storage value, and `NaN` compared against a bound is `false` in
+   * **both** directions — so a bare `Math.min`/`Math.max` pair passes it through
+   * and the panel mounts at `NaN` pixels, which computes to no panel at all. It
+   * lands on the width this *declares* at the breakpoint it first docks at, not on
+   * the floor, so a broken entry looks like never having dragged.
+   */
+  check("a hand-edited storage value cannot produce a panel of NaN", taskPane.clamp(Number.NaN), TASK_DEFAULT);
+  /*
+   * ⚠ **The reset removes the key rather than writing the default into it.** A
+   * stored default is still a *chosen* width and would go on beating both media
+   * blocks, so the panel would stay 20rem at `xl` for ever — the breakpoint
+   * present, declared, correct and unreachable.
+   */
+  taskPane.reset();
+  check("a reset hands the stylesheet's two answers back", [taskWidth(), storage.get("reemoat.taskWidth")], [null, undefined]);
+  const afterFirstReset = toldTask;
+  taskPane.reset();
+  check("and resetting an already-unset pane tells nobody twice", toldTask - afterFirstReset, 0);
+  stopTask();
 
   /*
    * **The handle paints above the two sticky bars, and both halves of that are
@@ -1433,6 +1752,1305 @@ process.stdout.write("\nhow wide the rail is\n");
   check(
     "the handle is in the one focus rule rather than styling its own",
     /\[role="separator"\]\[tabindex\]/.test(css),
+    true,
+  );
+}
+
+/* ------------------------------------------------------------------
+ * **The menu drawer, the machine column, and the version in the footer.**
+ *
+ * Three surfaces that arrived together and are held apart here for one reason:
+ * each of them reproduces, on a new axis, a rule this app has already got wrong
+ * once. The drawer is a modal layer that is **not** a route, which is the first
+ * one in this app — so what holds it is the `LayerKind` it registers, and `"menu"`
+ * is the plausible wrong answer (`TaskPanel` picks it, correctly, for the opposite
+ * geometry). The column is a strip whose axis changed, and three pieces of the
+ * horizontal one are *wrong* rather than merely unnecessary on it. And the version
+ * is a build-time constant read through an identifier this driver's own runtime
+ * does not define, which is a `ReferenceError` at module evaluation if the guard
+ * is ever "simplified".
+ *
+ * Every sweep below carries a floor, because a regex matching nothing passes.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe menu, the machines and the build\n");
+{
+  const drawer = stripComments(readFileSync(new URL("../src/ui/MenuDrawer.tsx", import.meta.url), "utf8"));
+  const column = stripComments(readFileSync(new URL("../src/ui/MachineColumn.tsx", import.meta.url), "utf8"));
+  const browser = stripComments(readFileSync(new URL("../src/ui/SessionBrowser.tsx", import.meta.url), "utf8"));
+  const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+  const { shortcutsEnabled } = await import("../src/ui/overlay.js");
+  report("all three surfaces were found to read", [drawer.length, column.length, browser.length].every((n) => n > 500), "three files, none of them empty");
+
+  /* ---- the drawer covers the app, and is not a docked panel ---- */
+
+  /*
+   * ⚠ **`"sheet"`, and `TaskPanel` is the precedent that must not be copied.**
+   * That panel registers `"menu"` on purpose — at `xl` it docks *beside* the
+   * conversation with no scrim, and `inert` on `#root` would kill the transcript it
+   * was opened to read alongside. This one is scrim-backed at every width. With
+   * `"menu"`, `shortcutsEnabled` stays true, and `keyboard.ts` records exactly what
+   * that costs: `inert` stops taps and focus but **not** a `window` keydown, so `j`
+   * and `k` would walk the session list behind an opaque panel, navigating to
+   * sessions nobody can see. Both halves are pinned, because the true one alone
+   * passes on a file carrying both.
+   */
+  check(
+    "the drawer covers the app rather than docking beside it",
+    [/useDismissible\("sheet"/.test(drawer), /useDismissible\("menu"/.test(drawer)],
+    [true, false],
+  );
+  /*
+   * And the pure half, which is what actually holds the behaviour the kind buys.
+   * The source text says which string was typed; this says what that string does.
+   */
+  check("so a drawer on the stack silences the bare-letter shortcuts", shortcutsEnabled([{ id: 91, kind: "sheet" }]), false);
+  /*
+   * ⚠ **And the layer lasts as long as the panel does, which is the half the kind
+   * cannot say.**
+   *
+   * `useDismissible` pushes on its third argument and pops in the effect's
+   * cleanup; `pop` runs `syncInert`, so `#root` loses `inert` and
+   * `shortcutsEnabled` goes true again the instant the last `sheet` leaves the
+   * stack. Passed `open`, that happened `DRAWER_EXIT_MS` **before** the element
+   * stopped existing — the drawer covered the app for the whole slide-out while
+   * the app behind it was live again, so `j`/`k` walked the session list and Tab
+   * reached controls nobody could see. Every check above was green over it: the
+   * kind was `"sheet"`, the durations agreed, the scrim still caught taps. It is
+   * keyboard-only, which is why looking at it did not find it.
+   *
+   * Asserted as an **identity between two derivations** rather than as the literal
+   * `shown`: the argument the hook is handed and the binding the mount guard
+   * returns on are read separately and compared, so renaming the flag keeps this
+   * green and passing the wrong one cannot.
+   */
+  const layerActive = /useDismissible\("sheet",\s*onClose,\s*([A-Za-z_$][\w$]*)\)/.exec(drawer)?.[1] ?? "";
+  const mountGuard = /if \(!([A-Za-z_$][\w$]*)\) return null;/.exec(drawer)?.[1] ?? "";
+  report(
+    "the layer's lifetime and the panel's were both found",
+    layerActive.length > 0 && mountGuard.length > 0,
+    `layer on ${layerActive}, mounted on ${mountGuard}`,
+  );
+  check("the sheet layer lives exactly as long as the panel it covers the app with", layerActive, mountGuard);
+
+  /* ---- and there is a way out that is not the scrim ---- */
+
+  /*
+   * ⭐ **There is no ✕ in the head, by the owner's call, and this assertion is
+   * inverted rather than deleted — because the gap it was written for is real.**
+   *
+   * `Sheet` may say "the rows behind it are the accessible way out" because it
+   * draws one; this panel registers `"sheet"`, so `inert` lands on `#root` and the
+   * rows behind it are precisely what cannot be reached, and the scrim is an
+   * `aria-hidden` `<div>` by the same reasoning that keeps it from being a phantom
+   * tab stop. What is left is Escape, a tap on the scrim, the hamburger, and
+   * Android's Back — which leaves a screen-reader user on **iOS** with none:
+   * VoiceOver's navigation skips an `aria-hidden` element and iOS has no Back.
+   * One platform, one assistive technology, stated at the code and in Q3.628
+   * rather than argued away.
+   *
+   * ⚠ **What is pinned is that the ✕ is absent *and that the remaining ways out
+   * still work*.** Half of this is a negative, and a negative alone would go green
+   * over a drawer nobody can close at all: the layer's `onClose` (asserted above
+   * on `shown`, which is what gives Escape to the topmost layer) and the scrim's
+   * own click are the two mechanisms, and both are read.
+   *
+   * ⚠ **The sweep keeps its positive control even though it now expects to find
+   * nothing.** A regex that stopped matching would report the ✕ as absent whatever
+   * the file said, which is the failure mode of every source-text assertion here —
+   * and this one is *asserting* an absence, so it is the one shape where a broken
+   * pattern is indistinguishable from success.
+   */
+  const CLOSER = /<IconButton[^>]*?label="Close[^"]*"[\s\S]{0,240}?\/>/;
+  report(
+    "the close-control sweep can see one",
+    CLOSER.test('<IconButton icon={X} label="Close menu" onClick={onClose} size="nav" />'),
+    "positive control",
+  );
+  check("the drawer draws no close control of its own", CLOSER.test(drawer), false);
+  check(
+    "and the two ways out that remain are both wired",
+    [/useDismissible\("sheet", onClose, shown\)/.test(drawer), /onClick=\{leaving \? undefined : onClose\}/.test(drawer)],
+    [true, true],
+  );
+  /*
+   * ⚠ **The absence is a decision now, so the decision is pinned and not only the
+   * absence.** The sweep above goes green over three different states — the
+   * owner's call, an accidental deletion, and a refactor that dropped the control
+   * on the way past — and nothing here could tell them apart. What separates them
+   * is the paragraph at the head of the panel that records the call, enumerates
+   * the exits that remain and names the one population left with none of them. So
+   * that paragraph is read as source text: deleting the explanation is what turns
+   * this red, which is the only thing standing between a recorded gap and a gap.
+   *
+   * ⚠ **Read *un-stripped*, and that is the mechanism rather than an oversight.**
+   * Every other sweep in this block runs over `stripComments` output because this
+   * repository restates code facts in prose; this one is *about* the prose, so it
+   * is the one read here that must not be stripped. Hence the pair: each member
+   * present in the raw file **and** absent from the stripped one. The day somebody
+   * tidies this onto `drawer` the first check goes red rather than silently
+   * passing on a file with no explanation left in it, and the day the record is
+   * smuggled into a string literal the second one does.
+   *
+   * ⚠ **Matched over unwrapped prose, because a comment wraps.** The sentence
+   * naming the population spans a line break with a ` * ` in the middle of it, so
+   * the first draft of this check was red on the file it was written against.
+   * `prose` joins continuation lines, which also means a reflow of the paragraph
+   * does not redden a check that is about what it says.
+   *
+   * A census with a required-member list rather than a count: a fifth thing worth
+   * recording fails as "found, not listed" instead of failing to raise a floor.
+   * The `Q3.628` member is deliberately file-wide — the scrim's own paragraph
+   * cites it too, and either citation is a route to the entry.
+   */
+  const drawerRaw = readFileSync(new URL("../src/ui/MenuDrawer.tsx", import.meta.url), "utf8");
+  const prose = (text: string): string => text.replace(/\n[ \t]*\*?/g, " ").replace(/\s+/g, " ");
+  const RECORDED: Array<[string, RegExp]> = [
+    ["the call that deleted it", /There was a ✕ here and it is gone by the owner's call/],
+    ["the exits that remain", /the ways out are now: Escape/],
+    ["the population left with none of them", /leaves without one is a screen-reader user on \*\*iOS\*\*/],
+    ["the entry that argues both", /Q3\.628/],
+  ];
+  report(
+    "the drawer was read a second time with its comments intact",
+    drawerRaw.length > drawer.length,
+    `${drawerRaw.length} raw against ${drawer.length} stripped`,
+  );
+  check(
+    "the head records the call, the exits that remain and who is left with none",
+    RECORDED.filter(([, re]) => !re.test(prose(drawerRaw))).map(([what]) => what),
+    [],
+  );
+  check(
+    "and every one of those is prose, which is why this one read is not stripped",
+    RECORDED.filter(([, re]) => re.test(prose(drawer))).map(([what]) => what),
+    [],
+  );
+  /*
+   * `aria-modal` beside `role="dialog"`, which is `Sheet`'s idiom. It is a
+   * description rather than a claim here: the `"sheet"` layer really does inert
+   * the rest of the document, so without the attribute the announcement and the
+   * reality disagree.
+   */
+  check("it announces itself as modal, which the inert it installs makes true", [/role="dialog"/.test(drawer), /aria-modal="true"/.test(drawer)], [true, true]);
+  /*
+   * ⚠ **The exiting scrim stops taking taps the instant it starts leaving.**
+   * `--animate-scrim-out` ends at `opacity: 0` while the element lives the full
+   * `DRAWER_EXIT_MS`, so it was an invisible viewport-sized click-eater for the
+   * tail of every close — and under `prefers-reduced-motion`, where `index.css`
+   * forces `animation-duration: 0.01ms !important`, for essentially all of it.
+   *
+   * Read out of the scrim element alone, with **both** ends of the slice anchored:
+   * an `indexOf` that misses gives -1 and `slice` reads a negative end as counting
+   * from the end of the string, so an unguarded slice widens to most of the file
+   * instead of emptying — which is four of this repository's measured
+   * false-greens.
+   */
+  const scrimAt = drawer.indexOf("aria-hidden={true}");
+  const scrimEnd = scrimAt < 0 ? -1 : drawer.indexOf("/>", scrimAt);
+  const scrim = scrimAt >= 0 && scrimEnd > scrimAt ? drawer.slice(scrimAt, scrimEnd) : "";
+  report("the scrim element was found, both ends anchored", scrim.length > 0 && scrim.length < 600, `${scrim.length} chars`);
+  check(
+    "the scrim swallows no taps once it is only a fade",
+    [/pointer-events-none/.test(scrim), /onClick=\{leaving \?/.test(scrim)],
+    [true, true],
+  );
+
+  /* ---- and a heading over these rows shares their left edge ---- */
+
+  /*
+   * ⚠ **`MENU_HEADING` is the *popover* heading and carries its own `px-2.5`.**
+   * `bits.tsx` states the rule absolutely — "a heading that did not share that
+   * left edge is the one arrangement worth preventing" — and importing it over
+   * `DRAWER_ROW`, which is `px-3`, reached exactly that arrangement: the word
+   * `screens` sat 2px inboard of the rows it heads, inside the same `px-1.5`
+   * scroller. `.claude/rules/web-typography.md` is the rule; the fix is a spelled-
+   * out constant at this panel's inset, because appending `px-3` to the imported
+   * one is resolved by Tailwind's emission order rather than by the string.
+   *
+   * Both insets are **derived from the source strings** rather than pinned at
+   * `px-3`, so this holds through a change to the row's own padding and can only
+   * go green when the two agree.
+   */
+  const insetOf = (name: string): string =>
+    /(?:^|\s)(px-[\w.[\]/-]+)/.exec(new RegExp(`const ${name} = "([^"]*)"`).exec(drawer)?.[1] ?? "")?.[1] ?? "";
+  const rowInset = insetOf("DRAWER_ROW");
+  const headingInset = insetOf("DRAWER_HEADING");
+  report("both insets were read off the drawer's own constants", rowInset.length > 0 && headingInset.length > 0, `rows ${rowInset}, heading ${headingInset}`);
+  check("the heading over these rows shares their left edge", headingInset, rowInset);
+  check("and the popover's heading is not borrowed for them", /MENU_HEADING/.test(drawer), false);
+  /*
+   * It is still the one caps idiom, at `MENU_HEADING`'s own tone — the choice
+   * between the three constants is a colour decision, and only the padding is this
+   * panel's. Asserted so that "spelled out" cannot quietly become "a different
+   * treatment".
+   */
+  const headingClasses = /const DRAWER_HEADING = "([^"]*)"/.exec(drawer)?.[1] ?? "";
+  check(
+    "and it is the same caps idiom at the menu's tone",
+    ["text-2xs", "font-semibold", "tracking-wider", "uppercase", "text-faint"].every((part) => headingClasses.includes(part)),
+    true,
+  );
+  /*
+   * ⚠ **Portaled, and not for tidiness.** `inert` lands on `#root`; a drawer
+   * rendered inside it inerts *itself* — visible, scrimmed and completely
+   * untouchable, with nothing in the console. `Sheet` is portaled for this and for
+   * a second reason it states: `position: fixed` resolves against the nearest
+   * `backdrop-filter` ancestor, and this app's header, composer and rail footer are
+   * each one hop from one.
+   */
+  check(
+    "it is portaled beside #root, which is the element inert lands on",
+    /createPortal\(/.test(drawer) && /document\.body/.test(drawer),
+    true,
+  );
+  check("it paints from the z-order table rather than a literal", /\$\{LAYER\.overlay\}/.test(drawer), true);
+  check("and reads no breakpoint in JavaScript", /matchMedia|innerWidth|clientWidth/.test(drawer), false);
+  /*
+   * **No hand-rolled focus trap, which is `overlay.ts`'s standing rule** — `inert`
+   * is the mechanism. The second cost is the one that would be invisible: a
+   * `[role="dialog"][tabindex]` is a focusable element type outside `index.css`'s
+   * one `:focus-visible` selector list, so it would take focus and draw no ring.
+   */
+  check("there is no hand-rolled focus trap", /tabIndex/.test(drawer), false);
+
+  /* ---- and it moves like the sheet it is a sibling of ---- */
+
+  check(
+    "the drawer arrives from its edge, over the one scrim this app has",
+    [/animate-drawer/.test(drawer), /animate-scrim/.test(drawer), /bg-fg\/25/.test(drawer)],
+    [true, true, true],
+  );
+  /*
+   * ⚠ **The two durations asserted *equal* rather than `260` pinned twice.** A
+   * drawer arriving from the left and a sheet arriving from the bottom are one
+   * gesture in this app — "a layer covers the app" — and a second easing or a
+   * second clock would be a second decision about it, made by whoever typed the
+   * second rule rather than argued anywhere.
+   */
+  const sheetMs = /--animate-sheet:\s*sheet\s+(\d+)ms/.exec(css)?.[1] ?? "";
+  const drawerMs = /--animate-drawer:\s*drawer\s+(\d+)ms/.exec(css)?.[1] ?? "";
+  report("both movements were found in the stylesheet", sheetMs.length > 0 && drawerMs.length > 0, `sheet ${sheetMs}ms, drawer ${drawerMs}ms`);
+  check("and the drawer travels on the sheet's clock", drawerMs, sheetMs);
+  /*
+   * Its own keyframe, on the inline axis — and never the arrival's name with
+   * `reverse` composed onto it, which `sheet-out`'s docblock records as playing
+   * once and never playing back.
+   */
+  check("its keyframe moves on the inline axis", /@keyframes drawer \{\s*from \{\s*transform: translateX\(-100%\);/.test(css), true);
+  check("and it does not try to leave by reversing its arrival", /animate-drawer[^"`]*\breverse\b/.test(drawer), false);
+  /*
+   * ⚠ **It leaves under its own keyframe, and the wait is the same number.**
+   *
+   * Opening is a CSS animation on mount and needs no state; leaving cannot be,
+   * because an unmounted element does not animate — so the panel is kept on screen
+   * for the duration with the outgoing animation on it and then dropped. The two
+   * numbers live in two files that cannot see each other, which is exactly the
+   * shape `--rail-w`/`RAIL_DEFAULT` is pinned for, so this reads the stylesheet's
+   * and asserts the component's against it.
+   *
+   * `both` is the half that is invisible when it is missing: without a fill the
+   * panel snaps back to rest for the frames between the animation ending and React
+   * dropping it — a flash of the full drawer after it has already left.
+   */
+  const outMs = /--animate-drawer-out:\s*drawer-out\s+(\d+)ms[^;]*\bboth\b/.exec(css)?.[1] ?? "";
+  report("the departure was found, and it fills forwards", outMs.length > 0, `${outMs}ms both`);
+  const waitMs = /DRAWER_EXIT_MS = (\d+);/.exec(drawer)?.[1] ?? "";
+  check("the panel waits exactly as long as the movement it is playing", waitMs, outMs);
+  check(
+    "and the scrim leaves with it rather than blinking out",
+    /animate-scrim-out/.test(drawer) && /@keyframes drawer-out/.test(css),
+    true,
+  );
+  /*
+   * ⚠ **And the exit is decided during render, never in an effect.**
+   *
+   * This shipped as an effect keyed on `open` and the defect was visible on every
+   * close: an effect runs *after* the commit, so the render where `open` first
+   * turns false still saw `leaving === false`, took the early return and
+   * **unmounted the panel** — a painted frame with no drawer in it — and only then
+   * did the effect set the flag and remount it to play the exit. What that looks
+   * like is the menu vanishing and then calmly closing a moment later, which is
+   * how it was reported.
+   *
+   * Asserted as source text because it is invisible to everything else here: the
+   * class strings were right, the durations agreed, and every check was green over
+   * it. The negative half is the one that matters — an effect whose dependency
+   * list is `[open]` is the shape that regressed, and a reader restoring it would
+   * otherwise only be caught by eye.
+   *
+   * ⭐ **It is read out of `leaving.ts` now**, which is where the mechanism went
+   * when `TaskPanel` needed the same exit on a phone. The pair below is what stops
+   * that extraction becoming a check about a file nobody calls: the shape is
+   * asserted in the hook, and *both* surfaces are asserted to be callers. A
+   * drawer that quietly went back to its own copy would otherwise leave this whole
+   * section green over the hook while regressing the panel it is describing.
+   */
+  const leaving = stripComments(readFileSync(new URL("../src/ui/leaving.ts", import.meta.url), "utf8"));
+  check(
+    "the exit is derived during render rather than scheduled after the commit",
+    [/if \(open !== wasOpen\.current\)/.test(leaving), /\}, \[open\]\);/.test(leaving)],
+    [true, false],
+  );
+  /*
+   * ⚠ **`animationend` bubbles**, so the guard is a fact about *this* element
+   * rather than a name match on the keyframe — a child spinner or a pulsing meter
+   * cell would otherwise end its parent's life from the inside, and a keyframe
+   * rename would fall back to the backstop with everything green.
+   */
+  check(
+    "and it ends on the element's own movement, with the constant only as a backstop",
+    [
+      /event\.target !== event\.currentTarget/.test(leaving),
+      /animationName/.test(leaving),
+      /window\.setTimeout\(\(\) => \{\s*setLeaving\(false\);?\s*\}, backstopMs\)|setTimeout\(\(\) => setLeaving\(false\), backstopMs\)/.test(leaving),
+    ],
+    [true, false, true],
+  );
+  const drawerCalls = /useLeaving\(open, DRAWER_EXIT_MS\)/.test(drawer);
+  const panelCalls = /useLeaving\(open, TASK_PANEL_EXIT_MS\)/.test(
+    stripComments(readFileSync(new URL("../src/ui/TaskPanel.tsx", import.meta.url), "utf8")),
+  );
+  check("and both surfaces that keep a layer past its close are callers", [drawerCalls, panelCalls], [true, true]);
+
+  /* ---- what is in it, and what may not be ---- */
+
+  /*
+   * ⚠ **Asserted as an ordered list rather than as three `includes`**, so a fourth
+   * destination fails here instead of passing as "still a menu". `MenuDrawer`'s
+   * docblock sets the test a row must pass and records that `Account` fails one
+   * clause of it deliberately; this is what stops the next row failing it by
+   * accident.
+   */
+  /*
+   * ⚠ **Two destinations, and `Account` is deliberately not one.** It is
+   * `DEFAULT_SECTION`, so `settingsPath()` already opens on it — a row here would
+   * be the same door drawn twice, which is the middle clause of the test
+   * `MenuDrawer`'s docblock carries over from `ProfileMenu`. Asserted as an
+   * ordered list rather than as `includes`, so a fourth destination fails here
+   * instead of passing as "still a menu".
+   *
+   * ⚠ **Any call, never an allowlist of the ones expected.** This matched
+   * `settingsPath(...)|marketPath()` alone and so was structurally incapable of the
+   * failure the paragraph above promises: `go(pluginPath(machine, plugin.id))` was
+   * already in the file and the sweep reported `["settingsPath()", "marketPath()"]`
+   * as "no others". A capture that names what it is looking for cannot see what it
+   * is not. The `navigate` count beside it closes the other door — a row written
+   * without `go` at all.
+   */
+  const destinations = [...drawer.matchAll(/go\(([A-Za-z_$][\w$]*\([^)]*\))\)/g)].map((m) => m[1]);
+  check("the drawer's destinations, in order and no others", destinations, [
+    "settingsPath()",
+    "marketPath()",
+    "pluginPath(machine, plugin.id)",
+  ]);
+  check("and nothing navigates except the helper itself", (drawer.match(/navigate\(/g) ?? []).length, 1);
+  /*
+   * ⚠ **And every one of them goes through the one helper that closes first.**
+   * `AppShell` is handed `route={background}`, and every destination above is an
+   * overlay path — so `background` does not change when a row navigates and a
+   * listener on it would fire never. `App`'s effect on `usePathname()` is the belt;
+   * this is the brace, and a row calling `navigate` directly would leave the drawer
+   * standing open over the sheet it had just opened.
+   */
+  check(
+    "and each goes through the helper that closes the drawer first",
+    /const go = [\s\S]{0,80}?onClose\(\);\s*navigate\(path\);/.test(drawer),
+    true,
+  );
+  /*
+   * The head is who you are and it is **not** a control — that is what the Account
+   * row below it is for, and a pressable identity plus a row naming the account is
+   * the same door drawn twice.
+   */
+  check(
+    "it opens with who you are, and that is not itself a control",
+    [/<Monogram /.test(drawer), /<button[^>]*>\s*<Monogram/.test(drawer)],
+    [true, false],
+  );
+  /*
+   * The head is an avatar rather than an initial, and the face is derived from the
+   * name. The pure half — that it is derived at all, rather than rolled — is
+   * asserted below; this is only that the drawer asks for one.
+   */
+  check("and it draws a face rather than a letter", /personEmoji\(name\)/.test(drawer) && /size="md"/.test(drawer), true);
+  /*
+   * ⚠ **Derived, never rolled.** A face that changed between renders would be the
+   * one thing on this screen that moves for no reason — and this rail re-renders
+   * on the four-second poll and on every stream event, so "no reason" would mean
+   * several times a minute. The property is stability first and spread second: it
+   * does not need to be a good hash, it needs to be the *same* hash next time.
+   *
+   * `Math.random` is asserted absent from the module rather than inferred from two
+   * equal calls, because two calls agreeing is exactly what a cached random value
+   * would also do.
+   */
+  const { personEmoji } = await import("../src/ui/bits.js");
+  const faces = ["admin", "rends", "someone else", "Ада", "🙂 leading emoji"].map((n) => personEmoji(n));
+  check("a face is the same one every time it is asked", faces, ["admin", "rends", "someone else", "Ада", "🙂 leading emoji"].map((n) => personEmoji(n)));
+  check("an empty name still gets one rather than a blank circle", personEmoji(null).length > 0 && personEmoji("").length > 0, true);
+  report("and the names tried here do not all land on one face", new Set(faces).size > 1, `${new Set(faces).size} of ${faces.length}`);
+  const bitsSrc = stripComments(readFileSync(new URL("../src/ui/bits.tsx", import.meta.url), "utf8"));
+  check("and nothing rolls it", /Math\.random/.test(bitsSrc), false);
+  /*
+   * No zero-width joiners and no variation selectors in the list: those render as
+   * two glyphs, or as a black-and-white silhouette, on whichever platform has not
+   * shipped the pair — and a broken face is worse than the letter it replaced.
+   */
+  const faceList = /const FACES = \[([^\]]*)\]/.exec(bitsSrc)?.[1] ?? "";
+  report("the face list was found", faceList.length > 0, `${(faceList.match(/"/g) ?? []).length / 2} faces`);
+  check("every face is one code point", [/\u200d/.test(faceList), /\ufe0f/.test(faceList)], [false, false]);
+  /*
+   * ⚠ **No product mark at the foot.** A wordmark there is a thing to look at
+   * rather than to read, and the fact this line carries is which build you are
+   * running. Asserted as an absence because an absence is what a later reader
+   * would otherwise "fix".
+   */
+  check("and the foot carries the build and no wordmark", [/Version \{APP_VERSION\}/.test(drawer), /<Mark\b/.test(drawer)], [true, false]);
+  /*
+   * ⭐ **The build line is centred and `faint`, which reverses the tone its own
+   * docblock argued for.** That read `text-muted` "because it is the only place in
+   * the app that answers *what am I running*". The premise stopped being true —
+   * Settings → Account carries the build, one row above this line in the same
+   * panel — so what is left is a footer stamp, which is what `faint` is for.
+   * Centred because left-aligned it reads as a fourth row of the list above it;
+   * nothing else in this panel is centred, and that is the whole of what separates
+   * it. Both halves pinned, since either alone puts it back in the list.
+   */
+  const versionRow = /<div className="([^"]*)">Version \{APP_VERSION\}/.exec(drawer)?.[1] ?? "";
+  report("the build line's own element was found", versionRow.length > 0, versionRow);
+  check(
+    "the build is a stamp under the rows rather than one more of them",
+    [/\btext-center\b/.test(versionRow), /\btext-faint\b/.test(versionRow), /\btext-muted\b/.test(versionRow)],
+    [true, true, false],
+  );
+  /*
+   * ⭐ **No weight in this panel, by the owner's call.** `DRAWER_ROW` carried
+   * `font-medium` and the head's name `font-semibold`; what the arguments for those
+   * were actually about is the *size* and the *ink* — `text-sm` rather than
+   * `text-xs`, the glyph in the same colour as the words — and neither moved.
+   * Three rows and a name in a 352px panel are the only things in it, so emphasis
+   * had nothing to separate them from.
+   *
+   * ⚠ **`DRAWER_HEADING` is exempt and the check says so by reading the two
+   * strings separately.** Its `font-semibold` is the small-caps idiom rather than
+   * emphasis — `webcheck.typography.ts` runs a census over every site that spends
+   * it — so a sweep for `font-` over the whole file would demand deleting the one
+   * weight that has an argument.
+   */
+  const rowClasses = /const DRAWER_ROW = "([^"]*)"/.exec(drawer)?.[1] ?? "";
+  const nameRow = /<span className="([^"]*)">\{name \?\? "Signed in"\}/.exec(drawer)?.[1] ?? "";
+  report("the row and the name were both read", rowClasses.length > 0 && nameRow.length > 0, `${rowClasses} | ${nameRow}`);
+  check(
+    "nothing in the drawer is emphasised, and the caps band keeps its weight",
+    [/font-/.test(rowClasses), /font-/.test(nameRow), /font-semibold/.test(headingClasses)],
+    [false, false, true],
+  );
+  check("the one extra fact is still drawn only when it is true", /me\?\.via === "api_key"/.test(drawer), true);
+  /*
+   * The way out is last, separated, and the only row here that is not a
+   * navigation. It is drawn outside any `me !== null` guard on purpose:
+   * `bootstrap`'s catch keeps `phase: "ready"` with no `me` when the control plane
+   * is unreachable, and an outage is the worst moment for it to disappear.
+   */
+  /*
+   * ⚠ **Ordering, not adjacency.** This matched a `border-t` within 120 characters
+   * of `text-danger` and went red the moment the row grew a wrapper — a check that
+   * fails for a reason it does not name, which this file's own header calls crying
+   * wolf. What actually has to hold is the *arrangement*: the way out is separated
+   * from the destinations above it, and it sits above the build line rather than
+   * below it, because a version is the last thing on a panel and an action is not.
+   */
+  const signOutAt = drawer.indexOf("store.signOut()");
+  const versionAt = drawer.indexOf("Version {APP_VERSION}");
+  report("the way out and the build line were both found", signOutAt > 0 && versionAt > 0, `${signOutAt} then ${versionAt}`);
+  check(
+    "the way out is separated, drawn as a refusal, and sits above the build line",
+    [/border-t border-edge/.test(drawer), /text-danger/.test(drawer), signOutAt < versionAt],
+    [true, true, true],
+  );
+  check(
+    "the machine's plugin screens survived the move, still gated on there being some",
+    /screenPlugins\(/.test(drawer) && /launchable\.length > 0/.test(drawer),
+    true,
+  );
+  check("and the help popover left with the footer it sat in", /HelpButton/.test(drawer) || /HelpButton/.test(browser), false);
+
+  /* ---- one menu button at each width, chosen in CSS ---- */
+
+  /*
+   * ⚠ **Two mounts and a class string, which is `AppShell`'s rule.** The phone's
+   * copy sits in the header row and is withdrawn at `lg`; the desktop's is at the
+   * top of the machine column, which is itself only ever rendered inside an
+   * `<aside>` that is `hidden … lg:flex` — so it carries no breakpoint of its own,
+   * and a `lg:` on it would be a second, disagreeing answer to the same question.
+   */
+  /*
+   * ⚠ **Matched on the label rather than on the element.** The column's copy is a
+   * plain `<button>` running the full 72px — `ICON_BUTTON_SIZE.chip` is `h-8 w-8`
+   * and a `w-full` composed onto it is two width utilities of equal specificity
+   * resolved by emission order — while the phone's is still an `IconButton`. What
+   * has to hold is that there is one at each width and that the breakpoint is a
+   * class string, not which primitive draws it.
+   */
+  const TRIGGER = /(?:<IconButton[^>]*label="Menu"|aria-label="Menu")[\s\S]{0,320}?(?:\/>|<\/button>)/;
+  report(
+    "the trigger sweep can see both spellings",
+    TRIGGER.test('<IconButton icon={MenuIcon} label="Menu" size="chip" />') &&
+      TRIGGER.test('<button aria-label="Menu" className="x"><Icon /></button>'),
+    "positive control",
+  );
+  const phoneTrigger = TRIGGER.exec(browser)?.[0] ?? "";
+  const deskTrigger = TRIGGER.exec(column)?.[0] ?? "";
+  check("the list header opens the menu, and so does the machine column", [phoneTrigger.length > 0, deskTrigger.length > 0], [true, true]);
+  check("the list header's copy is withdrawn where the column draws one", /lg:hidden/.test(phoneTrigger), true);
+  check("and the column's needs no breakpoint, being inside the lg aside", /\blg:/.test(deskTrigger), false);
+
+  /* ---- one data source, two axes ---- */
+
+  /*
+   * ⚠ **The same four calls in both files.** There is one answer to "which machine
+   * am I looking at" — `groups.ts` module state — and two presentations of it, so
+   * picking a machine on a phone and picking one on a desktop write the same
+   * `localStorage` key and cannot disagree. `allTab` is asserted beside
+   * `machineTabs` because it is returned separately and is the one a second
+   * presentation is most likely to forget.
+   */
+  report("the call sweep can see one", /machineTabs\(/.test("machineTabs(groups, view)"), "positive control");
+  for (const [what, code] of [
+    ["the phone's tab strip", browser],
+    ["the desktop column", column],
+  ] as const) {
+    check(`${what} is drawn from the tab list and the All tab beside it`, [/machineTabs\(/.test(code), /allTab\(/.test(code)], [true, true]);
+    check(`${what} selects through the store`, /selectMachine\(/.test(code), true);
+    /*
+     * And reveals the selection when it *changes*, not on every render. This rail
+     * re-renders on the four-second poll and on every stream event; an effect
+     * without that dependency yanks a strip you had scrolled back to the selected
+     * entry, repeatedly, which is the "a list that moves under a travelling thumb"
+     * failure both components spend their comments avoiding.
+     */
+    check(`${what} reveals the selection on a change rather than every render`, /\}, \[selected/.test(code), true);
+  }
+  /*
+   * ⚠ **Three things the horizontal strip carries that the column must not, and
+   * each is *wrong* on a vertical axis rather than merely unnecessary.**
+   *
+   * `.no-scrollbar`'s licence in `index.css` is granted to "a strip dragged
+   * sideways whose contents announce there is more of them by being cut off at the
+   * edge", and that docblock says outright: never on a vertical list, where a bar
+   * is the only thing saying how much more there is.
+   *
+   * `.edge-fade`'s `is-cut` arithmetic is `scrollWidth - clientWidth`, which on a
+   * vertical box is zero for ever — so the gradient would never light, and nothing
+   * would fail. That is the silent half, and it is why this is a check rather than
+   * a comment.
+   *
+   * `overscroll-contain` on a box that may have nothing to scroll ends the scroll
+   * chain anyway — 400px of wheel travel against 0px on the same gesture, measured
+   * — and a fleet of one puts a single entry in here.
+   */
+  check(
+    "and the column carries none of the horizontal strip's three cues",
+    [/no-scrollbar/.test(column), /edge-fade/.test(column), /overscroll-contain/.test(column), /scrollWidth/.test(column)],
+    [false, false, false, false],
+  );
+  check("while the strip it was borrowed from still has them", /no-scrollbar/.test(browser) && /edge-fade/.test(browser), true);
+  /*
+   * ⭐ **The selected machine is a filled mark, and the tile behind it paints
+   * nothing** — asserted in both directions, because the revert is one word and it
+   * goes green on a one-sided check.
+   *
+   * It was `bg-raised` across the whole tile, which is the same token the session
+   * list beside it uses for the selected *row*, full-bleed and square in both
+   * places. The two columns' heads agree at 56px and their rhythms then diverge —
+   * a 66px machine tile against a 64px session row with a subline, 42px without,
+   * and a folder header as the list's first child — so the two bands could only
+   * ever sit at unrelated offsets wearing one fill. Reported as the column looking
+   * crooked. Pinning the offsets would leave the next change to either rhythm to
+   * reopen it; removing the band removes the edge there is nothing to line up.
+   *
+   * ⚠ **The `bg-raised` arm is pinned *absent*, which is the half that matters.**
+   * Restoring the band is a smaller diff than any of this and reads, in review,
+   * like a palette fix.
+   *
+   * ⚠ **And the ternary is allowed to wrap.** Written as one line it fits; the
+   * formatter breaks it the moment the strings grow, and a regex that silently
+   * stops matching fails as "the change never landed".
+   */
+  check(
+    "the selected machine is a filled mark rather than a band beside the session rows",
+    [
+      /tab\.selected\s*\n?\s*\? "bg-fg text-ink/.test(column),
+      /tab\.selected \? "bg-raised"/.test(column),
+      /tab\.selected \? "font-medium text-fg"/.test(column),
+    ],
+    [true, false, true],
+  );
+  /*
+   * ⚠ **`.tap` is on the `<button>` and the mark is a child `<span>`, so the fill
+   * has to carry its own transition.** `transition` is not inherited: the band
+   * cross-faded only because it was painted on the `.tap` element, and moving the
+   * fill inward without this makes the selection snap. It must not be
+   * `transition-transform` — the assertion twenty lines down bans that in this file
+   * outright, because `.tap`'s `transition` shorthand is unlayered and swallows it.
+   */
+  check("and the fill it moved onto carries a transition of its own", /transition-colors/.test(column), true);
+  /*
+   * Two `bg-fg` shapes two pixels apart on the one machine that most needs
+   * reading — selected, with work blocked on it. The ring is the rail bell's own
+   * idiom and is the cheapest thing that separates two fills of one colour.
+   */
+  check(
+    "and the count on top of it keeps a ring, or the two fills merge",
+    /bg-fg px-1 text-2xs font-semibold text-ink ring-2 ring-ink/.test(column),
+    true,
+  );
+  /*
+   * ⚠ **The reorder is one gesture with two presentations, and a hook is what
+   * keeps that true.** `MachineColumn`'s own docblock argues — and `web-shell.md`
+   * restates — that the two axes are two components and that a `variant` prop
+   * *"which could disagree with the CSS no longer exists"*. A shared
+   * `<MachineList axis=…>` would undo exactly that; a hook inverts it, so the
+   * gesture is one body and the presentation stays two. Asserted as a shape rather
+   * than left to a reviewer, because the tidying edit here is to merge them.
+   */
+  const machineDrag = stripComments(readFileSync(new URL("../src/ui/machineDrag.ts", import.meta.url), "utf8"));
+  check(
+    "the machine reorder is a hook, and both axes mount it",
+    [/export function useMachineDrag\(/.test(machineDrag), /useMachineDrag\(\{ axis: "y"/.test(column), /useMachineDrag\(\{ axis: "x"/.test(browser)],
+    [true, true, true],
+  );
+  check(
+    "and it splices through the body the agent strip already had",
+    [/from "\.\.\/agentStrip"/.test(machineDrag), /\bmoveRow\(/.test(machineDrag)],
+    [true, true],
+  );
+  /*
+   * `web-shell.md`'s two sentences about this gesture, and the second is why an
+   * entry can still be *clicked* to select a machine: capture at the press
+   * retargets the synthesised `click` to the capturing element, which is Q3.576 one
+   * control over. The slop constants are imported rather than re-typed, because the
+   * swipe on the same screen decides it is horizontal at the same distance and two
+   * copies drifting is a hold and a swipe both arming on one finger.
+   */
+  check(
+    "a finger's gesture refuses the scroll only while a drag is live",
+    /if \(event\.cancelable\) event\.preventDefault\(\);/.test(machineDrag),
+    true,
+  );
+  /*
+   * ⚠ **The touch plumbing is one copy now, and a census is what says so.** The
+   * `relay`-over-`ops` double indirection plus the four add/remove pairs stood
+   * byte-for-byte in `rowDrag.ts` and `machineDrag.ts` and, with `end` where those
+   * two said `stop`, in `machineSwipe.ts` — each under its own copy of the same two
+   * ⚠ paragraphs, one about registering in the ref callback rather than an effect
+   * and one about being non-passive on the scroller. Three copies of a measurement
+   * is two that will be missed.
+   *
+   * ⚠ **Differenced rather than counted, and the population is swept rather than
+   * written down.** A count of registrations cannot see a fourth copy growing back
+   * in a file nobody wrote down — and neither could the first draft of this, whose
+   * population *was* the three gesture files, so a copy anywhere else was outside
+   * what it looked at. Every sweep below runs over every `.ts`/`.tsx` under `src`
+   * and only the *answer* is written down. A set equality is also what cannot be
+   * kept green by a predicate that always says the same thing: an always-true one
+   * hands over the whole client, an always-false one hands over nothing.
+   *
+   * ⚠ **The second name in that answer is not a copy.** `MachineAgentsSection`
+   * registers one non-passive `touchmove` for the component's life, to
+   * `preventDefault` while its own *pointer* drag is live; it has no start, no end
+   * and nothing to relay. It is listed because the sweep can see it, and the check
+   * under it is what keeps it that rather than a fourth gesture — beginning one is
+   * the plumbing's alone.
+   */
+  const gestureSrc = (file: string): string => stripComments(srcFile(`ui/${file}`));
+  const plumbing = gestureSrc("rowDrag.ts");
+  const client = srcFiles().map((rel) => [rel, stripComments(srcFile(rel))] as const);
+  report("every sweep here is over the whole client", client.length > 100, `${client.length} files`);
+  const sweptFor = (hit: RegExp): string[] => client.filter(([, body]) => hit.test(body)).map(([rel]) => rel).sort();
+  check(
+    "the files that put a touch listener on a node themselves are the two that may",
+    sweptFor(/addEventListener\("touch/),
+    ["ui/rowDrag.ts", "ui/settings/MachineAgentsSection.tsx"].sort(),
+  );
+  check("and beginning a gesture is the plumbing's alone", sweptFor(/addEventListener\("touchstart/), ["ui/rowDrag.ts"]);
+  check(
+    "every gesture reaches it through the one hook, and no screen that draws one mounts it",
+    sweptFor(/useTouchGesture[(<]/),
+    ["ui/machineDrag.ts", "ui/machineSwipe.ts", "ui/rowDrag.ts"].sort(),
+  );
+  check(
+    "which registers both halves non-passive, on the node, from the ref callback",
+    [
+      /export function useTouchGesture</.test(plumbing),
+      /node\.addEventListener\("touchstart", going\.start, \{ passive: false \}\)/.test(plumbing),
+      /node\.addEventListener\("touchmove", going\.move, \{ passive: false \}\)/.test(plumbing),
+      /const scrollerRef = useCallback\([\s\S]{0,400}previous\.removeEventListener\("touchstart"/.test(plumbing),
+    ],
+    [true, true, true, true],
+  );
+  /*
+   * And the tick that says a hold has armed. It was the literal `12` in two files,
+   * so two gestures on one screen could come to feel different at the same moment
+   * — the same drift `PRESS_SLOP` is imported to prevent one line down.
+   */
+  check(
+    "the haptic is one number, named once and imported rather than re-typed",
+    [
+      /export const HAPTIC_MS = \d+;/.test(plumbing),
+      /navigator\.vibrate\?\.\(HAPTIC_MS\)/.test(machineDrag),
+      /vibrate\?\.\(\d/.test(machineDrag + plumbing),
+    ],
+    [true, true, false],
+  );
+  check("and the pointer is taken at arm rather than at the press", /setPointerCapture/.test(machineDrag.slice(machineDrag.indexOf("const arm"))), true);
+  check("while the press itself captures nothing", /setPointerCapture/.test(machineDrag.slice(0, machineDrag.indexOf("const arm"))), false);
+  check("the hold and the swipe share one distance, by import", [/PRESS_SLOP/.test(machineDrag), /from "\.\/rowDrag"/.test(machineDrag)], [true, true]);
+  /*
+   * The three things a reorder must not do, each asserted where its mechanism is.
+   * The first is the likeliest defect in the whole change: without it every drop
+   * also selects the tab it just moved.
+   */
+  check("a drop may not also select the machine it dropped", /onClickCapture/.test(machineDrag), true);
+  /*
+   * ⚠ **Both of these are about a four-second poll landing inside one gesture,
+   * and both are asserted over comment-STRIPPED source** — the file's own
+   * docblocks quote `going.from`, `latest.current` and `getBoundingClientRect()`
+   * verbatim, so a raw regex here would pass on the prose that explains the rule.
+   *
+   * The write guard: `going.from` is measured when the drag arms, `latest.current`
+   * is reassigned on every render, and a machine arriving or leaving between the
+   * press and the drop made that index name a different row — so the drop moved
+   * the wrong machine and persisted it. The drop must re-check the row's id.
+   */
+  const endBody = machineDrag.slice(machineDrag.indexOf("const end = useCallback"));
+  report("the drop's own body was isolated", endBody.length > 0, `${String(endBody.length)} chars`);
+  check(
+    "a drop checks the row is still where it armed before writing an order",
+    [/settled\[going\.from\]\?\.id !== going\.id/.test(endBody), /setMachineOrder\(moveRow\(settled,/.test(endBody)],
+    [true, true],
+  );
+  /*
+   * And the other half: nothing ends a drag whose row unmounted. Touch events go
+   * to a detached node, and `PaneHandle.tsx` measured the mouse path on Chrome
+   * 151 — no `pointerup`, no `pointercancel`, not even `lostpointercapture`. The
+   * effect keyed on `tabs` is the only thing that can notice.
+   */
+  check(
+    "and a drag whose row left the list is ended rather than left running",
+    [/!tabs\.some\(\(tab\) => tab\.id === going\.id\)\) end\(\)/.test(machineDrag), /\}, \[tabs, end\]\)/.test(machineDrag)],
+    [true, true],
+  );
+  check("All is refused rather than being absent by luck", /id === ALL_MACHINES/.test(machineDrag), true);
+  check("and the class that would take scrolling from the list is never used", /touch-none/.test(machineDrag), false);
+  /*
+   * ⭐ **The neighbours slide rather than teleporting, and the class that does it
+   * is not the obvious one.** Both machine surfaces carry `.tap`, whose
+   * `transition` *shorthand* resets `transition-property` to three colours — and
+   * every rule in `index.css` is unlayered on purpose, so it beats
+   * `transition-transform` inside `@layer utilities` outright, whatever the class
+   * string says. The result is a reorder where the dragged entry follows the
+   * pointer and everything else jumps.
+   *
+   * ⚠ **Neither list that already reorders would have caught it.** The session
+   * rows and the agent strip both shift an element carrying **no** `.tap`, so the
+   * utility works there and the trap only appears on a surface where a row is also
+   * a button. `agent-strip.md` records the same cascade fault for `touch-none`.
+   */
+  const sheet = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+  const tapAt = sheet.indexOf(".tap {");
+  const slidesAt = sheet.indexOf(".slides {");
+  report("both transition opt-ins were found", tapAt > 0 && slidesAt > 0, `tap at ${String(tapAt)}, slides at ${String(slidesAt)}`);
+  check("the sliding opt-in is declared after the one it has to beat", slidesAt > tapAt, true);
+  /*
+   * ⭐ **The bar under the conversation's name has no rule, and the veil is what
+   * replaced it.**
+   *
+   * There was a `border-b` here and a `min-h-15` pinning this row to the
+   * background panel's head so the two rules met as one line. The panel is an
+   * inset card now and meets nothing, and the rule itself is gone — so what
+   * separates a sticky bar from the conversation scrolling behind it is that the
+   * conversation stops being legible as it passes, which is a job for the ground
+   * rather than for one pixel. At `/85` the words underneath still read through
+   * it, which is why the line was doing work the ground should have been doing.
+   * Asserted together, because removing the rule without strengthening the ground
+   * is the edit that looks tidy and is a regression.
+   */
+  const header = stripComments(readFileSync(new URL("../src/ui/Header.tsx", import.meta.url), "utf8"));
+  const bar = /className=\{`sticky top-0 \$\{LAYER\.header\}([^`]*)`\}/.exec(header)?.[1] ?? "";
+  report("the header's own class string was found", bar.length > 0, bar.trim());
+  check("the bar draws no rule under itself", /border-b/.test(bar), false);
+  const veil = Number(/bg-surface\/(\d+)/.exec(bar)?.[1] ?? "0");
+  check("and its ground is opaque enough to stand in for one", veil >= 95, true);
+  check("while still being a veil rather than a wall", [veil < 100, /backdrop-blur/.test(bar)], [true, true]);
+  /*
+   * ⚠ **The top inset is one expression, and `pt-safe` plus a `pt-*` would be a
+   * silent no-op.** `.pt-safe` is declared unlayered in `index.css`, so it beats
+   * any padding utility on the same element whatever the class string says — the
+   * identical cascade fact `Composer.tsx` measured for `.pb-safe`, and the third
+   * surface in this app to meet it. So the floor is raised *inside* the safe-area
+   * expression, and the safe-area term is still there: a notch wins where there is
+   * one.
+   */
+  check("the header's top inset is written as one expression", /pt-\[max\([\d.]+rem,env\(safe-area-inset-top\)\)\]/.test(bar), true);
+  check("and it does not try to add padding beside an unlayered class", /pt-safe/.test(bar), false);
+  /*
+   * ⭐ **`working` is optimistic, and the optimism is at the reading rather than in
+   * the predicate.**
+   *
+   * `showsWorking` is a claim about the last snapshot that arrived, and between
+   * Enter and that snapshot there is a gap — a round trip at best, and on a session
+   * coming back from being released the whole of a restart. The conversation said
+   * nothing at all for that whole time while the message sat visibly in it, which
+   * is the one place this interface was not optimistic about a fact it is already
+   * optimistic about everywhere else: the message itself is drawn from the echo
+   * before the log confirms it.
+   *
+   * ⚠ **The predicate may not learn about echoes.** `wire.ts`'s are pure functions
+   * over what the daemon said, asserted as a partition, and an echo is not
+   * something the daemon said — so the `||` belongs at the call site and nowhere
+   * else. Both halves are asserted: the reading ORs it, and `wire.ts` still has no
+   * idea the module exists.
+   */
+  const view = stripComments(readFileSync(new URL("../src/ui/SessionView.tsx", import.meta.url), "utf8"));
+  const wire = stripComments(readFileSync(new URL("../src/wire.ts", import.meta.url), "utf8"));
+  check(
+    "a message on its way is drawn as work about to happen",
+    /const working = echo !== null \|\| \(snapshot !== null && showsWorking\(snapshot\)\);/.test(view),
+    true,
+  );
+  check("and the predicate it ORs stays a pure reading of the snapshot", /echo|Echo/.test(wire), false);
+
+  /*
+   * And the other pair of edges: the rail's footer and the composer are
+   * bottom-anchored stacks either side of one divider, so the New session button
+   * and the box you type in share a bottom edge. Both spend `pb-safe` on the band
+   * and the same `pb-2` on the box inside it — ⚠ which may not move onto the band,
+   * because `.pb-safe` is unlayered and beats a `pb-*` utility on the same node,
+   * silently. `Composer.tsx` measured that; this is the second surface to need it.
+   */
+  const composer = stripComments(readFileSync(new URL("../src/ui/Composer.tsx", import.meta.url), "utf8"));
+  const composerPad = /\$\{COLUMN\} px-4 pb-(\d+)/.exec(composer)?.[1] ?? "";
+  const footPad = /<div className="pb-safe shrink-0 px-3 pt-3">\s*<div className="pb-(\d+)">/.exec(browser)?.[1] ?? "";
+  report("both bottom insets were found", composerPad.length > 0 && footPad.length > 0, `composer pb-${composerPad}, rail foot pb-${footPad}`);
+  check("New session stops where the composer's box stops", footPad, composerPad);
+  check("and neither spends it on the band that carries pb-safe", /pb-safe[^"]*\bpb-\d/.test(browser + composer), false);
+  check("nor does any surface pair pt-safe with a top padding utility", /pt-safe[^"]*\bpt-\d/.test(browser + composer + header), false);
+  check("and it carries the transform the other refuses", /\.slides \{[^}]*transform \d+ms/.test(sheet), true);
+  /*
+   * The three colour declarations are `.tap`'s, restated because a shorthand
+   * cannot extend one — so they are two copies that must stay in step.
+   */
+  const decls = (block: string): string[] =>
+    (/\{([\s\S]*?)\}/.exec(block)?.[1] ?? "")
+      .split(",")
+      .map((one) => one.trim().replace(/^transition:\s*/, "").replace(/;$/, ""))
+      .filter((one) => one.length > 0);
+  const tapDecls = decls(sheet.slice(tapAt));
+  const slideDecls = decls(sheet.slice(slidesAt));
+  check("and it still says everything the other one does", slideDecls.slice(0, tapDecls.length), tapDecls);
+  /*
+   * And both machine surfaces reach for it rather than for the utility, which is
+   * the half a stylesheet check cannot see.
+   */
+  /*
+   * ⚠ **Scoped to the strip, not swept over the file.** `SessionBrowser.tsx` uses
+   * `transition-transform` legitimately twice — on the chevron that rotates when a
+   * folder opens — and those carry no `.tap`, so the utility works there. A
+   * file-wide ban would be a check that is right about the wrong elements, and the
+   * way it would be "fixed" is by breaking a chevron.
+   */
+  const stripBody = browser.slice(browser.indexOf("function MachineTabs("));
+  const tabsOnly = stripBody.slice(0, stripBody.indexOf("\nfunction "));
+  report("the tab strip's own body was isolated", tabsOnly.length > 0 && tabsOnly.length < browser.length, `${String(tabsOnly.length)} chars`);
+  for (const [what, code] of [["the phone's tab strip", tabsOnly], ["the desktop column", column]] as const) {
+    check(`${what} slides its neighbours with the opt-in, not the utility`, [/\? "slides"/.test(code), /"transition-transform"/.test(code)], [true, false]);
+  }
+  /*
+   * ⭐ `agent-strip.md`: *"a pointer gesture that is the only way to reorder is a
+   * control a keyboard cannot reach at all."* There is no handle here to hang
+   * arrows on, so the entry takes them held with `Alt` — which also leaves
+   * `keyboard.ts`'s bare-key rules untouched. And it is said out loud, because a
+   * key press moves an entry that may be scrolled out of view on two surfaces that
+   * had no live region between them.
+   */
+  check(
+    "the same control answers a keyboard",
+    [/altKey/.test(machineDrag), /ArrowUp/.test(machineDrag), /ArrowLeft/.test(machineDrag), /isTypingInto\(/.test(machineDrag)],
+    [true, true, true, true],
+  );
+  check("and a keyboard move is announced", /moved to position/.test(machineDrag), true);
+  check(
+    "on both axes, from the one sentence the hook owns",
+    [/aria-live="polite"/.test(column), /aria-live="polite"/.test(browser), /drag\.announcement/.test(column), /drag\.announcement/.test(browser)],
+    [true, true, true, true],
+  );
+  /*
+   * ⚠ **Reachable is not discoverable, and the gesture only ever had the first.**
+   * The entry is a `<button>` whose accessible name is the machine's name and whose
+   * state is `aria-pressed`; the reorder hid behind `event.altKey` with no
+   * attribute, no visible hint and no `sr-only` one — so `machine-gestures.md`'s
+   * *"keyboard parity is owed, not offered"* was satisfied mechanically and not in
+   * practice: nobody reading this column with a screen reader had any way to learn
+   * an entry could be moved. The sibling list one screen over names the gesture on
+   * a handle (`Move <name>`) and this surface has no handle by design, so the
+   * naming has to sit on the entry itself.
+   *
+   * Drawn by `bind` so the two axes cannot disagree, and the axis-dependent half is
+   * pinned as a *pair* — one spelling read out of the file would let the column
+   * ship the strip's arrows.
+   */
+  // Bounded at `} as const`, not at the first `};` — that one is the `bind` return
+  // type two screens down, and the wide capture let `x: "…"` be found anywhere.
+  const shortcuts = /const SHORTCUTS = \{([\s\S]*?)\} as const;/.exec(machineDrag)?.[1] ?? "";
+  report("the shortcut table was found", shortcuts.length > 0, shortcuts.replace(/\s+/g, " ").trim());
+  check(
+    "the reorder names itself, and names the keys it takes",
+    [
+      /"aria-keyshortcuts": SHORTCUTS\[axis\]/.test(machineDrag),
+      /"aria-roledescription": MOVABLE/.test(machineDrag),
+      /\by: "Alt\+/.test(shortcuts),
+      /\bx: "Alt\+/.test(shortcuts),
+    ],
+    [true, true, true, true],
+  );
+  /*
+   * ⚠ **And the keys it *names* are the keys it *takes*.** The attribute is a
+   * second copy of `onKey`'s own branch, so it is compared against that branch
+   * rather than against a hand-typed list — a shortcut naming an arrow the handler
+   * ignores is worse than naming none, and it is the half that cannot be seen by
+   * reading either line on its own.
+   */
+  const branch = /const back = vertical \? "(\w+)" : "(\w+)";[\s\S]{0,80}const on = vertical \? "(\w+)" : "(\w+)";/.exec(machineDrag);
+  report("the handler's own arrow branch was found", branch !== null, branch?.[0].replace(/\s+/g, " ") ?? "not found");
+  const named = (axis: "x" | "y"): string[] =>
+    (new RegExp(`\\b${axis}: "([^"]+)"`).exec(shortcuts)?.[1] ?? "")
+      .split(" ")
+      .map((one) => one.replace("Alt+", ""))
+      .sort();
+  const taken = (vertical: boolean): string[] =>
+    [branch?.[vertical ? 1 : 2] ?? "", branch?.[vertical ? 3 : 4] ?? "", "Home", "End"].sort();
+  check("the vertical axis names the keys its own handler takes", named("y"), taken(true));
+  check("and so does the horizontal one, which is the half a single spelling would hide", named("x"), taken(false));
+  check(
+    "and the two it names on both axes are keys the handler reads",
+    [/event\.key === "Home"/.test(machineDrag), /event\.key === "End"/.test(machineDrag)],
+    [true, true],
+  );
+  check(
+    "neither surface re-types either attribute, so there is one answer to draw",
+    [
+      /aria-keyshortcuts/.test(column),
+      /aria-keyshortcuts/.test(browser),
+      /aria-roledescription/.test(column),
+      /aria-roledescription/.test(browser),
+    ],
+    [false, false, false, false],
+  );
+  /*
+   * Neither axis re-derives the order. It is `store.ts`'s, merged there so both
+   * inherit one answer and `machineTabs` still adds no sort of its own.
+   */
+  for (const [what, code] of [["the phone's tab strip", browser], ["the desktop column", column]] as const) {
+    check(`${what} draws the order it is handed and sorts nothing itself`, [/localeCompare/.test(code), /machineOrder\(/.test(code)], [false, false]);
+  }
+
+  /*
+   * ⚠ **The order budget was truncating the *live* machines.** `nextOrder` keeps a
+   * slot for a machine the fleet has lost — deliberate, and argued in its own
+   * docblock — and bounded the result with `slice(0, MAX_MACHINE_ORDER)`, whose
+   * comment called the tail *"the end nobody has expressed a position for"*. That
+   * is exactly inverted: the stored walk runs first and the queue's remainder is
+   * appended **after** it, so the tail is where the live machines land, while a
+   * stale slot is only ever added and never evicted. With the stored list saturated
+   * by retired ids, the write-back answered a full list with **none** of the drawn
+   * machines in it, and feeding that back through a second drag answered no live id
+   * again — a reorder preference permanently inoperative, never self-clearing.
+   *
+   * ⚠ **Nothing on screen breaks, which is why this needs a driver rather than a
+   * bug report.** `orderMachines` drops an id the fleet no longer holds at draw
+   * time, so the column goes on rendering in pure name order for ever: no crash, no
+   * empty list, and nothing visible to notice.
+   *
+   * And the bound's existing case cannot see it. That one is the all-live shape —
+   * three hundred machines cut to two hundred, asserted one section file over — and
+   * a stale slot does not *lower* a count, it fills it. So the saturated case is
+   * asserted here as its own rule, in both directions: every drawn id survives, and
+   * the stale slots given up are the **last** ones rather than the first.
+   */
+  {
+    const { MAX_MACHINE_ORDER, nextOrder } = await import("../src/machineOrder.js");
+    const stale = Array.from({ length: MAX_MACHINE_ORDER }, (_, at) => `m_gone_${String(at)}`);
+    const drawn = ["m_b", "m_a", "m_c"];
+    const next = nextOrder(stale, drawn);
+    check("a saturated order still holds every machine that is drawn", next.slice(-drawn.length), drawn);
+    check("and it is still inside the bound", next.length, MAX_MACHINE_ORDER);
+    check(
+      "the slots it gave up are the last stale ones, not the first",
+      [next.includes("m_gone_0"), next.includes(`m_gone_${String(MAX_MACHINE_ORDER - drawn.length - 1)}`), next.includes(`m_gone_${String(MAX_MACHINE_ORDER - 1)}`)],
+      [true, true, false],
+    );
+    check(
+      "so a second drag on that list answers the live ids rather than none",
+      nextOrder(next, ["m_c", "m_b", "m_a"]).slice(-3),
+      ["m_c", "m_b", "m_a"],
+    );
+    /*
+     * And the fallback the tail still has: when `drawn` alone is over the bound
+     * there is no stale slot left to give up, so the cut lands where it always did.
+     */
+    check(
+      "with nothing stale to give up, the tail is cut after all",
+      nextOrder([], Array.from({ length: MAX_MACHINE_ORDER + 5 }, (_, at) => `m_${String(at)}`)).length,
+      MAX_MACHINE_ORDER,
+    );
+  }
+
+  /*
+   * ⚠ **The underline and the tab's inset were two numbers agreeing by hand.**
+   * `TabUnderline`'s docblock claimed `inset-x-3` matched `px-3` and nothing
+   * checked it — which is exactly the pair that drifts the moment somebody widens
+   * the tabs. Both are read out of the file and required equal, so the claim is a
+   * mechanism rather than a sentence.
+   */
+  const strip = stripComments(browser);
+  const tabInset = /min-h-11 items-center gap-1\.5 px-(\d+)/.exec(strip)?.[1] ?? "";
+  const markInset = /absolute inset-x-(\d+) -bottom-px/.exec(strip)?.[1] ?? "";
+  report("both insets were found to compare", tabInset.length > 0 && markInset.length > 0, `tab px-${tabInset}, mark inset-x-${markInset}`);
+  check("the mark under a tab is as wide as the tab's own content box", markInset, tabInset);
+  /*
+   * `All` and the `+` sit in the machine tabs' rhythm — the `+`'s own docblock
+   * says so — so all three move together or the strip reads as two controls that
+   * wandered in beside a row of tabs.
+   */
+  check("All and the + share that inset", (strip.match(new RegExp(`px-${tabInset}\\b`, "g")) ?? []).length >= 3, true);
+  /*
+   * And the fade is a fraction of something again: its own comment said `w-8` "is
+   * no longer a fraction of anything and would have to be re-measured rather than
+   * re-derived", and at this inset it is exactly twice it. Asserted as the relation
+   * rather than as the literal, which is the difference between the two.
+   */
+  check("the cut edge fades by twice a tab's inset", /w-8 bg-gradient-to-l/.test(strip) && Number(tabInset) * 2 === 8, true);
+  /*
+   * ⚠ **And the desktop column did not follow.** Moving `MACHINE_COLUMN_PX` moves
+   * all three rail bounds with it to keep the subtraction above true, and
+   * `clampRailWidth` preserves a stored *total* — so every existing reader would
+   * silently lose the delta off their list. The column's own bound is a different
+   * one: 68px of the 72 is the name, and two hosts eliding to `server-…` is the
+   * failure it is shaped against. Two axes, two constraints, no shared number.
+   */
+  const { MACHINE_COLUMN_PX: columnPx } = await import("../src/ui/rail.js");
+  check("widening the phone's tabs did not widen the desktop column", columnPx, 72);
+  check("and the two insets are not one number by accident", new RegExp(`px-${tabInset}\\b`).test(stripComments(column)), false);
+
+  /*
+   * The flick between machines.
+   *
+   * ⚠ **No breakpoint in JavaScript, and the gate is not one in disguise.**
+   * `AppShell`: *"CSS already knows the width, and a second source of truth for it
+   * is how a resized window ends up rendering a rail that is not there."* This
+   * stores nothing, subscribes to nothing and re-renders nothing — it reads, once
+   * per gesture, whether the `lg:hidden` tab strip is laid out at all, which is
+   * layout the browser computed from the same two class strings the breakpoint has
+   * always been answered in. `SessionBrowser` is mounted twice and each mount's
+   * ancestor is `display: none` at the other width, so exactly one can ever swipe.
+   */
+  const swipe = stripComments(readFileSync(new URL("../src/ui/machineSwipe.ts", import.meta.url), "utf8"));
+  check(
+    "the swipe asks no second source of truth about the width",
+    [/matchMedia\("\(min-width/.test(swipe), /innerWidth <|window\.innerWidth\b(?!.*EDGE)/.test(swipe), /\blg:/.test(swipe)],
+    [false, false, false],
+  );
+  check("it asks the DOM's own answer instead, once per gesture", /offsetParent === null/.test(swipe), true);
+  const appShell = readFileSync(new URL("../src/ui/AppShell.tsx", import.meta.url), "utf8");
+  check("and the breakpoint is still answered in two class strings", [/lg:hidden/.test(browser), /lg:flex/.test(appShell)], [true, true]);
+  /*
+   * The one `matchMedia` it may make, and it is the hole `index.css`'s own
+   * reduced-motion block has had three times: that block zeroes
+   * `transition-duration` on `*`, which makes the settle free — and cannot reach a
+   * transform this file writes per frame.
+   */
+  check("a follow that CSS cannot reach asks about reduced motion itself", /prefers-reduced-motion/.test(swipe), true);
+  check(
+    "it begins on touchstart, non-passive, through the one hook the census above pins",
+    [/useTouchGesture</.test(swipe), /addEventListener\("touch/.test(swipe)],
+    [true, false],
+  );
+  /*
+   * ⚠ **A second flick begun inside the settle's own window was interpolated
+   * rather than pinned to the finger, and that is the common case rather than an
+   * edge** — flicking twice in quick succession is the ordinary way somebody moves
+   * two machines along. `settle` wrote `transition` onto the wrapper and cleared it
+   * from a bare `window.setTimeout` with no handle kept: nothing cancelled it,
+   * neither `onStart` nor `slide` cleared the property, and the list crawled behind
+   * the thumb for the length of the slide. This file's own standing rule is that
+   * the follow is written straight onto the wrapper node once per `touchmove`
+   * *precisely* so that nothing sits between the finger and the transform, and a
+   * transition left on the node is exactly that something.
+   *
+   * Three facts, because each is silent on its own: the follow clears it, the timer
+   * is a handle rather than fire-and-forget, and the node leaving takes the pending
+   * clear with it — the last because repeated flicks otherwise queued writes
+   * against whatever node the ref happened to hold when they fired.
+   */
+  check(
+    "a live follow is never transitioned, and the settle's timer can be taken back",
+    [
+      /const slide = \(by: number\): void => \{[\s\S]{0,200}unsettle\(node\)/.test(swipe),
+      /const settling = useRef<number \| null>\(null\);/.test(swipe),
+      /window\.clearTimeout\(settling\.current\)/.test(swipe),
+      /settling\.current = window\.setTimeout\(/.test(swipe),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    "and the node going takes the pending clear with it",
+    /const wrapRef = useCallback\([\s\S]{0,300}window\.clearTimeout\(settling\.current\)/.test(swipe),
+    true,
+  );
+  /*
+   * ⚠ **A census rather than a ban**, because the defect was a timer with nobody
+   * holding it: the two counts are every timer this file starts against every one
+   * whose id it keeps. A bare `window.setTimeout` added later raises the first and
+   * not the second, which a regex forbidding one cannot express without also
+   * forbidding the one that is correct.
+   */
+  const timers = (swipe.match(/window\.setTimeout\(/g) ?? []).length;
+  const held = (swipe.match(/settling\.current = window\.setTimeout\(/g) ?? []).length;
+  check("every timer the swipe starts is one it can cancel", [timers, held], [1, 1]);
+  /*
+   * And the two durations were a pair agreeing by hand: the clear has to land
+   * *past* the slide or it snaps the settle it exists to tidy up after. Asserted as
+   * the relation rather than as either literal, which is the `inset-x`/`px` idiom
+   * two screens up read on a second subject.
+   */
+  const slideMs = Number(/const SETTLE_MS = (\d+);/.exec(swipe)?.[1] ?? "0");
+  const clearMs = Number(/const SETTLE_CLEAR_MS = (\d+);/.exec(swipe)?.[1] ?? "0");
+  report("both settle durations were found", slideMs > 0 && clearMs > 0, `slide ${String(slideMs)}ms, clear ${String(clearMs)}ms`);
+  check("the transition comes off after the slide it animates, not during it", clearMs > slideMs, true);
+  /*
+   * ⚠ **One number, two gestures, and exactly one of them is ever live.**
+   * `rowDrag` abandons an unarmed hold past `PRESS_SLOP` in *any* direction, and
+   * that number's own docblock puts it below the ~10px at which engines commit a
+   * pan. So the distance at which this decides it is horizontal is the distance at
+   * which the hold is already dead and the scroller has not yet taken the touch.
+   * Imported rather than re-typed, or the two drift and one finger arms both.
+   */
+  check("the swipe's slop is the hold's, by import rather than by coincidence", [/PRESS_SLOP/.test(swipe), /from "\.\/rowDrag"/.test(swipe)], [true, true]);
+  check("and it stands down while a row drag owns the touch", /busy\.current\(\)/.test(swipe), true);
+  check("the platform's own Back keeps its edge", /EDGE_DEAD_ZONE/.test(swipe), true);
+  /*
+   * It moves a selection and nothing else. `announce`/`data-nav` is for a screen
+   * *replacing* another one, and a tab change replaces nothing — there is no
+   * history entry and `navMove` has no value for it.
+   */
+  check(
+    "a swipe selects a machine and does not navigate",
+    [/selectMachine\(/.test(swipe), /navigate\(/.test(swipe), /startViewTransition/.test(swipe)],
+    [true, false, false],
+  );
+  check("and it clamps at both ends rather than wrapping", /Math\.min\(Math\.max\(/.test(swipe), true);
+  /*
+   * ⚠ **The phone's strip is a tab bar, not a row of pills.** The selected tab is
+   * marked by a rule under the word — the one shape that survives translating an
+   * accent-coloured underline into a monochrome palette — rather than by a
+   * `bg-raised` fill, which is 1.22:1 on `ink` and is the tone this app keeps
+   * failing to divide anything with. Asserted in both directions, because a
+   * revert to pills leaves the underline component in the file unused and every
+   * other check green.
+   */
+  check(
+    "the machine tabs mark the selected one with a rule rather than a fill",
+    [/function TabUnderline\(\)/.test(browser), /\{tab\.selected && <TabUnderline \/>\}/.test(browser), /rounded-full px-2\.5 text-xs/.test(browser)],
+    [true, true, false],
+  );
+  /*
+   * The column is divided by a line and paints no ground of its own: `ink` against
+   * `surface` is 1.06:1, too small a step to divide two panes, and this element
+   * sits inside an `<aside>` that already paints `bg-ink`. A third plane in a
+   * palette that has three in total is not available.
+   */
+  const nav = /<nav[^>]*className="([^"]*)"/.exec(column)?.[1] ?? "";
+  report("the column's own element was found", nav.length > 0, nav);
+  check("it is divided by a line and paints no ground of its own", [/border-r border-edge/.test(nav), /\bbg-/.test(nav)], [true, false]);
+
+  /* ---- the list header, and what it no longer refuses ---- */
+
+  /*
+   * ⚠ **Nothing in this row answers a tap with nothing.** The fleet-wide magnifier
+   * was drawn `disabled` beside a live search box one row down; in a single row
+   * forty pixels apart that is the conflation Q3.211 drew them apart to prevent
+   * rather than the distinction. The live box is asserted present in the same
+   * breath, so "deleted the wrong one" fails here too.
+   */
+  report("the refusal sweep can see one", /label="Search everything/.test('label="Search everything — not built yet"'), "positive control");
+  check(
+    "the header's search is the one that works, and there is no second, dead one",
+    [/label="Search everything/.test(browser), /aria-label="Search sessions"/.test(browser)],
+    [false, true],
+  );
+  /*
+   * ⚠ **And the list screen still has a heading, exactly once.** Below `lg` there
+   * is no `Header` on this route at all, so this `<h1>` is the only heading on the
+   * app's primary screen — `Header.tsx`'s docblock rests on it. The wordmark moved
+   * to the drawer's footer; the element did not move anywhere.
+   */
+  check("the list column still names the app for a screen reader, exactly once", (browser.match(/<h1\b/g) ?? []).length, 1);
+  /*
+   * The footer is one button. Full width with a leading glyph, never a floating
+   * action button — the rail's every other row is full-bleed, and a circle over the
+   * end of the list covers the row it is sitting on.
+   */
+  const footAt = browser.indexOf("function SidebarFoot");
+  const footEnd = browser.indexOf("\n}\n", footAt);
+  // Both ends, never one. `indexOf` answers -1 for a terminator that moved, and
+  // `slice(from, -1)` reads a negative end as counting from the end of the string —
+  // so an unguarded end widens this slice to the rest of the file instead of
+  // emptying it, and every positive assertion below becomes satisfiable from some
+  // other component. The floor under it cannot detect that: a widened slice is
+  // longer, not shorter. Same guard as `between()` in `scripts/nativecheck.ts`.
+  const foot = footAt < 0 || footEnd <= footAt ? "" : browser.slice(footAt, footEnd);
+  report("the footer was found", foot.length > 0, `${foot.length} chars`);
+  check(
+    "New session is still a full-width button at the foot of the list, and never a FAB",
+    [/size="sm"[\s\S]{0,120}className="w-full"/.test(foot), /\bfixed\b|\babsolute\b|\brounded-full\b/.test(foot)],
+    [true, false],
+  );
+  check("the account row left, and the footer still draws no rule the composer's cannot meet", /ProfileMenu|border-t/.test(foot), false);
+
+  /* ---- the build, drawn once, read from one place ---- */
+
+  const version = stripComments(readFileSync(new URL("../src/version.ts", import.meta.url), "utf8"));
+  check("the drawer says what build this is", /APP_VERSION/.test(drawer), true);
+  /*
+   * ⚠ **`typeof`, and the two halves of this check are the whole rule.** This
+   * driver imports the app's modules under plain `tsx` with no Vite, so
+   * `__APP_VERSION__` is not defined here at all: a bare reference — or
+   * `__APP_VERSION__ === undefined`, which reads as the careful spelling — throws
+   * `ReferenceError` during *module evaluation*, taking down every check that
+   * transitively imports it with an error naming neither the file nor the
+   * identifier. `typeof` on an undeclared name is the one read JavaScript defines.
+   */
+  check(
+    "the constant guards the identifier a Vite-less import does not define",
+    [/typeof __APP_VERSION__ === "string"/.test(version), /__APP_VERSION__\s*===\s*undefined/.test(version)],
+    [true, false],
+  );
+  const { APP_VERSION } = await import("../src/version.js");
+  check("so this driver, which has no Vite, gets the fallback rather than a ReferenceError", APP_VERSION, "dev");
+  /*
+   * And the build reads the manifest rather than writing the number down a second
+   * time. `pincheck` already holds that manifest against the root, the other two
+   * workspace manifests, `DAEMON_VERSION`, the control plane's `VERSION` and the
+   * CHANGELOG — seven copies of which six are asserted against each other. A
+   * literal in `src/` would be the eighth, asserted by nothing.
+   */
+  const viteConfig = stripComments(readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8"));
+  check(
+    "and the build reads it from this package's manifest rather than a second literal",
+    /__APP_VERSION__: JSON\.stringify\(/.test(viteConfig) &&
+      /JSON\.parse\(readFileSync\(new URL\("\.\/package\.json"/.test(viteConfig),
     true,
   );
 }

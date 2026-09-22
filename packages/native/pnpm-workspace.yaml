@@ -1,0 +1,16 @@
+# **This file exists to stop pnpm walking up.**
+#
+# `packages/native` is deliberately not a member of the repository's workspace —
+# the three measurements are in the root `pnpm-workspace.yaml`, beside the
+# `'!packages/native'` line that excludes it. But exclusion alone is not enough:
+# pnpm resolves a root by searching *upwards* for the nearest
+# `pnpm-workspace.yaml`, so `pnpm install` run in here found the repository's
+# root, installed the three projects it lists, and left this one with no
+# `node_modules` at all — silently, exit 0, "Already up to date".
+#
+# So this is the marker that makes this directory its own root. It lists itself
+# and nothing else, and it must never grow a second entry: anything that belongs
+# to the fleet's dependency tree belongs in the root workspace, and anything that
+# does not belongs here for the reasons that file gives.
+packages:
+  - '.'

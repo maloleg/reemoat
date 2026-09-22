@@ -16,7 +16,10 @@ import type { AgentId } from "../src/acp/agents.js";
 import { systemSecretFor } from "../src/acp/systems.js";
 import { AgentAskRuns } from "../src/agentask.js";
 import { AgentLoginRuns } from "../src/agentauth.js";
+import { AgentInstallRuns } from "../src/agentinstall.js";
+import { AgentScriptGate } from "../src/agentscript.js";
 import { AgentUpdates, agentChannelFrom, agentSourceFrom } from "../src/agentupdate.js";
+import { removeAnnounce, writeAnnounce, ANNOUNCE_VERSION } from "../src/announce.js";
 import { IdleParking } from "../src/idlepark.js";
 import { LocalRuntime } from "../src/runtime/local.js";
 import { resolveRoots } from "../src/browse.js";
@@ -29,10 +32,13 @@ import {
   SESSION_CREATE_BURST,
   SESSION_CREATE_REFILL_MS,
   SessionRegistry,
+  TURN_SILENCE_MS,
   type WorktreePolicy,
 } from "../src/registry.js";
 import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
 import { createApp } from "../src/server.js";
+import { localStaticKey } from "@reemoat/protocol";
+import { ensureMachineKey, machineKeyRotation } from "../src/machinekey.js";
 import { openStores, type StoreBundle, type StoredIdentity } from "../src/store/sqlite.js";
 import { Contributions } from "../src/plugins/contributions.js";
 import { PluginHost } from "../src/plugins/host.js";
@@ -112,6 +118,26 @@ function threadpoolNote(): string {
  */
 const DEFAULT_HOST = "127.0.0.1";
 const SHUTDOWN_HARD_LIMIT_MS = 25_000;
+
+/**
+ * The control plane refused the enrollment code: single-use, expired or unknown.
+ *
+ * A fresh code is the remedy, and it is the **only** failure here for which that
+ * is true — which is why it has a code of its own rather than sharing `2` with
+ * every other reason this process gives up.
+ */
+const EXIT_CODE_REFUSED = 3;
+
+/** The control plane could not be reached or did not answer. Wait, do not re-mint. */
+const EXIT_CONTROL_PLANE_UNREACHABLE = 4;
+
+/**
+ * The operating system refused a connection to an address on this network.
+ *
+ * Its own code because its remedy is its own: nothing is down and no amount of
+ * waiting helps — somebody has to grant a permission. See `localNetworkBlocked`.
+ */
+const EXIT_LOCAL_NETWORK_BLOCKED = 5;
 const DEFAULT_DB = join(homedir(), ".reemoat", "reemoat.db");
 const DAY_MS = 86_400_000;
 
@@ -256,6 +282,22 @@ try {
   );
   process.exit(2);
 }
+
+/*
+ * The X25519 static this machine answers on, generated on first start and kept
+ * for ever after.
+ *
+ * Here rather than inside `openStores` for the reason every other startup fact is
+ * here: nothing in `src/` prints, and this is the line an operator compares by eye
+ * against what `cpctl admin fleet` shows for the same machine. It is the only
+ * check anybody has on the pin, and it is offered as a **display rather than an
+ * enforcement** — saying otherwise would be claiming a property nothing holds.
+ *
+ * Before the server serves and before the tunnel dials, because the dial
+ * announces it.
+ */
+const machineKey = ensureMachineKey(stores.machineKeys);
+console.log(`machine key: ${machineKey.kth}`);
 
 /*
  * The reverse of the enrollment check further down, and it has to read the store
@@ -586,6 +628,19 @@ registry.setSessionLimits({
    */
   idleParkMs:
     boundedInt(process.env["REEMOAT_IDLE_PARK_MINUTES"], IDLE_PARK_MS / 60_000) * 60_000,
+  /*
+   * And the other threshold on the same clock: how long a turn may say nothing
+   * before this daemon stops waiting for it.
+   *
+   * Minutes on the outside for the reason above, and `0` the only way off for the
+   * reason above — sharper here, because what a typo would switch off is the only
+   * thing that can clear a `status: "running"` nothing else in the process can
+   * reach. `TURN_SILENCE_MS` carries why it is three hours, measured against a
+   * real turn on the machine that reported the bug, and why it is not derived
+   * from the park threshold.
+   */
+  turnSilenceMs:
+    boundedInt(process.env["REEMOAT_TURN_SILENCE_MINUTES"], TURN_SILENCE_MS / 60_000) * 60_000,
 });
 /*
  * And what somebody set on the settings screen, which **overrides** the line
@@ -625,6 +680,18 @@ const idleParking = IdleParking.start({
       `parked ${ids.length} idle session(s), agent(s) released: ${ids.join(", ")}`,
     );
   },
+  /*
+   * The second sweep on the same clock, with its own switch for the reason
+   * `turnSilenceEnabled` states: switching parking off is not a request to leave
+   * a session claiming to be working for ever.
+   */
+  reap: () => registry.abandonWedgedTurns(),
+  reapEnabled: () => registry.turnSilenceEnabled,
+  onAbandoned: (ids) => {
+    console.log(
+      `gave up on ${ids.length} turn(s) the agent never answered: ${ids.join(", ")}`,
+    );
+  },
 });
 
 // Every spelling of "no" the `mode:` note below accepts; `deploycheck` reads this
@@ -647,7 +714,52 @@ const AGENT_UPDATES_OFF: ReadonlySet<string> = new Set(["off", "0", "false", "no
  * this names is only a live process. The script decides what each name means:
  * Q4.113.
  */
+/**
+ * Everything that has to forget what it knew about a harness whose binary moved.
+ *
+ * ⚠ **One function and two callers, because the list is an *order* rather than a
+ * set and a second copy would drift out of it.** The daily refresh and an install
+ * somebody pressed both change which build is on disk, and the block below was
+ * written out inside `onUpdated` when `onUpdated` was the only caller.
+ *
+ * `agent` narrows it where the caller knows: an install is about one harness, a
+ * refresh may have moved any of them.
+ */
+const afterAgentsChanged = (agent?: string): void => {
+  // Or the daemon's *report* goes on naming the build it resolved before this ran,
+  // for the length of that cache: the spawn already runs the new one, because the
+  // held path is the symlink the script repointed — see `LocalRuntime.agentCli`.
+  // This is also what clears `findOnPath`'s 30s miss, which is why every verdict
+  // about "is it there now" has to come after it rather than before.
+  runtime.forgetAvailability();
+  /*
+   * And the capability cache, which `forgetAvailability` cannot reach: it holds
+   * the model list *and* the build that published it for `MODELS_TTL_MS`, so a
+   * picker opened just before the run would name the old build over the old list
+   * for ten minutes after the binary moved — the exact pairing `cli` rides that
+   * route to keep honest.
+   */
+  agentAsks.forget(agent);
+  /*
+   * And the sessions that were waiting for exactly this: a harness with no CLI
+   * on the machine costs a resume no attempt (`agent_missing`), so the pass is
+   * run again now that one may have arrived. Queued behind a boot pass still in
+   * flight, by `autoResume` itself.
+   */
+  resumeInterrupted(agent === undefined ? "after the agent update" : `after installing ${agent}`);
+};
+
+/**
+ * Who may run `deploy/agents.sh`, between the two things in this process that do.
+ *
+ * The script's own `mkdir` lock catches an orphan a previous daemon left behind;
+ * this catches the two runs *this* daemon starts, which that lock can only answer
+ * with `exit 0` and a warning. Neither subsumes the other.
+ */
+const agentScriptGate = new AgentScriptGate();
+
 const agentUpdates = AgentUpdates.start({
+  gate: agentScriptGate,
   busy: () => [
     ...new Set(
       registry
@@ -662,25 +774,7 @@ const agentUpdates = AgentUpdates.start({
     // no line in the log was measured as invisible, and the script's own notes
     // are the only record of which build each harness is on now.
     console.log(`agent update: ran deploy/agents.sh${report === null ? "" : `\n${report.replace(/^/gm, "    ")}`}`);
-    // Or the daemon's *report* goes on naming the build it resolved before this ran,
-    // for the length of that cache: the spawn already runs the new one, because the
-    // held path is the symlink the script repointed — see `LocalRuntime.agentCli`.
-    runtime.forgetAvailability();
-    /*
-     * And the capability cache, which `forgetAvailability` cannot reach: it holds
-     * the model list *and* the build that published it for `MODELS_TTL_MS`, so a
-     * picker opened just before the run would name the old build over the old list
-     * for ten minutes after the binary moved — the exact pairing `cli` rides that
-     * route to keep honest.
-     */
-    agentAsks.forget();
-    /*
-     * And the sessions that were waiting for exactly this: a harness with no CLI
-     * on the machine costs a resume no attempt (`agent_missing`), so the pass is
-     * run again now that one may have arrived. Queued behind a boot pass still in
-     * flight, by `autoResume` itself.
-     */
-    resumeInterrupted("after the agent update");
+    afterAgentsChanged();
   },
   /*
    * On by default, and that is the decision rather than an oversight: the whole
@@ -701,6 +795,37 @@ const agentUpdates = AgentUpdates.start({
   // env file is what decides, not the script's default (Q4.115).
   channel: agentChannelFrom(process.env["REEMOAT_AGENT_CHANNEL"], (detail: string) => console.error(`agent update: ${detail}`)),
 });
+
+/**
+ * Putting a harness on this machine, because somebody asked for it.
+ *
+ * ⚠ **The gate is shared with the updater and an install wins it**, which is the
+ * one ordering decision between them: somebody is watching this, and the daily
+ * refresh's work will still be there in a day.
+ *
+ * ⚠ **`verify` is what decides whether the install worked, and it runs *after*
+ * `afterAgentsChanged`.** `deploy/agents.sh` exits 0 having printed `install
+ * failed; this machine has no copy of it until the next run` — it must, because
+ * three of its four callers contract it never fails — so the exit code answers
+ * nothing. Asking the machine is the answer, and asking it before the caches are
+ * dropped reads `findOnPath`'s 30-second miss and calls a successful install a
+ * failure.
+ *
+ * ⚠ **Switched off by the same variable the updater reads**, because they are one
+ * posture: a machine whose CLIs somebody else manages does not want a button that
+ * downloads one either, and `installable` folds that in so no such button is drawn.
+ */
+const agentInstalls =
+  AGENT_UPDATES_OFF.has((process.env["REEMOAT_AGENT_UPDATES"] ?? "").trim().toLowerCase())
+    ? undefined
+    : new AgentInstallRuns({
+        gate: agentScriptGate,
+        verify: async (agent: string) => (await runtime.agentCli(agent)) !== null,
+        onFinished: (agent: string) => afterAgentsChanged(agent),
+        onWarning: (detail: string) => console.error(`agent install: ${detail}`),
+        source: agentSourceFrom(process.env["REEMOAT_AGENT_SOURCE"], () => {}),
+        channel: agentChannelFrom(process.env["REEMOAT_AGENT_CHANNEL"], () => {}),
+      });
 
 /*
  * Plugins, if this machine wants them.
@@ -789,6 +914,7 @@ const { app, injectWebSocket } = createApp({
   machineSettings: stores.machineSettings,
   asks: agentAsks,
   logins: agentLogins,
+  installs: agentInstalls,
   uploads,
   roots,
   plugins: pluginHost,
@@ -859,8 +985,44 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
    * runs once the server is already serving, and `RelayTunnel.start` returns
    * immediately and dials in the background.
    */
-  startRelayTunnel(localAddress(info, host, port));
+  const local = localAddress(info, host, port);
+  startRelayTunnel(local);
+  announceLocally(local);
 });
+
+/**
+ * Tell a client on this computer where to find this daemon.
+ *
+ * Only where there is an identity to name and a mode that accepts a token for it:
+ * a `shared_secret` daemon has no machine id, and announcing one would offer the
+ * app a route whose every request is refused. `src/announce.ts` carries why this
+ * is a file rather than a well-known port.
+ *
+ * Nothing depends on it. A failure is one line and a fleet that reaches this
+ * machine the way every other client does — through the relay.
+ */
+function announceLocally(local: { host: string; port: number }): void {
+  if (machineId === null || authMode === "shared_secret") return;
+  if (local.port === 0) {
+    // `localAddress` answers 0 for "could not tell", which is the same state that
+    // stops the tunnel dialling. An announced port of 0 is an address nothing can
+    // connect to, so say nothing rather than something wrong.
+    return;
+  }
+  try {
+    writeAnnounce({
+      v: ANNOUNCE_VERSION,
+      machineId,
+      host: local.host,
+      port: local.port,
+      instanceId,
+      authMode,
+    });
+    console.log(`local: announced at ${local.host}:${local.port} for apps on this computer`);
+  } catch (error) {
+    console.error(`local: could not announce this daemon (${describe(error)}); clients will use the relay`);
+  }
+}
 /*
  * A refused bind is a configuration mistake, so it reads like one.
  *
@@ -922,13 +1084,13 @@ resumeInterrupted("at boot");
 /**
  * One pass of the registry's auto-resume, with its outcomes on the log.
  *
- * A function because it has two callers now: boot, and the completion of every
- * agent update — the second being what brings back a session whose harness had
- * no CLI on the machine when the first ran (`agent_missing`, which spends no
- * attempt). `autoResume` queues the second pass behind a first still in flight.
+ * A function because it has three callers now: boot, the completion of every
+ * agent refresh, and the completion of an install somebody pressed — the last
+ * being what brings back a session whose harness had no CLI on the machine when
+ * the first ran (`agent_missing`, which spends no attempt). `autoResume` queues a
+ * second pass behind a first still in flight.
  */
 function resumeInterrupted(when: string): void {
-  let missing = 0;
   void registry
     .autoResume({
       enabled: autoResume,
@@ -937,7 +1099,6 @@ function resumeInterrupted(when: string): void {
         // fill the log with the same sentence three times per session per boot,
         // and the interesting line is the one that says it stopped trying.
         if (outcome.result === "resumed" || outcome.result === "failed") return;
-        if (outcome.result === "agent_missing") missing += 1;
         console.error(
           `auto-resume ${outcome.sessionId}: ${outcome.result}` +
             (outcome.detail === null ? "" : ` — ${outcome.detail}`),
@@ -950,20 +1111,28 @@ function resumeInterrupted(when: string): void {
         `auto-resume ${when}: ${report.resumed}/${report.considered} session(s) reattached` +
           (report.skipped > 0 ? `, ${report.skipped} skipped` : "") +
           (report.failed > 0 ? `, ${report.failed} failed` : "") +
-          (report.deferred > 0 ? `, ${report.deferred} waiting for an agent CLI to be installed` : ""),
+          (report.deferred > 0
+            ? `, ${report.deferred} waiting for an agent CLI — install it under Settings → Agents`
+            : ""),
       );
       /*
-       * The install that the waiting sessions need is already scheduled — five
-       * minutes after start, so it does not race this very pass — and with this
-       * pass over and sessions waiting on it, the wait is the whole cost. Run it
-       * now; its completion starts the next pass. A no-op when updates are off,
-       * and then the sentence above is the operator's cue — and a no-op once any
-       * run has happened, because that next pass lands here too: with a harness
-       * the script cannot install, honouring every nudge ran the installers
-       * back-to-back for the daemon's life. After the first run the day's timer
-       * is the retry.
+       * ⚠ **This used to call `agentUpdates.nudge()`, and that stopped meaning
+       * anything when the timer became a refresher.** The nudge existed to pull
+       * the five-minute first run forward when a resume pass found a harness with
+       * no CLI on the machine: the install those sessions needed was already
+       * scheduled, so running it now closed the loop. A `--refresh-only` run
+       * installs nothing, so honouring the nudge would be a subprocess, a log
+       * line and a cache flush that cannot possibly repair what the pass
+       * reported — every boot, on exactly the machines that are already missing
+       * something.
+       *
+       * What closes the loop now is a person: `deferResume` keeps those sessions
+       * waiting with no attempt spent, the line above names where to go, and
+       * `AgentInstallRuns` runs `resumeInterrupted` itself when an install
+       * finishes. The `missing` counter that fed the nudge went with it —
+       * `report.deferred` is what decides whether that clause is printed, and
+       * always was.
        */
-      if (missing > 0) agentUpdates.nudge();
     })
     .catch((error: unknown) => {
       // The pass swallows per-session failures itself, so reaching here means the
@@ -1017,6 +1186,45 @@ function startRelayTunnel(local: { host: string; port: number }): void {
     // the report names the build a launch would get; the daily update above
     // clears that cache but does not redial — see `AGENT_CLIS_HEADER`.
     agentClis: () => announcedAgentClis(runtime),
+    // The static an app authenticates this machine by, as this daemon booted
+    // holding it.
+    //
+    // ⚠ **"Read once here rather than per dial: unlike the CLI inventory beside
+    // it, this does not move under a running daemon" is what this said, and the
+    // `rotateMachineKey` block below falsified the second half of it.** A 409
+    // makes the tunnel announce a *different* key on its next dial, so the
+    // announced key does move under a running daemon — this value is only the
+    // first one, and the tunnel stops reading it after that.
+    //
+    // What survives is the reason it is a value rather than a function like
+    // `agentClis`: nothing ever asks this daemon to re-read a key, because there
+    // is no second answer to read. The replacement is *handed* to the tunnel by
+    // the rotation instead, which is a different mechanism from re-reading and is
+    // why the two options beside each other are shaped differently. See
+    // `ensureMachineKey`, and the `rotateMachineKey` block below, which has said
+    // this from the other side since the rotation landed.
+    machineKey: machineKey.publicKey,
+    // The private half, for terminating an encrypted stream. It never leaves this
+    // process — the relay carries ciphertext it cannot read, and this is the only
+    // thing that can open it.
+    staticKey: localStaticKey(new Uint8Array(Buffer.from(machineKey.privateKey, "base64url"))),
+    // What to announce if the control plane says the pair above is not what it
+    // pinned. On a machine holding one key this answers `null` on its first call
+    // and changes nothing; on one that lost the two-daemon startup race it is how
+    // the guess `migrateMachineKeysToOneLive` had to make stops being final. See
+    // `machineKeyRotation`.
+    //
+    // ⚠ This is the one thing that makes `machineKey` above stale, so the
+    // ordering `buildVerifier` already has is load-bearing now: enrollment runs
+    // and finishes before the listener exists, and this runs from inside the
+    // listening callback. Move an `enroll()` after the dial and it would post the
+    // key this daemon booted on rather than the one it is announcing, pinning the
+    // wrong half of the pair with `setMachineKey`, which compares nothing.
+
+    rotateMachineKey: machineKeyRotation(stores.machineKeys, machineKey),
+    // Every relayed request is checked here, against the key the handshake
+    // authenticated, exactly as it is checked at the HTTP gate.
+    verifier,
     // Nothing in src/ prints; this is where the words come out.
     onEvent: (kind, detail) => {
       if (kind === "connected") console.log(`relay: tunnel up (${detail})`);
@@ -1103,6 +1311,15 @@ async function shutdown(signal: string): Promise<void> {
   }, SHUTDOWN_HARD_LIMIT_MS);
   hard.unref();
 
+  // First, and before the tunnel: a stopped daemon that is still advertising a
+  // loopback address costs the next local probe a refused connection. Cheap,
+  // synchronous, and `force: true` so a daemon that never announced is a no-op.
+  try {
+    removeAnnounce();
+  } catch {
+    // A crash leaves it behind anyway, so nothing may depend on this running —
+    // see `removeAnnounce`. Not worth a line of output during a shutdown.
+  }
   // Before the sessions, so the relay stops handing this daemon new work while it
   // is winding down. A tunnel closing is routine — clients fail over or retry.
   await tunnel?.stop();
@@ -1111,6 +1328,13 @@ async function shutdown(signal: string): Promise<void> {
   // this daemon is gone. Stopped before the sessions because it is cheap and
   // unconditional, and because it is not on the 20s session budget.
   await agentLogins.shutdown();
+  /*
+   * ⚠ **A run in flight is deliberately not killed**, which is `AgentUpdates`'
+   * argument verbatim: it writes outside this repository, into the vendors' own
+   * directories, and a SIGKILL partway through an `npm i -g` leaves a tree the
+   * next run has to repair. What this stops is the sweep and any new run.
+   */
+  agentInstalls?.shutdown();
   // Disarms the schedule; a run already in flight is deliberately left alone rather
   // than killed — see `AgentUpdates.doShutdown`.
   await agentUpdates.shutdown();
@@ -1230,7 +1454,25 @@ async function buildVerifier(): Promise<AuthSetup> {
     }
     console.log(`enrolling with ${controlPlane}…`);
     try {
-      const result = await enroll({ controlPlane, code });
+      /*
+       * ⚠ **`machineKey` is what makes the re-pin reachable at all, and without it
+       * the whole recovery story is inert.**
+       *
+       * `machinekeys.ts` argues trust-on-first-use on the grounds that
+       * "re-enrollment is the way back" from a pinned key that no longer matches,
+       * and `setMachineKey` calls itself "the one place a pin is replaced ... the
+       * rotation story". Both were true of the route and false of the fleet: the
+       * control plane reads `body["machineKey"]` and this — the only `enroll()`
+       * call site in the tree — posted `{ code }` alone, so `announcedKey` was
+       * always `null` and `setMachineKey` never ran in production. A daemon that
+       * lost `~/.reemoat/reemoat.db` generated a new key, was refused at every dial
+       * with 409 for ever, and no `cpctl` verb could clear the pin.
+       *
+       * `ensureMachineKey` runs at the top of this file, so the key exists before
+       * anything here can enroll with it. The ordering is the load-bearing half:
+       * announcing a key generated *after* enrollment would pin the wrong one.
+       */
+      const result = await enroll({ controlPlane, code, machineKey: machineKey.publicKey });
       identity = {
         machineId: result.machineId,
         issuer: result.issuer,
@@ -1247,12 +1489,33 @@ async function buildVerifier(): Promise<AuthSetup> {
         console.log(`relay: ${identity.relayUrl} (every client reaches this daemon through it)`);
       }
     } catch (error) {
-      const hint =
-        error instanceof EnrollError && error.code === "code_rejected"
-          ? "\n  Enrollment codes are single-use and expire. Ask for a fresh one."
-          : "";
+      const rejected = error instanceof EnrollError && error.code === "code_rejected";
+      const hint = rejected ? "\n  Enrollment codes are single-use and expire. Ask for a fresh one." : "";
       console.error(`enrollment failed: ${describe(error)}${hint}`);
-      process.exit(2);
+      /*
+       * ⚠ **Three exits rather than one, so a supervisor can tell what to do
+       * next.** Everything here used to be `2`, which is also the code for a
+       * missing token, an unreadable identity, a database a newer daemon migrated
+       * and a lock another daemon holds — so a parent watching this process could
+       * only know that it failed. Reemoat.app is such a parent now, and the
+       * difference decides whether it mints a fresh code (which is pointless and
+       * re-enrolls the machine when the real problem was a held lock) or reports
+       * what happened.
+       *
+       * The alternative was reading these words, and a supervisor that greps its
+       * child's log is one rewording away from silently doing nothing. Nothing in
+       * `deploy/` branches on the code — launchd and systemd see only non-zero —
+       * so this adds a signal without changing what any existing unit does.
+       */
+      process.exit(
+        rejected
+          ? EXIT_CODE_REFUSED
+          : error instanceof EnrollError && error.code === "local_network"
+            ? EXIT_LOCAL_NETWORK_BLOCKED
+            : error instanceof EnrollError && (error.code === "unreachable" || error.code === "timeout")
+              ? EXIT_CONTROL_PLANE_UNREACHABLE
+              : 2,
+      );
     }
   }
 

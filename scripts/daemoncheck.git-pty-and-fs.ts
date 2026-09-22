@@ -106,6 +106,33 @@ process.stdout.write("\nwhere a login client's cursor lands\n");
   // Once the 64 KiB cap has trimmed the front, an old cursor is behind the window.
   check("a cursor behind the discarded prefix is a gap", readFrom("tail", 100, 40).gap, true);
   check("and is served the oldest output that survives", readFrom("tail", 100, 40).chunk, "tail");
+  /*
+   * ⚠ **`since === dropped` is the one value where `since < dropped` flips**, and
+   * the boundary is what the three cells above cannot see. A client whose cursor
+   * sits on the oldest surviving byte lost nothing, and telling it otherwise puts
+   * the transcript's "something is missing" notice over a transcript that is
+   * whole; one byte behind it, the notice is the truth. So the pair pins **where**
+   * the flip is and not merely that one exists.
+   *
+   * The reach was worked out by mutating this function rather than assumed, which
+   * matters because the obvious mutation is the one that proves least. Flipping to
+   * `since <= dropped` reddens the new `(100, 100)` cell *and* the pre-existing
+   * `(0, 0)` one — but `(0, 0)` is the case where nothing has been dropped at all,
+   * so on its own it says the flag is right when there is no window, never where a
+   * window's front is. The two cells with reach nothing else has are the
+   * neighbour's: a boundary moved one byte, `since < dropped - 1`, survives every
+   * older cell and fails only on `(100, 99).gap`, and dropping the `Math.max` so
+   * the slice takes a negative offset survives them too — `"tail".slice(-60)` is
+   * still `"tail"` — and fails only on `(100, 99).chunk`.
+   *
+   * Worth the lines now that the login run and the install run read through this
+   * one function rather than a copy each, which is the whole reason it was lifted
+   * out of `agentauth.ts`.
+   */
+  check("a cursor on the oldest surviving byte is not a gap", readFrom("tail", 100, 100).gap, false);
+  check("and is served the whole of what survives", readFrom("tail", 100, 100).chunk, "tail");
+  check("while one byte behind it is a gap", readFrom("tail", 100, 99).gap, true);
+  check("and that cursor reads the same surviving bytes", readFrom("tail", 100, 99).chunk, "tail");
   check("a cursor inside the window is not a gap", readFrom("tail", 100, 102).gap, false);
   check("and reads only what follows it", readFrom("tail", 100, 102).chunk, "il");
 }
@@ -204,7 +231,11 @@ process.stdout.write("\nthe fs capability, enforced rather than announced\n");
     const client = await AcpClient.launch(
       { id: "kimi", displayName: "fake", command: "fake", args: [], env: {}, authHint: "" },
       agent.process as never,
-      options,
+      // `authMethod: null` because this section's subject is the two capability
+      // flags. A non-null id would put an `authenticate` on the wire that the
+      // fake agent never answers, and the launch would sit on
+      // `AUTHENTICATE_TIMEOUT_MS` before every assertion below.
+      { ...options, authMethod: null },
     );
 
     // Both sent regardless of what was advertised — which is the entire point.
@@ -825,5 +856,108 @@ process.stdout.write("\nwhat a form is allowed to be\n");
       properties: { a: { type: "string", description: "q".repeat(40_000) } },
     })?.includes("bytes"),
     true,
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * the one prose string on the elicitation path that is not on the form
+ * ------------------------------------------------------------------ */
+
+/**
+ * `elicitation_request.message`, and the bound that had gone missing under it.
+ *
+ * ⚠ **Its own section rather than a line in the one above, because it is bounded
+ * by a different mechanism for a different reason.** Everything above is about
+ * the *form*: structure refused, prose carried whole, one 32 KiB backstop over
+ * the projected object. `message` is not a field of that object — `onElicitation`
+ * carries it beside the form — so `MAX_ELICITATION_FORM_BYTES` never weighed it,
+ * and between 0.3.0 (when `MAX_ELICITATION_MESSAGE_CHARS` was retired with the
+ * other prose clips) and 0.9.1 it was bounded by **nothing in `src/`**.
+ *
+ * What that costs is not bytes, it is the permanent stall this release exists to
+ * remove, reached by a second door. The string rides two things that cannot
+ * shrink it:
+ *
+ *   - `truncateEvent` returns the `elicitation_request` arm **unchanged** — a
+ *     truncated question is an unanswerable question — while
+ *     `StreamConnection.flush` takes the first event of a batch whatever it
+ *     weighs. One ~1 MiB question is therefore one WebSocket message past
+ *     `MAX_SOCKET_MESSAGE_BYTES`, refused by `MessageAssembler`, and `stream.ts`
+ *     reconnects with the cursor unchanged onto the same batch, for ever.
+ *   - `PendingElicitationSnapshot.message` rides every `hello` frame, and
+ *     `fitSnapshotFrame`'s halving rung floors at one row (`while (keep > 1)`
+ *     does not run at `keep === 1`), so a single oversized question defeats every
+ *     rung and the oversized control frame goes out anyway.
+ *
+ * ⚠ **Two assertions and not one, because this bound has two ways of being
+ * absent and each is silent on its own.** A clip that does not cut is the obvious
+ * one and the pure function below catches it. The other is a clip nothing calls —
+ * which is exactly how this field came to be unbounded in the first place: the
+ * *comments* went on saying "clipped at ingest in `session.ts`" for five releases
+ * after the constant was deleted. So the second assertion is over `session.ts`'s
+ * own source, **comment-stripped**, and it is a pair: the call site is there, and
+ * the raw field is passed as a `message` **nowhere**. A positive match alone
+ * would stay green beside a second, unclipped call site; the negative half is
+ * what makes it a statement about the file rather than about one line.
+ */
+process.stdout.write("\nwhat an agent's question is allowed to say\n");
+{
+  const { clipElicitationMessage } = await import("../src/session.js");
+  const { readFileSync } = await import("node:fs");
+
+  // The measured shapes this must not touch: claude's adapter's own preamble, and
+  // the 318-character option description that got the 512-character clip retired.
+  const preamble = "Please answer the following questions.";
+  check("the preamble a real adapter sends arrives identically", clipElicitationMessage(preamble), preamble);
+  const longest = "p".repeat(318);
+  check("and so does the longest prose this machine's log has ever carried", clipElicitationMessage(longest), longest);
+  check("a question right at the cap is untouched", clipElicitationMessage("q".repeat(4_096)).length, 4_096);
+
+  /*
+   * The cut itself, weighed the way the wire weighs it. `clip`'s budget is in
+   * UTF-16 code units and the ceiling downstream is UTF-8 bytes, so the
+   * assertion that matters is the byte length of the worst case this can produce
+   * — every unit an astral pair, which `Buffer.byteLength` charges at four.
+   */
+  const cut = clipElicitationMessage("z".repeat(1_000_000));
+  check("one over it is cut rather than carried", cut.length <= 4_096, true);
+  // Visible rather than silent: `clip` leaves its own marker, which is the whole
+  // reason a clip is tolerable on a question at all.
+  check("and says so where somebody reading it can see", cut.endsWith("]"), true);
+  check("the marker names the truncation", cut.includes("truncated"), true);
+  const astral = clipElicitationMessage("\u{1F600}".repeat(500_000));
+  check(
+    "even all-astral prose stays far under the frame ceiling",
+    Buffer.byteLength(astral, "utf8") < 32 * 1024,
+    true,
+  );
+  // An absent `message` is an empty one. `ElicitationRequest.message` is typed
+  // `string` and is agent-supplied JSON at runtime, and
+  // `PendingElicitationSnapshot.message` declares itself always present.
+  check("an agent that sends no message at all leaves no hole", clipElicitationMessage(undefined as never), "");
+
+  /*
+   * ⚠ **Comment-stripped, and the honest standing of that is: a defence, not a
+   * measured save.** Checked 2026-09-18 — neither string below occurs in a
+   * comment in `session.ts` today, so stripping changes nothing right now and
+   * saying otherwise would be this file claiming a catch it never made. It is
+   * here because *this* subject is a bound whose prose outlived it by five
+   * releases: the comments went on saying "clipped at ingest in `session.ts`"
+   * after the constant was deleted, and the natural repair for that — writing the
+   * call form into a docblock beside the code — is exactly what would make a raw
+   * regex green over a deleted call.
+   */
+  const sessionSrc = readFileSync(new URL("../src/session.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  check(
+    "the ingest call site is really there, with the comments taken out",
+    sessionSrc.includes("message: clipElicitationMessage(request.message)"),
+    true,
+  );
+  check(
+    "and nothing hands the raw field on as a message beside it",
+    /message:\s*request\.message\b/.test(sessionSrc),
+    false,
   );
 }

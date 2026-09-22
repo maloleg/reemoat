@@ -2,8 +2,31 @@
 
 Two services, two surfaces, and they are not the same shape. The **control
 plane** issues identity and holds accounts; the **daemon** owns sessions and runs
-on your machine. A browser talks to both — the control plane directly, the daemon
-through the relay.
+on your machine.
+
+A client talks to both, and how it reaches the second depends on where it is. The
+control plane is always addressed directly.
+
+**A daemon is reached over an encrypted channel, and there is no other way in.**
+The app opens a WebSocket to the relay at **`/__relay/channel`**, the relay
+authorizes it — verify the capability, take the machine from `aud`, read the live
+user, machine and grant rows — and then splices it to that machine's tunnel as raw
+bytes. Inside it the app and the daemon run
+`Noise_IK_25519_ChaChaPoly_BLAKE2s` between themselves, and every route below
+travels as frames in that session. The relay carries bytes it holds no key for.
+
+⚠ **The plaintext proxy is deleted.** The relay used to serialize each request onto
+the tunnel and copy the answer back, so a daemon had an ordinary HTTPS base URL and
+this document could say *"one base URL instead of another and nothing else"*. Both
+handlers now answer **`426 upgrade_required`** — every request, and every upgrade
+that is not a channel. There is nothing to point an HTTP client at.
+
+The one path that is still plain is the desktop app reaching a daemon on the **same
+computer**, over loopback: no relay, no channel, and there the capability is a
+bearer token for its remaining life, which `.claude/rules/relay.md` bounds and
+`SECURITY.md` states. Every route below, every header and every refusal is identical
+on both paths — the channel is a transport under them, not a different API — which
+is why this document does not mention it again.
 
 This file is a map, not a specification. Every route's actual rules — what a
 refusal means, what may be replayed, what a 409 carries — are in
@@ -34,8 +57,14 @@ nothing about whether the daemon acted.
 **Auth.** The daemon takes a bearer token whose `aud` is its own machine id, and
 stops asking who the subject is — see `.claude/rules/auth-and-tokens.md`. The
 control plane takes a session token (`rs_`) or an API key (`rk_`), resolved by
-prefix. The web UI never sends its control-plane credential to a daemon or to the
+prefix. The app never sends its control-plane credential to a daemon or to the
 relay.
+
+A machine capability also names the **device** it was minted for, in RFC 7800's
+`cnf.jkt`. The daemon compares that against the static key the Noise handshake
+authenticated and does it **offline**, which is what keeps *"the daemon makes
+exactly one control-plane request, ever"* literally true — so a capability copied
+off the wire or out of a log is worth nothing from any other installation.
 
 **Bodies** are capped: 1 MiB on the daemon, except the three routes that stream
 their own — `POST /sessions/:id/uploads` (100 MiB), `POST /fs/import` (50 MiB) and
@@ -45,9 +74,18 @@ auth gate.
 
 ---
 
-## The daemon — 58 routes
+## The daemon — 62 routes
 
-Runs on your machine, reachable through the relay. `pnpm client` drives all of it.
+Runs on your machine, reachable through the relay's encrypted channel.
+
+⚠ **`pnpm client` no longer drives all of it, and this line used to say it did.**
+Its relay arm is deleted: opening a channel needs an X25519 device key and a
+capability the Authority bound to it in `cnf.jkt`, and `REEMOAT_TOKEN` is a
+long-lived bearer capability with neither — which is exactly what the binding exists
+to make worthless. The client refuses with a sentence naming the remedy rather than
+downgrading. What it still drives, unchanged, is every route below against a daemon
+on **this** computer, through `REEMOAT_URL`; for a machine anywhere else the client
+is the app.
 
 ### Liveness
 
@@ -59,7 +97,7 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 
 | | |
 |---|---|
-| `GET /agents` | What is installed, which are signed in, and which have a sign-in at all. **Every harness this machine offers**, which is the four this repository ships plus any a plugin added and has not been switched off |
+| `GET /agents` | What is installed, which are signed in, and which have a sign-in at all. **Every harness this machine offers**, which is the five this repository ships plus any a plugin added and has not been switched off. `installable` says which of the absent ones this daemon can fetch |
 | `GET /agent-auth` | Where each agent's credentials go |
 | `PUT /agent-auth/:agent` · `DELETE /agent-auth/:agent` | Set or clear a pasted credential |
 | `POST /agent-auth/:agent/login` | Start a device-code login on a pty |
@@ -68,6 +106,31 @@ Runs on your machine, reachable through the relay. `pnpm client` drives all of i
 | `GET /agent-auth/login/:loginId` | What the pty has printed so far |
 | `POST /agent-auth/login/:loginId/input` | Type into it |
 | `DELETE /agent-auth/login/:loginId` | Abandon it |
+
+### Installing a harness
+
+**Nothing puts a coding-agent CLI on a machine but a press here.** The bootstrap
+installs none, and the daemon's daily run is a *refresh* — it moves the copies
+that are already there and fetches nothing new. A harness added to this
+repository therefore does not arrive on every machine in the fleet by itself.
+
+The writes are **`machine:admin`**, not `session:write`: putting new programs on
+somebody's computer is an act on the machine, which is the rule `POST /plugins`
+already follows. The poll is `session:read` — unlike a login transcript, this one
+carries no one-time code.
+
+| Route | What it is |
+|---|---|
+| `GET /agent-install` | Whether this daemon installs at all, and the one run it is holding — for a client that reloaded and has no id |
+| `POST /agent-install/:agent` | Start one. `409 install_busy` while another run or the daily refresh holds the machine, naming which; `503 install_unsupported` where the daemon installs nothing |
+| `GET /agent-install/runs/:installId` | The transcript from a cursor, plus `phase` and `outcome` |
+| `DELETE /agent-install/runs/:installId` | Stop it |
+
+⚠ **`outcome` is never derived from `exit`, on either side.** `deploy/agents.sh`
+exits 0 having printed that an install failed — it must, because three of its
+four callers contract that it never fails — so the daemon decides by asking the
+machine again afterwards. A client reading `exit.code === 0` as success would
+draw *installed* over a harness that is not there.
 
 ### Systems, and the agents assembled out of them
 
@@ -175,7 +238,7 @@ plugin_failed` for anything the plugin's own code raised.
 
 ---
 
-## The control plane — 60 routes
+## The control plane — 64 routes
 
 Holds the accounts, the machines, the grants and the fleet's signing key.
 `pnpm cpctl` drives it.
@@ -203,7 +266,8 @@ these, so a new route is private by doing nothing. "Public" is not
 |---|---|
 | `GET /v1/me` | Who this credential is, and what it may reach |
 | `POST /v1/me/password` | Requires the current one, even under a valid session |
-| `GET` · `DELETE /v1/me/sessions` · `DELETE /v1/me/sessions/:id` · `DELETE /v1/me/sessions/current` | Where you are signed in |
+| `GET` · `DELETE /v1/me/sessions` · `DELETE /v1/me/sessions/:id` · `DELETE /v1/me/sessions/current` | Where you are signed in. Each row names the **device** it belongs to where there is one, and falls back to what the `User-Agent` says where there is not |
+| `GET` · `POST /v1/me/devices` · `DELETE /v1/me/devices/:id` | The installations registered on this account. A **device** is not a session and not a credential: a session is one bearer token with an expiry, a device is the computer or phone that keeps producing them, and holding its id proves nothing — it is read only after a session token has already resolved. Registering binds the caller's current session, adopts an id it already holds, and **ignores one it does not** rather than refusing (an id that was retired would otherwise close a sign-in loop with no exit); it refuses an API key with `409 device_needs_session`, because a key has no session for a device to hang off, and `409 device_limit` at the cap — a **refusal** rather than an eviction, so that somebody holding one live session cannot sign every device of the owner out. `POST /v1/login` carries the same block optionally and answers `deviceId`. The listing includes **recently retired** rows, because the question it exists to answer is usually asked after something has gone wrong. Retiring one ends every session bound to it and **no other device's**; `404 device_not_found` covers "no such device" and "not yours" alike. Devices are **not** an authorization subject — a grant is `(user, machine)`, so every device of one person reaches the same fleet — and `relay/authorize.ts` reads no device row, so a revocation stops that installation here on the next request and leaves a machine token already minted alone for its remaining ~300s. `SECURITY.md` carries the windows |
 | `GET` · `POST /v1/me/keys` · `DELETE /v1/me/keys/:keyId` | API keys |
 | `PUT /v1/me/email` · `POST /v1/me/email/verify` | The address is the recovery channel: a session changes it alone, an API key proves the password first |
 
@@ -216,7 +280,7 @@ these, so a new route is private by doing nothing. "Public" is not
 | `POST /v1/machines/:id/revoke` | Retire one, which gives its slot back to the limit |
 | `GET` · `PUT` · `DELETE /v1/machines/:id/grants` | Share a machine **you own**, and take it back. A grant is **full access** to the machine, so this is the owner's verb: the admin routes that wrote one are deleted. Addressed by user id — there is no directory an ordinary account may read, so the other person reads theirs off `GET /v1/me`. `404 machine_not_found` for one you do not own, which is the anti-mapping rule rather than a lie; `409 grant_is_owner` for your own grant on both writes (narrowing it would take `machine:admin` off your own hardware, removing it would hide the machine from its owner — retiring it is the verb for that); `404 user_not_found`; `409 user_disabled` for a suspended account, which would otherwise become live the moment somebody re-enabled them; `400 bad_request` for a `userId` that is missing on either verb; `404 grant_not_found` on an unshare that removed nothing |
 | `DELETE /v1/machines/:id/grants/me` | **Give up a share somebody made to you.** The three routes above all resolve through ownership, so a grantee could reach none of them — and a share is written for any `userId` with no consent asked, so what somebody can do to you unasked now has something you can do about it. Your own grant only, and there is no `userId` parameter: the caller is the subject, and a route that took an id would be `DELETE /v1/admin/grants` under another name. `409 grant_is_owner` on a machine you own, because `GET /v1/machines` joins `grants` and an owner without one owns a machine in no list — retiring it is the verb for that; `404 grant_not_found` for both "no such grant" and "no such machine", which is the same anti-mapping rule |
-| `POST /v1/tokens` | The short-lived token a browser uses. Quota is checked **after** the grant is proved |
+| `POST /v1/tokens` | The short-lived capability the app spends on one machine. Quota is checked **after** the grant is proved. The answer is also **how a client learns where that machine is and what it will answer as**: `machine.relayUrl`, `machine.relayOnline`, and `machine.key` — the machine's X25519 static, which is IK's precondition and therefore the thing without which no channel can be opened at all. `null` there means a machine that has not dialled since it learned to announce one, and the client turns that into a sentence about updating it rather than into a session without it: there is no mode to fall back to. A route and a key are the same kind of fact — *how to reach this thing* — so they are minted together rather than fetched twice and left to disagree. **`409 device_key_required`** refuses a signed-in installation that has registered no device key: a capability minted for it could not open a channel, so the answer is a refusal with a remedy rather than a credential that fails later about the wrong thing. An **API key** is the deliberate exception and is minted **without** a binding, because a key is no sign-in and has no device to bind to — such a capability works over loopback and is refused by any daemon it reaches on a channel, which is the honest shape rather than a let-off |
 
 ### Admin
 
@@ -230,6 +294,7 @@ password change is refused all of it by a second positional gate.
 | `PUT` · `DELETE /v1/admin/users/:id/machine-limit` | The commercial limit, per person |
 | `GET` · `POST · PATCH /v1/admin/machines[/:id]` | Every machine in the fleet, whoever owns it |
 | `POST /v1/admin/machines/:id/enrollments` · `/revoke` · `PUT /v1/admin/machines/:id/owner` | Mint a code, revoke a machine, adopt an ownerless one. **The enrollment mint refuses a machine that is enrolled and has an owner *or grantees*** (`409 machine_enrolled`) — redeeming a code retires the running daemon's tunnel key, so it would replace somebody's machine rather than read it; its owner mints their own. **The owner route refuses a transfer away from a live owner** (`403 machine_owned`), and refuses adopting an ownerless machine somebody holds a grant on unless they are the one being handed it (`403 machine_granted`) — so what it adopts is a row nobody depends on, and what it re-labels is a machine for the owner it already has. Adopting burns that machine's outstanding codes and says how many |
+| `DELETE /v1/admin/machines/:id/machine-key` | **Unpin a machine's static key.** A machine's X25519 key is pinned on first sight and a *different* one on a later dial is refused, which is the right answer for a substituted machine and the wrong one for a daemon whose database was legitimately rebuilt — so this is the operator's undo, and the only one. Idempotent, with `cleared` saying whether a row actually changed rather than turning the second attempt into an error. It returns `previousKey`, deliberately: it is a public key, this route is admin-only, and this is the only moment anybody can write down what *was* pinned, so refusing it would mean repairing a mismatch also destroys the evidence of what the mismatch was. `403 machine_revoked` for a revoked machine, which dials nothing and therefore has no pin to repair |
 | `GET /v1/admin/grants` | Who holds what, paged. **The `PUT` and `DELETE` are deleted** — a grant is full access to a machine that runs agents as its owner, and an admin writing one for a machine they do not own was one request from that. Sharing is `PUT /v1/machines/:id/grants`; the read is kept, because an operator who cannot see this table cannot answer "why can this person reach that machine" |
 | `GET` · `PUT /v1/admin/settings` · `POST /v1/admin/settings/test` | Env-seeded, database-owned; the answer says which side won |
 | `GET /v1/admin/mail` · `POST /v1/admin/mail/:id/retry` | The outbox, and pushing a stuck message again |
@@ -238,12 +303,51 @@ password change is refused all of it by a second positional gate.
 | `GET /v1/admin/relay` | Which tunnels are up, and how long an offline machine has been that way |
 | `GET /v1/admin/fleet` | What every machine is *running*, connected or not — the daemon build, the protocol it agreed, and which build of each agent CLI it would launch (`agents`, harness → version, as of its last dial; `null` from a daemon older than the field). The inventory a protocol change or an agent rollout is planned from |
 
-### The web UI
+### Outside `/v1`
 
 | Route | What it is |
 |---|---|
 | `GET /install.sh` | The one-line installer — `deploy/bootstrap.sh` with **this instance's own origin** substituted in and shell-quoted, so a self-hosted control plane hands out a script that points at itself. Unauthenticated by path rather than by position: `callerAuth` is mounted on `/v1/*` and has never seen anything outside it. `text/plain`, so it can be read in a browser before it is piped into a shell; `no-store`, because the body varies by `Host`. A missing file is a 404, not a 500. `REEMOAT_CP_INSTALL=0` turns it off |
 
-`GET *` serves `packages/web/dist` with an SPA fallback, from disk, per request.
-`REEMOAT_CP_WEB=0` turns it off — and takes the security headers with it, which
-you then have to send yourself. See `packages/control-plane/.env.example`.
+**`GET /register` · `/confirm` · `/forgot` · `/reset` · `/verify` · `/terms` ·
+`/acceptable-use` · `/privacy` · `/app`** serve the **gate** — a page each, from
+`packages/web/dist-gate`, which is in the image and served by this same process.
+Not an SPA fallback: the list is closed, and every other path answers the error
+envelope. That is what makes these nine addresses the whole of what a browser can
+reach.
+
+The gate exists because its flows have nowhere else to land: `/confirm`, `/reset`
+and `/verify` are opened by a **mail client**, in a browser, and `POST /v1/forgot`
+is the only remedy this service has for a forgotten password. `/app` is where every
+one of them ends — the page that says the product is an app and, where
+`REEMOAT_CP_APP_DOWNLOAD_URL` names one, offers the build.
+
+⚠ **Nothing serves the app, and there is no variable that would.** A browser holds
+no device key, so it cannot open the encrypted channel a daemon is reached through —
+it could load the app and reach no machine at all. The gate's list above is closed:
+an address outside it answers the error envelope, whatever the method. Q1.649.
+
+## What is served to a browser
+
+| | Serves | Reached by |
+|---|---|---|
+| **Every deployment** | the API, the relay, and the **gate** at nine addresses | the Reemoat app; a browser for sign-up and recovery |
+
+**One row, and that is the change.** There was a second — a checkout naming a built
+app bundle — and it is deleted with `REEMOAT_CP_WEB`. The desktop app carries its own
+copy of the interface, compiled into the binary, and **never downloads one**;
+`docs/NATIVE.md` records how that invariant is held and what asserts it.
+
+⚠ **`mail.public_url` must point at whatever serves the gate.** The confirmation,
+reset, verify and invitation links are built from it, and they are opened in a
+browser — so pointed at something that does not serve those nine addresses they
+land on the error envelope. `GET /v1/admin/settings` reports it as a problem when
+it points at a control plane serving none, and the gate itself takes a **pasted
+link or code** for the case a mail client rewrites the URL and drops the fragment
+the token rides on.
+
+`REEMOAT_CP_INSTALL=0` switches off `/install.sh`, the route the next machine joins
+through. It is the only variable of its shape left — *either* a boolean *or* a path —
+and `=1` means the built-in default, because `deploy/bootstrap.sh` really is in the
+image. (A second one shared that shape without a default to mean, so `=1` resolved to
+a directory called `1` and 404ed for ever. It is deleted.)

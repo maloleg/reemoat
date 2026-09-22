@@ -56,20 +56,20 @@ bug in the file.
 
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
-| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 131 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 86 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 350 | `####` |
-| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 54 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 110 | `####` |
-| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 67 | `###` |
-| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 134 | `###` |
-| | | **932** | |
+| [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 89 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 386 | `####` |
+| [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 65 | `###` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 114 | `####` |
+| [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 71 | `###` |
+| [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 147 | `###` |
+| | | **1014** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 932 rather than the 472
+dividers. So the count is over **both** depths, and it says 1014 rather than the 514
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -3739,6 +3739,500 @@ driver throws `ReferenceError` at call time, and four flat fixtures gain a field
 
 **Status.** Current
 
+### Q1.639 — Which leg of the native client leaves the webview, and why only one
+
+**Question.** The native shell bundles `packages/web` and loads it from
+`tauri://localhost`. Which of this client's three conversations — control plane,
+relay, daemon — has to move into the host process?
+
+**Measured, 2026-09-14.** `grep -rn "hono/cors" packages/control-plane/src/`
+returns nothing, and `grep -rn "access-control-allow" packages/control-plane/src/`
+finds only prose. The **control plane mounts no CORS middleware at all.** The
+daemon does (`src/server.ts`, `origin: "*"`, `allowHeaders: ["authorization",
+"content-type"]`, `credentials: false`) and so does the relay
+(`relay/proxy.ts`, the same `corsHeaders()`). `packages/web/vite.config.ts` records
+why the control plane has none: `/v1` is proxied in dev *"instead of making dev the
+one place a CORS rule has to exist for the control plane"*.
+
+**Decision.** Exactly one leg moves, and it is `/v1/*`. `cpSend` in
+`packages/web/src/native.ts` is `fetch(path, init)` in a browser and one `host_cp`
+call in the shell; the relay, the daemon and the WebSocket stay on the webview's own
+`fetch`, `XMLHttpRequest` and `WebSocket`, unchanged.
+
+**Why the others may not move, four reasons and any one is sufficient.**
+`sendWithProgress` is `XMLHttpRequest` because `fetch` reports no upload progress
+and a streamed body is Chromium-only, and a Rust client has no progress events.
+`withTimeout` composes an outer `AbortSignal` which `request` threads through, and
+an `invoke` cannot be aborted. `isTransportFailure` is a **negation** — anything
+that is not an `ApiError` — so a second definition of "the request was never
+answered" eventually disagrees, and the two ways it can disagree are *every subway
+tunnel signs the fleet out* and *nobody is ever signed out*. And the Noise
+handshake runs in the page: a daemon leg in Rust would give an encrypted stream two
+decryptors. ⚠ The device *key* is the one part that does live in Rust, and it does
+not contradict this — `host_device_dh` answers a shared secret rather than a key,
+so the page drives the handshake while holding none of the static.
+
+**Rejected.** Adding a CORS layer to the control plane — it would put a header on
+the one service that has never needed one, to serve a client that does not need it
+either. And `tauri-plugin-http` for everything, which fails on the first reason
+above.
+
+**Status.** Current. `pnpm nativecheck` asserts the control plane does **not**
+appear in the shell's `connect-src`: if it does, the split has stopped being one.
+
+### Q1.640 — What a native client keys its credential on, and what it may not keep
+
+**Question.** In a browser the control-plane credential lives in `localStorage`
+under `reemoat.credential`, and the origin scopes it. A native shell has one
+webview origin for every server somebody might point it at. What scopes it there?
+
+**Decision.** The operating system's credential store, with the **server's origin as
+the lookup key** — `credential#<origin>`. So a credential cannot be *read* for a
+server it was not issued by: structurally, rather than because some code path
+remembered to clear it on a change. `host_set_server` also erases the previous
+origin's entry in the same act, so nothing is retained for a server this app is no
+longer going to present to.
+
+`#` as the delimiter because a URL origin cannot contain one, which makes the rule
+unambiguous with no escaping and makes a later `credential#<origin>#<account>` an
+extension of the shape rather than a migration away from it.
+
+**Why not keep it only in the host process**, which is stronger on the face of it:
+`cpFetch` attributes a 401 by comparing `credential === sent` **by identity**, and
+its docblock records the exact ten-second race that rule defends. A handle the page
+could not compare would lose it silently. So the value lives in the page's memory
+exactly as it does in a browser, in the keyring at rest, and **never** in
+`localStorage` — `setSession`'s native arm returns before the storage writes rather
+than beside them, and `webcheck` asserts the absence under all three names,
+including the two `LEGACY_STORAGE` ones a later launch would otherwise adopt.
+
+**What is never stored.** The person's password: `POST /v1/me/password` asks for the
+current one whichever credential presents, so a stored one would make that a
+formality. And any daemon credential — `REEMOAT_TOKEN` reaches a daemon with no
+grant at all, and a machine token is 300 seconds long and derived, so it belongs at
+`ensureToken` and nowhere near a keyring.
+
+**Durability is a probe, not a `cfg!`.** `credential::probe` writes a canary, reads
+it back, compares it and erases it, because a store that accepts a write and loses
+it is the failure that reads as working — a Linux box with no D-Bus session
+compiles and runs fine. A `false` draws **the sentence `cp.ts` already has** for a
+browser with storage disabled; two spellings of one state is a defect this
+repository has shipped before.
+
+**Status.** Current.
+
+### Q1.641 — Why serving the web UI is an environment variable and not a setting
+
+**Question.** `REEMOAT_CP_WEB=0` makes the control plane an API and a relay with no
+public interface — a supported shape now that the desktop app carries its own copy
+of the client. `SETTING_KEYS` is where a value goes when an admin should be able to
+change it from the Server settings screen without a redeploy. Why is this not one?
+
+**Decision.** Environment only, restart to change, and the reason is mechanical
+rather than editorial: `createControlPlaneApp` registers `serveStatic` and the SPA
+fallback **once**, at construction, and Hono has no route deregistration. A row in
+`instance_settings` would be readable per request and would change nothing — the
+value and the behaviour would disagree until somebody restarted the process, which
+is a switch that lies. `app.ts` already makes this argument for
+`REEMOAT_CP_PLUGIN_CATALOGUE_URL`, where the value is compiled into a CSP built once;
+this is the same shape one directive over.
+
+**Rule.** The two switches deciding what this process *serves* spell themselves
+identically: `0`, `false` or `no` turn it off, `1`, `true` and `yes` mean **the
+default**, and anything else is a path. That is a trap rather than a nicety — an
+affirmative spelling read as a path resolves to a directory named `1`, `existsSync`
+fails, and every page answers 404 in a way indistinguishable from an image built
+without the bundle.
+
+**Measured.** `REEMOAT_CP_INSTALL` was given the three-and-three and
+`REEMOAT_CP_WEB` was not, and the comment beside the fix *named the other variable
+as carrying the same trap* — for two releases, while it stayed open. A paragraph
+that knows about a defect is not a check. `deploycheck` now reads both predicates
+out of `main.ts` and asserts they agree, which is what fails the day a third
+path-or-switch variable arrives with a fourth spelling. It also found that
+`REEMOAT_CP_INSTALL` was documented in **no** `.env.example` in the tree: the
+`SETTING_KEYS` sweep cannot reach an env-only value, so both are named in the
+`envOnly` list beside the other three.
+
+**Why they are two switches and not one.** Turning off the interface must not turn
+off `GET /install.sh`, which is how the next machine joins the fleet, and turning off
+the installer must not take the interface with it. Stated in
+`packages/control-plane/.env.example` because that is where somebody sets one and
+reasonably assumes the other follows.
+
+**Status.** Current. `relaycheck` asserts an API-only instance still answers
+`/health`, `/v1/instance` and `/install.sh` — with the substitution and the shell
+quoting, which until now was proved by `imagecheck` alone, in docker, with the
+bundle present — and that a browser at `/` gets the error envelope rather than a
+page or a bare 404.
+
+### Q1.642 — What a device is, and why it is not an authorization subject
+
+**Question.** Somebody signs in from a laptop and a phone. Revoking the laptop
+without revoking the phone had nothing to act on: the only per-sign-in record was
+`user_session_origins`, whose two fields — an IP address and a `User-Agent` — are
+a claim the *caller* makes about itself and are documented as recognition, never
+identification. What should a first-class Device be, and what should it decide?
+
+**Decision.** A `devices` row per installation, owned by a user: an id, a name,
+a platform, when it was registered and when it was retired. `user_sessions`
+gains a nullable `device_id`. Retiring one ends every session bound to it and
+refuses any later sign-in that offers its id.
+
+**And a device decides nothing about access.** A grant stays `(user_id,
+machine_id)`, so every device of one person reaches exactly the same fleet, and
+`relay/authorize.ts` reads no device row. That is the requirement stated from the
+other end — *MacBook and iPhone signed into one account see the same machines* —
+and it is also what keeps the relay out of this feature entirely.
+
+**Why a device id is not a credential.** It is an identifier this service hands
+back. It is stored unhashed and returned in full, unlike everything in `keys.ts`,
+because holding one authorizes nothing: every request still carries the session
+token, and the id is read only *after* that token has resolved, to ask whether the
+installation has been retired. That single fact decides where the client keeps it
+— see Q1.643 — and it is why this table needs none of `keys.ts`' machinery.
+
+**What per-device revocation is, precisely.** A grouping key over sessions, plus a
+bind refusal. It is immediate at the control plane and it does **not** shorten the
+window on a machine token already minted, because nothing in the token-verifying
+half reads a device. Stated in `SECURITY.md` as a table rather than implied,
+because "revoke the laptop" reads as stronger than it is.
+
+**Rejected: a `public_key` column now.** The brief asked that a key be attachable
+later *without another schema redesign*, and `migrate()` is exactly that
+guarantee — so the column buys nothing today and costs something real: a column
+nothing writes reads as *these rows are key-attested*, which is an unenforced
+security claim sitting in the table per-device revocation is argued from.
+
+**⚠ Amended: the column exists now, and the rejection's own reason is the
+specification it was built to.** Phase 5 added `devices.public_key`, and what
+makes it right today is precisely what made it wrong then: it is written — by
+`registerDevice`, from the key the shell generated — and the claim is *enforced*,
+by the daemon, offline. A capability names the device's key in RFC 7800 `cnf.jkt`;
+the `Noise_IK` handshake proves the caller holds the matching private half; the
+daemon compares the two and refuses `wrong_device` otherwise. So "these rows are
+key-attested" stopped being an unenforced security claim and became a checked one,
+which is the only condition under which this entry ever agreed to the column.
+
+**And the framing that kept everything else above true.** The key is
+**authentication, not authorization**. A grant is still `(user_id, machine_id)`,
+still full access to the machine; `relay/authorize.ts` still reads no device row
+and must not learn to. What the key adds sits one layer down and changes nothing
+this entry decided: which devices exist, what a grant covers, and who may reach
+what are all exactly as they were. Q1.648 is where the binding itself is argued.
+
+**Rejected: a `last_seen_at` column.** It needs a writer and both available
+writers are failures this package already carries intervals to avoid —
+per-request is the fsync-per-request that `user_sessions.last_seen_at` and
+`api_keys.last_used_at` both exist to bound, and write-at-registration makes
+"last seen" a date that never moves. The screen reads
+`MAX(user_sessions.last_seen_at)` over the device's own sessions instead: a value
+that already exists, already disciplined, and no new write on the authentication
+path.
+
+**Status.** Current. `.claude/rules/cp-devices.md` is the area.
+
+### Q1.643 — Where the client keeps its device id, and why not the keyring
+
+**Question.** The native shell has an OS keyring (`credential.rs`) and an ordinary
+preferences file (`config.rs`). A device id has to survive a restart. Which one?
+
+**Decision. The configuration file**, as a map keyed on the server's origin
+beside `server`. `credential.rs` is untouched.
+
+**Why, and it is a measurement rather than a preference.** `credential::probe`
+exists because a store that *accepts* a write and loses it is the failure that
+reads as working — a Linux box with no D-Bus session or no unlocked collection is
+the ordinary case, and the app already draws a sentence for it. Put the device id
+there and that same machine registers a **brand new device on every launch**,
+never reading one back, and walks straight into the account's device limit — with
+the only evidence being a list of identically-named rows. `config.rs`'s own header
+had already written the rule: *"Not a secret, and deliberately not in the keyring.
+A server address is a preference; the credential for it is the secret."* A device
+id is on the preference side of that line, and Q1.642 says why.
+
+**Secondary cost avoided:** `host_boot` would go from one keychain read to two on
+the first-paint path, which on an ad-hoc-signed development build is two prompts
+per `cargo build`.
+
+**A map rather than one current value**, which is the single place this file's
+shape departs from the credential's. `host_set_server` erases the previous
+origin's *credential* because a credential this app will not present is one it has
+no reason to hold. The same act on a device id would be destructive rather than
+tidy: the row on that server is not deleted by anything here, so forgetting the id
+leaves an installation the person can no longer recognise in their own list and
+spends a second slot the next time they point back. Retaining it leaks nothing.
+
+**⚠ This reverses Q7.136, and only its narrowest half.** That entry refused a
+device id on the grounds that *"a value generated at first run and persisted is
+device identity, arriving by accident, and it would be a new fact about a person
+that nothing in this fleet has agreed to record."* What changed is that it is no
+longer an accident and the fleet has agreed: there is a `devices` table, the id
+comes from it rather than from a local generator, and a person can see and retire
+the row. The three refusals that entry makes **at the interface** all stand — no
+`list()`, no private key through a `String`, no first-run generation — and the
+keyring seam stays reserved for the device *key*, which has none of these
+properties.
+
+**Measured, and it is the failure mode this decision is really about.** `Boot` in
+`commands.rs` carries no `#[serde(rename_all)]`; every camelCase field names
+itself. So `pub device_id` without an explicit `rename` serializes as `device_id`,
+`boot.deviceId` is `undefined` for ever, and `tsc`, `cargo`, `cargo test`,
+`webcheck` and the command census are **all green** while the app registers a new
+device on every launch. `nativecheck` gained a `Boot` ↔ `NativeBoot` key-set
+census for exactly that, which is the shape it already ran for
+`LocalAnnounce` ↔ `Stored` and whose docblock names the class: *"A field renamed
+on one side is not a compile error anywhere… Nobody would find it."*
+
+**Status.** Current.
+
+### Q1.644 — Why the device check is a second statement rather than a join
+
+**Question.** `resolveSession` runs on every authenticated request, on the process
+that in embedded mode also carries every relay tunnel. Checking whether a
+session's device has been retired is one more fact about the same row. Why not
+join it?
+
+**Decision. A second cached statement, run only when the row carries a
+`device_id`.** The audited single-table query is left byte-identical.
+
+**Measured, against `node:sqlite`.** `devices` shares `id` and `revoked_at` with
+`user_sessions`, and `resolveSession` reads its row by **bare key**. Written the
+natural way — `SELECT s.*, d.revoked_at FROM …` — the row object comes back with
+`revoked_at: null` for a session whose own value is set, because the device's NULL
+overwrote it. So **session revocation stops working for everybody**: signing out,
+sign-out-everywhere, a password change and both admin sweeps keep answering 200
+while the revoked token goes on authenticating. Written with bare column names
+instead it throws `ambiguous column name: id` at `prepare` — which is lazy, so the
+container starts green and then answers a plain-text 500 to every signed-in
+request, there being no `app.onError` on this service.
+
+**What the second statement costs**: nothing for a browser, an API key or any
+session that predates devices, because it is conditional on `device_id` being
+non-NULL; one primary-key lookup for a native one. Cheaper than the join it
+replaces, and it makes the aliasing trap structurally impossible rather than a
+thing somebody has to remember. `callerAuth`'s own joined statement already writes
+`k.id AS key_id` for this reason, and `listSessions` qualifies every column.
+
+**The assertion that holds it.** `relaycheck` drives session revocation **on a
+session that has a live device** — the one case a join would break while every
+other assertion in the file stayed green.
+
+**Status.** Current.
+
+### Q1.645 — Why a retired device id is ignored rather than refused
+
+**Question.** A client offers a device id that has been retired. Refuse the
+sign-in, or register a fresh device?
+
+**Decision. Register a fresh one, on both doors** — `POST /v1/login` and
+`POST /v1/me/devices` — and never answer an error for it.
+
+**Why refusing is a trap.** A client keeps the id it was given. Answer an error
+and it signs in, is refused on its very next request, signs out, signs in again
+with the same stored id, and the loop closes with no exit but somebody deleting a
+keychain entry or a JSON file by hand. Every variant of "refuse it" is that same
+loop wearing a different status code.
+
+**What it gives up: nothing.** The retired row stays retired and its sessions stay
+ended. Revocation retires *that installation's access*, not the computer's right
+to ask again with a password — which is also the honest description of what
+retiring a device means to the person doing it.
+
+**The same rule closes a second hole**, which is why it is one rule rather than
+two: an id belonging to *another account* takes the same path. Without it, one
+account could bind its session to a stranger's device row — after which the
+victim's Revoke signs the attacker out (harmless) and the attacker's session
+inherits the victim's `revoked_at`, so the victim can be signed out at will by
+somebody they have never met. Every lookup carries `user_id`, on both statements
+of both routes, and `relaycheck` drives both halves.
+
+**Status.** Current.
+
+### Q1.646 — Why the device cap refuses where the session cap evicts
+
+**Question.** `MAX_SESSIONS_PER_USER` is 10 and evicts the oldest rather than
+refusing the newest, on the stated argument that *"being unable to sign in on a
+new device because of an old one is the wrong failure."* Should `MAX_DEVICES_PER_USER`
+do the same?
+
+**Decision. No — it refuses, `409 device_limit`.**
+
+**The sessions argument does not transfer, and the reason is one word.** A session
+*is* the thing you are trying to get, so refusing one refuses the sign-in. A
+device is not: a sign-in succeeds perfectly well with no device bound, so refusing
+the *registration* costs a sentence saying "retire one" and nothing else.
+`POST /v1/login` swallows the cap for exactly that reason and hands back a session
+with `deviceId: null`.
+
+**And eviction here would be a weapon rather than a convenience.** Anybody holding
+one live session — which is precisely the case per-device revocation exists to
+contain — could call `POST /v1/me/devices` twenty times and evict, retire and sign
+out every real device the owner has, while their own newest session survived the
+sweep. The owner's remedy is the one thing they would no longer be signed in to
+reach.
+
+**The two numbers differ and the relationship is stated** rather than left for
+somebody to "correct": 20 devices against 10 sessions. At most ten devices hold a
+live session at once; the eleventh sign-in retires the oldest *session* and leaves
+its device registered, which is right — that installation asks for a password
+again and keeps its identity. `session_revoked` and `device_revoked` are separate
+codes so the client can tell those two apart.
+
+**Status.** Current.
+
+### Q1.647 — What the Authority is, and what stops the line moving
+
+**Question.** The control plane holds identity and the daemons hold the work. That
+was true by accident: nothing stopped the next feature putting a session title or
+a transcript index here "just for the list". Should the division be named, and can
+it be enforced?
+
+**Decision. Named in `docs/AUTHORITY.md`, and enforced by two ratchets in
+`relaycheck`** — not by renaming the directory.
+
+**The rename is refused and it is worth saying why.** `packages/control-plane` is
+named in the Dockerfile and its `.dockerignore` twin, `RELAY_INPUTS`,
+`compose.yml`, every deploy script, a dozen `paths:` globs and every relative
+import in two packages. That is the blanket sweep `CLAUDE.md`'s `remoslop` warning
+is about, for no behaviour at all. What was missing was never a name.
+
+**The two ratchets.** *What it imports*: `packages/control-plane/src/**` reaches
+the repository root for exactly five files — `src/{token,auth,cors,http}.js` and
+`src/relay/protocol.js`, all wire vocabulary — which is the **same list**
+`deploy/docker/Dockerfile` COPYs, so the two cannot drift without an image that
+fails at runtime inside a container. *What it answers*: no route path names
+`sessions`, `prompts`, `agents`, `worktrees`, `files`, `diffs` or `events`.
+
+**The exception is named rather than pattern-matched around.** The four
+`/v1/me/sessions` routes are exempt by literal, because a sign-in is a credential
+with an expiry — precisely this service's business — and it collides with the
+daemon's *agent session* on one English word and nothing else. Listing them is
+what keeps `/v1/sessions` refused: the exemption is strings somebody has to add
+to, on a line that says what it is.
+
+**Neither is a security boundary**, and both say so — `plugins.md` makes the same
+disclaimer about `manifest.scopes`. What they buy is that the shape stays legible,
+which for a division of responsibility is the whole of what a check can buy.
+
+**Three lightweight facts the Authority does keep**, named so the next idea can be
+measured against them: tunnel presence, what a daemon announced about itself on
+the handshake, and mail waiting to go out. Each is about reachability or is this
+service's own.
+
+**Status.** Current. `.claude/rules/authority.md` is the rule.
+
+### Q1.648 — What the device key binds, and what it deliberately does not
+
+**Question.** A capability is a signed bearer token: anybody holding the string
+can spend it until it expires. Phase 5 required that one stolen off the wire or
+out of a log be worth nothing. What should the binding be, and where should it be
+checked?
+
+**Decision. The capability names the device's X25519 public key in RFC 7800
+`cnf.jkt`, and the daemon compares that to the key the `Noise_IK` handshake just
+authenticated.** Both sides of the comparison are local: the key is inside the
+signed capability, and the handshake proved possession on this connection. No
+lookup, no fetch, no revocation list.
+
+**Why that shape and not a lookup.** `auth-and-tokens.md` states that the daemon
+makes exactly one control-plane request, ever, and that *"what must never appear
+is code that reads something it needs from the control plane"*. A binding checked
+by asking the Authority which key a device holds is exactly that code. Putting the
+key **inside the capability** is what keeps the rule literally true and what keeps
+an Authority outage from stopping a session that is already running.
+
+**Authentication, not authorization, and that distinction is load-bearing.** A
+grant is still `(user_id, machine_id)` and still full access. `relay/authorize.ts`
+reads no device row. Four documents said so — `cp-devices.md`, `docs/AUTHORITY.md`,
+`SECURITY.md` and Q1.642 — and none of them had to change, because the key decides
+*whether this caller is who the capability says*, never *what they may reach*.
+Getting this backwards would have meant per-device grants, which is a feature
+nobody asked for and a migration for every existing row.
+
+**The anti-downgrade rule, which is the half that is easy to miss.** A channel
+that authenticated a key refuses a capability carrying **no** `cnf` at all
+(`unbound_capability`), rather than falling back to bearer semantics. Without it
+the binding is advisory: a caller simply asks for an unbound capability and the
+whole mechanism is optional. ⚠ And `parseClaims` returns `null` for a `cnf` that
+is *present but malformed*, rather than treating it as absent — the same rule one
+layer down.
+
+**Why the channel decides and not a configuration.** A verifier *option* for
+"require a device binding" was written and taken back out the same day — named
+here without a backtick because it never shipped and a citation to it would grep
+to nothing. It made the binding something an operator could be wrong about, and a
+daemon with it off would have accepted bearer capabilities while every document
+said otherwise. `daemoncheck` went red across every route, which was the design
+error surfacing rather than a fixture problem. The **channel** decides instead: a
+channel that authenticated a key insists the capability names it, and a request
+with no channel is loopback — which is the trade `relay.md` already states and
+bounds.
+
+**What it does not defend against.** The Authority mints capabilities and holds
+the signing key, so it can name any device key it likes. This closes theft of a
+serialized capability, not a hostile issuer.
+
+**Status.** Current. `src/auth.ts` holds the check; Q7.37 is the phase.
+
+
+### Q1.649 — Deleting the browser branch of the app
+
+**Question.** Phase 5 made remote access depend on a device key in the operating
+system's keyring: a client with none cannot open an encrypted channel to a daemon,
+and there is no other way in. A browser has none. So what is left of the app's
+browser build — the Telegram mini app, the `REEMOAT_CP_WEB` bundle, the arms that
+exist only outside the native shell — and should it be kept?
+
+**Decision. Deleted, and the reason is not tidiness.** A browser loading this app
+can reach **no machine at all**. It draws a machine list, a session list from
+nothing, and opens none of them. Serving that is worse than serving nothing:
+"unreachable" is at least a sentence somebody can act on, while a product that
+loads and then fails on the first tap is a support conversation.
+
+**What went:**
+
+- **`telegram.ts` and the mini app.** Seven exports, the `[data-telegram]` CSS
+  rules, the `<html>` marker `main.tsx` wrote, setTelegramBack's effect in
+  `App.tsx`, the rule file, and the Telegram section of the privacy policy — a
+  policy that describes behaviour the product no longer has is a false statement
+  about data, which is the one document where that costs something real.
+- **`REEMOAT_CP_WEB`**, and with it the control plane's static mount for the app,
+  its SPA fallback, and the asset-shape refusal that lived in it. `main.ts` reads
+  no environment value for a web root and `deploycheck` asserts the absence of the
+  *read* rather than of the name — two docblocks still say it, because that is
+  where the deletion is argued.
+
+**What stayed, and each was checked rather than assumed:**
+
+- **`cp.ts`'s browser storage arm and `LEGACY_STORAGE`.** The **gate** signs
+  people in — `Gate.tsx` calls `store.adoptSession`, which calls `cp.setSession` —
+  and the gate is a browser bundle. So the browser arm is live, and the two
+  pre-rename keys it sweeps are still what is sitting in somebody's tab.
+  `noUnusedLocals` would have made a dormant constant a typecheck failure, which
+  is how this was settled rather than argued.
+- **`platform.ts`**, which is not a browser branch: it answers what kind of device
+  this is, and the shell needs that too.
+- **`localRoute.ts`**, which has no `inNativeShell()` of its own — `localDaemon()`
+  answers `null` outside the shell and always did, so there was no arm to remove.
+- **`upFrom`**, whose only *caller* was Telegram's back button and whose only
+  remaining reader is `LegalScreen`. Its table of assertions was re-homed rather
+  than deleted with the caller that used to justify it: a pure function with one
+  live reader and no coverage is how the next edit to it goes unnoticed.
+
+**What is genuinely given up.** The control plane can no longer serve the app to a
+browser for a demo or a checkout, and `pnpm web` in dev is what replaces that.
+`pnpm web:build` still exists, because `pnpm native:build` compiles its output into
+the binary — the bundle is still built, it is simply never served over HTTP.
+
+⚠ **The security property does not depend on this deletion**, which is why it is
+recorded as a separate decision rather than as part of Q7.37. `deviceStaticKey()`
+answers `null` outside the shell, so a browser was already refused and already said
+so. What this removes is dead weight and a false promise, not a hole.
+
+**Status.** Current. Q7.37 is the phase this follows from.
+
+
 ## Session lifecycle, questions and attachments
 
 ### Q2.1 — What happens to a live session when the daemon restarts?
@@ -7119,6 +7613,304 @@ constants against.
 
 **Status.** Fixed, 2026-09-11.
 
+### Q2.229 — Parking is invisible for thirty minutes, and then a deploy gives it away
+
+**Question.** Q2.224 shipped parking on the promise that a released session *"draws
+as an ordinary `idle` session and says nothing"*, and `doStop` keeps
+`agentConfigState` and `agentCommandsState` for `parked` alone so the controls and
+the `/` menu stay live. Both are true of the process that parked it. Neither is true
+of the next one: those two fields are in memory, `ManagedSession` deliberately
+restores no config from disk, and a parked row therefore comes back with nothing.
+
+**Measured, 2026-09-19**, on the development machine, read-only against the running
+daemon. Five parked rows, two claude and three opencode. Every one of them answered
+`GET /sessions/:id/commands` with `revision 0, dropped 0, count 0`, and carried
+`agentConfig.options: []` on its snapshot. A freshly created claude session on the
+same daemon answered `revision 1, dropped 0, count 111` with `context` among them,
+four options — `mode`, `model`, `effort`, `fast` — and five modes including
+`bypassPermissions`. So the two states are not a matter of degree: a parked session
+is one deploy away from a composer with three `—` chips under *"The agent is not
+offering this control at the moment"* and a `/` menu with nothing in it, and it
+stays there, because nothing publishes again until somebody types. The prod hosts
+update at 04:00 and 05:00 UTC, which makes that the state of every overnight
+conversation, fleet-wide, every morning.
+
+It also answers a question that was filed separately: **`/context` was reported as
+"not published as a command"**, and it is published. The 111-command list has it,
+and driving that list through the client's own `buildCommands`/`filterCommands`
+ranks it **first** for the query `context` and shows it for `c`, `co`, `con`. What
+the reporter had was a session whose agent was away. One defect, two symptoms.
+
+**Decision.** Keep them, on a wider gate, and write them down.
+
+`revivableByPrompt` — `autoResumable`'s `prompt` column, asked one step earlier
+because `doStop` has the reason before there is an `exitRecord` to read it from — is
+the single gate on three things now: what `doStop` keeps, what `configIsDeferred`
+accepts a tap on, and what `persistedRow` writes to the new nullable
+`sessions.agent_state_json`. **A call into that function and never a second
+`switch`**, which is what keeps *"adding an `ExitReason` is a compile error"* true in
+one place; `daemoncheck` asserts set equality between the two over the whole union
+rather than listing the members, so a new reason lands in the sweep with nobody
+adding a line.
+
+That widens the keeping from `parked` to `parked`, `stopped`, `agent_exited`,
+`agent_signed_out`, `daemon_shutdown`, `daemon_restarted` and `config_changed`, and
+leaves `start_failed`, `start_timeout` and `agent_kill_failed` clearing as before —
+where `—` is the honest reading, because there was never a conversation for a
+control to be about. The argument was never about the word: a conversation that
+comes back on a message is one whose controls still describe something.
+
+**What makes a stale copy honest is that nothing in it reaches an agent unchecked.**
+A wake replays it through `Session.restoreConfig`, whose two withdrawal guards skip
+any option or mode the returning agent no longer offers — which is precisely the
+risk `agentConfigState`'s docblock named as the reason not to restore from disk,
+answered rather than accepted. The worst case is a control that takes a tap and then
+quietly does not come back, which is the bound parking already had within one
+daemon life.
+
+**Four things that are easy to get wrong here, and what each cost.**
+
+  - **`commandsRevisionValue` seeds to 1, not 0.** `commandsPlan` in
+    `packages/web/src/store.ts` reads `0` or `undefined` as *"this daemon has
+    nothing"* and drops the fetch, so a restored list left at 0 would sit on the
+    daemon with the `/` menu still empty — the exact symptom, with the fix in place.
+  - **The raw `agentConfigState`, never `snapshot().agentConfig`.** That one is
+    composed through `withUltracode`, which rewrites the effort value to a choice no
+    agent ever published, and `dedupeAliasChoices`, which moves the model selection
+    off its placeholder. Replaying either sends the agent something it never said —
+    the same ⚠ `restartAgent` already carries about its own capture.
+  - **Refused whole past `MAX_AGENT_STATE_BYTES`, never clipped.** A clipped choice
+    list leaves `setConfigOption` validating against fewer rows than the agent
+    published, so a value somebody really can choose answers `invalid_value`: a
+    control that lies rather than one that is absent. 64 KiB, twice the measured
+    worst case — opencode's 362 models reduce to ~33 KB once the prose is dropped
+    from every unselected choice — and doubled resident rather than merely on disk,
+    because the blob rides `SqliteSessionStore.put`'s dirty-check key.
+  - **The `busy` guard moved above the deferred arm.** `restartAgent` reaches its
+    process boundary through `stop("config_changed")`, a reason a prompt revives, so
+    from the moment it stops `configIsDeferred` answers `true`. Recorded there, a
+    choice would be written into `agentConfigState` and then silently overwritten by
+    the `restoreConfig` already putting back a snapshot captured before the tap:
+    200, the chip moves, nothing happens. `clearing || restarting` is tested first
+    in both `setConfigOption` and `setMode` now, because in both windows the config
+    is about to be replaced wholesale and there is nothing a recording could be
+    recorded against.
+
+**What the client changed: nothing.** `drawnControls`' first branch is
+`live.length > 0` and it returns `stale: false`, so a session arriving with options
+is already drawn live and tappable whatever its status — which is why the daemon's
+two sets were made one set rather than a flag being added to the wire. That property
+was asserted nowhere: every `stale` check in `webcheck` drives the *empty* branch,
+where the status is exactly what decides, so re-narrowing the first branch to
+`hasLiveAgent` would have left all of them green while the composer went faint on
+four statuses at once. It is pinned by name now.
+
+⚠ **One documented invariant is reversed and one window closes.**
+`agentConfigState`'s *"deliberately not restored from disk"* now carries an
+exception, stated at the field; and `snapshotConfigSource`'s *"the empty window is
+left empty on purpose"* describes a window that no longer opens, since the restart
+keeps its controls throughout. The gate below it stays: `armForStart` empties the
+field on the way *in* to a spawn, so *"no live agent yet: report that rather than a
+memory"* has more than one way of being true.
+
+⚠ **That last sentence was wrong, and it was the gate's only surviving
+justification.** `armForStart` assigns `exitRecord`, `parkedAtSignOut`,
+`stopRequested`, `stopping`, `startAbandoned`, `startPromise` and `session` —
+seven fields, and `agentConfigState` is not one of them. What the gate is worth is
+narrower and still real: `held` is the *restart*'s captured config, and serving it
+over a set `doStop` really did empty would report a memory where the rule is "no
+live agent yet". `doStop` empties it for the three `revivableByPrompt` refuses, so
+the clause still has a state to answer for. Corrected at the docblock 2026-09-19,
+in the review that also found Q2.230.
+
+**Status.** Fixed, 2026-09-19.
+
+### Q2.230 — A wake now replays a mode, and one of the two callers was nobody
+
+**Question.** Q2.229 made `doStop` keep `agentConfigState` for every stop a message
+undoes and wrote it to `agent_state_json`, so `doResume`'s `wantedConfig` — empty
+on all but a parked wake before — is now a real option list on essentially every
+resume, and `Session.restoreConfig` replays it. Two things follow that nobody
+decided: a tap landing *inside* that replay, and the boot pass running it with
+nobody present.
+
+**What was measured.** Both reproduced, 2026-09-19.
+
+- **The tap.** `restoreConfig` runs *after* `onStarted` has published, so a
+  `setConfigOption` or `setMode` arriving in that window finds `exitRecord` cleared
+  by `armForStart` (hence `configIsDeferred` false), a live `session`, and neither
+  `clearing` nor `restarting` — a wake sets neither. It reaches the agent, answers
+  `ok`, and is then overwritten by the snapshot captured before it: 200, the chip
+  moves, nothing happens. That is verbatim the failure `restarting` was written
+  for, reached through the door Q2.229 opened. It was invisible because the *end
+  state* is identical either way — the assertion that the wake put back what it
+  captured passes with and without the bug.
+- **The boot pass.** `shutdown` stops every live session with `stop("daemon_shutdown")`,
+  which `revivableByPrompt` accepts, so the config is kept, persisted and adopted;
+  `autoResumable(…, "boot")` is `true` for that reason, so the pass resumes the
+  session and `restoreConfig` re-applies the remembered mode with nobody watching.
+  On the prod hosts that is 04:00 and 05:00 UTC.
+
+**Decision.** The tap is a defect and is fixed: `replacingConfig` names all three
+windows — `clearing`, `restarting`, and `resuming` — and both methods test it
+instead of writing two flags out by hand. The set was the thing that drifted, and
+only `setMode` had ever been raced, so reverting `setConfigOption`'s half left every
+driver in this repository green; `daemoncheck.restart-and-resume.ts` races both
+inside a real wake now, through a rig hook that fires on the restore's own RPC.
+
+The boot replay **stays**, on the owner's word. Restoring what somebody chose is the
+whole of what Q2.229 bought, and a boot pass is not a new decision — it is the same
+conversation coming back. What makes it bounded rather than a grant is
+`restoreConfig`'s two withdrawal guards: a mode the returning agent no longer
+publishes is skipped, which is what claude does with `bypassPermissions` under root.
+Recorded here rather than left as a side effect, because *"the daemon re-applies a
+permission mode at 4am"* is a sentence somebody should have written down before it
+was true.
+
+**Alternatives.** Skipping the mode on the `boot` trigger and replaying it only on a
+prompt was offered and declined: it splits one restore into two behaviours keyed on
+who asked, and the thing it protects against — a session left in a permissive mode
+coming back in it — is a session the person put there. Refusing to restore a
+full-access mode at all was declined for the same reason and a sharper one: it would
+silently drop a choice somebody made by name, which is the failure Q3's plan-card
+work is about from the other side.
+
+**Status.** Fixed (the tap) and decided (the boot replay), 2026-09-19.
+
+
+### Q2.231 — a turn the agent never answers, and the only thing in the process that can end one
+
+**Question.** Reported from a live machine: the panel reads *working* hours after
+the agent had finished. The owner's reading was that claude-agent-acp can start a
+turn by itself on returning from background work, and that such a turn has no
+`session/prompt` to produce a `turn_end` from.
+
+**Decision.** A second sweep on `idlepark.ts`'s existing clock —
+`SessionRegistry.abandonWedgedTurns`, the predicate `ManagedSession.wedged`,
+`TURN_SILENCE_MS` at an hour, `REEMOAT_TURN_SILENCE_MINUTES` to move it and `0` to
+switch it off. It calls `Session.abandonTurn`, which ends the turn **locally** with
+`turn_end{stopReason: "abandoned"}` and sends the agent nothing at all.
+
+**The reported mechanism is inverted, and that matters for anyone chasing this
+again.** Nothing but `armTurn` writes `ManagedSession.turn`, and `armTurn` is
+reached only from the three prompt paths — so a turn the agent starts by itself
+leaves `turn === null`, and `status` reads **`idle`**, not `running`. Its events are
+not lost; `startIdleDrain` records them. That produces the *opposite* defect, which
+`sendMidTurn`'s `started_new_turn` arm already warns about.
+
+**What actually pins `running`.** `status` is derived and `running` is
+`this.turn !== null` and nothing else. `turn` is cleared in exactly one place,
+`pump`'s `finally`, reached only when the turn's generator returns, which happens
+only on a `turn_end` or an `error` — both produced only by the `session/prompt`
+request settling. And that request is the one RPC in `session.ts` fired with **no
+deadline**, deliberately, because a turn may legitimately run for hours. So
+`status === "running"` is exactly *"a `session/prompt` this daemon issued has not
+settled"*, and an adapter that stops answering pins it for the life of the process:
+`POST /cancel` observes the same unsettled promise through `waitForTurnToSettle`,
+and `parkable`'s first line refuses anything that is not `idle`, so the sweep, the
+ceiling's eviction and a wake all skip it at any age — while it holds one of
+`MAX_LIVE_SESSIONS` and its agent's ~397 MB. Only `DELETE /sessions/:id` or a
+restart cleared it.
+
+⚠ **`withAbandonableDeadline` is the obvious fix and it is the wrong one, twice
+over.** Its own docblock records that against a peer which never answers the
+cancellation reclaimed nothing — `pendingResponses` stayed at 20 of 20 — so it does
+not solve the residual it exists for in exactly this case. And it names
+`session/prompt` as the one method whose `ctx.signal` an installed adapter honours:
+across codex-acp 1.8.0's whole bundle `ctx.signal` appears once, on that method. So
+the "deadline" would abort the agent's work — a third stopping verb arrived at by
+accident, against *"stopping the agent and stopping the session are two verbs"*
+(Q2.42) and against *"the agent must never notice a client leaving"*.
+
+⚠ **`turnActive` has to be cleared by hand, and missing that would have been worse
+than the bug.** It is `Session`'s guard against two prompts in flight and it is
+cleared *only* inside the outstanding request's callbacks. A turn closed without
+those running reads as idle, opens the composer, accepts the next message and then
+throws *"a prompt is already in flight for this session"* into the transcript — for
+every message, for the rest of the session. `abandonTurn` clears it itself.
+
+⚠ **And the late answer had to be fenced, or it would cut a *live* turn short.**
+The request stays outstanding and may settle at any time, including after a second
+turn has started. Every callback it installs is now fenced on a `promptEpoch`
+`abandonTurn` bumps, so a stale answer pushes no second `turn_end` for the prompt it
+belonged to and — the sharper half — cannot end the turn running now. The driver
+walks exactly that: abandon, then answer the stalled request, then assert the live
+turn is still live.
+
+**Why silence rather than duration.** A turn running for three hours while the
+agent narrates is working; a turn that has produced nothing is not distinguishable
+from a dead one. A session waiting on a person reads `blocked`, which the predicate
+refuses through `status` rather than through a clause; `hasLiveBackgroundWork` is
+Q2.228 applied to the other threshold.
+
+⚠ **The threshold was an hour and both halves of that were wrong — the number and
+the clock it measured.** It was reasoned rather than measured: what goes quiet
+inside a turn is one long tool call, a build or a test suite, and an hour is past
+all of those. That is a fact about the wrong kind of turn. The correction came from
+the machine that filed the report, whose store still held the session
+(`s_89d35945`, 2 203 events): a prompt at 03:11:07 answered by a **real**
+`turn_end{end_turn}` from the agent at 04:39:26 — 88 minutes, working the whole
+time — and inside it a single silence of **51.7 minutes**, seq 426 → 427, with 21.8
+minutes the next largest. An hour cleared that by 8.3 minutes, which is a
+coincidence and not a margin. ⚠ Both gaps are between *agent* events, the series
+the predicate measures; swept over every event the second reads 21.5 minutes
+instead, because a person's prompt landed inside it (seq 1509 → 1510). The largest
+is 51.7 either way.
+
+So the number is now a multiple of the one measured silence rather than a margin
+over it: **three hours**, ~3.5×. The multiple comes from the asymmetry, which is
+one-sided. Ending a turn that was not over is not recoverable the way the other
+mistake is — the transcript says the agent stopped answering where it had not, the
+real end's `stopReason` and `usage` are dropped, and the next message reaches an
+agent still answering the last one. Waiting too long is the status quo this fixes,
+bounded instead of infinite. ⚠ It is no longer derived from `IDLE_PARK_MS`: "twice
+the park threshold" was arithmetic dressed as an argument, and the two answer
+different questions on different evidence.
+
+⚠ **And the clock had to become the agent's own.** `wedged` measured
+`lastActivityAt`, which every write moves — `status` events, the daemon's errors,
+and the *person's* messages, since `recordPrompt` appends through `safeAppend`. So
+somebody typing into a session that says *working* reset the silence clock on every
+message, and the one state this daemon cannot otherwise escape was kept alive by
+the person trying to escape it. The same measured session shows three such prompts
+inside the open turn (04:28:35, 04:32:16, 04:38:44). `lastAgentEventAt` is set only
+from `record` — the pump's loop and the idle drain, i.e. what came out of the agent
+— and from the drain's early return for the `agent_log`/`other` it drops, because
+those are the agent speaking even when they are not worth logging. The two clocks
+stay separate rather than becoming one field: for *parking*, a person typing **is**
+activity and is the reason not to take the agent away.
+
+⚠ **The driver row for that clock passed with either field, and the reason is
+worth keeping.** The two clocks are milliseconds apart in a test, so no `now` handed
+to `abandonWedgedTurns` discriminates them — the row was written, the wrong field
+was restored to check it, and it printed `ok`. It is a pair now: the mechanism
+asserted with no clock at all (a person's message moves one field and not the
+other) and the outcome asserted at *exactly* the threshold, with 200 ms of declared
+margin either side of the instant it is measured from. A minute of slack — which is
+what the row carried at first — swallows the difference and asserts nothing.
+
+⚠ **Two of the driver rows written for this passed for the wrong reason, and both
+are the same class of mistake as the bug.** *"Nothing was sent to the agent"* was
+asserted as `stalledCount() === 1` — which says only that the outstanding prompt is
+still outstanding, and is true however much traffic goes the other way: adding a
+`session/cancel` to `abandonTurn`, the third stopping verb this entry exists to
+avoid, left the whole section green, because the rig dispatches on the method, a
+notification carries no id, and its `default:` arm drops one without a word. The rig
+records every inbound method now and the property is a list rather than a count. And
+the 61-minute row measured against the fixture's `now`, stamped when module 1 of 23
+was imported, while `wedged` measures the real `turnStartedAt` — an undeclared
+60-second wall-clock budget on a driver that has no other one, which a slower runner
+or one more section inserted above would have turned red, reading as the feature
+being broken rather than the clock. The instant is taken in the section now.
+
+**What this deliberately does not do.** It adds no `SessionStatus` member and holds
+no turn open. It does not stop the session, which would have read as `parked` or
+`stopped` for a conversation nobody ended. After the ending the session is `idle`,
+so the ordinary sweep releases the wedged agent half an hour later — the code that
+could not see it before — and the pending request goes with the process. The wire
+change is one `TurnStopReason` member and the daemon ships first: `wire.ts` types
+`stopReason` as `string` and `stopReasonText` already falls through for a value it
+has never heard of.
 
 ## The web client
 
@@ -7135,7 +7927,12 @@ the regression driver for the terminal, but it is no longer the only way in.
 remaining job is to be a reference implementation of the token and replay logic
 that the browser mirrors.
 
-**Status.** Current
+**Status.** Current — and **narrowed by Q3.605**, which is where to read before
+concluding anything from the "no Electron" clause. There is a native shell now
+(`packages/native`, a Tauri window); what that clause was actually refusing — a
+second copy of the product with its own runtime and its own drift — is still
+refused, and there is exactly one bundle. The service worker and the push are
+untouched.
 
 #### Q3.2 — How does the screen answer "does anything anywhere need me"?
 
@@ -8750,11 +9547,17 @@ published, so the reader's locale must not decide what the agent is called.
 
 #### Q3.518 — An agent that never published an effort control, against one that withdrew it
 
-**Decision.** Draw the slot anyway. `drawnControls` synthesizes `NO_LEVELS` — an
-empty `thought_level` select whose id is namespaced `reemoat:` — and names it in
+**Decision.** Draw the slot anyway. `drawnControls` synthesizes an empty
+`thought_level` select whose id is namespaced `reemoat:` and names it in
 `unavailable`, so `Absent` draws it through `chipParts`/`chipInner` like every other
 withdrawn control and its menu carries `unavailableHint`'s sentence. No second code
 path, no new component, and nothing new on any wire.
+
+⚠ **This was a constant of its own and it is `placeholderFor` now — see
+Q3.615.** The effort slot was the only one synthesized, on the reasoning below;
+every standard slot is synthesized now, for a reason this entry could not have
+seen. Nothing here is reversed: the argument for keeping *this* slot is unchanged
+and is the one the generalisation was built on top of.
 
 **Why.** Q3.404 keeps the slot of a control the agent *drops*, because a button that
 vanishes moves everything beside it and explains nothing. claude and kimi drop it;
@@ -11432,7 +12235,11 @@ every single refresh, with nothing they could do about it. Reported from a real
 session. Nothing needed opening: `1 failed` is drawn on the collapsed row, the same
 "the number survives collapse" idiom as a folder's waiting count and a card's step
 badge. A bare `ToolCall` still opens itself on failure, and the difference is exactly
-that — it has no badge. `webcheck` pins the derived expression by reading the file,
+that — it has no count of its own. (⚠ Amended: `1 failed` is no longer a badge —
+`Badge`'s plain tone is `bg-raised`, the fill `UserBubble` paints, so the count was
+drawing the conversation's own rectangle on a machinery row and was reported as
+blending with the message. It is a bare `text-muted` run of text now. The property
+here is that the collapsed row states the number, not that it wears a pill.) `webcheck` pins the derived expression by reading the file,
 because the rule is one line of JSX.
 The three-valued state is the shape and the argument of the nullable `ultracode`
 column: a boolean would make "I closed this" and "nobody has looked" one thing, so
@@ -11492,8 +12299,10 @@ bare row was the one this same change had to teach to say anything at all. Repor
 "why isn't this folded, and what is that `exec-…`?", which is the honest reading of it.
 
 What replaces it is the arrangement `failed` already uses: the number survives the
-collapse. `N approved` is on the row, quieter than the failure badge because being asked
-and having answered is not a thing that needs anybody's attention again. So "an approval
+collapse. `N approved` is on the row, quieter than the failure count because being asked
+and having answered is not a thing that needs anybody's attention again — a ranking
+that outlived the badge it was written about: `N approved` is `text-faint` and the
+failure count is `text-muted`, with neither of them filled. So "an approval
 cannot be hidden" is kept by *counting* rather than by a row of its own, and the
 transcript is one line where it was three.
 
@@ -20117,7 +20926,7 @@ costs the markdown in the rare clamped case and never the state — the same sen
 #### Q3.596 — The mini app drew ✕ Close at every depth, and the back button had never once been asked for
 
 **Question.** Q3.443 built the Telegram back button: `upFrom` answers where up goes,
-`null` at the root, and `setTelegramBack` posts `web_app_setup_back_button` — one
+`null` at the root, and setTelegramBack posts `web_app_setup_back_button` — one
 control, so hiding it is what draws ✕ Close. Reported from a phone months later:
 *"в ТМА при переходе в диалог все еще кнопка закрыть… иначе юзеру каждый раз
 приходится перезаходить в тма"*. `upFrom` returns `"/"` for a conversation, the
@@ -20129,8 +20938,8 @@ version was read out of it on every call. `router.ts`'s `navigate` calls
 `history.pushState(state, "", path)` with a path-only URL, which replaces the
 **whole** URL — proven against the same WHATWG parser the browser uses:
 `new URL("/m/x/s/y", "https://cp/#tgWebAppVersion=8.0")` is `https://cp/m/x/s/y`.
-So `telegramVersion()` answered `null` from the first tap onward, `versionAtLeast`
-read that as *too old* by its own deliberate fail-closed rule, and `setTelegramBack`
+So `telegramVersion()` answered `null` from the first tap onward, versionAtLeast
+read that as *too old* by its own deliberate fail-closed rule, and setTelegramBack
 returned before posting anything.
 
 **The one call that survived was the one that hides the control.** At the root
@@ -20138,18 +20947,18 @@ returned before posting anything.
 `is_visible: false` — so the app successfully asked Telegram for ✕ Close, once, and
 then never spoke again.
 
-**The fix is a latch, at the one moment that means launch.** `telegramReady` runs
+**The fix is a latch, at the one moment that means launch.** telegramReady runs
 from `main.tsx`'s module body, before `createRoot` and therefore before any effect
 can navigate. It is mirrored into `sessionStorage` because a *reload* loses the
 fragment too — this app assigns `window.location.href = "/"` on sign-out and offers
 the same from the error boundary. Telegram's own SDK does exactly this and their
 docs say why: *"If the application uses hash routing, it may lose the initial hash
-after some time."* Only the **version** is kept, never `tgWebAppData` — that is a
+after some time."* Only the **version** is kept, never tgWebAppData — that is a
 signed credential naming a Telegram account, this app has never read it, and a copy
 in `sessionStorage` would be one this origin stores for no reason.
 
 ⚠ **`webcheck` was green over it for the whole time, and the reason generalises.**
-The driver writes `location.hash` immediately before each `setTelegramBack` call, so
+The driver writes `location.hash` immediately before each setTelegramBack call, so
 the read always succeeded — the one condition the real app never satisfies. The
 assertion now drives the actual sequence: latch at launch, wipe the fragment the way
 a navigation does, then ask. Reverting the fix fails it twice.
@@ -20159,7 +20968,18 @@ a navigation does, then ask. Reverting the fix fails it twice.
 injected (`data-telegram` is stamped off the same test, and the header inset it
 controls was visibly applied in the screenshot).
 
-**Status.** Active
+⚠ **Superseded by deletion: there is no mini app any more.** Phase 5 made remote
+access native-only — a browser holds no device key, so it cannot open an encrypted
+channel to a daemon and says so — and a Telegram mini app is a browser. So
+`telegram.ts` and every symbol this entry names with it are gone, which is why the
+ones above are no longer written as code. What survives is `upFrom`, because
+`LegalScreen` reads it for a different reason, and the sequence this entry is
+*about* — latch at launch, then ask — outlived its subject as a shape: a value read
+out of a launch fragment on every call is a value that stops existing after the
+first navigation.
+
+**Status.** Superseded (Q1.649). The defect and its measurement are kept because
+the shape recurs; the code is deleted.
 
 #### Q3.597 — 52px of empty screen under a header bar that had already reserved its own space
 
@@ -20189,8 +21009,8 @@ it had. `0.5rem` leads the `max()` so an answer of `0` falls back to the ordinar
 `.pt-safe` floor rather than to nothing.
 
 **The two numbers are added, and that is the one thing here read from documents
-rather than measured.** `safeAreaInset` is the space to avoid at the top of the
-*screen*; `contentSafeAreaInset` the space to avoid at the top of the *content
+rather than measured.** safeAreaInset is the space to avoid at the top of the
+*screen*; contentSafeAreaInset the space to avoid at the top of the *content
 area*, i.e. of what the first leaves. Nested, therefore additive — and Telegram's
 SDK writes four CSS properties per object and combines nothing, so every page doing
 this adds them. **It is the direction to be wrong in**: over-adding costs a band of
@@ -20200,7 +21020,7 @@ mode settles it; in the ordinary presentation both are 0, which is the reported 
 
 **Q3.443's rule survives verbatim at the line it was about.** That line is still a
 `max()` and still never an addition to `env()`. The one addition is between
-Telegram's own two numbers, in `telegramInsets`, where both are in scope and neither
+Telegram's own two numbers, in telegramInsets, where both are in scope and neither
 is a literal.
 
 **The bottom edge had the same defect and nobody reported it**, because nothing under
@@ -20216,10 +21036,20 @@ specificity — `Composer.tsx` records the same trap and names the casualties.
 
 **And `telegram.ts` got a rule file.** It was globbed by none, so the knowledge above
 arrived in no session that opened it, which is how two of these shipped twice.
-`telegram-mini-app.md` holds it; `web-shell.md`, at 25 characters of headroom, keeps
+`telegram-mini-app.md` held it; `web-shell.md`, at 25 characters of headroom, kept
 one sentence and a pointer.
 
-**Status.** Active
+⚠ **Superseded by deletion.** The mini app is gone (Q1.649), and with it
+`telegram.ts`, its rule file and the `[data-telegram]` rules this entry is about —
+which is why the two inset accessors it names are no longer written as code. Three
+things in here are **not** about Telegram and survive: `.pt-safe`/`.pb-safe` are
+still unlayered and still beat a layered Tailwind utility regardless of specificity;
+`max()` is still never an addition at that line; and the general lesson — that a
+platform flag says *which platform*, never *how that platform is presenting you* —
+is the one this entry exists for.
+
+**Status.** Superseded (Q1.649). The CSS trap and the three-states lesson are kept;
+the code is deleted.
 
 #### Q3.598 — Three documents that had to be readable with no account
 
@@ -20335,9 +21165,9 @@ at interactive content inside a `<label>` does not activate the labelled control
 so the links do not tick the box on the way past.
 
 **Measured, and unverifiable without a phone:** whether a same-origin `_blank`
-survives Telegram's webview. The idiom is already exercised there off-origin by
-`MarketEntry` and `AgentsPanel`, and `inTelegram` is the seam if it turns out not
-to be.
+survives Telegram's webview. ⚠ **Moot since Q1.649** — there is no mini app, so the
+question has no environment left to be asked in and the seam this named is deleted
+with it. The `target="_blank"` idiom stands on its own reasons and is unchanged.
 
 **Status.** Current
 
@@ -20633,6 +21463,1889 @@ whole of its job. 256, the same number and the same argument as
 
 **Status.** Current
 
+
+#### Q3.605 — Whether a native shell reverses Q3.1's "no Electron"
+
+**Question.** Q3.1 says `packages/web` is *"a plain React + Vite + Tailwind SPA…
+There is no Electron, no service worker and no push."* `packages/native` is a Tauri
+2 window around that same bundle. Is that clause now false?
+
+**Position.** It is **narrowed rather than reversed**, and the narrowing is worth
+stating because the clause reads as covering this and does not.
+
+What Q3.1 refuses is a second copy of the product: an Electron app is its own
+runtime with its own version of the UI, its own update channel and its own set of
+bugs, and the argument was that one screen shared by a browser and a phone is worth
+more than two clients that drift. That argument is **kept**, and it is what decides
+the shape here: there is exactly one bundle, `frontendDist` points at
+`packages/web/dist`, no module in `packages/web` imports a `@tauri-apps` package,
+and `pnpm nativecheck` asserts both halves of that from the two sides that could
+each break it alone. A native build is a *window*, not a fork.
+
+The other two clauses are untouched and stay refused. There is still no service
+worker — `tauri://localhost` cannot register one, WebKit refusing a script URL whose
+scheme is not `http(s)` — and still no push. What the shell adds is a credential
+store, one CORS-shaped transport, a save panel and a link handler, which is four
+platform facts and no new product surface.
+
+**Rejected.** Amending Q3.1 in place. It is a record of what was decided in
+2026-07 and the clause was true of the tree for every release since; rewriting it
+would hide that a native client arrived and make the entry a description of the
+present rather than of a decision.
+
+**Status.** Reversed an earlier decision, in part. `.claude/rules/native-shell.md`
+is the area; Q1.639 and Q4.116 are the two halves that actually cost something.
+
+#### Q3.606 — Why the app bundle carries no gate screen
+
+**Question.** `register`, `confirm`, `forgot`, `reset` and `verify` were built into
+`dist` *and* into `dist-gate` — two copies of one sign-up form, two consent boxes,
+two paths for a one-time link, and both to be fixed in pairs. Should the app keep
+its copy?
+
+**Decision.** No, and the measurement is what makes it easy: **the app's copy was
+already unreachable except through two of its own buttons.** `packages/control-plane/src/app.ts`
+checks `GATE_PATHS` *before* the app's SPA fallback, so `/register` is served from
+`dist-gate` even on a checkout running both bundles — no HTTP request has ever
+rendered `dist`'s gate. Under the shell, `/confirm`, `/reset` and `/verify` had no
+way in at all: a mail client opens a link in a browser, and a Tauri window has no
+address bar. What `App.tsx`'s gate arm actually drew was the two screens `SignIn`
+created client-side with `navigate("/register")` and `navigate("/forgot")`.
+
+So the arm is gone and both doors are **anchors** at `controlPlaneOrigin()`. The
+mechanism costs nothing new: `interceptExternalLinks` already captures absolute
+`http`/`https` clicks and hands them to `host_open_external`, so the shell opens
+the system browser and a browser build performs an ordinary navigation to the
+gate. **Zero new bridge surface; the command census stays at fifteen.**
+
+Three properties, each a real failure and each asserted:
+
+- **Absolute, never root-relative.** `openableHref` parses with no base, so a
+  relative href answers `null`, the interceptor never fires, the webview
+  navigates, Tauri's asset protocol falls back to `index.html`, and the app
+  redraws the sign-in screen with a changed URL — a silent no-op.
+- ⚠ **`target="_blank"`, which is the one that is easy to lose.** This bundle is
+  also what runs inside Telegram, where `<authority>/register` is the **same
+  origin** — so a plain anchor is a real navigation that leaves the mini app's
+  document and destroys the launch fragment `telegram.ts` latches against, landing
+  on a gate bundle that has no Telegram wiring at all. `_blank` answers all three
+  surfaces at once.
+- **`controlPlaneOrigin()`, never `location.origin`**, which under the shell is
+  `tauri://localhost`.
+
+**`ui/gate/GateCard.tsx` stays and is the named exception**: `ForcedPasswordChange`
+renders one, and that screen is the app's by decision. So the rule asserted is *no
+gate **screen***, not *nothing from that directory* — and `webcheck` walks both
+entry points' import closures rather than grepping one file, following dynamic
+imports too, because a `lazy()` chunk is every bit as present in `dist` as the
+entry. The paired check that `GateCard` **is** in both closures is the
+non-vacuity control and the record of the exception, so nobody later "fixes" the
+first check by moving the file.
+
+`Route` keeps its `gate` arm and `screenOf` its case. Deleting them is the
+eight-edits-and-a-case-table `native-shell.md` argues against, and the parse is
+what keeps `parseGateScreen` and `parseLegalDoc` assertably disjoint. A typed
+`/register` falls through to `SignIn`, the answer every unknown path already gets.
+
+**Measured, 2026-09-16.** The app's entry chunk went from **380,235 bytes to
+300,549** — 79,686 off, 21%, on the path to a login form, which is the same
+argument the `SessionView`/`Settings` split already made and for the same
+population: a phone on LTE. And `grep -ho "Create an account\|Choose a
+password\|acceptedTerms\|register/confirm"` over the built assets returns
+nothing, which is the property rather than the bytes.
+
+#### Q3.607 — Where the server is changed from, once one has been chosen
+
+**Question.** `state.host.server === null` drew the picker. What draws it
+afterwards?
+
+**Decision — and it began as a defect rather than a feature request.**
+`setNativeServer` had **exactly one call site**, and `clearSession` deliberately
+leaves the server alone. So a server that had been chosen could not be changed
+from inside the app at all: signing out returned you to the same one, and the only
+remedy was deleting the shell's config file by hand. Somebody who typed a
+reachable but wrong address was stuck there.
+
+**The first screen is a welcome, and that is where the question lives.** On a
+machine where nothing has happened yet it greets, says in one sentence what a
+server is, and offers an address box already holding what the build suggests;
+**Continue** adopts it and the sign-in form is next.
+
+⚠ **For one draft it was not a screen at all**, the default having been written
+down at first launch (Q4.121): the address appeared instead as a line with a
+*Change* link under the sign-in form's lead sentence. The argument for putting it
+there was real — a custom scheme has no address bar, so `cp.ts`'s *"the credential
+goes to one origin"* rule has nowhere else to be stated — and the screen was still
+wrong. A login form is not where somebody learns which fleet they are on, and a
+URL with a verb beside it reads as a thing to deal with before typing a password.
+The rule it was defending is satisfied better by the welcome, which answers that
+question immediately before the password is asked for and has nothing else on it.
+
+⚠ **And the first cut of that welcome built a one-way door in a new place, which
+is the same defect this entry opens with.** `Continue` adopts an address; with
+nothing on the sign-in form pointing back, somebody who typed a reachable but
+*wrong* one arrived at a password box with no route to the screen that sets it —
+Settings → Account needs a session, and getting one needs the right server. So the
+form carries a leading `‹ Server`: it names its destination and never the address,
+it is drawn only in the shell, and it is `web-shell.md`'s kind of back control —
+a fixed destination drawn as a chevron rather than `history.back()`. It is
+disabled while a sign-in is in flight, because `App.tsx` tests `pickingServer`
+above `phase` and a login landing behind that screen would leave somebody on a
+form nobody asked for.
+
+**Two sentences on the server screen were true in one state and false in
+another**, which is the class of defect a screen with two entrances grows. *"That
+address is ours"* is nonsense where no default was compiled in — every build from
+this repository, where the box opens empty. *"Forgets this computer's sign-in"*
+describes nothing when the screen is reached by that back control, there being no
+session. Each is gated on the fact it claims, and both are asserted.
+
+The second entrance is a **Server address** row under Settings → Account,
+immediately above Sign out because changing servers *is* signing out plus a
+redirection. `state.pickingServer` carries it, so it rides the store the screen
+already subscribes to and adds no hook above `App.tsx`'s branching — where a
+recorded `Minified React error #310` says one must not appear.
+
+**It stays a phase, not a `Route` arm and not a `SettingsLeaf`.** Both are routes;
+`parseGateScreen` and `parseSettingsRoute` are shared with the web build, which
+would then parse and draw a screen that can do nothing where the server is the
+origin that served the page. As a phase, `App.tsx` returns it above `<AppShell>`,
+so the settings sheet is *replaced* rather than nested — which is what makes
+Cancel put it back exactly where it was, the URL never having moved.
+
+**Cancel exists if and only if there is a server to go back to.** That single
+condition is what keeps the first-run state uncancellable, and it is the reason
+`signInReady` did not have to learn about servers: there is no path to a sign-in
+form with no server, so the guard is structural rather than a second predicate
+answering a question one arm above already answers.
+
+**Three things the editing entrance made necessary that first run never did.** The
+field opens on the current value, because an editing screen that opens empty is
+one where the safe act is typing it again from memory. Adopting an origin equal to
+the one already held reloads nothing — `host_set_server` returns early on a match,
+writing no file and erasing no credential, so re-typing your own address would
+otherwise be a sign-out charged for a spelling. And the screen says what changing
+servers costs, in two sentences: the credential for the old origin is erased in
+the same act, and *"your account there is untouched"* — true because **nothing
+here ends the session on the old server**. No `DELETE /v1/me/sessions/current` is
+sent, deliberately: it is a network call to a server somebody is leaving, which is
+often *why* they are leaving, and it must not stand in front of a server change.
+The row stays in that server's Settings → Devices.
+
+#### Q3.608 — Why the desktop rail became two columns, and why the machines went inside it
+
+**Question.** The machines were a horizontal pill strip above the session list.
+The owner asked for Telegram's arrangement: a narrow vertical strip of folders on
+the far left, the chat list beside it, the conversation on the right. Where does
+that third column attach?
+
+**Decision.** **Inside the existing `<aside>`**, as its first child, with
+`--rail-w` measuring both columns. `MachineColumn` is 72px and `SessionBrowser`
+takes the rest.
+
+**Why, and it is `RailHandle` rather than taste.** The handle divides the *rail*
+from the *conversation*, and that join is the aside's trailing edge whichever way
+its own children are arranged — so `left: var(--rail-w)` stays correct with no
+edit, and so do every one of the pinned assertions about it.
+
+**Rejected: a sibling column before the aside.** It forces the handle onto a
+`calc` of two lengths, and the second length is then written twice — once in
+`rail.ts` in device pixels and once in a class string. That is precisely the
+`19.5rem`/`312` defect `index.css` records at the top of the file: two spellings
+of one width that agree only at a 16px root, both asserted, producing a 78px snap
+on every load for readers on a larger font. Reintroducing it one file over,
+deliberately, was not available. It also costs a second bound, a second
+`localStorage` key and a second CSS variable for a column nobody can drag.
+
+**The bounds are stated as arithmetic.** `MACHINE_COLUMN_PX` plus the three
+numbers they were — 240 / 312 / 480 — so `rail.ts`'s argument for its floor ("a
+session row is a status dot, a title, a relative time and a kebab… at 240px it
+still shows enough of a name to tell two sessions apart") stays an unchanged claim
+**about the list**. `webcheck` asserts the *subtraction* where a literal used to
+be, which additionally pins that the column was added exactly once to each bound.
+
+**The migration is `clampRailWidth` and nothing else.** A `reemoat.railWidth`
+written before the column existed meant the list, and nothing can tell such a
+value from one written after — but every path reads it through the one clamp, so
+anything under the new floor comes up to it and anything above keeps its total
+width with the list 72px narrower. Bumping the storage key would have thrown the
+preference away for everybody to fix it for nobody.
+
+**Status.** Current
+
+#### Q3.609 — What a horizontal strip carries that a vertical one may not
+
+**Question.** `MachineTabs` is kept verbatim for the phone. What does the desktop
+column copy from it?
+
+**Decision.** Four things do not come across, and three of them are *wrong* rather
+than merely unnecessary on a vertical axis.
+
+**`.no-scrollbar`.** Its licence in `index.css` is granted to "a strip dragged
+sideways whose contents announce there is more of them by being cut off at the
+edge", and that same docblock says outright: never on a vertical list, where a bar
+is the only thing saying how much more there is. The column takes the app-wide
+thin bar under a fine pointer, which is the ordinary appearance of a vertical
+scroller — and which is how the latent defect recorded against the phone's strip
+(that class plus a desktop pointer) stops applying to a desktop at all.
+
+**`.edge-fade` and its `ResizeObserver`.** The `is-cut` arithmetic is
+`scrollWidth - clientWidth`, which on a vertical box is zero for ever: the
+gradient would never light, and nothing would fail. That silence is why it is a
+`webcheck` assertion rather than a comment. Dropping it also leaves the column
+with no `clientWidth` read at all, which is the property `AppShell`'s
+no-breakpoint-in-JavaScript rule is really about.
+
+**`overscroll-contain`.** Chrome ends the scroll chain at a box carrying
+containment even when it cannot move — 400px of wheel travel against 0px on the
+same gesture, measured — and a fleet of one puts a single entry in this column.
+
+**`lone`.** The one-machine full-width pill has no vertical analogue, and it also
+gated the observer's dependency array and whether the fade mounted at all: three
+coupled behaviours behind one boolean.
+
+**What does come across** is the scroll-into-view, keyed on `[selected]` rather
+than running on every render — the rail re-renders on the four-second poll and on
+every stream event — and the ordering, which stays `machineTabs`': by name, never
+by reachability or activity.
+
+⚠ **There was never a `wheel` listener here to carry over.** A mouse has no
+gesture for a horizontal box, so on a desktop the phone's strip cannot be scrolled
+at all; `AgentStrip` is the component that had to add a non-passive listener for
+it. The vertical axis closes that gap for free, which makes this a gain rather
+than a loss.
+
+**Rejected: one component with an axis prop.** `SessionBrowser`'s own docblock
+argues the shape — *"The `variant` prop is gone with the split: its only remaining
+job was row density, and the mount already knows the width, so a prop that could
+disagree with the CSS no longer exists."* Two presentations over one data source
+is that argument one level up. `machineTabs`, `allTab`, `currentView` and
+`selectMachine` are untouched, so the two cannot disagree about which machine is
+selected.
+
+**How the selected machine is drawn, and it took two passes.** The band is
+**full-bleed** — `bg-raised` across the whole 72px, with the chip inside it
+stepping up to `surface`, which is the one tone above `raised` this palette has —
+plus `font-medium text-fg` on the label. Three signals, because with the palette
+this delicate one is not enough and these cost nothing.
+
+⚠ **The first pass put the fill on the 28px chip alone and it was reported as not
+visible**, which it was not: a tone step that small, on a strip whose entire job is
+saying which machine you are reading, is something you go looking for. The second
+pass inset the band as a rounded pill and cost eight pixels of every label —
+`server-fra` and `server-hel` both elided to `server-…`, which is the one failure a
+folder rail cannot have, since the label is the only thing telling two machines
+apart. Full-bleed at `px-0.5` leaves 68px of the 72 for the name, four more than
+the strip had before any of this.
+
+**Status.** Current
+
+#### Q3.610 — Why the fleet-wide magnifier is gone
+
+**Question.** Q3.211 drew a *disabled* magnifier in the rail header, deliberately,
+as the not-built fleet-wide search — distinct from the box below it, which filters
+this machine's chats by title. The header is one row now. Does the magnifier stay?
+
+**Decision.** No. It is deleted, and this reverses Q3.211.
+
+**Why the earlier decision does not survive the merge.** Q3.211's argument was
+that the two controls answer different questions and must not be conflated — and
+it was right *about two controls on two rows*. With both in one row, forty pixels
+apart, a dead magnifier beside a live field is not a distinction; it is the
+conflation, drawn. Q3.211 itself records the middle step: the magnifier was once
+wired to focus the box below, which was "a shortcut to something already on screen,
+and a conflation of two different questions". One row makes that shortcut the
+default reading whether or not anything is wired.
+
+**What replaces it.** Fleet-wide search, when built, is a **scope** of the one box
+— searching under the `All` entry — rather than a second control. That spelling
+only became available with this layout: `All` is now permanently on screen at the
+top of the machine column rather than a pill that can scroll away.
+
+⚠ **No `webcheck` assertion covered the old control**, which is why this reversal
+is cheap and also why it is written down: the replacement *is* asserted, in both
+directions — the refusing label absent, the working field present — so deleting
+the wrong one of the two fails.
+
+**Status.** Reverses Q3.211
+
+#### Q3.611 — Why the menu drawer is not a route
+
+**Question.** Every pop-up in this app is a route, and the rule behind that is
+Android's Back. The hamburger opens a full-height left drawer. Is it a route?
+
+**Decision.** No, and it is the first modal layer in this app that is not one.
+
+**Why.** `/menu` is a URL nobody is at for more than a second: all three of its
+rows are themselves routes, so the drawer is a launcher rather than a place, and a
+shared or reloaded link to it would open a panel over the home screen with nothing
+behind the decision. Against that, a new `Route` arm is compile-enforced in four
+switches and **accepted in silence by three** — `isSheet`'s `||` chain,
+`isOverlayPath`'s literal list, and `sheetUpLabel`'s early return — a class of
+omission `overlay.ts`'s own docblock records as having been reachable twice.
+
+**What it costs, stated plainly.** Android's Back would otherwise navigate the app
+*behind* a visible drawer, which is worse than failing to close it. The remedy is
+one effect on `usePathname()` in `App`: Back closes the drawer **and** navigates,
+which is one press doing two things. That is the known limitation, and it is the
+price of not minting a dead-end URL.
+
+⚠ **The effect may not be keyed on the `route` prop.** `AppShell` is handed
+`route={background}`, and every destination in the drawer is an overlay path — so
+`background` does not change when a row navigates and a listener on it would fire
+never. Each row also calls `onClose()` before `navigate()`, which is the brace;
+the effect is the belt and the Back behaviour.
+
+**Status.** Known limitation
+
+#### Q3.612 — What the menu drawer may contain
+
+**Question.** `ProfileMenu` set a test for its rows: *a row must be a destination,
+it must be reached from nowhere else, and it must be about **you** rather than
+about what is on screen.* Does a drawer change it?
+
+**Decision.** No. All three clauses survive, and the drawer holds **Settings** and
+**Plugins** — the same two destinations the popover held.
+
+**⚠ There was an `Account` row for one revision, and it was removed by the owner
+on sight.** It was added on the argument that the drawer's head is *inert* — you
+no longer press your own name to open anything — so without a row nothing in the
+panel reached your account. That argument is real and it is not enough: Account is
+`DEFAULT_SECTION`, so `settingsPath()` already opens on it, and the row was the
+same door drawn twice one line apart. The middle clause of the test caught it and
+the test was overruled rather than re-read. This entry is the correction.
+
+**What follows for the next row.** The test is unchanged, so the bar is what it
+was: a destination, reached from nowhere else, about you. The head being inert is
+not a licence to duplicate a destination that is one tap away — it is the reason
+the head is a *heading*.
+
+**Rejected: make the head itself the link.** It keeps the panel's only destination
+on the one element that does not look like one, which is the discoverability
+problem the session row's kebab was added to solve.
+
+**What is unchanged.** No Language row and no ellipsis of extras — there is no i18n
+and `index.css` refuses a theme switcher. `Sign out` is last, separated, **above
+the version**, and drawn even when `me === null`, because `bootstrap`'s catch keeps
+`phase: "ready"` with no `me` during a control-plane outage and that is the worst
+moment for the way out to disappear. One tap, no two-step confirm: the confirming
+pattern is a *row* pattern and does not fit a panel this narrow.
+
+**And the foot carries the build and nothing else.** The product mark was there for
+one revision and came out with the Account row: a wordmark at the foot of a menu is
+a thing to look at rather than to read, and the fact the line carries — which build
+you are running — was the smaller half of it.
+
+⚠ **`useDismissible("sheet")`, and `TaskPanel` is the precedent that must not be
+copied.** That panel registers `"menu"` on purpose, because at `xl` it docks
+*beside* the conversation with no scrim and `inert` on `#root` would kill the
+transcript it was opened to read alongside. This one is scrim-backed at every
+width. With `"menu"`, `shortcutsEnabled` stays true and `j`/`k` walk the session
+list behind an opaque panel — `inert` stops taps and focus but not a `window`
+keydown, which `keyboard.ts` records.
+
+**Status.** Current
+
+#### Q3.613 — What was lost with the rail footer
+
+**Question.** The account row, the `?` help popover and the plugin launcher all
+left the footer for the drawer. Is anything actually gone?
+
+**Decision.** One thing: `HelpButton`'s legend, and it is not re-homed.
+
+**What it held.** The only documentation anywhere in this app of `j`, `k` and `/`
+— and, more load-bearing, the only statement that none of them fire while a text
+field has focus, which on this screen is most of the time.
+
+**Why it is not moved into the drawer.** The drawer takes rows that are *places to
+go*, which is the test Q3.612 argues; a legend is not one. And this legend had
+already been deleted once, from under the New session button, because it
+advertised the shortcuts as a feature, listed an `r` that has never been bound,
+and said nothing about the typing caveat — *"a legend that is wrong more often
+than it is right teaches people to ignore legends."*
+
+**So the shortcuts stay bound and become undiscoverable.** Named here so it is not
+found later as a defect. If it returns, `CommandMenu` is where it belongs: that is
+already the keyboard surface, and a legend beside the keys it describes cannot go
+stale in the way a legend in a footer did.
+
+**The plugin launcher is a demotion rather than a loss** — the market's rows link
+through to the same screens — and the rule it was written for is untouched: the
+rail is the sessions, and a plugin able to add rows to the list would open a hole
+in `waitingFloor`, which is computed by subtraction precisely so that a new
+section cannot.
+
+**Status.** Current
+
+#### Q3.613b — The face, and the way the drawer leaves
+
+**Question.** The account box drew a letter and the panel vanished on close. Both
+were reported as looking unfinished. What replaced them?
+
+**The face.** `personEmoji` maps the account name onto one of twelve single-code-
+point faces. ⚠ **Derived, never `Math.random()`** — this rail re-renders on the
+four-second poll and on every stream event, so a rolled face would change several
+times a minute, which makes an avatar useless as a thing to recognise and is the
+one element on the screen that would move for no reason. Pure and exported, so the
+driver asserts stability rather than inferring it from two equal calls; `Math.random`
+is asserted *absent* from the module, because two calls agreeing is exactly what a
+cached random value would also do. No zero-width joiners and no variation selectors
+in the list: those render as two glyphs, or as a monochrome silhouette, on whichever
+platform has not shipped the pair, and a broken face is worse than the letter.
+
+**The exit.** Opening is a CSS animation on mount and needs no state; leaving cannot
+be, because an unmounted element does not animate. So a close keeps the panel on
+screen until its own `animationend` and then drops it. `AgentConfigBar` keeps its
+picker mounted past dismissal for the same reason — neither layer is a route, so
+neither has a view-transition snapshot to leave behind — but not on the same clock:
+read 2026-09-19, its `dismiss` still ends on a flat `window.setTimeout(…,
+SHEET_EXIT_MS)`. ⚠ **This clause said the two carried "the same shape", and the
+rewrite above is what made that false**, since what changed here was precisely the
+half they no longer share. What they do share is the extra lifetime and the
+argument for it, and nothing asserts even that.
+
+⚠ **`DRAWER_EXIT_MS` is the ceiling on that wait rather than the wait, and this
+entry said otherwise for a release.** A flat timer is a constant standing in for a
+duration that is not constant: under `prefers-reduced-motion` `index.css` collapses
+every animation to `0.01ms !important`, so the panel is gone within a frame while
+the timer holds the `"sheet"` layer — and therefore `inert` on `#root` — for the
+remaining 260ms, leaving the app untappable and deaf to `j`/`k` over a screen with
+no drawer on it. That is the mirror of registering the layer on `open`, which had
+the app live *under* a visible panel, and neither is visible to anything pointing at
+the screen. The timer stays as the backstop, because an `animationend` that never
+arrives — a cancelled animation, a backgrounded tab — would otherwise strand `inert`
+for ever, which is worse than either window.
+
+⚠ **A distinct keyframe, never the arrival with `reverse` composed onto it** —
+`sheet-out`'s entry records what that does: it slides out and does not slide back.
+⚠ **And `both`**, which is the half that is invisible when it is missing: without a
+fill the panel snaps back to rest for the frames between the animation ending and
+React dropping the element, a flash of the full drawer after it has already left.
+The duration lives in two files that cannot see each other, so `webcheck` reads the
+stylesheet's and asserts the component's `DRAWER_EXIT_MS` against it — the same pin
+`--rail-w`/`RAIL_DEFAULT` carries, for the same reason.
+
+**Status.** Current
+
+#### Q3.614 — Where the app's version comes from
+
+**Question.** The drawer's footer says what build this is. There was no version
+readable from the browser bundle at all. What supplies it?
+
+**Decision.** A Vite `define` reading `packages/web/package.json`, surfaced through
+`src/version.ts` behind a `typeof` guard.
+
+**Why not a literal.** `pincheck` already holds that manifest against the root, the
+other two workspace manifests, `DAEMON_VERSION`, the control plane's `VERSION` and
+the CHANGELOG's newest dated heading — seven copies of which six are asserted
+against each other. A constant in `src/` would be the eighth, asserted by nothing,
+and the one nobody greps for at a release.
+
+⚠ **`typeof` is the whole trick and not defensive style.** `webcheck` imports this
+package's modules under plain `tsx` with no Vite, so `__APP_VERSION__` is not
+defined there: a bare reference — or `__APP_VERSION__ === undefined`, which reads
+as the careful spelling — throws `ReferenceError` during *module evaluation*,
+taking down every check that transitively imports the file with an error naming
+neither the file nor the identifier. The driver asserts the fallback the guard
+produces, so the guard cannot rot into a comment.
+
+**`vite.gate.config.ts` deliberately gets no `define`.** That file's own rule is
+that it sets no build config asserting something the code does not say, and none of
+the gate's nine addresses draws a version. The guard means an accidental import
+edge would not throw — it would answer `"dev"` — so the gate's value-graph walk
+asserts the edge does not exist: a shipped bundle quietly claiming to be a
+development build is worse than one that fails to build.
+
+**Rejected: `NativeBoot.appVersion`.** It is `null` in a browser for ever, so the
+line would be blank for almost everybody, and `native-shell.md`'s rule is "one
+bundle, two shells" — a value that differs between them is a value that makes the
+footer lie about which shell you are in. It keeps having no reader, now by
+decision.
+
+**Rejected: a field on `GET /v1/instance`.** That is the control plane's version
+rather than this bundle's, it costs a wire type and a service change to answer a
+different question, and `GateCard.tsx` carries a tombstone for the `SourceNotice`
+that drew exactly this class of fact and was taken off every screen.
+
+**Status.** Current
+
+#### Q3.615 — The composer with no controls at all
+
+**Question.** A screenshot: the message box, the paperclip, Send, and nothing else.
+No mode, no model, no effort, no `…`. Under what circumstances is that allowed?
+
+**Decision.** None. `drawnControls` synthesizes a placeholder for every standard
+slot nothing already occupies, in **every** state, so the strip is the same shape on
+every session.
+
+**What produced it.** Two branches returned an empty set, and both were deliberate:
+a live agent publishing nothing, and an absent agent with nothing remembered. The
+argument was that an agent publishing nothing already *is* the sentence "this agent
+has no controls", and a row that is not drawn cannot have a slot missing from it.
+
+**Why that argument is wrong.** It compares an agent against itself. The reader is
+comparing this session against the last one they opened — and a composer that grows
+and shrinks a whole row between sessions is the shape change Q3.402, Q3.417 and
+Q3.404 each refuse in a narrower form. A width that moves was worth a rule; a row
+that appears and disappears is the same defect one size up.
+
+**⚠ And the second branch was not rare, which is what made it urgent.** `heldConfig`
+lives in the tab's `rows` map and nothing persists it; the daemon deliberately
+restores no `agentConfig` from disk, answering with an empty set until a resume
+re-reads it from a live agent. So **every reload of a session whose agent is away**
+landed there — interrupted, parked, failed to start, and permanently for an ended
+one, since nothing will ever publish again. The reported screenshot is the other
+journey: a session whose agent had not finished starting.
+
+**The synthesis is `ALWAYS_DRAWN`, derived rather than listed.** Four tables in
+`agentConfig.ts` already almost name these three categories and each says something
+slightly different on purpose; a literal array would be the fifth and the one
+nothing forces into step. Filtering `CATEGORY_SLOT` for its two visible slots yields
+exactly `mode`, `model` and `thought_level`, and excludes the hidden and nested
+categories without naming either.
+
+**Asserted as a property, not as cases.** `webcheck` crosses all nine session
+statuses with every shape of published and remembered config — 81 combinations —
+and asserts not one empties the strip. The four checks that used to *codify* the
+empty strip are turned around rather than deleted: the cases are still worth
+naming, they have the opposite answer now.
+
+**Status.** Reverses the empty-strip half of Q3.518
+
+#### Q3.616 — A nested control whose host cannot be opened
+
+**Question.** `collaboration_mode` is drawn inside `mode`'s menu. What happens when
+`mode` is unavailable?
+
+**Decision.** It is demoted to `…`, which is the answer a *missing* host already
+had. `splitOptions` takes the `unavailable` set and stops counting an unavailable
+control as a host.
+
+**⚠ This was a live defect before anything was synthesized, and nothing saw it.**
+`Absent` takes `{ option }` and draws a chip and one sentence — no `nested` prop, no
+`ChoiceSection` — and nothing else in the renderer reads `slots.nested`. So a host
+routed to `Absent` left its nested control drawn **nowhere**; `commands.ts` skips an
+empty select, so it was not in the `/` menu either. On codex that is the plan
+switch, silently gone for as long as the agent had withdrawn `mode`. The existing
+guard for this shape was applied to the model fold and never to the host search.
+
+**Why demotion rather than teaching `Absent` to nest.** The second answer makes
+`Absent` a two-shape component and costs the property its docblock rests on — that
+it draws a slot through `chipParts` and `chipInner`, the same two calls the live
+chip makes. Unavailable and absent are the same fact from the reader's side: there
+is no menu to nest into.
+
+**Status.** Current
+
+#### Q3.617 — What a reload costs the agent's controls
+
+**Question.** The strip keeps the last set a running agent published, so it stays
+the same shape while the agent is away. That memory is in `rows`. What happens on
+F5?
+
+**Decision.** `configMemory.ts` writes it through to `localStorage`, keeping **only
+the selected choice** of each control, and `rememberHeld` in `store.ts` reads it
+back where `holdConfig` answers `undefined`.
+
+**Why it was worth fixing.** Q3.405's memory answers within one tab. `heldConfig`
+is a field on a row in a `Map`, the daemon deliberately restores no `agentConfig`
+from disk, and so a reload of any session whose agent is away fell through to
+placeholders reading `—` on values that had been on screen a second earlier.
+Permanently, for an ended session. Reported from a screenshot of exactly that.
+
+**Why only the selected choice.** `chipValue` names a value through the *choice*
+that carries it, never through the raw value — without one the model chip reads
+`openai/gpt-5` instead of `GPT-5`, and for a model it mines the choice's
+description to split `Opus 5 · Best for…` into a name. So a memory of the value
+alone restores the chip and draws it wrong, which is worse than a dash. Keeping the
+whole option is not available either: opencode publishes **362** models on one
+control, and a few hundred sessions of that is megabytes into a budget shared with
+the credential. The count is asserted at one rather than "contains the right one".
+
+**⚠ Why this is safe here and refused on the daemon.** `registry.ts` declines to
+persist `agentConfig` because a stale copy would put a control on screen that the
+next `set_config_option` rejects. That argument is about a value the daemon would
+**send**. Nothing read back here is ever sent: `drawnControls` answers `stale` for
+a memory and `Select` is `disabled` under it, so the worst case is a chip naming a
+model that has since gone — readable, and one live answer away from being
+corrected. The two are the same data with opposite blast radii.
+
+**What it deliberately does not do.** It restores the *reading*, not the setting. A
+daemon restart still brings a session back on the agent's own defaults, because
+nothing persists the chosen values where the daemon can replay them — Q3.618. And
+it is one browser: the same session on a phone still draws dashes until its agent
+speaks.
+
+**Bounds and hygiene.** 120 sessions, most recently seen first — two machines'
+worth of the 60-per-machine the rail draws at once — applied on **write**, because
+a read-time bound answers differently as storage fills and makes a chip appear on
+one load and not the next. Cleared on sign-out: a model name and an effort level
+are not secret, but they are a record of what somebody was doing, and leaving them
+for the next person to sign in on that browser is how a per-tab convenience becomes
+a disclosure. Every read and write is in a `try`/`catch` on `rail.ts`'s grounds.
+
+**Where it lives.** `src/configMemory.ts`, the fourth module of `attach.ts`'s shape
+and the first that touches storage — module state with subscribers, in `src/`
+because `store.ts` imports it. Deliberately not a field on the store: `store.ts`
+writes to no storage at all, and that is a property worth keeping.
+
+**Status.** Current
+
+#### Q3.618 — Why the chosen settings still do not survive a daemon restart
+
+**Question.** Q3.617 restores what the controls *read*. Why not what they *are*?
+
+**Decision.** Not built. The daemon keeps `agentConfigState` in memory and the
+`sessions` table has no column for it, so a restart brings every session back on the
+agent's own defaults.
+
+**What already works, and is easy to mistake for this.** A **parked** session keeps
+its config — `doStop` clears it for every reason except `parked` — so its chips stay
+live and tappable, a tap is recorded by `recordDeferredConfig` rather than refused,
+and the wake replays it. That path is intact. What does not survive is a restart of
+the daemon *process*, which is what a deploy is.
+
+**What it would take.** A nullable `agent_config_json` column holding the chosen
+values only, on `ultracode`'s precedent — additive, `SCHEMA_VERSION` unmoved, a
+column an older daemon never selects — written only from `setConfigOption`, which is
+where `ultracodeChoice` is written and is what keeps an agent's *own* mode switch
+out of it. claude switches to `plan` from its own hook, so writing on
+`onConfigChanged` instead would remember a mode nobody chose. `resume` already calls
+`restoreConfig(wanted)`, which compares against the returning agent and skips what
+it no longer offers, so it is already tolerant of a stale bag.
+
+**Why it is not done anyway.** Two costs that are the feature's, not the
+implementation's. A choice is re-applied to a binary that may have moved —
+`deploy/agents.sh` refreshes the CLIs daily, and a model id that survived with a
+changed meaning is re-applied silently. And a restart stops being honest: a session
+resumed a week later comes back on choices made in a conversation that is long
+finished, including an expensive model, with nothing on screen saying why.
+
+**Status.** Deliberate non-goal for now
+
+#### Q3.619 — Machines in the reader's order, without a schema change
+
+**Question.** The tabs are ordered by name and `web-shell.md` says they must be:
+*"never by reachability or activity. Both flicker on the four-second poll, and a
+list reordering under a travelling thumb is the one thing this cannot do."*
+Somebody wants to drag them.
+
+**Decision.** The rule is **narrowed rather than reversed**, on its own stated
+reason. Flicker is what it bans — and an order a person set does not flicker: it
+moves when they move it and at no other moment. So ordering by `reach` or by
+activity stays banned outright, and `reemoat.machineOrder` is merged over the name
+sort in `sessionGroups`.
+
+**Per device, in `localStorage`**, the `reemoat.railWidth` / `reemoat.machineTab`
+idiom. Owner's call: the control plane has nowhere to put a per-user order and a
+schema migration is not worth one. The cost is real and stated — the order set on
+a desktop is not the order on a phone.
+
+**`orderMachines`' shape is `orderStrip`'s, not `sessions.rank`'s**, and the
+argument is `agentStrip.ts`'s read one list over: **which list gains members on the
+commonest act in the product.** Starting a session is what this app is *for*, so
+that list grows constantly and a new row must have an honest position with nothing
+stored — hence a position clock, `rankBetween`, and a re-space when two instants
+collide. Machines are added by hand, a handful per account, over months, so a
+whole-list rewrite per reorder costs nothing and removes every way the arithmetic
+can be wrong. There is also no server to hold a rank, and the list is bounded
+(`MAX_MACHINE_ORDER`) where sessions are not.
+
+**Measurement — and it is the whole of this entry.** `sessionGroups` is memoised on
+the *identity* of `state.sessions` and `state.machines`, and a reorder replaces
+neither. Without `machineOrderVersion()` in that guard a drop repaints nothing
+until the four-second poll happens to hand over a new `machines` array: a drag that
+does nothing for four seconds and then jumps. **Every assertion written off the
+source text stays green with the guard reverted** — verified by reverting it — so
+the pair is driven against the real function instead, and three cases go red.
+
+**One deliberate divergence from the agent strip.** `nextOrder` keeps a slot for a
+machine the fleet no longer holds, where `MachineAgentsSection` drops such an entry
+on the next reorder. `selectedMachineIn` already promises revoke-and-restore for
+the selected *tab*; an order that forgot while the tab remembered would be two
+halves of one preference disagreeing.
+
+**Alternatives tried and taken back out.** A per-machine `rank` in `localStorage` —
+the same information with strictly more ways to disagree with itself. Sorting
+inside `machineTabs` — two axes, two sorts, and it falsifies that function's own
+docblock and the assertion under it in the same edit.
+
+**Status.** Current. `machine-gestures.md` is the area.
+
+#### Q3.620 — Two horizontal gestures on one phone screen, and what actually keeps them apart
+
+**Question.** The owner asked for the chats' drag on the machines *and* a Telegram
+flick between machines. On a phone that is a horizontal drag on a 44px tab strip
+and a horizontal flick on the list under it — two gestures on one axis on one
+screen, which is the conflation every gesture rule here exists to prevent.
+
+**Decision.** Both are built, and what separates them is **which box the finger
+landed in**. `machineDrag`'s listeners are on the *strip's* scroller and
+`machineSwipe`'s are on the *list's*; the two are siblings, so a touch beginning on
+a tab never reaches the swipe and one beginning on the list never reaches the drag.
+That is structural rather than lucky, and it is worth writing down because the
+plan for this work assumed a predicate would be needed and budgeted for one.
+
+**What did need a predicate** is `rowDrag`, which owns the same scroller as the
+swipe: a finger held still for 400ms and *then* moved sideways is a real case. So
+the swipe refuses while `rowDrag.armed()` — a **ref, not React state**, because the
+frame in which a hold arms is the frame in which React has not been told.
+
+**And one number does the rest.** `SWIPE_SLOP` is `PRESS_SLOP`, imported rather
+than re-typed. `rowDrag` abandons an unarmed hold past 8px *in any direction*, and
+that number's own docblock puts it below the ~10px at which engines commit a pan —
+so at the one distance where the swipe decides it is horizontal, the hold is
+already dead **and** the scroller has not taken the touch. Two copies drifting
+apart is a hold and a swipe both live on one finger.
+
+**Alternative taken back out.** Reordering on the desktop column only, with the
+phone inheriting the result. It was the recommendation until the surfaces were
+looked at: the collision it avoided does not exist, and it would have left a
+phone-only reader unable to reorder at all.
+
+**Status.** Current.
+
+#### Q3.621 — Swiping between machines without a breakpoint in JavaScript
+
+**Question.** `SessionBrowser` is mounted **twice** — once in `AppShell`'s
+`hidden … lg:flex` aside and once in `App.tsx`'s `lg:hidden` div — and `AppShell`
+forbids a second source of truth for the width: *"CSS already knows the width, and
+a second source of truth for it is how a resized window ends up rendering a rail
+that is not there."* A swipe handler inside that component mounts on the desktop
+rail too.
+
+**Decision.** A **per-gesture read of the DOM's own answer**, at `touchstart` and
+never cached: the swipe runs only where the `lg:hidden` tab strip **is laid out**,
+`offsetParent !== null`.
+
+Three things make that not a breakpoint in disguise. It is **not state** — nothing
+stored, subscribed to or re-rendered, so it cannot disagree with CSS and cannot go
+stale; it is layout the browser computed from the same two class strings the
+breakpoint has always been answered in. It is **exclusive in both directions** —
+each mount's ancestor is `display: none` at the other width, so exactly one can
+ever swipe and neither knows which one it is. And it is **semantic rather than
+dimensional**: the gesture moves the *tab strip's* selection, so it runs where the
+tab strip is the control on screen, and the width is only how that is decided.
+
+**The rest of the contract.** `touchstart`, non-passive through
+`addEventListener` because React attaches `onTouchMove` passively; horizontal
+intent decided once as `|dx| > |dy| * 1.5` past the slop and never reconsidered;
+`event.cancelable === false` treated as vertical, because the engine has already
+claimed the pan and arguing with it is how a swipe becomes a stutter;
+`preventDefault` only after the axis resolves, never on `touchstart`, which would
+kill the tap that opens a session. A **second guard that does not share that
+cause** — `[touch-action:pan-y_pinch-zoom]`, one arbitrary value rather than two
+utilities, since two setting one property are resolved by Tailwind's emission order
+rather than by the class string, and `pinch-zoom` kept because `pan-y` alone takes
+zoom off the whole rail. A 24px dead zone at each viewport edge, because
+`overscroll-behavior: none` stops the rubber-band and says nothing about the
+platform's own Back. Clamped at both ends, never wrapping.
+
+⚠ **`prefers-reduced-motion` is read in the hook**, not left to `index.css`. That
+file's blanket block zeroes `transition-duration` on `*`, which makes the settle
+free — and **cannot reach a transform written per frame from JavaScript**. It is
+the same hole that file records having had three times. Under reduced motion no
+transform is written and the swipe still commits: reduced motion removes the
+motion, not the feature.
+
+**Alternatives taken back out.** A view transition — `announce`/`data-nav` is for a
+screen *replacing* another one, and a tab change has no history entry and no
+`navMove` value. Telegram's true two-page turn — it needs both machines' lists
+mounted at once, on a rail whose whole design is one machine at a time
+(`waitingFloor` exists because of it). What ships is a nudge and a swap.
+
+**Status.** Current.
+
+
+#### Q3.622 — A panel that lines up, against a panel that has nothing to line up with
+
+**Question.** The background panel's head and the conversation's header drew two
+`border-b` rules that read as one line across the window, and they were 4px apart:
+`SHEET_HEAD` is `min-h-14` (56px) while the header was content-derived —
+`pt-safe` (8) plus a title-and-subtitle block plus `pb-3` (12) — which lands at 60.
+
+**The first fix was a number, and it worked.** `min-h-15` on both, held together by
+a driver because Tailwind scans source text and `xl:${CONST}` generates no class.
+The two rules met.
+
+**The second fix was a shape, and it is the one that shipped.** The panel stands
+12px off every edge at `xl` — rounded, bordered, lifted. ⭐ **The difference is not
+quality, it is what each closes.** The number answers *"why do these two lines not
+match"*, and has to be re-answered on every later change to either row. The inset
+card **abolishes the question**: a card that touches nothing lines up with nothing,
+so there is no edge to meet and nothing to keep in step. A construction that
+removes a question is cheaper than an answer that must be maintained, and the flush
+edges were what made the question askable at all — the panel was claiming the same
+edges as the window's own chrome.
+
+⚠ **Moving it inward was not free, and the trap is in the other axis.**
+`TASK_PANEL_GUTTER` reserved *exactly* the panel's width. Docking 12px off the
+right edge moves the panel's **left** edge 12px further in, so a gutter still equal
+to the width is overlapped by precisely that much — the card sliding over the last
+12px of every line of the conversation. The gutter is 26.75rem now and the driver
+asserts the **subtraction** (`gutter − width === inset`, the inset read from the
+class) where it used to assert equality. Verified on the built artifact: 26.75 −
+26 = 0.75 = `right-3`.
+
+**Two more decisions in the same pass.** The header's `border-b` is gone and its
+ground went `bg-surface/95` from `/85`: what separates a sticky bar from the
+conversation scrolling behind it is that the conversation stops being *legible* as
+it passes, which is the ground's job — at 85 the words read through, and the rule
+was doing work the fill should have done. Removing the rule without strengthening
+the ground is the edit that looks tidy and is a regression, so the two are asserted
+together. And the panel's own name went `text-lg` → `text-xs`: a sub-window may not
+announce itself more loudly than the screen it is inside (`SessionTitle` is
+`text-sm`), asserted as the comparison on this app's scale rather than as either
+number.
+
+⚠ **The top inset had to be written as one expression.** `pt-safe` plus a `pt-*`
+is a **silent no-op** — `.pt-safe` is unlayered and beats any padding utility on
+the same element — so the floor moves inside the safe-area expression itself. The
+third surface in this app to meet that cascade fact, after `Composer.tsx`'s
+`.pb-safe` and the rail's footer; it is now swept rather than remembered.
+
+**Status.** Current.
+
+#### Q3.623 — `working` is optimistic, and the optimism is at the reading
+
+**Question.** Between pressing Enter and the next snapshot there is a gap — a round
+trip at best, and on a session coming back from being released the whole of a
+restart. The conversation said nothing at all for that time while the message sat
+visibly in it.
+
+**Decision.** `working` ORs the pending echo:
+`echo !== null || (snapshot !== null && showsWorking(snapshot))`. This interface is
+already optimistic about exactly that fact one line up — the message itself is
+drawn from the echo before the log confirms it — and the foot staying silent beside
+a message plainly on its way was the one place it was not.
+
+⚠ **The predicate may not learn about echoes.** `wire.ts`'s four are pure functions
+over *what the daemon said*, asserted as a partition, and an echo is not something
+the daemon said. So the `||` belongs at the call site and nowhere else; both halves
+are asserted — that the reading ORs it, and that `wire.ts` still has no idea the
+module exists.
+
+**It costs nothing when it is wrong.** `clearEcho` runs on a refused send, and
+`landEcho`/`settleEcho` clear it when the log catches up, so the optimistic arm is
+bounded by the same lifetime the drawn message already has. And it tells no lie the
+Stop control could act on: `canCancelTurn` is read from the snapshot and stays
+false until there is a turn to cancel.
+
+**Status.** Current.
+
+
+#### Q3.624 — a selected machine is a filled mark, not a band beside the chats
+
+**Question.** The machine folders wore `bg-raised` across the whole tile when
+selected. The session list beside them marks its own selected row with the same
+token, full-bleed and square. Reported as the folder column looking crooked.
+
+**Decision.** The band goes; the 28px mark is filled instead —
+`bg-fg text-ink` against `bg-raised text-muted`, with the label's weight as the
+second signal. The tile paints nothing when selected.
+
+**The two bands could never line up, and that is arithmetic.** Both column heads
+agree at 56px — `pt-safe` 8 + `min-h-11` 44 + `pb-1` 4 against `pt-safe` 8 + a 40px
+search field + `pb-2` 8 — and the rhythms then diverge: a machine tile is `py-2` 16
++ a 28px mark + `gap-1` 4 + an 18px label = 66px, a session row at `lg` is 64px with
+a subline and 42px without, and the list's first child is a folder header rather
+than a row. Two identical grey rectangles at unrelated offsets across one pixel of
+`border-edge`. Pinning the offsets would leave the next change to either rhythm to
+reopen it; removing the band removes the edge there is nothing left to line up with.
+
+⚠ **This narrows Q3.209 rather than repealing it.** That says `bg-fg` is the
+affirmative action inside a decision *and nothing else*, and the practised rule was
+already shorter than the sentence: `TabUnderline` is 2px of it arguing its own
+licence in as many words, the rail bell is a dot with `ring-2 ring-ink`, the blocked
+count is `bg-fg text-ink` at 16px in three places, and `Composer` ships a 32×32
+circle of it. The measurement that makes this a narrowing and not a hole is **area**:
+the mark is 28×28 = 784px², *smaller* than that circle and a quarter of the ≈100×32
+pill Q3.209 was written about. Barred as a pill-sized fill, licensed as a mark.
+
+⚠ **`transition-colors` on the chip is not decoration.** `.tap` is on the
+`<button>`, `transition` is not an inherited property, and the chip is a child
+`<span>` — so the old band cross-faded only because it was painted on the `.tap`
+element. Moving the fill inward without it makes the selection snap. It may not be
+`transition-transform`, which `webcheck` bans in that file outright because `.tap`'s
+unlayered `transition` shorthand swallows it.
+
+**The badge gained `ring-2 ring-ink`.** The count and the mark are both `bg-fg` and
+overlap by two pixels at the corner, so on the one machine that most needs reading —
+selected, with work blocked on it — they grew as a single shape.
+
+**Status.** Current.
+
+
+#### Q3.625 — the background panel collapses rather than vanishing, and every width it can be drawn at owes an exit
+
+**Question.** `TaskPanel` closed with `if (!open) return null` — one frame, on a
+phone, under a sheet that had taken 260ms to arrive. Its scrim had no animation in
+*either* direction.
+
+**Decision.** `useLeaving` in `ui/leaving.ts`, extracted from `MenuDrawer` where
+every part of it was measured: the render-derived transition, `animationend` as the
+clock, the constant as a backstop that may not be deleted, and `shown` rather than
+`open` feeding both the mount guard and `useDismissible`.
+
+**Extracted at the second caller rather than the third.** `AgentConfigBar` keeps a
+panel past dismissal too and is deliberately not a caller: its `open` is its own
+`useState`, flipped from inside the exit timer, so `shown === open` throughout and
+its render reads `{open && !leaving && (`, which a driver pins as a literal. A
+different shape wearing the same word. What made extraction right here is that the
+drawer's version carries four separately measured paragraphs, and a hand-written
+second copy inherits none of them.
+
+⚠ **`md:animate-none` had to go, and it had been correct.** It cancels
+`animate-sheet`, whose `translateY(100%)` would otherwise slide the docked card up
+from the bottom of the screen — right while a close was an unmount in one frame, and
+exactly wrong once `animationend` is the clock: an element carrying `animation: none`
+fires none, so at `md` and above the exit falls to the backstop and leaves a **fully
+visible** card over the conversation for its whole duration. `--animate-rise-out` is
+the mirror of a keyframe that already existed, the card arrives on `rise` as
+`SHEET_PANEL` does, and the cancellation moved onto the *other arm* — written beside
+a standing `md:animate-none` it would be two utilities setting one property in one
+variant, resolved by Tailwind's emission order rather than by the class string.
+
+**`TASK_PANEL_EXIT_MS` is the longer of the two exits** — 260 for the sheet against
+140 for the card — because a backstop under either cuts a movement off mid-slide.
+Read out of the stylesheet by the driver, since neither file can see the other's
+number, and declared beside this panel's own class strings rather than imported:
+three surfaces, three constants, each asserted against its own token.
+
+**Status.** Current.
+
+
+#### Q3.626 — the background panel is draggable, on the rail's own separator
+
+**Question.** The panel docked at two fixed widths. The rail beside it has had a
+drag handle since Q3.5's neighbourhood, and the owner asked for the same thing here
+— reusing the module rather than writing a second one.
+
+**Decision.** `ui/paneWidth.ts` holds the mechanism; `rail.ts` and `taskWidth.ts`
+are two instantiations; `ui/PaneHandle.tsx` is `RailHandle` generalised, with `sign`
+as the only difference between a pane left of its handle and one right of it.
+
+⚠ **`rail.ts` keeps its filename and all four exported names.** `webcheck` drives
+`clampRailWidth`, `railWidth`, `setRailWidth` and `subscribeRail` by name *and*
+behaviourally, so keeping them made this four lines instead of a rewrite of nine
+assertions that are about the rail rather than about where its code lives.
+
+**`null` is a state, and only this pane has one.** The rail has one width at every
+size, so unset and default are the same rail. The panel has two declared widths,
+because the conversation's width is not monotonic in the window's — at `lg` the rail
+arrives and takes 384px, so the 20rem panel leaves 308px at 1024, narrower than the
+436px the same panel leaves at 768 with no rail at all. So `index.css` declares 20rem and steps
+to 26rem at `xl`, `null` means *the stylesheet decides*, and a chosen width is
+written onto `documentElement`, which beats both media blocks. A double-click resets
+by **removing** the key: a stored default is still a chosen width and would go on
+beating both blocks, leaving the `xl` step present, declared, correct and
+unreachable.
+
+⚠ **Both declarations are unlayered `:root` and `@media` adds no specificity.** The
+wide one wins because it comes **later** and for no other reason — this stylesheet's
+own post-mortem, where every phone animation once shipped onto the desktop for
+exactly that. The order is asserted, not just the values.
+
+**The gutter retires a class of defect rather than an instance.** It was
+`md:w-[20rem] xl:w-[26rem]` against `md:pr-[20.75rem] xl:pr-[26.75rem]`, two literals
+in two files four hundred lines apart with a driver walking both lists. It is
+`md:pr-[calc(var(--task-w)+0.75rem)]` now — the same property plus the 12px the card
+stands off the edge — so there is no second copy left to drift. What is still written
+twice is that 12px, three `*-3` utilities and a `+ 0.75rem`, and *that* is asserted
+as an equality.
+
+⚠ **Four defects found by review after it worked, each measured, each invisible to
+the gate.** (a) A press that never moved committed a width — `pointerup` fires for a
+zero-pixel press, and on this pane that turns *the stylesheet decides* into a number
+that beats both declared widths: a click at 1400px stored 416, after which a 900px
+window drew 416 where the stylesheet says 320. (b) Unmounting mid-drag is **not** a
+`pointercancel`: measured on Chrome 151, removing the element holding the capture
+delivers no `pointerup`, no `pointercancel` and not even `lostpointercapture`, so the
+property this gesture wrote outlived the pane and `reset()` — `committed` already
+being `unset` — was an early-returning no-op. (c) The separator was live under a
+finger: `md` is 768 and `lg` is 1024, which every tablet clears, so both handles were
+tabbable, capture-taking `touch-action: none` strips across the edge of the
+conversation with no visible appearance at all. `[@media(pointer:fine)]` is nested
+**inside** the width variant, never written as a competing
+`[@media(pointer:coarse)]:hidden` — two `display` utilities in one string are
+resolved by Tailwind's emission order. (d) `aria-valuenow` is required on a focusable
+separator and, unlike `slider`, the spec names no repair, so engines synthesised a
+value outside the range this element advertised.
+
+⚠ **And the two panes' bounds are independent with their sum bounded nowhere.**
+`TASK_MAX` 512 against `RAIL_MAX` 552, both one gesture away at any width. Measured
+at a 1024px window with both at their maxima: the conversation's content box floored
+at **0px**, its title measured 0px wide, and the card lay 52px over the session rail.
+The clamp is in CSS because CSS is the side that knows the viewport —
+`--task-fit: min(var(--task-w), calc(var(--task-room) - 15.75rem))`, a 240px floor
+plus the 12px gap, with `--task-room` being the window less the rail where the rail
+exists. `--task-w` stays the stored number the separator writes and announces;
+`--task-fit` is what is spent. `var()` substitutes lazily, which is why it can be
+declared above what it depends on.
+
+**One DOM read, once per gesture, and it is not a breakpoint.**
+`getComputedStyle(documentElement)` for the pane's own property is CSS *answering*
+rather than JavaScript deciding — `machineSwipe`'s `offsetParent` licence. Without
+it the first drag at `xl` begins from the `md` default and jumps 96px under the
+pointer. A JavaScript clamp against the available width was refused outright:
+`webcheck` bans `matchMedia`/`innerWidth`/`clientWidth` in that file by literal, and
+it would be a second source of truth for a width CSS already knows. Which does not
+mean there is no clamp — it means the clamp is in CSS, where the viewport is, and
+`--task-fit` is what the panel and the gutter actually spend. The cost is stated as
+a floor rather than a width: the conversation keeps 240px at every size, and past
+that a drag stops widening the card rather than eating the text.
+
+**Status.** Current.
+
+
+#### Q3.627 — nothing in this client changes the mouse
+
+**Question.** `index.css` carried an `@layer base` rule setting `pointer` on every
+enabled `button`, every `[role="button"]` and the app's one `<summary>` — restored
+on purpose after Tailwind v4's preflight dropped it. The owner's instruction: no
+module in the UI may change the mouse from its default, and nothing should make it
+react.
+
+**Decision.** The rule is deleted, with the two classes that only existed to cancel
+it (`disabled:cursor-default` in `EventList`, `cursor-pointer` on `AgentsPanel`'s
+`<summary>`) and the `col-resize` on the resize separators. The assertion is
+**inverted rather than removed**: a sweep over `packages/web/src` with an allow-list
+that is empty.
+
+**The old argument was true and it is not the decision.** It ran: with the accent
+colour gone an unfilled button is drawn in the colour of what it sits on, so the
+pointer's shape is the one cue separating a control from a caption on a desktop.
+What answers instead is the control rather than the pointer — `.tap`'s 120ms colour
+transition, `hover:bg-raised` on rows, `hover:text-fg` on captions, and the
+separators' line thickening. **The cost is real and unassertable**: a
+`text-muted hover:text-fg` caption at rest is identified by nothing, and no driver
+here can see that.
+
+⚠ **`col-resize` on `PaneHandle` is the one exception, and it went out and came
+back within a day.** It was swept with everything else on the reading that the
+instruction was about the mouse rather than about which control earns an exemption;
+the owner reversed it, and the reversal is the better answer. The ban is about a
+*pointer* shape claiming that ordinary text is pressable — an arrow pair over the
+1px division between two panes is the opposite of that, and it is the only thing
+saying an 8px transparent strip can be dragged at all, on a control whose whole
+appearance at rest is a line that lights on hover. The allow-list holds one
+**path**, and one entry covers both separators because they are one component; a
+second file wearing a cursor fails the check rather than arriving as a precedent.
+
+⚠ **Four wrong states satisfy a regex on `index.css` alone** — unlayered, other
+whitespace, a utility in a `.tsx`, which Tailwind emits from *source text* and never
+puts in the stylesheet, and `style={{ cursor: … }}`, the form React code actually
+reaches for, which the first pattern could not see at all and which `AppShell`
+already has an object literal ready for on the very element whose shape was deleted.
+
+⚠ **And the class spelling may not appear in a comment either, which is the sharper
+half.** This repository keeps its history in its docblocks, so the natural way to
+record a deleted utility is to name it — and Tailwind's scanner does not strip
+comments and reads every file under `packages/web`, `scripts/` included. Measured:
+the driver's own positive control, written as a literal, compiled the banned rule
+into **both** shipped stylesheets while printing `ok` — the one thing the ban exists
+to keep out of the artefact, put there by the check asserting it was gone. So the
+utility arm runs a second time over raw source across both authored trees, while the
+declaration arm stays comment-stripped so the record itself is not an offender. Both
+build outputs are now free of any cursor rule, which is the property that was
+actually wanted and was never the one being checked. So it is a sweep over the one file list that takes
+`.css` as well as `.tsx`; `srcFiles()` is `.ts`/`.tsx` only, and a check built on it
+would leave the stylesheet unread. And the declaration arm is anchored on a cursor
+**value**: `wire.ts` declares `cursor: number` for the transcript's byte cursor, so
+a bare colon makes the wire protocol an offender — a red gate whose only available
+repair is loosening the pattern. A control asserts it does not match that line.
+
+**Anchors are out of scope and cannot be in it.** The eight real `<a>` elements take
+the hand from every user-agent stylesheet, and reclaiming it would mean this app
+setting a cursor on the only elements whose shape is universally understood.
+
+**Status.** Current.
+
+
+#### Q3.628 — the menu drawer loses its weight and its ✕, and the build line becomes a stamp
+
+**Question.** Three owner calls on one panel: the bold type reads badly, the ✕ is
+not wanted, and the version at the foot should be centred and quieter.
+
+**Decision.** `DRAWER_ROW` drops `font-medium` and the head's name drops
+`font-semibold`; the `IconButton` goes; the build line takes `text-center` and
+`text-faint`.
+
+**The weight was doing a third job nobody asked for.** What its paragraphs argued
+was the *size* and the *ink* — `text-sm` rather than `text-xs`, the glyph in the
+same colour as the words, against a first draft that read as a list of footnotes —
+and neither of those moved. Three rows and a name in a 352px panel are the only
+things in it, so emphasis had nothing to separate them from. `DRAWER_HEADING` keeps
+its `font-semibold`: that is the small-caps idiom rather than emphasis, and
+`webcheck.typography.ts` runs a census over every site that spends it, so a sweep
+for `font-` across the file would have demanded deleting the one weight with an
+argument. The check reads the two class strings separately for that reason.
+
+⚠ **The ✕ closed a real gap and removing it reopens it, narrowly.** This panel
+registers `"sheet"`, so `inert` lands on `#root` and the rows behind it are
+precisely what cannot be reached; the scrim is an `aria-hidden` `<div>`, by the
+same reasoning that keeps it from being a phantom tab stop. What is left is Escape
+(the topmost layer's, through `useDismissible`), a tap on the scrim, the hamburger
+that opened it, and Android's Back through `App`'s `usePathname()` effect. That
+leaves a screen-reader user on **iOS** with none of them: VoiceOver's navigation
+skips an `aria-hidden` element and iOS has no Back. One platform and one assistive
+technology — stated rather than argued away, and cheap to reverse, which is why it
+is a line at the code rather than a refusal.
+
+⚠ **The remedy, if it is ever wanted, is the ✕ and not a `tabIndex` on the scrim.**
+`overlay.ts` states that `inert` is the mechanism and a hand-rolled trap may not be
+added, `Sheet` argues that a viewport-sized button is a phantom tab stop, and
+`webcheck` pins `tabIndex` absent from this file.
+
+**The assertion is inverted rather than deleted, and it keeps its positive
+control.** It pins the ✕ absent **and** that the two remaining mechanisms are
+wired — a negative alone would go green over a drawer nobody can close at all. The
+control stays because this is now a check *asserting* an absence, which is the one
+shape where a pattern that stopped matching is indistinguishable from success.
+
+**The build line reverses a tone its own docblock argued.** That read `text-muted`
+*"because it is the only place in the app that answers what am I running, so it is
+written to be read once rather than to disappear"*. The premise is no longer true —
+Settings → Account carries the build, one row above this line in the same panel —
+so what is left is a footer stamp, which is what `faint` is for. Centred for the
+same reason: left-aligned it reads as a fourth row of the list above it, and
+nothing else in this panel is centred.
+
+**Status.** Current.
+
+
+#### Q3.629 — the background panel's head is spelled out at 44px, and composing the sheet's could not have shortened it
+
+**Question.** The panel's header band was reported as too tall. It composed
+`SHEET_HEAD` — 56px — around a `text-xs` `<h2>` and a 24px `sm` button.
+
+**Decision.** `PANEL_HEAD`, written out in `TaskPanel.tsx`, `min-h-11`. Every other
+token is `SHEET_HEAD`'s in `SHEET_HEAD`'s order.
+
+⚠ **The obvious repair is a measured no-op.** `` `${SHEET_HEAD} min-h-11` `` puts
+two `min-h-*` utilities on one element, resolved by the stylesheet's emission order
+rather than by the class string — and that order is **numeric and ascending**:
+`.min-h-9`, `.min-h-10`, `.min-h-11`, `.min-h-12`, `.min-h-14` in that sequence
+inside one layer. So composition can only ever make a head *taller*. `h-10` is no
+escape (a `min-height` of 56 beats a `height` of 40 by the box algorithm, not the
+cascade), and `min-h-[2.75rem]` is the same bet in a less legible form: there is
+not one arbitrary `min-h` in the shipped sheet to say where one would land.
+
+⚠ **Inverting `SHEET_HEAD` to 44 and letting `Sheet` compose 56 back on would
+work, and is refused for exactly that reason.** Upward composition is the direction
+emission order permits, so it is the smaller diff and it lands — and it makes a
+head's height depend on which of two numbers is larger, which is the trap
+`BUTTON_SIZE` and `DRAWER_HEADING` each spent a docblock closing. It also hands the
+next person who wants a shorter sheet head a revert that fails in silence.
+
+**44 rather than 40, and the two pixels are the reason.** Every `ICON_BUTTON_SIZE`
+entry reaches this app's 44px floor through a positioned `::after` that costs no
+layout, and the `<aside>` carries `overflow-hidden`, which clips hit-testing along
+with paint — so at 40 the ✕ is a 42px target with a 2px strip gone off the top and
+nothing on screen to explain it. At 44 it ends flush bar a corner lens the card's
+own 16px radius takes, at the point furthest from the glyph. It still takes a fifth
+off the band.
+
+**Two sentences in that file were already false and went with it.** One claimed
+`sm:px-5` "arrives with the constant", which stopped being true the moment the row
+was spelled out; the other said "the scroller and **the foot** above carry it too",
+and there is no foot — it was deleted when the standing output sentence went. The
+head's inset is now differenced against the scroller's by a driver rather than
+asserted in prose.
+
+**Status.** Current.
+
+
+#### Q3.630 — the finished band folds, and clearing it hides rather than destroys
+
+**Question.** A workflow that ended while the panel was open appeared to stay put.
+The owner asked for finished tasks to be remembered, folded by default, and
+clearable — with `Finished` itself not disappearing.
+
+**Decision.** `FinishedSection` in `TaskPanel.tsx`, seeded closed, with a control
+that records which rows this reader is done with in `finishedTasks.ts`.
+
+**Why it looked stuck, which is not what it was.** `taskSections` moved the row to
+`Completed` correctly all along. But `PanelBody` names a section only when
+something else is populated — Claude Code's own suppression rule — so with one
+workflow and no delegations the finished card kept its place, its size and its
+position, with its chip changed from `(running)` to `(done)` and **nothing on
+screen saying the word**. A band that folds is what says the row moved.
+
+⚠ **Seeded closed *in the section*, never in `TaskPanel`.** The panel renders
+nothing while `!shown`, so everything below `PanelBody` unmounts on every close and
+a `useState(false)` there is read afresh on every open — the whole of "collapsed by
+default", with nothing stored and nothing to keep in step. `TaskPanel` itself is
+rendered unconditionally by `EventList`, so the same line in its body would survive
+every close and every session switch. One character apart in a diff, opposite in
+behaviour, so the driver reads the position rather than the value.
+
+⚠ **The clear hides and destroys nothing.** The daemon has exactly one
+background-task route and it is *stop*: no forget, no delete, no clear. It keeps
+terminal rows on purpose so this panel can answer *did that build finish*. So
+another tab still sees them, and so does this one after a reload.
+
+⚠ **In memory rather than `localStorage`, which is the opposite call from
+`groups.ts`'s collapse set and the same one `echo.ts` made.** Those persist a
+*preference about this client*; this is a *claim about rows on a remote machine*,
+and three things destroy those with nothing to tell the browser — a daemon restart
+(`asyncTasks` is a `Map` with nothing in SQLite), the agent's own `/clear`, and
+eviction at the cap. A stored set would go on hiding ids that can never be seen
+again, and would hide a freshly spawned row that reused one.
+
+⚠ **The write replaces rather than unions, and that is the prune.** Stored as
+exactly what is finished at that instant, the set is always a subset of what the
+wire holds and is still the union of everything ever cleared — a row cleared an
+hour ago is finished now too. Driven rather than read off the source: every source
+pin stays green over a union.
+
+⚠ **The hidden set never reaches `tasks.ts`.** Pushed in there, `taskSections`
+would answer no `Completed` section once everything was cleared and the band would
+vanish with it — the owner's rule reversed by a change that reads as a
+simplification. It is a display filter, and the wire's partition stays the wire's.
+
+**The count is not Claude Code's, and a reader arriving from it will misread
+ours.** Theirs is a lifetime list for a run. Ours is how many finished rows the
+daemon is still holding: capped with live rows at `MAX_TRACKED_ASYNC_TASKS`, lossy
+oldest-finished-first, gone on a restart. Raising the cap is a wire decision rather
+than a client one — 32 tasks is already around 93 KB per snapshot.
+
+**One gap is left open rather than closed, because closing it reverses Q3.622.**
+Once nothing is outstanding, `footSays` answers `null`, `WaitingFoot` is not drawn,
+and `onOpenTasks` has no other call site — so the panel cannot be *re*opened to
+read the record it now keeps. Everything here works while something is running and
+is unreachable when nothing is. The repair is one condition at `EventList`'s foot,
+and it is an owner call: the line that used to stand there was removed on the
+grounds that work which is over is not information anybody asked for twice.
+
+**Status.** Current.
+
+
+#### Q3.631 — the background panel gets a second door, and the band exists when nothing does
+
+**Question.** Q3.630 left a gap open and named it: once nothing is outstanding
+`footSays` answers `null`, `WaitingFoot` is not drawn, and `onOpenTasks` had exactly
+one call site — so the record the panel had just learned to keep became unreachable
+at the moment it became worth reading. The owner closed it: a `Background tasks` row
+in a kebab at the top right, opening the panel **even when there are no tasks**, and
+showing only Finished in that state.
+
+**Decision.** `SessionMenu` gains an optional `onOpenTasks`, the row is drawn first
+when it is passed, and the `lg:hidden` wrapper around the header's kebab is gone.
+`taskSections` stops emitting `Completed`; `PanelBody` draws the band itself.
+
+**Why the door is a menu row and not a line at the foot.** Q3.622 removed
+`N background tasks finished` on the owner's call — work that is over is not
+information anybody asked for twice — and the obvious repair was to put it back
+under another name, which `footSays`' own ⚠ refuses in advance. A kebab row is a
+door without a standing sentence, so the removal stands and the record is reachable.
+
+⚠ **The `lg:hidden` wrapper was right for every row it was about and wrong for the
+one that arrived.** Rename, Pin, Resume and Stop are all on the session's row in the
+rail, so above `lg` the menu was a second door to a door. `Background tasks` is on
+no rail row at any width, which is precisely not a duplicate — the premise the old
+argument rested on. The four are **kept** at `lg` rather than hidden inside the
+menu: one control holding different things at different widths is a harder thing to
+explain than a duplicate one glance away, and gating them would leave
+`label="Session actions"` false at the width where the menu holds no session action.
+
+⚠ **Three prose sites rested on that wrapper and nothing enforced it.** A sweep of
+every driver for `lg:hidden` returns three hits, none about this header — so the
+change would have gone green with `SessionView`'s docblock and **two** paragraphs in
+`Header.tsx` left lying, the second of which argues the 44px kebab from "neither
+control exists above `lg`, so there is no pointer for a large hover ground to look
+heavy to". There is one now. The size stays: it is a prop, and choosing a second by
+width is a breakpoint answered in JavaScript, which `AppShell` forbids. The pair is
+asserted in both directions now.
+
+⚠ **`taskSections` had to stop emitting the band, and that finally makes its own
+docblock true.** It claimed *"`Agents` sits above these and `Completed` below them,
+and neither is a member … Both are drawn by the panel around this list"* while
+pushing `Completed` into the array. A function returning a section per thing that
+exists cannot return one for a thing that does not, so `sections` now means *how
+many live kinds* — all any caller read it for — and the band is `PanelBody`'s.
+
+⚠ **One `bands` count replaced two proxies, and this is the half that would have
+broken in silence.** The `Agents` heading was gated on `sections.length > 0` and a
+live section's own on `sections.length > 1`, both standing in for *is there more
+than one band on screen* — true while `Completed` was inside `sections`, false the
+moment it moved out. Left alone, a lone live kind beside the band goes unlabelled
+and `Agents` disappears whenever the band is the only other thing. **No driver
+anywhere reads `aria-labelledby`, `"Agents"` or `PanelHeading`**, so nothing would
+have said a word.
+
+⚠ **The band is gated on `reports`, which narrows the owner's words on purpose.**
+`Completed (0)` is a count, and a count of finished background work is an **answer**.
+claude is the one agent of the four with a lifecycle on the wire; kimi backgrounds
+shells and says nothing, codex leaves a PTY behind an ordinary tool call, opencode
+cannot background at all. Ungated, the panel would assert zero finished on three of
+them in the same breath as the sentence above it disclaiming any such knowledge. So
+*even if there are none* holds on claude and not on the other three — stated rather
+than discovered. The `||` arm is belt: a non-reporting agent's list is always empty.
+
+**Nothing to show is a heading, not a fold** — and that is a repair rather than a
+concession. It was already reachable before the band became unconditional: clearing
+the list leaves `tasks.length > 0` with `shown.length === 0`, so the control stayed
+pressable over an empty body, verbatim the defect `EventList` names as *a disclosure
+whose body is empty is a control that lies about having something behind it*. One
+condition covers the cleared session and the one that never backgrounded anything,
+and there is no clear control beside a zero: an act with no object.
+
+**Status.** Current.
+
+
+#### Q3.632 — a disclosure fold is the height of its own words, and the finished band is a tone quieter
+
+**Question.** `Completed (1)` was a 44px band beside a 24px trash, reported as far
+too tall — *"especially against the delete button on the right"* — and too loud.
+
+**Decision.** Both of this app's caps-band folds drop `min-h-11`:
+`FinishedSection`'s and `bits.tsx`'s `Disclosure`. The finished band takes
+`FINISHED_HEADING`, the idiom at `text-faint`.
+
+⚠ **The 44px each fold carried was argued, and the argument was about the wrong
+thing.** `Disclosure`'s was pinned with a reason: *"`min-h-11` is on the fold
+because it opens the list of capabilities somebody is about to grant a stranger's
+code, and this app is used from a phone."* That reasons from the **importance of
+what is behind the fold**, and a tap floor is not about importance — it is about
+what a mis-tap costs. Opening a fold costs one tap to undo. **Approving the grant
+does not**, and that control is untouched and still swept by the three-file check.
+`FinishedSection`'s carried the same shape of reason and falls to the same answer.
+
+**The app's own rule was already on this side.** `web-shell.md`: the floor is
+scoped to controls that *answer an agent* — the ask, permission and elicitation
+cards — and *"a blanket rule would be false: most `tap`/`press` strings do not reach
+44px and are right not to"*. The example it gave for that was "the 32px machine
+pills", which have not existed since the machine tabs became `min-h-11`; the folds
+replace it, so the sentence names something live again.
+
+⚠ **`` `${SETTINGS_HEADING} text-faint` `` is a silent no-op**, two members of one
+colour family on one element being resolved by Tailwind's alphabetical emission
+rather than by the string. So the band's tone is spelled out, which makes it the
+**sixth** site of the caps idiom outside the three constants —
+`webcheck.typography.ts` carries a *census* rather than a count, so a sixth reddens
+it as *found, not listed* until the table names it. That census caught this file's
+prose at *four* once and has now caught it at *five*.
+
+⚠ **Both arms of the band spend it.** The fold and the empty heading are one band
+in two states, and a tone on only one of them changes its colour at the moment it
+empties — which is the one moment nothing about it has changed. `PanelHeading`
+therefore takes the whole class string rather than a colour to append, defaulted so
+every live section is unchanged.
+
+**Status.** Current.
+
+
+#### Q3.633 — an absent answer was drawn as a negative one: the panel's empty state is three-valued
+
+**Question.** Reported from a screenshot: after a restart the background panel says
+*"This agent doesn't report background work, so nothing here can say whether any is
+running"* — about claude, which reports. And the finished band is not drawn either.
+
+**Decision.** `backgroundReporting` in `tasks.ts`, three-valued —
+`reports` / `silent` / `unasked` — with the three sentences as a `Record` over the
+union. `TaskPanel` draws `BACKGROUND_EMPTY[reporting]`.
+
+**The conflation, exactly.** `reportsBackgroundTasks` is read off the attached
+agent's declared capability, and `doStop` sets it to `false` — which a daemon
+restart reaches for every session, and which parking reaches on its own. The
+daemon's docblock is explicit that `false` means *"nobody asked"*. The client turned
+that into a sentence asserting a property **of the agent**, at a moment when there
+is no agent. An absent answer drawn as a negative one, which is the failure this
+repository names in `transcriptNotice`, in `machineSubline` and in the
+`reportsBackgroundTasks` field's own reason for existing — and it was reached
+through that very field.
+
+⚠ **`hasLiveAgent` already existed for this question and is reused rather than
+re-derived.** Its docblock: *"the statuses in which an agent process exists and can
+be asked something … the question every answer about the agent's controls turns
+on."* `stopping` is excluded there on a measurement — `doStop` fans a snapshot out
+both before and after it empties the agent's state, so a frame can legitimately read
+`stopping` with nothing on it — and inheriting that is the whole reason not to test
+`isTerminal` here.
+
+⚠ **A missing row lands in the `unasked` arm, and the arm's sentence is worded to
+be true of both.** `Transcript` looks its row up independently of the screen's own
+guard, so `null` is reachable. *Nothing has asked* covers a row that has not arrived
+exactly as well as a session with no agent; what it may never become is a fourth arm
+saying something about an agent nothing has heard from. The driver pins that the arm
+names no agent at all.
+
+**The sentence answers the question somebody in that state is holding.** Not *why is
+this empty* but *where did my finished list go*: `asyncTasks` is a `Map` in the
+daemon's memory with nothing in SQLite, and `doStop` empties it, so background work
+is not kept across a restart. Q3.630 recorded that as a bound; this is the first
+place it is said to a reader.
+
+⚠ **`unasked` is barred from the finished band along with `silent`**, and for the
+same reason rather than by analogy: after a restart the daemon's rows are gone, so
+`Completed (0)` would say *nothing finished* about a session that may have finished
+ten things before the process died. The band returns the moment an agent does, which
+is when the count means something again.
+
+**The old pair of assertions was a shape check and stayed green over all of this.**
+It sliced 200 characters before the claim and looked for a `reports ?` in them —
+every arm can be wrong with that shape intact, and the missing arm was not
+expressible in it at all. The partition is driven now. The slice went with it: an
+`indexOf` answering -1 feeds `slice(-201, -1)`, which hands back the last 200 bytes
+of the file rather than nothing, so deleting the sentence would have turned the
+check green over a message about something else entirely.
+
+**Status.** Current.
+
+
+#### Q3.634 — a target grown with a pseudo-element grows hover with it, and the ✕ lit up 10px early
+
+**Question.** Reported off the background-tasks panel: *the ✕ clearly has a bigger
+trigger zone than itself — the mouse is not on the ✕ yet and it is already
+highlighted.*
+
+**Decision.** Every hit-target `::after` in `packages/web` is gated on
+`[@media(pointer:coarse)]:` — `ICON_BUTTON_SIZE.sm`, `.nav`, the shared
+`TAP_GROW_Y`, and the three hand-rolled copies in `EventList.tsx` and `Toast.tsx`.
+
+**The mechanism, and why no CSS separates the two.** A generated box is rendered as
+a child box of its originating element and takes part in hit testing; `:hover`
+matches an element while the pointer designates *any* of its boxes, generated ones
+included. So the pad's reach and the hover trigger's reach are one rectangle by
+construction. `ICON_BUTTON_SIZE.sm` is 24px of ink inside `after:-inset-2.5`, and
+its docblock priced that growth as *"it costs no layout anywhere"* and stopped
+there — the hover cost was written down nowhere in this repository. In
+`TaskPanel`'s `min-h-11` head a 24px box centred leaves exactly 10px above and
+below, so the pad filled the band's whole height and the glyph lit while the
+pointer was still over the title beside it, faded in over `.tap`'s 120ms so that it
+read as *already* highlighted rather than as a mis-aim.
+
+**Why the repair is free rather than a trade.** Tailwind wraps every `hover:`
+utility in `@media (hover: hover)`, verified in the shipped sheet. So the leak
+exists only where a mouse exists and the pad is only needed where a thumb does; the
+two conditions are complementary and both were unconditional. A fine pointer now
+gets the ink and nothing more — 24px for `sm`, still above WCAG 2.5.8's 24×24 — and
+a hover that starts at the edge of what is drawn. A coarse pointer is untouched.
+
+⚠ **The spelling is the raw `[@media(pointer:coarse)]:`, not a `@custom-variant`.**
+`BUTTON_SIZE.sm` already ships that escape one table up in the same file and about
+twenty call sites use it; a declared variant would be a second spelling of one idea.
+It is written out per class rather than composed from a constant because Tailwind
+scans source for whole class names — a prefix built by interpolation emits nothing
+at all, silently, and the target simply stops existing on a phone.
+
+⚠ **The three assertions this needed were all green over the change.**
+`NAMES_ITS_44`, `GROWS_TO_44` and `REACHES_44` are substring matches, and
+`after:-inset-2.5` is still a substring of the gated spelling — so all three would
+have gone on passing while asserting nothing. They are anchored on the prefix now,
+and a fourth check reads `TAP_GROW_Y`'s own value class by class, since three table
+entries and five call sites reach 44px through that one string. The widest leak was
+the one no sweep could see: the transcript's outstanding-tasks row is `h-5 w-full`,
+so it fails the square pattern `GROWS_TO_44` is applied through, and it was lighting
+`hover:bg-raised` from 24px below itself.
+
+⚠ **And the first repair made the same mistake one layer down.** The new check over
+`TAP_GROW_Y`'s own value tested `!token.includes("]:after:")` — the *shape* of an
+arbitrary variant rather than the gate. Respelling the media query
+`[@media(pointer:fine)]:`, the exact inversion of the property the check is named
+for, left every assertion green while the pad stopped existing under a thumb on the
+composer's Send and Stop, the config bar's chips and drag handle, the sheet's grab
+bar and the transcript's download button. Found by mutating the constant and
+re-running the driver's own logic — a plain variant (`lg:`, `hover:`) *was* caught,
+which is what made the hole look closed. The gate is spelled once now and both
+halves of the section spend that literal.
+
+#### Q3.635 — the failure count was drawn in the fill reserved for the message you wrote
+
+**Question.** Reported off a screenshot of the transcript: *`1 failed` needs to be
+dimmer, it blends with the message.*
+
+**Decision.** It is not a `Badge` any more — `text-2xs text-muted`, no fill, no
+radius, no padding, no `font-medium`.
+
+**It was literally the message bubble's rectangle, shrunk.** `Badge`'s plain tone is
+`bg-raised text-muted`; `UserBubble` is `bg-raised px-3.5 py-2.5`; the transcript
+pane is `bg-surface`. Same token, same strength, same ground, three inches apart. It
+also contradicted the rule written 400 lines further down its own file —
+`ToolCall`'s frame note says machinery is unfilled and that what a failure keeps is
+*"two signals, neither of them a rectangle"* — and it survived the pass that took
+the border off that row and the semibold off its title by being the one element
+nobody looked at.
+
+**`text-muted` rather than `text-faint`, and that is a ranking rather than a
+preference.** Q3.106 records that `N approved` is *"quieter than the failure badge
+because being asked and having answered is not a thing that needs anybody's
+attention again"*, and `N approved` is `text-faint`. Landing the failure count on
+the same token would erase an argued ordering while fixing a fill. `text-muted` is
+dimmer than the row's own `text-fg/85`, which is what was asked for, and still
+strictly louder than the settled fact one fold down.
+
+**The alignment half needed no change and is recorded so it is not re-reported.**
+The run row is `w-full` inside the same `${COLUMN} px-4` container the bubble is in,
+so both boxes end at the same pixel. What was 4px inboard was the row's *content*,
+from the `px-1` every machinery row carries so `hover:bg-raised` has room inside a
+`rounded-md` corner. Removing the fill takes the visible offset from 10px to 4px,
+and 4px between two runs of text is invisible where 4px between two painted greys is
+not. `-mr-1` on the trailing span was considered and refused: the live `Dot` takes
+that slot whenever a run is running, so the fix would have to be applied twice and
+would look wrong on hover.
+
+⚠ **Three prose sites moved with it**, because two of them asserted the badge by
+name: Q3.105's *"a bare `ToolCall` still opens itself on failure, and the difference
+is exactly that — it has no badge"*, its copy in `.claude/rules/web-transcript.md`,
+and Q3.106 above. What those rules rest on is that the collapsed row **states the
+number**, never what shape it states it in.
+
+#### Q3.636 — the bubble owns the selection, and its row does not
+
+**Question.** Reported off a screenshot of a one-line message: *the text selects
+crookedly, and there are two line breaks in it for some reason.*
+
+**Decision.** `select-none` on `UserBubble`'s row **and** on the bubble box, with
+`select-text` on a wrapper *inside* the padding. The edges of the selectable block
+are the whole property.
+
+⚠ **The first decision here was `select-text` on the bubble box, and it was
+measured — afterwards — to do nothing at all.** It shipped, the owner looked at it
+and asked why the selection still looked the same, and the answer was that it did.
+What was missing was an engine: the reasoning was checked against Chromium, where
+there is no band to remove, and the report came from WebKit.
+
+**What WebKit actually does.** It fills the selection gap down to the bottom of the
+block the selection ends in. The row is full-column-width — it has to be, since
+`justify-end` on a full-width box is what right-aligns a `w-fit` bubble — and the
+bubble is padded, so with the selectable block being the padded box the fill took
+the bubble's own `py-2.5` with it. That is the band, and it is ~11px rather than the
+whole conversation's width.
+
+**Measured in a real `WKWebView`, driving `NSEvent` drags rather than a `Range`**,
+because a programmatic range ignores `user-select` by specification and paints
+identically with the fix and without it — which is why the first repair looked
+verified and was not. A small AppKit harness snapshots the view before and after,
+diffs the pixels, and reports the bounding box of what changed:
+
+| gesture | no classes | `select-text` on the box | on the inner content |
+|---|---|---|---|
+| drag past the end of the text | 255×31 | 255×31 | **248×20** |
+| triple-click | 255×31 | 255×31 | **255×20** |
+
+20px is the line box and nothing more. `display: inline` on the paragraph was
+measured too and painted 31 — so what decides this is where the selectable block's
+edges are, never what the paragraph is.
+
+⚠ **What is left is the engine's, and it was chased to the end before being left.**
+Asked why a two-line message still highlights "empty space", the same harness was
+given a per-line fill profile (rows with the same right edge collapsed into bands)
+and run over the real gestures. The block is 584 wide where its longest line is
+553, because a `w-fit` box whose text *wraps* takes the available width, not the
+longest line.
+
+| gesture | bands |
+|---|---|
+| drag ending inside the message | `20px@584w 22px@40w` — last line tight, copy clean |
+| triple-click | `42px@584w` — every line to the block edge |
+| drag continuing into the next message | `42px@584w` |
+
+So the shipped arrangement is already right for an ordinary drag: the last line
+stops at the text. The other two select the paragraph's *block end*, and filling a
+line to the block edge is what every engine does with an intermediate line — it is
+how the line break shows as included. Eight CSS arrangements were measured against
+it (`select-text` on the box, on the wrapper, on the `<p>`; `w-fit` on the wrapper;
+`display: inline` on the paragraph and on the wrapper; none) and every one painted
+`42px@584w`. A JS clamp was measured too — narrowing the range to the last text
+node, guarded so a selection reaching another message is untouched — and the log
+shows it applying and then WebKit **putting it back**: `fire clamped fire
+end-outside:P`. On `mouseup` rather than `selectionchange` it survives for the drag
+that was already tight and loses to the engine for the triple-click. It is not
+shipped: it buys nothing the engine allows to stand.
+
+⚠ **And the last of it is the engine, measured across both.** Shown a screenshot of
+Claude Code's own transcript, where every line stops at its own text, the same page
+was rendered in Chromium and the pixels diffed the same way:
+
+| engine | intermediate line | last line |
+|---|---|---|
+| Blink (Chromium, and Electron apps) | `22px@549w` — tight to the text | `22px@40w` tight |
+| WebKit (`packages/native`, iOS) | `20px@584w` — to the block's content edge | `22px@40w` tight |
+
+LayoutNG dropped selection-gap painting; WebKit still fills an intermediate line to
+the block edge, which is how a soft wrap shows as included. The screenshot it was
+compared against was `claude.ai` in Chrome — no Claude desktop app is installed on
+that machine and `LSHandlers` gives `com.google.chrome` for `https` — so the client
+it is being measured against is **not solving this**: it is on the engine that does
+not have it. Opened in that same Chrome, this app's own bubble measures `22px@549w`,
+i.e. the thing being asked for, already. **The comparison is
+between two engines, not between two stylesheets** — one DOM, one selection, 35px
+of difference. Eleven arrangements were measured against it in WebKit (`select-text`
+on the box / the wrapper / the `<p>`, `w-fit`, `display: inline` on either,
+`white-space: pre-wrap`, `width: fit-content`, `width: max-content`, no classes, and
+the JS clamp) and every one painted `@584w`.
+
+**What is left to spend is layout, and it is declined here.** The gap is 31px
+because the bubble sits at its `max-w` rather than at its longest wrapped line — a
+fact visible with nothing selected. Hugging it would remove most of the fill in
+WebKit, and there is no CSS that does it for wrapped text: it needs measuring the
+line box in JavaScript, per message, on a transcript holding hundreds. That is the
+thing `AppShell` refuses by name — *"a resized window must not be able to render a
+layout that is not there"* — so it is written down here rather than built.
+
+⚠ **The copy keeps one `\n` in WebKit under both gestures**, and that is the block
+boundary the serializer writes. It is not the *two* breaks the report named: those
+were measured in Chromium, where the serializer writes `\n\n` for the same
+paragraph. Two engines, two answers, one DOM — and the report was read against the
+wrong one. Removing the last newline would mean a message being a single inline
+chain, which a message with two paragraphs cannot be, so it stays.
+
+**What was ruled out.** Nothing on the write side is implicated: `Composer` sends
+`text.trim()`, `recordPrompt` appends it verbatim, the stored event for the reported
+message carries no newline at all, and remark drops trailing blank lines anyway — so
+a `trim()` anywhere would have fixed nothing. Swapping the `<p>` for a `<div>` was
+proposed and declined twice over: the measurement says block-ness rather than the
+tag is what produces the second break, so it would not work, and a second component
+map would leave Q7.86's `img`/anchor guard asserting a map that no longer renders
+one of the two tones — the untrusted one.
+
+⚠ **`select-text` is not belt and braces.** Without it the bubble is not selectable
+at all, which is worse than the bug. `webcheck` reads the class strings off
+`Bubble.tsx` with a floor — the two elements have to be found before anything is
+judged — and asserts three things rather than two: that neither the row nor the
+padded box is selectable, that `select-text` is **not** on the padded box, and that
+something inside it carries it. The middle row is the load-bearing one: putting the
+class back on the box is the repair that looks right, reads right, and was measured
+to do nothing.
+
+**The only prior judgement here refuses a static `select-none`** — `SessionBrowser`'s
+drag row carries one *only while a row is moving*, because *"putting it on the list
+unconditionally would take selection away from the rail permanently to fix a state
+that lasts a second"*. This is the other case, and the docblock says so at the code:
+what loses selection is a gutter with nothing in it, the content is handed straight
+back one element down, and the state it fixes is every selection anybody makes.
+
+⚠ **The half of this that read "the fill is the engine's and the page cannot move
+it" is wrong, and Q3.638 is where it was disproved.** What no `select-*` placement
+changes, one property does: a block WebKit treats as a *selection root* paints no
+gaps at all. The three assertions above still stand and are still asserted — they
+are about which element is selectable, which is a different question from where
+the painting stops — but nothing here should be read as saying the fill had to be
+lived with.
+
+#### Q3.637 — the bubble is sized to the text it ended up holding, and that is a layout value written from JavaScript
+
+**Question.** A message bubble sits 31px wider than its longest line. Asked as
+*"why is empty space selected too"*, because that is where it is loudest — WebKit
+fills a selection's intermediate line to the block's content edge, so those pixels
+paint blue. Q3.636 established the fill is the engine's. This is the 31px.
+
+**Decision.** `ui/hug.ts`: measure the lines a bubble drew and set its width to the
+widest of them plus its chrome. One shared `ResizeObserver`, one batched pass a
+frame. Measured in WebKit on the shipped DOM, the selection's intermediate line
+goes from `584w` to `554w` against a longest line of 545.
+
+**There is no CSS for it, and that was checked rather than assumed.**
+`width: fit-content` is `min(max-content, available)`, and text that *wraps* has a
+max-content wider than available — so the box takes the available width and stays
+there. `max-content`, `min-content`, `white-space: pre-wrap` and `text-wrap: pretty`
+were each measured and changed nothing. `text-wrap: balance` was the only one that
+moved anything and moved it the wrong way: it evens the lines (`22px@309w` in place
+of `40w`) while the first line still fills to `584w`, and engines only balance short
+blocks.
+
+**The cost is measured, and the shape of the code is the cost.** 300 bubbles, the
+same code both ways:
+
+| | batched | interleaved |
+|---|---|---|
+| first pass | **1.6ms** | 25.7ms |
+| after a width change | **3.1ms** | 29.5ms |
+| a pass where nothing moved | **0.8ms** | — |
+
+Interleaving — read a bubble, write it, read the next — costs sixteen times as much
+for the same answer, because each write forces a layout before the next read. The
+frame budget is 16.7ms, which is what makes this affordable while somebody drags the
+rail rather than only at rest. So the three passes are an asserted property: every
+box is reset, then every width is computed, then every width is written.
+
+⚠ **The reset is half of that and not a tidiness.** A bubble still carrying last
+pass's width is measured *at* that width, so its text re-wraps inside it and the
+next answer is narrower again — a box that walks itself down to one word. Clearing
+first puts every box back on the width its `max-w-*` gives it, which is the only
+width the measurement means anything at. `hugWidth` rounds **up** for the same
+reason at sub-pixel scale.
+
+⚠ **`getClientRects()` answers a rect per *element* as well as per line box**, so
+one range over the wrapper returns the wrapper's own border box — `584x44` beside
+the `545x17` and `40x17` that are the lines. Taking the widest of that set hands
+the box its own width back: measured, the first attempt wrote 612 and nothing
+moved. `lineWidths` walks text nodes, which cannot pick up an element box whatever
+the markdown turned into.
+
+**What it refuses to touch.** `huggable` declines a bubble holding an attachment
+list or an image — those are laid out to the box rather than to a line, so trimming
+would clip them — and one holding a `pre` or a `table`, which scroll horizontally
+and therefore report the width they are *allowed* rather than the width they want,
+which would feed the box its own cap back.
+
+⚠ **It writes a layout value from JavaScript, which `AppShell` refuses by name** —
+*"a resized window must not be able to render a layout that is not there"*. The
+exception is taken deliberately and is narrow on three counts, and it is recorded
+here rather than argued at the code. There is no CSS that does it. It **degrades to
+the rendering that shipped before**: a bubble this never reaches keeps its `max-w-*`
+width, which is exactly today. And it decides no *layout* — which columns exist, at
+what width, and whether a rail is drawn are all still CSS's; this trims one box
+inside a layout CSS has already chosen. What would break the rule is the opposite
+direction — reading a width in JavaScript to decide *which* arrangement to draw —
+and nothing here does that.
+
+⚠ **The reason this was *asked* has since been answered elsewhere, and the module
+is kept anyway.** It was reported through the selection, and Q3.638 now stops the
+engine painting any gap at all — so no width here decides anything a selection can
+see. What is left is the 31px themselves: a grey box 31px wider than the sentence
+inside it, with nothing selected. That is a typographic judgement rather than a
+workaround, and it is the one this entry should be read as making from here on.
+
+#### Q3.638 — only the text is selected, and one property is the whole of it
+
+**Question.** Reported four times, the last one *after* the zero-width `::after`
+below had shipped: *"выделяется не ровно текст, а пробелы между ним"*, with a
+screenshot of a three-line bubble whose middle line painted to the box edge.
+Q3.636 established that WebKit fills a selection's line to the block's content
+edge and that no `select-*` placement changes it; Q3.637 removed that for a bubble
+by sizing the box to its longest line; the `::after` ended the *last* line of a
+block. What none of the three touched is everything else: every line that is
+neither the longest nor the last, the vertical margin between two blocks, and the
+whole empty column beside a right-aligned bubble. A drag from the top of a
+conversation to the bottom painted one solid rectangle, `748px@900w`.
+
+**Decision.** `column-span: all`, on the markdown body, the user bubble and the
+transcript column — and on `pre`, `td` and `th` inside them. WebKit's
+`RenderBlock::isSelectionRoot` answers yes to a block whose `column-span` is
+`all`, and a **selection root paints no gaps at all**. Measured with real
+`NSEvent` drags in WKWebView on the shipped bundle, over a page carrying every
+markdown shape this app draws: one band before, and after it per-line bands with
+`-1w` — nothing painted — in every gap between them. The unselected page is
+byte-identical.
+
+**What the fill depends on, measured against controls rather than reasoned.** One
+DOM, one drag, one thing changed at a time between a selection root and the text:
+
+| between the root and the text | result |
+|---|---|
+| three more levels of plain `div` | no fill |
+| a block with horizontal padding | no fill |
+| a `w-fit` block narrower than the column | no fill |
+| a `display: flex` container | **fill is back** — `46px@199w` against `22px@199w 24px@51w` |
+
+So one placement could not do it. `UserBubble` hangs in a `flex justify-end` row,
+which is why it carries its own; the column carries one for the space *between*
+messages, which no message can reach; and the markdown body carries one so agent
+prose is covered wherever it is drawn, which is inside several flex rows.
+
+**`column-span` rather than the transform that was found first, and the difference
+is in another engine.** `isSelectionRoot` also answers yes to any transformed
+block, and in WebKit the two are indistinguishable — same band profile, same
+byte-identical idle page. But a transform also makes a **stacking context**, and a
+`td` inside one composites its `border-edge/60` against a different backdrop: one
+1px row under a markdown table's header moved `#E6E4E0` → `#ECEAE7` in Chromium
+153. `column-span: all` makes no stacking context and no containing block, and
+outside a multi-column container it lays nothing out differently — Chromium is
+byte-identical under it, idle *and* selected, and so is the copied string. Neither
+trigger is specified behaviour; this one costs nothing where it is ignored, which
+is the whole argument for preferring it. `webcheck` asserts the property by name,
+because "just use a transform" is the simplification this would attract.
+
+**The three descendants are an ablation.** Without them the code fence painted
+`60px@863w` and the table `65px@855w` instead of their lines. Nothing *above* the
+cells substitutes: `table`, `thead`, `tbody` and `tr` each leave the whole table
+filled. `li` and `blockquote` were in the list and came back out — with them
+removed the profile is unchanged, band for band.
+
+⚠ **What it cannot reach is an *anonymous* block.** `mdast-util-to-hast` unwraps a
+tight list item's paragraph, so a bullet with sub-bullets renders as
+`<li>text<ul>…</ul></li>` and the engine wraps the sentence in a box no selector
+names — `transform`, `overflow`, `contain`, `flow-root`, `display: inline-block`
+and `display: table` on the `li` were each measured and not one moved it, that
+line painting `22px@530w` where its text is 67px wide. `remarkListItemBlocks` is
+the other half of that one shape and fixes it in the parse instead: marking such
+an item `spread` puts the paragraph back, and the line paints `20px@67w`. It costs
+no pixels — `mdast-util-to-hast` reads looseness off the *list*, so every sibling
+item gains a `<p>` too, and `COMPONENTS.p` is `my-1.5 first:mt-0 last:mb-0`, which
+on a lone paragraph in a list item is no margin at all; two WKWebView renders of a
+page holding a tight list, a nested list and an ordered list compare byte for
+byte.
+
+**The zero-width `::after` is superseded rather than kept beside this.** It was one
+rule, `content: "\200B"` on every inline-level block inside the bubble's
+`select-text` wrapper, and it worked: `42px@554w` before, `20px@554w 22px@40w`
+after. What it could not do is any of the three cases above. The two agree
+everywhere it applied, so keeping both would be a second mechanism for a subset —
+and it was not free: it needed `> div` to stay off the attachment chips (an
+`li::after` on the bare class grows every chip 28px → 52px) and a
+`:not(:has(…))` to exclude an `li` whose last child is a block, which gains a whole
+line box from an `::after` — +24px on a nested list, a `<p>`, a heading and an
+`<hr>`, three of which the first version of that guard missed.
+
+⚠ **Its measurement table is kept, because it is what rules out the obvious
+repairs.** What that rule needed was a trailing inline box that *renders* and is
+*not in the selection*, and both halves were measured against controls:
+
+| trailing thing | result |
+|---|---|
+| a real, selectable zero-width space text node | `42px@554w` — not fixed |
+| a word joiner, selectable | `42px@554w` — not fixed |
+| `::after { content: "" }` | `42px@554w` — not fixed |
+| an empty `<span user-select:none>` | `42px@554w` — not fixed |
+| `<wbr>` | `42px@554w` — not fixed |
+| `<span user-select:none>` holding a real space | `42px@554w` — not fixed |
+| `<span user-select:none>` holding a zero-width space | **fixed** |
+| `::after { content: "\200B" }` | **fixed** |
+
+Neither "a zero-width box" nor "an unselectable pseudo-element" on its own — both
+at once. Anybody reaching for one of the first six is reaching for something
+measured and refuted.
+
+**Blink never had the defect** — it dropped selection-gap painting with LayoutNG —
+and is asserted untouched rather than assumed: the page renders byte-identically
+under this rule, idle and selected, and `getSelection().toString()` is the same
+string, measured with a real CDP drag on Chromium 153.
+
+#### Q3.639 — a person's own line breaks, and why the fix is at the parse
+
+**Question.** *"A line break in a message is erased on send."*
+
+**Decision.** It is not erased on send — nothing between the textarea and SQLite
+touches it. `remarkHardBreaks` in `ui/mdlist.ts`, applied to the **user's tone
+only**, turns a soft break into a `break` node.
+
+**The write path is clean and that is measured**, because it decides where the fix
+belongs. `Composer.tsx` sends `text.trim()`, which is ends-only; the prompt route
+validates and passes the string through; `recordPrompt` appends it verbatim. A real
+`prompt` row in `~/.reemoat/reemoat.db` still carries its newlines. What loses them
+is CommonMark: a single newline is a *soft* break, it survives into the HTML inside
+one `<p>`, and `white-space: normal` collapses it. Measured in WKWebView on the
+shipped bubble DOM: `"a\nb"` draws one 22px line box whose `innerText` is `"a b"`.
+
+**Why the user's tone only.** An agent writes CommonMark and is entitled to it;
+turning its soft wraps into hard breaks would rewrite prose this app has no
+business rewriting — the same rule `remarkListDelimiter` exists for, one node type
+over. ⚠ It does reach text an *adapter* emitted, since `session.ts` maps ACP's
+`user_message_chunk` to `role: "user"` and `EventList` draws it in this same
+bubble; that is the person's own sentence relayed back, and the two are required to
+look alike.
+
+⚠ **`white-space: pre-wrap` is the cheaper-looking fix and it is wrong, measured.**
+`mdast-util-to-hast` writes a `\n` text node after every `<br>`, so a *hard* break
+— what somebody who typed a space before Enter produces — draws as **two**: a 66px
+box reading `"a\n\nb"` against this fix's 44px and `"a\nb"`.
+
+⚠ **A second `COMPONENTS` map was declined again**, for the reason Q3.636 already
+gave: it would leave Q7.86's `img`/anchor guard asserting a map that no longer
+renders one of the two tones, and the tone it would stop covering is the untrusted
+one. What varies here is the *plugin list*, hoisted to module scope beside the
+existing one for the identity reason its own docblock gives, and passed down — so
+`COMPONENTS` is untouched and there is still exactly one of it.
+
+**What is deliberately unchanged.** A newline inside backticks still renders as a
+space: mdast's `code` and `inlineCode` carry a `value` and no `children`, so the
+walk cannot enter them, and that is CommonMark's own behaviour. Asserted rather
+than trusted, because it is the property that decides whether this plugin may be
+pointed at markdown at all. It is also a **render** fix rather than a send fix —
+every message already in the log gains its breaks back on the next paint.
 
 ## Deployment, packaging and code layout
 
@@ -21431,8 +24144,10 @@ screens down with it.
 
 **Status.** Current — amended when the plugin subsystem landed, and again when
 the migration's third print, sessions cut by a cap that used to be per-person,
-became `onPruned` (Q2.222): the prune reports through a callback of its own now,
-and the migration prints twice. The count is stated here rather than only in
+became `onPruned` (Q2.222): the prune reports through a callback of its own now.
+`sqlite.ts` prints **three** times again since — `migrateMachineKeysToOneLive`
+retires a racer's machine key, which is a repair rather than the v6 migration and
+destroys nothing, the private half staying on disk — and the count is here not only in
 `CLAUDE.md` because a rule with a number in it is a rule that goes stale
 silently, and this is the sentence people quote.
 
@@ -22491,6 +25206,672 @@ pass, `scripts/daemon.ts`'s two readers, the bootstrap's flag, call, `set_env` w
 its call line, dated usage and refusal, and the example's commented assignment.
 `daemoncheck` holds `agentChannelFrom`'s spellings and the flag's place in the
 argument list.
+
+### Q4.116 — Where the native shell goes, and why it is not a workspace member
+
+**Question.** `packages/native` is a directory under `packages/`, which
+`pnpm-workspace.yaml` globs. Should it be a member of the workspace like the other
+two?
+
+**Measured, 2026-09-14.** Three things depend on the answer, and none of them is
+visible from the package:
+
+- `deploy/bootstrap.sh` and `deploy/deploy.sh` both run `pnpm install
+  --frozen-lockfile` at the repository root, **unfiltered**, on every machine in the
+  fleet — and `INSTALL_DEPS` matches `^packages/[^/]+/package\.json$`, so a
+  native-only edit re-runs it. As a member, `@tauri-apps/cli` and the one platform
+  binary pnpm picks for the host would install on every daemon host, to be run by
+  none of them.
+- `RELAY_INPUTS` matches `^pnpm-lock\.yaml$`, because the lockfile decides which
+  `tsx` the relay runs. As a member, every Tauri bump would rewrite that file and
+  **recreate the relay container**, dropping every tunnel in the fleet for a change
+  no relay contains.
+- `deploy/docker/Dockerfile`'s own comment states the third: `--frozen-lockfile`
+  *"verifies pnpm-lock.yaml against **every** importer in pnpm-workspace.yaml
+  before it installs the filtered subset"*, and the build context is deny-first. As
+  a member it would be an importer the context cannot see, so the control plane's
+  image would stop building — caught only by `imagecheck`, a separate CI job needing
+  docker.
+
+**Decision.** Under `packages/` for the location and **excluded from the
+workspace** with `- '!packages/native'`. All three consequences disappear: the root
+lockfile never moves for it, the Dockerfile and `.dockerignore` need no line, and
+the fleet installs nothing extra.
+
+**Measured again, immediately.** Exclusion alone is not enough. pnpm resolves a
+workspace root by searching **upwards**, so `pnpm install` run inside
+`packages/native` found the repository's root, installed the three projects it lists
+and left this one with no `node_modules` at all — silently, exit 0, *"Already up to
+date"*. `packages/native/pnpm-workspace.yaml`, listing `'.'` and nothing else, is
+the marker that stops the walk.
+
+**Rejected.** A top-level `native/`, which is lower friction still — the root
+`tsconfig.json` would not reach it and `docscheck` would not walk it. Refused
+because the directories that driver walks do not include such a name, so every
+`paths:` glob in a rule scoped to it would be *dead* and fail — and its own docblock
+names a rule that silently never arrives as the one failure it has with no symptom.
+Widening that walk for one package is a change to what the whole corpus is;
+`packages/` already is that.
+
+**Cost, stated rather than hidden.** A second lockfile, a second `node_modules`,
+`pnpm --filter @reemoat/native` does not resolve (the root scripts say
+`pnpm --dir packages/native`), and `pnpm install` at the root does not set the
+package up. `pnpm nativecheck` asserts the exclusion, the inner root marker and the
+absence of an importer in the root lockfile, because one deleted line undoes all
+three.
+
+**Status.** Current.
+
+### Q4.117 — What a Rust build tree does to the documentation driver
+
+**Question.** `docscheck` walks a fixed list of source directories, `packages/`
+among them, reads every file whose extension is in its own list and concatenates
+them into one string that assertion 4 tests with `corpus.includes(symbol)`. A Rust
+package under `packages/` builds into `src-tauri/target/`. What does that do?
+
+**Measured, 2026-09-14.** `target/` is **2.9 GB** after a single `cargo check` on
+this checkout, thousands of `.json` fingerprint files among them — and `json` is in
+`SOURCE_EXT`. `SKIP_DIR` was `node_modules|dist|\.git|\.gstack`, so the walk
+descended into all of it.
+
+**Two failures, and the second is the serious one.** The driver stops being one —
+it is supposed to run offline in one process in seconds. And assertion 4 **inverts**:
+a corpus carrying every dependency's build metadata starts answering `true` for
+stale symbols, so the ratchet that catches a broken pointer in this file passes
+because the corpus grew rather than because the pointer was fixed. That is the
+`pnpm-lock.yaml` hazard the driver's own root-file docblock refuses, arriving by a
+different door and a thousand times larger.
+
+**Decision.** `SKIP_DIR` gains `target` and `gen`. `gen` by name rather than by
+path, because everything under `src-tauri/gen` is generated — `gen/schemas` on every
+compile, `gen/android` and `gen/apple` once by `tauri android init` / `tauri ios
+init` — and a rule scoped at generated output is a rule about something nobody
+edits. The cost is stated: a `paths:` glob naming anything under `gen` is a dead
+glob and fails, which is the correct answer to writing one.
+
+**And the extension list gains `rs` in the same edit, only because of it.**
+`src-tauri/src` is where the control-plane proxy, the keyring keying rule and the
+navigation rule live, so a decision citing one of their symbols has to be able to
+resolve. Added *after* the skip rather than before: a corpus that reached a Rust
+build tree would read every vendored crate in it.
+
+**Rejected.** `toml`. `Cargo.toml` is a manifest of dependency names and
+`Cargo.lock` is a larger one, which is the same hazard one file over.
+
+**Status.** Current. `pnpm nativecheck` asserts `SKIP_DIR` still names both trees
+and that the extension list still reads `rs` and still refuses `toml`, from the side
+that knows why each of the three is there.
+
+### Q4.118 — What the control plane serves a browser, now that the app is the client
+
+**Question.** The Reemoat app carries its own copy of the interface and never
+downloads one, so the control plane serving the whole product at `/` is a copy
+nobody in the ordinary path loads. But three flows *begin in a mail client* —
+`/confirm`, `/reset`, `/verify` — and one is the only remedy this service has for
+a forgotten password. What should a browser be able to reach?
+
+**Decision. The gate and nothing else.** Nine addresses: the five gate screens,
+the three legal documents, and `/app`, the page that hands somebody over to the
+app. Served by the **Authority itself** — same process, same port, same container
+— from `packages/web/dist-gate`. Every other path answers the error envelope,
+including `/` and every address belonging to the app.
+
+**⚠ Not an SPA fallback, and that is the whole shape of it.** The app's fallback
+answers *any* unrouted path with `index.html`; this one answers a **closed list**.
+So the product is not merely hidden behind routing — it is not in the image, and
+no request can produce it.
+
+**Two builds rather than two inputs to one, and the reason is chunking.**
+`rollupOptions.input = {app, gate}` emits shared chunks, so shipping only the gate
+would mean computing its reachable chunk set out of Vite's manifest and keeping
+that walk correct for ever. Two builds have no shared chunks to separate:
+`dist/` is the app, `dist-gate/` is the gate, and the Dockerfile copies one
+directory and can carry no part of the other by accident. What it costs is modules
+emitted twice — paid on disk, never on the wire, since no browser loads both.
+
+**Measured, 2026-09-15.** The gate is 270 kB (83 kB gzipped) against the app's
+380 kB entry chunk. Most of the remainder is React (~140 kB) and `store.ts`'s
+import closure, which `Gate` reaches through six calls; a gate decoupled from the
+store measures 194 kB. That refactor is **not done** — it is a size decision
+rather than a correctness one, and `Gate` is heavily asserted.
+
+⚠ **The bytes were never the argument.** What the split buys is that the image
+*cannot* serve the product, which is true at 270 kB and would be true at 370 kB.
+A route guard over the whole bundle would have given the smaller diff and none of
+the property.
+
+**`REEMOAT_CP_WEB` inverted and kept one meaning: serve the app too.** Unset, `0`,
+`false`, `no` — no app. A path — the app from there, which is a checkout or a
+mounted directory. `1`/`true`/`yes` named nothing once the image stopped carrying a
+bundle, and were recognised only so they could be answered with a sentence at
+startup rather than resolving to `<cwd>/1` and 404ing for ever — the trap Q1.641
+closed, wearing the opposite clothes.
+
+⚠ **Superseded by deletion (Q1.649): the variable is gone and so is the constant
+it turned on.** A browser holds no device key, so it cannot open an encrypted
+channel to a daemon — it could load the app and reach no machine at all, which is
+worse than not offering it. The two spellings named above are no longer written as
+code, because there is no code. `REEMOAT_CP_INSTALL` is the only variable of that
+shape left, and `deploycheck` reads its three-and-three off `main.ts` rather than
+comparing it against a second.
+
+**What `CP_IMAGE_INPUTS` does.** It keeps the whole `^packages/web/` prefix,
+because the gate is built from `packages/web/src` plus `gate.html`,
+`vite.gate.config.ts`, `tsconfig.json` and `public/`. ⚠ It was briefly narrowed to
+the manifest alone while the image carried no web build at all, and narrowing it
+again would be the green-deploy-of-stale-bytes failure this file records twice
+already: a pattern that misses a rebuild leaves `cp_image_fingerprint` inspecting
+an image that was never built.
+
+**Status.** Current. `.claude/rules/authority.md` is the rule; `imagecheck`
+asserts both halves from inside a real container, because every offline driver can
+be green over an image that ships the whole product behind a route guard.
+
+### Q4.119 — Where somebody goes after signing up, when there is no build to give them
+
+**Question.** Every gate flow ends by pointing at the app, because the app is the
+product. What does that page link to?
+
+**Decision. `REEMOAT_CP_APP_DOWNLOAD_URL`, env-only, unset by default**, published
+on `GET /v1/instance` as `app.download` — `REEMOAT_CP_MACHINES_OFFER_URL`'s shape
+and every one of its arguments. An address rather than a flag, because a client
+that renders a link cannot be told "there is one" and left to invent where it goes.
+
+**⚠ Unset is the truthful state and the one this repository ships in.** Nothing
+here publishes a signed build: `tauri.conf.json` has `signingIdentity: null`, no
+updater artifacts and `targets: ["app"]` with no `dmg`, the build is arm64-only,
+and `deploy/ci-release.sh` uploads no app asset [⚠ no longer true — Q4.123 built the verb; `RELEASE_APP_TARGETS` is what is still empty]. So the page says *this server
+does not publish a build* and points at building from source, which is true — and
+a compiled-in default would be a button that downloads nothing on every fork,
+under a licence that hands them the source.
+
+**Not a `SETTING_KEYS` row.** The catalogue is env-only because the CSP is built
+once and a database-owned value could name an origin the document refuses; this
+one has no such problem — a download is a navigation, not a `fetch` — and is
+env-only for the *offer's* reason instead: it names one particular build published
+by whoever runs this deployment, and `SETTING_KEYS` is drawn on the Server
+settings screen of every instance, forks included.
+
+⚠ **Publishing builds is separate work and has an ordering constraint.** The
+updater keypair must be generated **before** the first public build, or that build
+can never be updated in place by a later one that has it — `docs/NATIVE.md`
+carries it. Signing and notarization are the rest.
+
+**Status.** Current. The page draws the download where an address is configured
+and the source instruction where none is.
+
+### Q4.120 — The mailed link that arrives without its fragment
+
+**Question.** The token rides the URL fragment so it never reaches a server log
+and so a mail gateway that `GET`s every link learns nothing. Mail clients and link
+scanners also **rewrite** URLs, and the fragment is exactly the part they drop.
+What does somebody do then?
+
+**Decision. The gate screens take a pasted link or code.** `readPastedGateToken`
+accepts a whole URL, a bare `#t=…` fragment, or the token alone, and refuses
+everything else **locally** rather than sending a guess — `readGateToken`'s own
+rule one function over: somebody who pasted the wrong thing is told that, instead
+of being told their link did not work.
+
+**Why it is not a second way to do one thing.** The card it sits on already
+existed for exactly this state — `gateUsable(screen, null)` and
+`incompleteLinkRemedy` — and its only previous remedy was "ask for a new one",
+which sends somebody back through a flow whose *next* mail the same client will
+rewrite the same way. Pasting the original works on the first try.
+
+⚠ **A session token pasted by mistake is refused by shape.** `cpctl login` prints
+an `rs_`, and somebody with both in a terminal can reach for the wrong one;
+`isGateToken` admits `et_` and `pr_` only, so the value never leaves the page.
+
+**And `mail.public_url` is the operator's half of the same problem.**
+`mailConfigured` gained a non-blocking problem when it points at a control plane
+serving no gate — worded without the words *"is not set"*, because `isMissing`
+keys on those and a sentence carrying them would stop the instance sending mail at
+all over a value merely aimed at the wrong host. The comparison needs the API's own
+origin, which is a property of the *request*, so `GET /v1/admin/settings` is the
+one caller that can pass it and `cpctl admin settings` gets it for free.
+
+**Status.** Current.
+
+### Q4.121 — Where a fork's default server comes from, and why it is seeded rather than answered
+
+**Question.** The app opens on a server picker, which is right for a fork and wrong
+for a build somebody ships to their own users: they have to type an address they
+were not given. Where does a default come from, given that this repository must
+name nobody's control plane?
+
+**Decision.** `option_env!("REEMOAT_DEFAULT_SERVER")` in `config.rs`, **empty
+here**, and `nativecheck` asserts no file in the repository sets it — the rule
+`signingIdentity: null` already follows, applied to *which fleet a binary joins*.
+Environment at **compile** time rather than run time, because a bundle has no
+environment to read when Finder, Explorer or a desktop entry launches it.
+`build.rs` carries `cargo:rerun-if-env-changed` for the name, without which
+`option_env!` is baked into a cached object file and a fork that corrects its
+address gets a binary silently keeping the previous one.
+
+⚠ **A suggestion for a form field, and written down by nothing — which is the
+third answer, both of the first two having been built and taken back out.**
+
+*A fallback inside `read_server`* was the first, and is the worse of the two. The
+keyring account *is* the origin (`credential#<origin>`), and the only thing that
+ever erases a stale one is `host_set_server` erasing `previous`. So a build
+shipped with default A is signed in to A, the next build ships default B, the app
+silently talks to B — nobody having chosen anything — and `credential#A` is left
+in the operating system's keyring with **no code path able to reach it**. That is
+precisely the failure the `credential#<origin>` scheme exists to make impossible.
+
+*Seeding* — writing the default at first launch — fixed that and shipped for one
+draft, where it turned out to be wrong for a reason that has nothing to do with
+keyrings: **it skipped the setup screen.** With `server` non-null from the first
+frame, the app opened on the sign-in form and the address appeared there as a line
+with a *Change* link. The app had chosen somebody's fleet and mentioned it
+afterwards, in the place they were about to type a password. Rejected on sight by
+the owner (2026-09-16).
+
+So: **two functions, two questions.** `read_server` is *which fleet is this
+installation on* and stays the only reader `lib.rs` calls; `default_server` is
+*what shall the box open on*, crosses the bridge as its own `defaultServer` field,
+and is written down by nothing. **Continue is the act that adopts an address** —
+until somebody presses it there is no server, no keyring account and no fleet.
+A build can change what is confirmed; it cannot change what is skipped.
+`nativecheck` holds the two apart, because folding them is the edit that passes
+every other assertion in that file.
+
+**Rejected: a literal in the source.** It is one deployment's address in every
+fork's binary, which `docs/NATIVE.md` already refuses for the update endpoint on
+the same grounds — *where the software comes from* and *which fleet it joins* are
+two questions.
+
+**Rejected: `import.meta.env` on the page.** `native.ts` refuses build flags in
+that layer, `host_cp`'s base has to live in the host process where the page cannot
+reach it, and it is the same string the keyring account is built from. One
+authority, as `normalize_origin` already is.
+
+**What it costs.** A malformed value is no default: the box opens empty and the
+screen asks, which is this file's posture everywhere — an app that cannot start
+because of a value one form re-enters is the worse failure.
+`a_compiled_default_is_an_address` is vacuous here and loud in a fork, because
+`option_env!` is evaluated in that fork's own build: a typo fails their
+`cargo test` rather than shipping as no default at all.
+
+### Q4.122 — A crypto package four readers compile, in a repository with no build step
+
+**Question.** The app and the daemon have to agree byte-for-byte about a
+cryptographic protocol. `wire.ts` is a **hand mirror** of the daemon's event
+vocabulary and says so, which is right for a union whose drift costs an
+`undefined` on a screen. What does it cost for a handshake?
+
+**Decision. A workspace package, `packages/protocol`, consumed as source by four
+readers at once.** A mirrored interface that drifts costs a wrong word; a
+mirrored *cryptographic protocol* that drifts costs a session that either stops
+working or, far worse, quietly agrees on something weaker at one end. That is not
+a thing to keep two copies of.
+
+**The four readers, and what each demanded.** `tsx` and the root `tsconfig.json`
+are `NodeNext`, so relative imports carry `.js`. The root `tsc --noEmit` picks the
+package up through `include: ["packages/*/src/**/*.ts"]`. `packages/web` compiles
+with `moduleResolution: "bundler"`, which accepts those same `.js` specifiers.
+Vite resolves the workspace symlink through `exports`. So `package.json` points
+`types` and `exports` at `./src/index.ts` directly and there is no build step,
+which is the repository's own rule rather than a shortcut.
+
+**⚠ `types: []` in the web config is what decides the byte type.** With
+`@types/node` present, `setInterval` returns `NodeJS.Timeout` and `process`
+becomes a global in code that ships to a phone — so the web package excludes node
+types on purpose, and therefore **`packages/protocol` may not mention `Buffer`**.
+Every byte string in it is a `Uint8Array`. That is a real adjustment for the
+daemon side, which reaches for `Buffer` everywhere else, and it is the kind of
+thing that compiles on one side and fails on the other if it is not decided up
+front.
+
+**⚠ A consumer must not import `@noble/*` itself.** pnpm's strict layout means a
+dependency of this package is not resolvable from a package that merely depends on
+*it* — the same shape as the `jose` gotcha `token.ts` records — so reaching past
+this module for a primitive fails at run time rather than at the typecheck.
+`publicFromSecret` and `randomSecretKey` are exported for exactly this reason.
+Measured: `scripts/protocolcheck.ts` could not resolve `@noble/curves` until they
+were.
+
+**And the control plane does not import it.** `relaycheck` pins that
+`packages/control-plane/src/**` reaches the repository root for exactly five
+files, and the same five are what the Dockerfile COPYs into the runtime stage. The
+relay needs only the `reemoat-enc` *value*, which lives in
+`src/relay/protocol.ts` — already on that list. So the image carries no crypto,
+which is the honest shape for a process that holds no key.
+
+**The one packaging trap, found by reading rather than by a red build.**
+`packages/native/scripts/build-daemon.mjs` copies source trees and writes a
+`package.json` whose dependency versions come from the root manifest — so
+`@reemoat/protocol` would have been pinned to `0.9.0` for npm to fetch from a
+registry it is not on, and a `file:` specifier writes a symlink the payload's own
+symlink audit refuses. It is filtered out of the version map and copied into
+`node_modules/@reemoat/protocol` as a real directory instead, with `@noble/*`
+declared at the root so npm installs them flat.
+
+**Status.** Current. Q7.37 is the phase; `pnpm protocolcheck` is the driver.
+
+
+### Q4.123 — Which platforms carry a daemon inside them, and what a tag publishes
+
+**Question.** The app is a **client** and a **daemon host** in one binary — a Node
+runtime and a copy of `src/`, about 200 MB unpacked. Windows cannot stop a bundled
+daemon cleanly (Q4.116's neighbours; `docs/NATIVE.md`'s *What runs where*), a phone
+cannot run one at all, and on Linux `deploy/install.sh` already puts one under
+systemd. So: which builds carry it, how is that written down, and what does a tag
+do with the result?
+
+**Decision. macOS is the only full profile. Every other platform ships a client,
+declared in `tauri.<platform>.conf.json` and nowhere else.** Each overlay sets
+`externalBin` and `resources` to `null`, and Tauri merges them over the base
+through `json_patch::merge` — RFC 7386, where a `null` **deletes the key**.
+
+**Measured 2026-09-19, because the alternative was a cargo feature.** With
+`target/daemon` and `binaries/` both moved aside, `cargo check` fails inside
+`build.rs` with no overlay present and **succeeds** with a `tauri.macos.conf.json`
+carrying those two deletions. So `tauri-build` reads the overlays at *compile*
+time, not only at bundle time — which is what makes a client build a configuration
+file with no Rust in it. A feature gate would have been the answer if it did not,
+and would have cost a second shape for `cargo clippy`, `cargo test` and the command
+census to be correct about.
+
+**And on the desktop it needs no code change at all.** `Payload::locate` answers
+`None` when nothing is staged, `host_daemon_state` answers `"unsupported"`, and
+`store.ts` takes no arm on that status — the path written for a developer who
+forgot `pnpm native:stage`. ⚠ `host_local_daemon` is *not* part of it: it reads
+`~/.reemoat/daemon.json` and never depended on the payload, so a client build on
+Linux still reaches a daemon `install.sh` put there. What a client gives up is
+**starting** one, not finding one.
+
+**Why Linux is a client, which is the answer that looks inconsistent.** Nothing
+there is refused — a daemon runs on Linux and most of the fleet is Linux. What is
+not in the *bundle* is a second copy of one, on the platform where the ordinary
+way to get a daemon is the shell installer. It also sidesteps the bundle-layout
+measurement `docs/NATIVE.md` still carries, and saying so is better than letting
+that read as a coincidence.
+
+**What a tag does: a fifth verb, `app`.** One matrix leg per target; it stages the
+payload for a full profile and **refuses a client leg that still has one on the
+runner** (a re-run of one leg is the real path to that); it passes no `--bundles`,
+because the kinds are the overlay's and a flag would be the second copy of that
+list; it refuses a bundle that was not produced, or was produced twice, and names
+the artifact it copied out. `publish` puts every one of them on the same
+`gh release create` call as the installer and **refuses a release missing an
+artifact its own list named** — by name, never by count, because a page missing the
+Windows build looks finished to everybody except the people it was missing for.
+
+⚠ **`RELEASE_APP_TARGETS` ships empty, and that is the gate rather than a gap.**
+`deploycheck` asserts every name in it has a `check.yml` leg, so a platform joins
+the list in the same change that gives it one. `RELEASE_PLATFORMS`' argument about
+arm64 images, made mechanical: the first build of a platform in this project's
+history may not happen on the release path. It is also the one knob spelled
+`${VAR-…}` rather than `${VAR:-…}` — for a list, an explicit empty is a request.
+
+**Rejected: asking for the Android keystore in `plan`.** It was written and taken
+back out. The four secrets are scoped to the `app-android` job so that *who can
+read the signing key* is answerable by reading the workflow, and `plan` is the job
+whose whole property is that it can write nothing anywhere. Asking there would
+mean handing the key to the job that runs every gate, or refusing every release
+for want of a secret that job cannot see. The saving was imaginary as well: the
+app legs are siblings under `plan` and start in the same second.
+
+**Rejected: `universal-apple-darwin` as one macOS artifact.** `tauri-build`'s
+`copy_binaries` resolves `binaries/node-<target-triple>`, so a universal build
+wants a `lipo`-ed Node *and* both esbuild platform binaries inside the payload.
+Neither has been measured here; two arch-specific artifacts cover the same
+hardware with nothing unmeasured on the path.
+
+**Two things the asset names decide, and they are public surface.**
+`releases/latest/download/<name>` resolves on the asset name, so a name is a URL
+the day somebody pastes it. They carry the **version**, unlike `install.sh` —
+that one is stable because it is pasted into a shell, and a desktop artifact is
+clicked. The OS token is `std::env::consts::OS`'s spelling, already one of the two
+vocabularies `native-shell.md` names, and the arch token is one word rather than
+the four the bundlers use between them.
+
+**And the §6 offer rides the notes.** Conveying a binary is a distribution, and
+`bundle.licenseFile` is read by the `dmg` and `nsis` bundlers and by nothing that
+builds a macOS `.app` — so the artifact most people download would carry neither a
+licence nor an offer. `plan` appends one naming this **tag**, derived from
+`SOURCE_URL`, so a fork that obeys the licence instruction gets a correct offer for
+free.
+
+**Status.** Current. `.claude/rules/native-packaging.md` is the area;
+`pnpm nativecheck` holds the overlays to an allowlist and `pnpm deploycheck` drives
+the verb. Q4.119 is what this makes possible and has not switched on.
+
+### Q4.124 — Why the dock icon was the wrong size, and the generator that replaced `tauri icon`
+
+**Question.** Reemoat's tile reads noticeably larger in the macOS Dock than the
+apps beside it. Why?
+
+**Measurement.** Every macOS raster in the tree had an opaque bounding box equal to
+its **whole canvas** — `icon.png` 512×512 in 512×512, `ic10` 1024×1024 in 1024×1024,
+zero margin. Apple's grid is an **824×824 squircle in a 1024×1024 canvas**: a 100px,
+9.77% transparent margin per side. Drawn at 100% the badge is about a quarter larger
+in linear terms than a conformant icon, which is the entire defect.
+
+⚠ **Checked against Apple's own shipping icons rather than against the
+documentation, and the first reading disagreed.** Pages, Numbers, Keynote and
+GarageBand all measure **854** of 1024 at an alpha threshold of 8 — not 824 — which
+would say this icon is now 30px too small. They are not: those icons carry a **soft
+drop shadow**, and the alpha profile says so outright. Across the middle row of
+Pages, alpha runs `75:1 80:4 85:9 90:16 95:29` and then jumps to `100:201 105:255`.
+Re-measured at any threshold past the ramp, all four are **824** — the same number
+as this icon, to the pixel.
+
+Two things follow. The geometry here is confirmed empirically and not just from a
+spec. And this icon has **no shadow**, which is a real cosmetic difference from
+Apple's and is left alone deliberately: the defect being fixed is size, a shadow is
+a separate design decision, and baking one in would move the very bounding box the
+assertions are written against.
+
+**Decision.** Inset to that grid, from `packages/native/scripts/icons.mjs` — a
+committed, zero-dependency Node generator — and **retire `tauri icon`**. Two numbers
+in that file are Apple's (`MARGIN`, `RADIUS`); the mark's six are parsed out of
+`packages/web/public/favicon.svg` rather than retyped, so the app icon is a stated
+*transform* of the favicon rather than a fourth copy of the drawing.
+
+**Why not re-run `tauri icon` against a committed master.** `native-packaging.md`
+already records what it does: it overwrites `ic_launcher_foreground.png` — correctly
+hand-authored as the mark alone on transparency at 58% of the frame — and rewrites
+two launcher XMLs back to `@mipmap/…` and `#fff`. Three builds shipped somebody
+else's logo out of that class of bug, and a hand-restore that must be remembered is
+the same shape as the `git checkout -- gen/android` that already gets forgotten. The
+generator writes **only** the macOS and Windows files, which `nativecheck` asserts
+by reading the script.
+
+**Two defects found in passing, both from the same cause.** `package.json` ran
+`tauri icon icon.png` and **`packages/native/icon.png` has never existed** — a script
+naming a file that is not there, for the life of the package. And two committed
+Android XML comments claimed `nativecheck` pinned their `@color` form and colour; it
+did not. Both are fixed, the second by writing the assertion rather than softening
+the claim.
+
+⚠ **Nothing in any of the twelve drivers asserted anything about an icon**, which is
+how all three shipped. There is now a PNG decoder in `nativecheck` (all five filter
+types, so it still bites on a raster replaced by hand) and nine assertions, including
+one that every file a script in that manifest names exists — the line that would have
+caught the dead script years ago. Verified non-vacuous: five go red on the tree before
+this change.
+
+**One platform, deliberately.** Android's foreground is the mark at 58% of its frame
+and its legacy rasters are correctly full-bleed; iOS and `apple-touch-icon.png` stay
+full-bleed because iOS masks its own icons and this inset would double; the favicon
+stays full-bleed because a tab strip does not mask. The Windows Store tiles are
+**unmeasured** and stay as they are, which is a stated gap rather than a guess.
+
+**Alternative deferred.** A continuous-curvature squircle `<path>` — more faithful,
+one inside-test away in `coverage`. Not in this commit: the defect is *size*, and a
+corner-curvature change alongside it makes the before and after unreadable.
+
+**Status.** Current. `.claude/rules/native-packaging.md` is the area.
+
+
+### Q4.125 — Which door installs grok, and why it is npm under both sources
+
+**The operator's requirement, stated directly: a binary the daemon can update at
+runtime.** That is what decided this, not tidiness.
+
+xAI ships two doors. `curl -fsSL https://x.ai/cli/install.sh | bash` is the vendor
+installer; `npm i -g @xai-official/grok` is the registry. Both land a working
+binary, and `grok update` exists and is non-interactive — so unlike kimi, whose
+`upgrade` exits 0 without installing when there is no TTY (Q4.113), grok's vendor
+arm would actually work.
+
+**It still takes the npm door under both `--source` values, and the reason is a
+property `CLAUDE.md` states about this script**: *no shell profile is edited*. Read
+2026-09-21, xAI's installer symlinks into `~/.local/bin` **and** appends to
+`~/.bashrc`/`~/.zshrc` to put `~/.grok/bin` on PATH. Taking that door would have
+made the sentence false — and the sentence is cheaper to keep than to qualify.
+
+**So grok is the second unconditional `ensure_npm` row, and the two are there for
+different reasons.** kimi's is that its own updater lies; grok's is that its own
+installer reaches outside what this script is allowed to touch. `deploycheck`
+spells both out one per line rather than admitting a pattern, so a third is a
+decision somebody makes rather than one that arrives by regex.
+
+**What the npm package actually is** is the part that bites. `@xai-official/grok`
+is an ~18 kB **launcher shim**; the platform binaries ride in
+`optionalDependencies` (`@xai-official/grok-{darwin,linux,win32}-{arm64,x64}`)
+brotli-compressed, and a postinstall decompresses one — 145 MB — into
+`$GROK_HOME/bin`, `~/.grok/bin` by default. Two consequences:
+
+- **`--no-optional` installs something that cannot run.** The shim detects it and
+  says so on stderr. `ensure_npm` does not pass it and must not grow it.
+- **`~/.grok/bin` is deliberately *not* in `MANAGED_CLI_DIRS`.** The toolchain
+  directory holds the shim, which is the copy `ensure_npm` refreshes, and the shim
+  finds its own payload. Naming the payload's directory would break the invariant
+  `deploycheck` holds that list to — *every directory the daemon searches is one
+  this script installs into* — and that invariant is the point rather than
+  bookkeeping: a directory searched but not managed is where a build nothing
+  updates gets picked up and run for ever. A machine somebody installed grok on by
+  hand is still found, because the vendor installer symlinks into `~/.local/bin`,
+  which is the first entry.
+
+Measured aside: with npm 11's `allow-scripts` gate blocking the postinstall
+entirely, the shim decompressed on **first invocation** instead and
+`~/.grok/bin/grok -> grok-1.0.40` appeared anyway. The door survives a blocked
+script; it just moves the work to the first run.
+
+**`--no-auto-update` is not set by this script**, and that is the boundary rather
+than an omission. grok checks for updates when it *runs*, so the flag belongs on
+the spawn — `resolveAgent` passes it on every ACP launch. The persistent form is
+`auto_update = false` in `~/.grok/config.toml`, a settings file under somebody's
+home, which this script writes for no other agent and will not start with this one.
+
+### Q4.126 — Nothing installs a harness but a press, and the timer became a refresher
+
+**Reported as a symptom, and the symptom named the shape.** *"xAI was added, it is
+not on the machine, and after a daemon update it shows as Sign in — and inside the
+sign-in screen it says cannot find."* Every clause of that is a different defect
+and the first one is the posture: adding a harness to this repository put it on
+every machine in the fleet, because `deploy/agents.sh` installed all five on the
+bootstrap, on every `deploy.sh`, and daily.
+
+**The owner's decision.** Installing a harness is an act somebody performs. A
+fresh machine enrols with **no** agent CLIs; a button in the app puts one there,
+with a progress indicator while it runs; sign-in comes after.
+
+**What each caller does now.**
+
+| caller | before | now |
+|---|---|---|
+| `deploy/bootstrap.sh` | installs all five, ~700 MB | installs **none**; `--install-agents a,b` for a provisioner |
+| `deploy/deploy.sh` | installs all five | `--refresh-only` |
+| `src/agentupdate.ts` | installs all five, daily | `--refresh-only`, daily |
+| `src/agentinstall.ts` | — | `--only <agent>`, on a `machine:admin` press |
+
+**`--refresh-only` needed a guard at *five* doors, and four of them were easy to
+miss.** "Absent" is spelled once in `ensure_npm` and three more times as a vendor
+`case` with no `""` arm at all, falling through into its install path. So
+`deploycheck` asserts an **absence over the whole transcript** — no install verb
+of any kind, from any door — because that is the only shape that catches the door
+somebody forgot rather than the doors somebody remembered.
+
+**`--only` validates its value where `--skip` does not**, and the asymmetry is
+written down because somebody will try to make them match. A `--skip typo`
+withholds a prune that was not going to matter. A `--only typo` is a run that
+walks no harness, prints a header, exits 0 and reports success — and the caller
+that passes `--only` is a button, which would draw that as *installed*.
+
+**Three things the install run is the inverse of a login on**, each a decision:
+
+- **One slot daemon-wide, not one per agent.** The script holds a single `mkdir`
+  lock, so a per-agent map lets five runs start of which four are answered by that
+  lock with a warning and `exit 0` — four transcripts that end, look finished, and
+  installed nothing.
+- **A second start is refused, never superseded.** A login supersedes because its
+  commonest end is a closed tab leaving a pty on stdin, and refusing there is a
+  permanent wall in front of the one person who cannot get past it. An install
+  waits on nobody, and killing a half-done `npm i -g` is the corruption the lock
+  exists to prevent.
+- **The TTL runs from `endedAt`.** `LoginRun.expired` measures from `startedAt`
+  and kills a live pty at ten minutes, which is right for a flow waiting on a
+  person; copied here it kills a legitimate download on a slow link.
+
+**⚠ The verdict is a measurement, never the exit status.** `deploy/agents.sh`
+exits 0 having printed `install failed; this machine has no copy of it until the
+next run` — it must, because three of its four callers contract that it never
+fails. So `installed` against `failed` is decided by asking the machine again, and
+`daemoncheck` asserts the **pair**: `outcome: "failed"` with `exit.code === 0`.
+⚠ **And the asking comes after the invalidation, asserted as a sequence** —
+`findOnPath` caches misses for 30 s, so probing first reads the miss recorded when
+the tile was drawn and calls a successful install a failure. A set-shaped
+assertion passes on the one ordering that is wrong.
+
+**Two layers of mutual exclusion, and neither subsumes the other.**
+`AgentScriptGate` is a field in this process, so it catches the two runs this
+daemon starts; an install wins and the daily refresh yields, because somebody is
+watching one of them. `--fail-if-locked` catches what no gate here can see: an
+orphan a previous daemon left running, since runs are spawned detached and
+shutdown deliberately does not kill one. ⚠ The gate is taken **above** `runOnce`'s
+first line, which sets `ran` and disarms `nudge()` for the process; and a refused
+tick **re-arms short**, or a refresh skipped because somebody installed for three
+minutes silently costs the fleet a day.
+
+**`agentUpdates.nudge()` is deleted from the resume pass.** Its whole purpose was
+pulling the five-minute first run forward when a pass found `agent_missing`; a
+refresh-only run installs nothing, so honouring it is a subprocess, a log line and
+a cache flush that cannot repair what the pass reported — every boot, on exactly
+the machines already missing something. What closes the loop now is a person, and
+`AgentInstallRuns` runs `resumeInterrupted` itself.
+
+**The progress indicator is a spinner, a step, and a clock — no bar.** A
+determinate one is unbuildable: `ImportCode`'s is honest because
+`XMLHttpRequest.upload.onprogress` counts bytes *this client is sending*, and
+nothing analogous exists behind `npm`. An animated indeterminate one costs a new
+`@keyframes` in `index.css`, which re-anchors `webcheck`'s slices of that
+stylesheet. ⚠ **And the label is not a guess**: `deploy/agents.sh` prints `step:
+<agent> <phase>` and `readStep` reads it, with `deploycheck` importing that parser
+to drive the emitter. `MachineInstalls`' docblock refuses a stage label on the
+ground that nothing in *its* flow is on the wire, and is right about its own case
+— this one put something on the wire first, because `attempt` and `ensure_npm`
+send every installer's output to `/dev/null` and a run is otherwise silent for
+minutes.
+
+**`installable` is a strict subset of `!available`.** `AgentUnavailableError` is
+thrown for four absences and the installer repairs one; the bit has ridden that
+error since the auto-resume pass needed it, and `availability()` threw it away.
+`server.ts` then folds in whether this daemon installs at all, as `loginSupportOf`
+folds `logins === null` into `blocked`. ⚠ **Read `=== true` on the client, never
+`!== false`** — the opposite of `login.canSignOut` twelve lines away, because that
+control's refusal is a `503` carrying the route's own sentence and this one's is a
+bare `404` with nothing to render.
+
+**Rejected: a `202 {queued}` on a contended start.** Friendlier, and it costs a
+queue whose only consumer is a rare race; the daily run's worst case is twenty
+minutes, which is too long to park an HTTP start behind. `409 install_busy` with
+`holder` names who has it, and the remedy is the same either way.
+
+**Rejected: a per-agent lock in the script.** Tempting, since `ensure_npm` stages
+per agent — but claude's and codex's vendor installers both write `~/.local/bin`,
+and the gate serialises them anyway. One lock, and the daemon is where the
+contention is answered so the script's own `exit 0` is never what a person sees.
+
+**What it costs.** A fresh machine has an empty New session strip until somebody
+presses Install, and `NewSession` owes that state its own sentence — *"No agent is
+installed on this machine yet."* — because *"not ready to start"* describes the
+ordinary first-run state as a fault.
 
 ## Invariants — rules that were defects first
 
@@ -24683,6 +28064,194 @@ docblock at all and has one now.
 **Status.** Current
 
 
+#### Q5.116 — The page gives up its credential before the host's origin moves
+
+**The defect, which the screen's second entrance created rather than revealed.**
+`host_set_server` moves the base **in the host process**, so from the instant it
+returns every `host_cp` call goes to the *new* origin — while the page still holds
+the old fleet's bearer in memory, and `location.assign("/")` has not happened yet.
+In that window the four-second poll, `refreshConfig`, or any `cpFetch` already in
+flight would hand **server A's session token to a host somebody has just typed
+in**. While `ChooseServer` was only ever drawn at `server === null` there was no
+credential and no window; as a settings screen there is both.
+
+**The rule.** `cp.clearSession()` runs **before** `setNativeServer`, never after.
+It is local, instant, cannot fail, and erases `credential#<old origin>` through
+the same call `host_set_server` was about to make one line later.
+
+**Priced, because the safe-looking order is the wrong one.** Clearing first costs
+one sign-in in the case where `setNativeServer` then fails on a full disk:
+somebody is signed out of a server they are still pointed at. Clearing second
+costs a credential disclosure to a host nobody has verified. The second is not a
+trade.
+
+**Asserted as source text, comparing two indices**, because it is invisible
+otherwise — every other assertion about this screen stays green either way, the
+request succeeds, and the only trace is a token in a stranger's log.
+
+⚠ **And the fix has a second ordering inside it, which the first draft got
+wrong.** Saving the address you are *already* on must give nothing up.
+`host_set_server` returns early on a matching origin — writing no file, erasing no
+credential — so the obvious place for that check is after it. That is too late:
+`clearSession()` has already run, and re-typing your own server signs you out. The
+host's early return protects the file and the keyring; it cannot protect a
+decision this page took two lines earlier. So the no-op exit sits **above** the
+clear, on exact equality against the canonical value the host already answered —
+deliberately nothing cleverer, because a looser comparison would be a second
+normalizer on the page, and two spellings of one origin is two credential keys.
+Both indices are asserted.
+
+#### Q5.117 — A cache is valid only if the thing it caches is there
+
+**The defect.** `build-daemon.mjs` asked `existsSync(extracted)` — the *directory*
+the Node runtime unpacks into — and reported *(cached)* on the strength of it. A
+directory that had been emptied answered `true`, so the script handed back a tree
+with no `bin/node`, and the failure surfaced two functions later as
+`spawnSync … ENOENT` on a path whose own name says "cache". It reads as a corrupt
+download. It is a check that was never a check.
+
+**How it was poisoned, which is the part worth measuring.**
+`Swatinem/rust-cache` treats every subdirectory of `target/` as a build profile
+and cleans what it does not recognise before saving — and the runtime cache lived
+at `target/node-cache` by an explicit decision, argued as *"`cargo clean` discards
+it, which is the right trade for a 50 MB archive"*. So a **green** run saved the
+directory with its 130 MB binary stripped out, and the **next** run restored the
+shell and died. The run that broke was the first one to restore a cache the run
+before it had poisoned, which is why nothing in the commit that went red had
+anything to do with it.
+
+There is a second way in with no CI involved: `run()` aborts the script on a
+non-zero exit, so an interrupted `tar` leaves a partial directory that every later
+run then trusts.
+
+**The rule, in two halves that do not replace each other.** *Correctness*: the
+question is asked of the **file about to be executed**, and a directory that
+cannot answer it is removed rather than worked around — which makes this
+self-healing against any pruner, any interrupted extraction, and anything else
+that takes the contents without taking the name. *Cost*: the cache does not live
+under `target/` at all, because that directory has an owner. The `cargo clean`
+trade is reversed and said so at the constant: it was priced without knowing
+another tool cleans there, and a runtime that survives `cargo clean` is a smaller
+loss than a build that breaks every other run.
+
+**What that leaves, and what pays for it.** Outside `target/` the runtime is no
+longer covered by `rust-cache` at all, so CI would download 50 MB every run. It
+gets an `actions/cache` step of its own, keyed on `NODE_VERSION` rather than on
+the script's hash — the file changes far more often than the version does, and a
+key that churns is a cache that never hits.
+
+**And the path is now written down twice**, in the script and in the workflow. A
+mismatch is silent in the direction that costs most — CI saves an empty path,
+every run re-downloads, nothing is red — so `nativecheck` reads both off disk.
+That is the `.dockerignore`/Dockerfile hazard `CLAUDE.md` already names, at a
+smaller scale and with the same treatment.
+
+#### Q5.118 — The invariants of an encrypted channel
+
+**Question.** Phase 5 put a cryptographic protocol between the app and the daemon
+and made the relay a carrier. Which of the rules it rests on are the ones that
+would be quietly broken by a reasonable-looking change?
+
+**Seven, and each was a decision before it was a rule.**
+
+**The capability rides the first *transport* message, never the handshake
+payload.** `Noise_IK`'s first message is encrypted to a static key alone: no
+forward secrecy, and nothing stops an eavesdropper replaying it verbatim. A
+capability in it would be replayable off the wire for its whole lifetime. After
+`ee`/`se` both ephemerals are fresh. ⚠ This is **not** enforced in
+`packages/protocol/src/noise.ts`, deliberately — that file implements the
+specification, which allows a payload in every handshake message, and the
+published vectors carry one in all four. Refusing it there would mean refusing the
+vectors. The rule belongs to the layer that decides what to send.
+
+**A tag failure ends the session and sends nothing.** There is no resynchronise
+and there must not be: a `CipherState` whose nonce has diverged fails every later
+frame, so "skip it and carry on" is a session that never works again while
+appearing to try. Both ends take this view. The refusal is a closed stream rather
+than a message, because below a failed handshake there is no key to send a message
+under — an asymmetry worth naming, since every other refusal in this codebase can
+say why.
+
+**`RESPONSE_END` and `FAILED` are different frames.** The natural shape is one
+"the stream ended" frame, and with one frame a daemon whose upstream died mid-body
+is indistinguishable from one that finished — so the app resolves a short body as
+if it were the answer. Two frames make *complete* and *gave up* different bytes.
+This is Q6.103 surviving the rewrite. ⚠ And the delivery of it is part of the
+rule: `fail()` must `end()` the stream rather than `destroy()` it, or the frame is
+written and thrown away — which turns a `502 truncated` back into a transport
+failure the client retries for ever. That was a real defect, found by the driver
+and not by reading.
+
+**The session pins its own capability onto every inner request.** The channel
+proved which device is calling and the capability presented at `HELLO` was checked
+against it; letting a request carry a *different* credential would mean the
+binding held for the handshake and not for the traffic. It also retires `?token=`
+on the last hop, because Node makes that request and can set a header.
+
+**The relay names the mode and understands neither.** `RelayTunnel.open` takes
+`encryption` with **no default**, so there is no spelling of that call that
+produces an unencrypted stream. It used to write `"none"` itself, which made the
+carrier the party that chose — and a carrier that can choose can choose the weaker
+one.
+
+**The daemon authenticates the machine by being able to answer at all.** There is
+no name to check and no certificate: `IK`'s second message is sealed under a key
+mixed from `ee` and `se`, so producing one requires the private half of the static
+the initiator started with. Reaching `split()` *is* the check, which is why there
+is no comparison to read in the client and why its absence is worth a paragraph.
+
+**No second timer against Q5.24.** The three-party rule — the daemon closes 4401
+past `exp + leeway`, the relay authorizes at open and never tears a live stream
+down, the client rotates at `exp − 60s` — is unchanged. The pool's reuse margin
+decides only whether an **idle** connection is handed out again; nothing tears a
+live one down on a clock.
+
+**Status.** Current. `.claude/rules/e2ee.md` is the area.
+
+
+#### Q5.119 — an offline driver is offline in what it *runs*, not in what it asserts
+
+**Question.** Reported from the development machine: *a node terminal keeps popping
+up in my Dock for a second and disappearing — are we comparing node wrongly
+somewhere?*
+
+**Decision.** `daemoncheck`'s one `POST /sessions` with a real agent id now goes to
+an app whose runtime reports every harness uninstalled, so nothing is spawned on any
+machine.
+
+**It is not a version comparison, and the measurement says what it is.** Every exec
+on the machine was logged for the length of one `pnpm daemoncheck`: `kimi --version`,
+`claude auth status`, about forty `grok --no-auto-update models`, and one
+`node /opt/homebrew/bin/kimi acp` — followed one second later by a LaunchServices
+registration named `kimi-code`. That registration is the Dock tile. A plain child
+process gets none; kimi's ACP entry point registers as an application, so it gets one,
+labelled from the node binary that is executing it. `firstVersion` is report-only by
+its own docblock and decides nothing, and `agentCli` caches no miss — there is no
+comparison anywhere that re-arms work.
+
+⚠ **The defect was written down and then not fixed.** The line's own docblock
+already said the assertion *"passed on a developer machine only by really spawning
+`kimi` and completing an ACP handshake, inside the driver whose own header promises
+no agent is involved, leaving a session and a worktree behind"*. Only the assertion
+moved — from `201` to *"not refused for being outside the roots"* — while the request
+still went to the shared fixture app, whose registry was built with no runtime and
+therefore holds a real `LocalRuntime`. So it went on spawning, and on leaving a
+worktree, for releases. **A driver that promises no agent may not be judged by what
+it asserts; what it runs is the promise.**
+
+**The assertion got stronger rather than weaker.** `create` resolves the cwd before
+it asks whether the agent exists, so `503 agent_unavailable` is a *positive*
+statement that the path was accepted and the request went on — where "not
+`outside_roots`" was satisfied by every other way of failing too, including the ways
+that have nothing to do with the roots. It is also the same answer in CI and on a
+developer machine, which the old shape never was.
+
+**What is left, and why it stays.** `availability()` still runs the real login
+probes in the sections that build a bare `LocalRuntime` — `claude auth status`,
+`grok models`. Those are Mach-O binaries that register nothing and draw no tile, and
+one of those sections exists precisely to `report` what this machine answers. The
+spawn that mattered was the ACP handshake, and it is gone.
+
 ## Measured behaviour of the agents and the tools
 
 ### Q6.1 — Why did `session_started` land in the log *after* the first `prompt` event?
@@ -25989,6 +29558,250 @@ adapter that ignores the opt-in.
 
 **Status.** Current
 
+### Q6.108 — Closing the last window quits, on every platform including macOS
+
+**Measured by reading `tauri-runtime-wry` 2.11.4 rather than by running anything**,
+because the source is unambiguous: on `TaoWindowEvent::Destroyed`, when the window
+map is empty, it emits `RunEvent::ExitRequested` and — with nothing calling
+`prevent_exit()` — sets `ControlFlow::Exit`. There is no platform arm. Tauri does
+not implement AppKit's convention that an app outlives its windows.
+
+**What this corrects.** `lib.rs` hung the daemon's teardown on `RunEvent::Exit`
+and explained the choice as *"closing the window on macOS is not quitting"*. The
+code was right; the reason was a fact about AppKit that this framework does not
+honour. Per `CLAUDE.md`'s rule about the comment layer — what may still go is a
+comment that is *wrong* — the sentence is replaced rather than kept.
+
+**What follows for the product, and it is the reverse of the usual direction
+here.** ⌘W quits the app and takes its daemon with it, which is exactly what a
+Windows or Linux user expects and exactly what a Mac user does not. So the current
+behaviour is the *portable* one, and the macOS convention — stay running, come
+back from the dock, with `Reopen` handled — is a **deliberate non-goal** beside
+"no menu bar, no tray, no notifications" rather than something anybody had
+decided. Reversing it is not one line: it needs `prevent_exit()`, a `Reopen`
+handler, and an answer to whether the daemon survives a windowless app, which is a
+product question rather than a platform one.
+
+### Q6.109 — What Grok Build actually sends, measured against 1.0.40
+
+**The whole of why grok is the cheapest harness this repository has added.** Driven
+2026-09-21 against `grok --no-auto-update agent stdio`, both signed out and with a
+key in the environment, because a capability that appeared only for a keyed agent
+would be a fact about the key rather than about the binary.
+
+**No adapter.** `grok agent stdio` is xAI's own ACP entry point — the ACP registry
+lists `grok-build` with `distribution.npx = {package: "@xai-official/grok@1.0.40",
+args: ["agent","stdio"]}` — so `pincheck` has nothing to pin and
+`AgentCapabilities.cli` records the build, which is kimi's and opencode's
+situation. claude and codex are the two that need a `*-acp` package, and it is now
+two of five rather than two of four.
+
+**`initialize` answers `protocolVersion: 1`** with `loadSession: true`,
+`sessionCapabilities: {list:{}, resume:{}, close:{}}`, `promptCapabilities:
+{image:false, audio:false, embeddedContext:true}`, `mcpCapabilities: {http, sse}`,
+an `auth: {}` marker, and **no `providers` key at all** — so `AcpClient.routing()`
+answers `null` and `hostable` refuses every foreign system for it with *"This agent
+only runs its own models."* Nothing had to be written for that.
+
+**`session/new` publishes exactly two `configOptions`**, and both land on doors this
+daemon already drives:
+
+| `configId` | `category` | Values |
+|---|---|---|
+| `model` | **`model`** | `grok-4.6` (current), `grok-4.5` |
+| `reasoning_effort` | **`thought_level`** | `xhigh`, `high` (current), `medium`, `low` |
+
+`category: "model"` is what `pinNativeModel` looks for, and `thought_level` is the
+spelling opencode publishes — so `/model` and `/effort` work with no new arm. The
+ids are **bare** (`grok-4.6`, not `xai/grok-4.6`), which is why `SYSTEMS.xai` leaves
+`nativeModelPrefix` null. `session/load` republishes the list, so the resume path
+Q2.217 is about has something to validate against.
+
+**Drawn through this daemon's own harness**, with a deliberately bogus key, the
+whole path is one line of output each: `⚙ model = grok-4.6 [model] (2 choices)`,
+`⚙ reasoning_effort = high [thought_level] (4 choices)`, `▸ session 01a0c47b-…`,
+and then xAI's own `Incorrect API key provided` on the first turn. Everything but
+the credential is proven.
+
+**Two smaller facts.** It emits `session_info_update`, which becomes an `other`
+event exactly as codex's does (Q6.100). And it pushes `_x.ai/session/setup`
+notifications naming the phase it is in — `auth`, `resolve_workspace`,
+`folder_trust`, `plugin_registry`, `mcp_merge`, `persistence_init`,
+`spawn_session_actor` — which are unread here and harmless, but are the reason a
+`session/new` that is *going* to fail still looks busy for a moment.
+
+**What is still unmeasured**, because it needs a real key: whether
+`session/request_permission` arrives without `--always-approve` (the documentation
+says permission prompts flow over ACP and never names the method), steering
+(`_session/steering`), `session/cancel`, and whether any context usage is reported.
+
+### Q6.110 — The ACP `authenticate` call, and the method id that is not advertised
+
+**Q6.20 had stood since the first release** — *"ACP has `session/authenticate` and
+this daemon never calls it. Gemini offers four `authMethods` and expects the client
+to pick one; any future agent support has to decide whether to drive it."* grok is
+that agent, and the decision is forced rather than chosen.
+
+**Measured 2026-09-21 on 1.0.40, three ways:**
+
+| | `session/new` |
+|---|---|
+| no `authenticate`, no key | `-32000 "Authentication required"`, `data: "no auth method id provided"` |
+| no `authenticate`, **`XAI_API_KEY` set** | **the same refusal** |
+| `authenticate({methodId: "xai.api_key"})` first, key set | **succeeds** |
+
+So the pasted key is not a door by itself — which is the whole difference from the
+other four, every one of which reaches its vendor out of band and answers
+`session/new` with no `authenticate` at all.
+
+> ⚠ **All three rows were taken on a machine holding no *other* credential, and
+> generalising them was the defect.** A fourth state exists — signed in by `grok
+> login` — where `session/new` needs no `authenticate` and sending one **breaks
+> the session**. The call is gated on a key now; **Q6.111 is the measurement and
+> supersedes the three paragraphs below about it being unconditional.**
+
+**The id is not in `authMethods`, and that is the part worth writing down.**
+`initialize` advertises exactly one method: `grok.com`, *"Sign in with Grok"*.
+Calling `authenticate` with it starts a device-code flow, prints
+`https://accounts.x.ai/oauth2/device?user_code=…` to **stderr**, and blocks until
+somebody authorizes it in a browser — not a call a daemon may make on the prompt
+path. `xai.api_key` is accepted, answers `{}` at once, and is documented only in
+xAI's own headless example. Setting `XAI_API_KEY` does not add it to the advertised
+list either, measured both ways. **A client that picked from `authMethods` would
+have the blocking arm as its only option**, which is the exact inversion of this
+repository's usual rule — here reading the agent's answer is what gets it wrong.
+
+**So `ACP_AUTH_METHOD` is a written-down table, `ROUTED_MODEL_ENV`'s shape**, and
+for its reason: a per-harness measurement that cannot be read off the wire, kept as
+a table so that the *absence* of a row is what decides rather than a condition at a
+call site. An id an agent does not know is a clean `-32602 "unsupported auth
+method: <id>"`, which makes a wrong row loud.
+
+**It is called in `AcpClient.launch`, once.** Between `initialize` and the first
+`session/new` — `providers/set`'s window, for its reason: one adapter per session,
+so the process scope and the session scope line up. One place because there are
+three launch sites (`Session.start`, `Session.openResumed`, `AgentAskRuns`) and
+Q2.215 is the record of what a per-site obligation costs.
+
+**A failure is carried rather than thrown, and that is not the silent fallback
+`providers/set` forbids.** That rule exists because a skipped route runs somebody
+else's default model under our name — a failure with no symptom. There is none
+here: `session/new` is the very next call and refuses by itself, with the agent's
+own sentence, down the `agent_auth_required` path that already exists. Throwing on
+the "no key" arm would instead refuse a machine signed in by `grok login`, whose
+`~/.grok/auth.json` this daemon deliberately does not read.
+
+⚠ **It answers `{}` for a bogus key.** Validation is deferred to the first real
+request, so this call proves the shape and never the credential — the mirror of
+what `AGENT_LOGIN.codex` records from the other side. ⚠ **And that sentence is
+where Q6.111 came from**: true of the *answer*, false of the *effect*, and the
+false half is what shipped.
+
+### Q6.111 — The `authenticate` that breaks a signed-in machine, and grok's three status strings
+
+**Reported as two symptoms on one screen**: a red `Internal error` under the first
+message sent to grok, and no modes on its chip strip. Neither is what it looks
+like, and the first is this entry.
+
+**The defect.** `ACP_AUTH_METHOD.grok` was sent on every grok launch. Q6.110's
+table has three rows and every one of them was taken on a machine holding **no
+credential at all** — the state a pasted key is for. The fourth state is the
+common one: a machine signed in by `grok login`, holding an OIDC token in
+`~/.grok/auth.json` and no `XAI_API_KEY`. Measured there, 2026-09-21, 1.0.40, two
+runs differing by one JSON-RPC call:
+
+| sent | `session/prompt` |
+|---|---|
+| `authenticate({methodId: "xai.api_key"})` → `{}` | `-32603 "Internal error"`, `data:` `Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/responses: Invalid or expired credentials (auth_kind=none, …, reason=no auth context)` — with `Auth: Oidc` in the same payload |
+| nothing | `stopReason: "end_turn"`, `totalTokens: 31764`, the text came back |
+
+**So the call selects an auth mode rather than merely asserting one.** With no key
+behind it grok stops consulting the token it already has and calls its own backend
+unauthenticated. `{}` is why this looked harmless and why Q6.110 wrote it down as
+proving "the shape and never the credential": the answer really is inert, the
+*effect* is not, and the damage lands one call later in the least explicable place
+a refusal can appear — inside the transcript, as a bare `Internal error` with the
+reason only in a `data` field nothing draws (`registry.ts` already argues this
+about `Failed to authenticate`).
+
+**And Q6.20's premise falls with it.** *"grok refuses `session/new` until an
+`authenticate` has been sent"* is a fact about having no credential, not about the
+binary. Signed in, `initialize` carries `cached_token` beside `grok.com` and
+`_meta.defaultAuthMethodId` is `"cached_token"`; signed out, only `grok.com` and
+`null`. grok volunteers the distinction; nothing here was reading it.
+
+**Decision.** `ACP_AUTH_METHOD` keeps its row and changes what it means: *which id
+spends a pasted key*, not *who needs an `authenticate`*. The id is sent only when
+that harness's credential is actually in the merged spawn environment.
+
+- `SessionRuntime.authMethod(agent, routed)` is the gate, and it is on the
+  **runtime** because that is the only layer that can see the answer: `resolveAgent`
+  returns `env: agentEnv()` and `LocalRuntime.launch` merges `secrets(agent)`
+  afterwards. `routed` short-circuits first — a routed pairing withholds those
+  secrets, so an id named there would spend a variable that will not be present.
+- `LaunchOptions.authMethod` carries it the one hop, **required**, so a third
+  launch site cannot inherit the old behaviour by omission — `fileIo`'s rule.
+  `AcpClient.launch` is still the single call site; only the decision moved.
+- The two `Session` launch paths hoist `routedPairing(…)` into one local, because
+  `launch` and `authMethod` must be given the same answer and computing it twice is
+  how they come to differ.
+- **Rejected: reading `initialize._meta.defaultAuthMethodId`.** It answers this
+  exactly and needs no plumbing, and it is the second signal that made the env gate
+  verifiable — but it keys behaviour on a vendor `_meta` field, which this
+  repository writes down rather than infers. Kept as the measurement, not the
+  mechanism.
+
+**Verified through the daemon's own `Session`, not just over raw ACP**: `pnpm
+harness --agent grok` now reports `model = grok-4.7 [model] (4 choices)`,
+`reasoning_effort = high [thought_level] (4 choices)`, and `turn end end_turn`.
+
+**And the same run closed `AGENT_LOGIN.grok.status`, which had been `null` with a
+docblock saying the signed-in string had not been seen on any machine here.** It
+has now. `grok models` exits 0 with an empty stderr in every state and names the
+credential it is about to use on its first line:
+
+| state | first line |
+|---|---|
+| signed in via `grok login` | `You are logged in with grok.com.` |
+| `XAI_API_KEY` set | `You are using XAI_API_KEY.` |
+| neither | `You are not authenticated.` |
+
+`signedIn` is an alternation of the first two — both are true answers to *will a
+session open* — and the pair stays a partition, which is why it is not `You are `
+with a lookahead. ⚠ It says `using` for a **bogus** key, so the probe proves a
+credential is present and never that it works; that is `AGENT_LOGIN.codex`'s gap
+from the other side and it is the survivable direction, since `admit` refuses on
+`loggedIn === false` and a wrong key becomes `lastStartRefusal` instead. What this
+fixes on screen: with `status: null` the row answered `loggedIn: null`,
+`agentStance` returned `unchecked`, and the tile offered **Sign in** on a machine
+that was already signed in.
+
+**The second symptom was not a bug at all, and the fix is the sentence.** grok
+publishes `model` and `reasoning_effort` and no `mode` in any session, so
+`ALWAYS_DRAWN` stood a placeholder in its mode slot for ever under *"The agent is
+not offering this control at the moment."* — a permanent fact in transient words,
+read as the feature being broken. `DrawnControls.never` marks the slots filled in
+against a **live** answer and `unavailableHint` draws *"This agent has no modes."*
+for them. The slot itself stays: `agentConfig.ts` already argues that the composer
+growing and shrinking a row between sessions is the shape change it forbids
+everywhere else. ⚠ A second id spelling (`reemoat:none:<category>`) was tried first
+and taken back out — `AgentConfigBar` keys each chip on `option.id`, so a slot
+whose id changed when the agent came back remounted the chip and dropped its open
+menu, over a fact that is about the sentence and nothing else.
+
+**And a third thing fell out of it, which was never about grok.** A provider whose
+rows come only from its native harness vanishes from the model picker in silence
+when that harness cannot be asked — `allModels` produces no rows, and there is no
+heading for an empty group. **Five of the eight** systems this product ships carry
+an empty `models` table on purpose, so this is claude, codex, grok and opencode,
+not one vendor. `unreadSystemsNotice` says so, reading `AgentCapabilities.error` —
+set only when the *ask* failed, never when a harness honestly published nothing —
+which is the same field `AgentBuilder`'s harness rows already draw `COULD_NOT_ASK`
+from, so the two halves of that screen cannot disagree. `notice` became a list
+rather than a string: OpenRouter's failure is a fetch *this browser* made and this
+one is a spawn *the daemon* could not make, and joining them would claim one cause
+for two.
+
 ## Open questions and deliberate non-goals
 
 ### Q7.1 — Was keeping full session history on disk an optimisation?
@@ -26671,8 +30484,13 @@ single implementation for exactly this: `clientFileIo`, `login`, `git` and
 `launch` are the four places a confining runtime has to answer differently, and
 each already has a comment saying so.
 
-**Why not yet.** Reserved in the same voice as the relay's `reemoat-enc: none` —
-the seam exists, no confinement was written.
+**Why not yet.** The seam exists; no confinement was written. ⚠ **This used to
+read *"reserved in the same voice as the relay's `reemoat-enc: none`"*, and that
+comparison has been spent** — Q7.37 shipped, the mode is gone, and the sentence
+now points at something that is not reserved any more. The voice it meant is
+still the right one and is worth naming without a cross-reference: an interface
+with one implementation, where every place a second one would have to answer
+differently already says so in a comment.
 
 **What it would take.** Filling in an implementation rather than reopening a
 design. Nothing about the rest of the daemon would change: paths stay host-side,
@@ -26712,18 +30530,41 @@ to say "this session may not push" that is not simply "do not run an agent".
 
 ### Q7.37 — Is traffic through the relay end-to-end encrypted?
 
-**Position.** No — the relay terminates TLS and sees plaintext today. The
-capability is reserved rather than built.
+**Position.** Yes, and it is the only mode. The relay carries bytes it holds no
+key for; the app and the daemon run `Noise_IK_25519_ChaChaPoly_BLAKE2s` between
+themselves.
 
-**Why not yet.** No crypto was written, deliberately.
+**What the seam bought.** This entry read *"No — the relay terminates TLS and
+sees plaintext today"* for as long as the relay has existed, and what it reserved
+was one header: `reemoat-enc` on the CONNECT handshake, negotiated per stream,
+with an unrecognised value a *stream* error rather than a tunnel-level one. That
+turned out to be exactly the right size of reservation. Adding the mode was a new
+value at one call site and a 501 for anything else; no protocol break, no flag
+day *for the seam itself*. The flag day that was taken is a different one and is
+recorded below.
 
-**What it would take.** The seam is the CONNECT handshake: `reemoat-enc: none`
-is negotiated per stream, and an unrecognised value is a *stream* error (501 on
-that one CONNECT) rather than a tunnel-level one, so an old daemon meeting a new
-relay loses one request instead of going offline. Adding a mode later is another
-header, not a protocol break.
+**What is built.** `packages/protocol` holds the handshake, written to the Noise
+specification (revision 34) and driven byte-for-byte against the published
+cross-implementation vectors in both roles by `pnpm protocolcheck`. The
+initiator's static is the app's **device key**, whose private half lives in the
+operating system's keyring and is used from Rust — `host_device_dh` answers a
+shared secret and the page never holds the key. The responder's static is the
+**machine key**, generated by the daemon on first start and announced on its
+tunnel dial. `src/e2ee.ts` terminates the session on the daemon and serves
+loopback with Node's own HTTP and WebSocket clients; `packages/web/src/e2ee.ts`
+is the initiator and the connection pool; `handleChannel` in
+`packages/control-plane/src/relay/proxy.ts` is the splice.
 
-**Status.** Not built.
+**What it does not buy, stated plainly.** E2EE removes the **relay** from the
+trusted payload path. It does **not** defend against a malicious Authority: that
+service mints every capability and holds `signing_keys.private_pem`, so it can
+issue one naming a device key of its own choosing. It does not make the operator
+untrusted — they still ship the client. What it does is make a compromised
+*carrier* worthless, and make a capability stolen off the wire or out of a log
+useless from any device but the one it was minted for.
+
+**Status.** Built. Q7.143 carries the flag day, Q1.648 the device binding,
+Q4.122 the packaging, and Q5.118 the invariants.
 
 ### Q7.38 — Is a relayed stream's authorization re-checked while it is open?
 
@@ -30747,3 +34588,790 @@ transactional message, one of which goes nowhere useful, is one link too many."*
 The named seam, so it is not invented twice, is a line in `HelpButton`'s popover.
 
 **Status.** Deliberate non-goal
+
+### Q7.135 — Whether the native client should reach a local daemon directly
+
+**Question.** The app often runs on a machine that is itself in the fleet. Should it
+talk to that daemon over loopback instead of out to the relay and back?
+
+**Measured, 2026-09-14.** It would work. `REEMOAT_HOST` defaults to `127.0.0.1` and
+`REEMOAT_PORT` to `7887`; `deploy/install.sh` writes `REEMOAT_AUTH=signed` for an
+enrolled daemon, and `src/auth.ts` verifies a control-plane token offline against a
+key captured at enrollment — it asks the control plane nothing, so a token minted by
+`POST /v1/tokens` whose `aud` matches is accepted at the loopback port. The daemon's
+CORS is `*`, so even a webview `fetch` from `tauri://localhost` reaches it.
+
+**Position — not built, and this is not a latency judgement.**
+`packages/web/src/machine.ts`'s `Route` docblock records that the direct path was
+**deleted rather than disabled**, and the reason is in `cp-accounts.md`: the relay
+reads live user, machine and grant rows *before a byte enters the tunnel*, so
+revoking a grant takes effect on the **next request**. On a direct path none of
+`revokeMachine`, a grant removal, a disable or the machine-limit switch-off reaches
+the daemon at all, because a daemon makes exactly one control-plane request ever. The
+window becomes the token's: 300 s plus 60 s of leeway either way, ~360 s.
+
+Three more costs, in descending order. The machine id has no cheap sound discovery:
+the unauthenticated `GET /health` answers `instanceId`, which `scripts/daemon.ts`
+regenerates from `randomBytes` on every start, so it cannot even be cached — the only
+sound method is minting a token per machine and trying each against loopback, which
+is safe (the `aud` check refuses a token for another machine) and costs N
+control-plane mints per wake, on the one path `refetchRoute` explicitly refuses to
+spend. A `shared_secret` daemon is unreachable this way regardless, and reaching it
+would mean a second credential kind in the client with no server-side revoke. And
+the payoff is unmeasured: nobody has timed the relay on a LAN.
+
+**The seam, and it is already complete.** `probeRoute` returns one answer and used
+to return two; `settleRoute` is the single publisher and already takes `Route |
+null`, `forgetRoute` already drops the memo, and `streamUrl` already maps
+`http:`→`ws:` correctly for a loopback base. Nothing is pre-built.
+
+**What would have to be true.** Loopback only — never a LAN address or a hostname,
+since loopback binding is the lever the deletion rests on. The machine established
+by the `aud` check and by nothing else, or the two paths disagree about what
+addresses a machine. The ~360 s gap stated where the **sharer** reads it, because
+they are the party who loses the guarantee. A `forgetRoute` status rule the relay
+candidate must not get, since a 401 from a re-enrolled local daemon genuinely means
+"this is not that machine any more". And opt-in per machine, off by default, so a
+fleet that never enables it is byte-identical.
+
+**Status.** Deliberate non-goal.
+
+### Q7.136 — How far the native secret store goes toward device identity
+
+**Question.** The shell has to keep a credential in the operating system's store.
+Device identity, signed updates and end-to-end encryption all want a key in the same
+place. How much of that should the abstraction anticipate?
+
+**Position.** The seam and nothing else. `credential.rs` declares a `SecretStore`
+trait with three methods and one implementation, and `CREDENTIAL` is a named set with
+one member — so adding a second secret is a visible edit in one place. The trait
+exists now because it costs nothing and because it is what a mobile arm forces:
+`keyring`'s Android support is behind its own feature with a different API, and iOS
+reaches the Apple keychain by a third path, so `Entry::new(…)` scattered through the
+commands is exactly what would make that expensive later. It is `SessionRuntime`'s
+argument one process over.
+
+**Three properties, each a refusal.** `read` and `write` carry a `String`, which is
+what says at the interface that a private key may not use them — a key this process
+can read is a key it can leak, so the future shape is a `sign(key, bytes)` that never
+returns one, backed by the Secure Enclave or a TPM. There is no `list`, because
+enumerating is what a key rotation would want and shipping the verb is shipping the
+feature. And there is **no device id**: a value generated at first run and persisted
+*is* device identity arriving by accident, and it would be a new fact about a person
+that nothing in this fleet has agreed to record.
+
+⚠ **The third refusal is reversed, and the first two are not. See Q1.643.** There is
+a device id now — but it is not generated at first run and it is not persisted here.
+The control plane has a `devices` table, the id comes from it, and a person can see
+the row and retire it, so the fact about them is one the fleet has agreed to record
+and they can act on. It lives in `config.rs` beside the server address rather than in
+this store, on `credential.rs`'s own argument for the split: it is an identifier
+rather than a secret, and a keyring that silently discards writes — which
+`credential::probe` exists to detect — would make the app register a new device on
+every launch. So `CREDENTIAL` is still a set of one, `read`/`write` still carry a
+`String`, there is still no `list`, and the seam this entry reserved is still
+reserved for the device **key**, which has none of those properties.
+
+⚠ **And the seam it reserved for a device *key* is spent, in the shape this entry
+specified.** There is an X25519 static per installation now, and it honours all
+three properties written above: it does **not** pass through `read`/`write`, which
+is why those still carry a `String`; `device.rs` holds it and exposes
+`host_device_dh`, which is *"a `sign(key, bytes)` that never returns one"* with a
+Diffie-Hellman where the signature would be; and there is still no `list`.
+
+One correction to the future shape this entry imagined, worth recording because it
+was stated as achievable and is not: **it is not backed by the Secure Enclave, and
+it cannot be.** The Enclave holds P-256 keys only, so no non-extractable X25519
+exists on that platform. What the arrangement still buys is real and narrower than
+"the key cannot be extracted": the **page** cannot read it, an `invoke` returns a
+shared secret rather than a key, and the store has no verb that would enumerate
+one. A process running as this uid can still reach the keyring, exactly as it can
+reach `reemoat.db`. Q1.648 and `.claude/rules/e2ee.md` carry the rest.
+
+**Status.** Amended 2026-09-15 — the "no device id" half is superseded by Q1.643;
+the device-key seam is spent (Q7.37). The `SecretStore` interface refusals are
+current. `docs/NATIVE.md` carries what turning on signed updates would take,
+including the one step that has to happen before a first public build.
+
+
+### Q7.137 — Whether the native client should reach a local daemon directly
+
+**Question.** Q7.135 asked this and answered *deliberate non-goal*, with five
+conditions for reopening it. The native shell now exists and the app is the primary
+client. Does the answer hold?
+
+**Decision. Built, on by default, and reachable by one client only.** The desktop
+app reaches a daemon on the **same computer** over loopback. `probeRoute` returns
+two answers again; `Route` carries a `kind`, read by `settleAnswer` and by nothing
+else. A browser cannot take this path at all — `localBaseFor` answers `null` outside
+the shell, because a page served over `https:` cannot reach `http://127.0.0.1`.
+
+**Why, and it is one fact Q7.135 did not weigh: who can take this path.** That entry
+priced the loss correctly — the relay reads live user, machine and grant rows before
+a byte enters the tunnel, so a direct path replaces revocation-on-the-next-request
+with the token's ~360 s (300 s plus 60 s of leeway either way) — and then compared it
+against nothing. The party who gains the window is not *a client*; it is a process
+running as the uid that owns `~/.reemoat`, which already holds `reemoat.db`, the
+identity, `identity.tunnel_key` and every transcript. A guarantee is only worth what
+it denies somebody, and this one denies that process nothing it does not already
+have. That is what makes **on by default** defensible where Q7.135 required opt-in.
+The switch stays, per machine, in Settings → Machines → *This device*, and the ~360 s
+is the sentence beside it rather than a footnote here.
+
+**Measured, 2026-09-14, and it reverses the entry's own cost list.** Q7.135 said the
+sound method "costs N control-plane mints per wake, on the one path `refetchRoute`
+explicitly refuses to spend". It costs **none**: `probeRoute` already awaits
+`ensureToken()` before it probes anything, and `resumeMachine` mints per machine on
+every wake regardless. The loopback candidate adds no control-plane request at all.
+
+**Rejected — a well-known port, and this is the sharpest part of the entry.**
+Probing `127.0.0.1:7887` is the obvious design, needs no daemon change, and was
+built. It is wrong, and not for a reason about tidiness: the probe has to carry a
+machine token to prove anything, and a token is a 300-second bearer for that machine
+**spendable through the relay from anywhere**. So the probe hands one to whichever
+process won the race for that port. On a single-user laptop that is the daemon; on a
+shared host it is a different OS user, per wake, and this daemon would have created
+the escalation rather than found it. Validating `GET /health` first does not close
+it — an unauthenticated answer is forgeable by whatever is listening.
+
+**So a daemon says where it is.** `src/announce.ts` writes `~/.reemoat/daemon.json`
+at `0600` inside a `0700` directory, from the listening callback where
+`localAddress` already computes the bound pair; `removeAnnounce` runs on a clean
+stop. The directory is the mechanism: another uid cannot write it, so the app never
+shows a token to a listener it was not told about by the daemon's own user. It is
+not new authority — every field is either public (a port, visible to `lsof`) or
+already in `reemoat.db`, which that uid can read. It also reaches a daemon on a
+custom `REEMOAT_PORT`, or on `0`, which no probe can.
+
+**The four rules that bound it, each the answer to a condition.**
+
+- **Loopback or nothing**, enforced in `local.rs` — in the host process, where the
+  page cannot reach it, which is `host_cp`'s argument one command over. `localhost`
+  is deliberately refused beside every LAN address: a name is whatever a resolver
+  says it is.
+- **The `aud` check establishes the machine and nothing else does.** `proveLocal`
+  spends one authenticated `GET /fs/roots`; the announced id is a hint that decides
+  only whether that request is worth making. ⚠ **Any status but 401 is proof** — the
+  auth middleware sits above every route, so a `403 insufficient_scope` from a
+  read-only grant and a bare 404 from an older daemon both mean the signature, the
+  issuer, the audience and the window all passed. Requiring 200 would refuse a
+  healthy local daemon over a scope the probe never needed. `GET /health` is asked
+  *afterwards*, never before: it is unauthenticated, so a 200 from it is a
+  stranger's 200. `/fs/roots` rather than `/sessions`, which builds a snapshot of
+  every session before it applies a limit.
+- **A 401 rule the relay candidate does not get.** `meansWrongMachine` is keyed on
+  the code, and `settleAnswer` guards on `route.kind === "local"` as well: down the
+  tunnel the relay has already derived the machine from the same verified `aud`, so
+  the code there would mean two services disagreeing about one fact rather than
+  *reach it the other way*. It calls `denyLocal`, ⚠ **never `forgetRoute`** — that
+  drops the memo and the next resolve would return to loopback for ever — and never
+  `refetchRoute`, which would spend a mint on a daemon answering about itself. ⚠
+  Retrying a non-replayable method is safe **here and only here**: that 401 comes
+  from middleware above every route, so no handler ran.
+- **Off per machine, and sticky per session.** The deny is cleared in `update()`,
+  which `runResume` calls per machine per wake — so a re-enrolled daemon is found
+  again without a reload, while a shut machine does not earn an authenticated
+  loopback request every fifteen seconds in the meantime.
+
+**Rejected — a Unix socket**, which is the shape this obviously wants. A webview
+cannot open one, so the daemon leg would move into Rust, and
+`.claude/rules/native-shell.md` refuses that for four independently sufficient
+reasons. It also would not remove the TCP port: `RelayTunnel.accept` splices every
+*relayed* stream to `127.0.0.1:<port>`, and so do `pnpm client` and `deploy/lib.sh`'s
+`/health` probe. A socket nothing connects to, added now for later, is the half-built
+seam this repository refuses everywhere else.
+
+**Known limitation.** Whether a packaged webview reaches loopback is a per-platform
+measurement no driver here can make. macOS is settled — App Transport Security
+exempts loopback, the entitlement is `com.apple.security.network.client`, the App
+Sandbox is off. Windows (WebView2, Chromium's Private Network Access) and Linux
+(WebKitGTK) are open, and `docs/NATIVE.md` carries them. A platform that refuses
+costs nothing visible: `proveLocal` fails and the relay answers.
+
+**Status.** Reversed an earlier decision. Q7.135 is superseded.
+
+### Q7.138 — Why the payload shipped a coding-agent CLI it deliberately does not ship
+
+**Question.** The owner reported, of the desktop build: *"why don't the CLIs the app
+installs pick up the authorization from Claude Code on this machine? They list it,
+and after the first message it turns out there is no authorization."* What is the
+mechanism?
+
+**Decision. Two independent mechanisms, one of them a packaging defect this fixes
+and one of them a property of the probe that stays.**
+
+**The defect: `pruneAgentClis` in `packages/native/scripts/build-daemon.mjs`.**
+`codex-acp` depends on `@openai/codex`, so npm stages that package **and writes a
+`.bin/codex` shim for it** — while `--omit=optional` drops
+`@openai/codex-darwin-arm64`, the platform package that actually implements it, on
+purpose, because `deploy/agents.sh` installs that CLI from the vendor and the pinned
+copy is never the one meant to run (Q4.114). Measured 2026-09-15 on the staged
+payload: `node_modules/.bin/codex --version` answers `Error: Missing optional
+dependency @openai/codex-darwin-arm64`. And `daemon_path` in `daemon.rs` puts the
+payload's `.bin` **first** on the daemon's PATH — which is right, and is what makes
+`claude-agent-acp` and `tsx` resolve under a GUI-launched process with no profile —
+so `findOnPath("codex")` answered the broken shim ahead of the working
+`~/.local/bin/codex` the person had installed themselves. `spawnPlan` then wrote
+that path into `CODEX_PATH`, so the override existed to point the adapter at the
+broken copy. The fix is the narrow one: the payload is not where a coding-agent CLI
+comes from, so the four `AGENT_LOGIN` commands are pruned out of `.bin` and
+everything npm wrote for the adapters and the runtime stays. `nativecheck` holds the
+pruned list to `AGENT_LOGIN`'s, because a fifth agent added in one place and not the
+other is this entry again on the fifth agent.
+
+**⚠ The property that stays: `claude auth status` is a credential-*presence* test,
+never a validity test.** Measured 2026-09-15 against claude 2.1.270, from a stripped
+environment with a temporary `HOME`: with `CLAUDE_CODE_OAUTH_TOKEN` set to
+`sk-ant-oat01-thisisnotarealtoken-0000…` it prints `{"loggedIn": true, "authMethod":
+"oauth_token", …}`, and it prints `loggedIn: false` only with **no** credential of
+any kind. `readLoginAnswer` believes that boolean and nothing else, `agentStance`
+maps it to `signed_in`, and `admit` refuses on `=== false` alone — so an agent
+holding a dead credential is listed as signed in, and one whose state could not be
+read at all (`null` → `unchecked`) is still offered a tile and still startable.
+
+**And claude is the harness where that cannot be caught at the gate.** kimi and
+codex answer `initialize` while logged out and reject `session/new` with `-32000`,
+which is the refusal `502 agent_auth_required` already reports. `claude-agent-acp`
+implements no authentication at all — it spawns the binary named in
+`CLAUDE_CODE_EXECUTABLE` and inherits whatever that binary is logged in as — so
+there is nothing to reject at `session/new` and the failure necessarily lands in the
+turn. That is the owner's *"after the first message"*, exactly, and it is structural
+rather than a missing check.
+
+**Not the cause, each ruled out by measurement.** The macOS Keychain's per-binary
+ACL: the file credential alone answers correctly from a stripped environment, and
+the payload ships no `claude` at all. `agentEnv()` stripping something: its prefix
+loop deletes `REEMOAT_*` and the explicit `SESSION_SCOPED_ENV` list, none of which
+carries a credential — `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN` and
+`ANTHROPIC_API_KEY` all survive. `HOME`: `Supervisor::start` sets it from
+`app.path().home_dir()`. A stale pasted credential shadowing the ambient one
+(`launch` merges `secrets(agent)` last, so it does): the row on this machine was
+tested against the API and is live.
+
+**Status.** The packaging half is fixed and pinned. The probe half is open and is
+the honest answer to *"why does it say it is signed in"* — it says a credential is
+configured, and no non-interactive command any of the four offers says more.
+
+### Q7.139 — What the machine the desktop app sets up is called
+
+**Question.** Q7.137 built an app that creates a machine by itself. On the first real
+run it named one `MacBook-Pro-Nikita`, the owner asked for `local` instead, and that
+shipped the same day. Then: *"remove the global machine name — the local machine is
+called local only where the app is running; for everyone else, the ordinary name."*
+
+**Decision. The label is the ordinary host name, and `local` is drawn per client.**
+`createForThisComputer` posts `machineLabelFor(boot.hostName)`;
+`LOCAL_MACHINE_NAME` is deleted. Which row is the computer you are sitting at is
+answered by `AppState.localMachineId`, filled from the daemon's own announce file
+through `localDaemon()`, and drawn as a `this device` badge on that one row.
+
+**Why the first answer was wrong, and it is one question it did not ask: who reads
+the label.** `local` is a good name on the screen of the computer it names. It is
+not local to the *account* — it is the row a phone sees, the row a second computer
+sees, and the row somebody holding a grant sees, and to every one of them it names a
+computer that is somewhere else. `packages/web/src/localRoute.ts` already states the
+general form of this for reachability — a value true of one client may not sit on a
+row every client reads — and naming is the same rule.
+
+**The badge is keyed on the announce file, never on the route.** `route.kind ===
+"local"` looks like the same fact and is not: `setLocalOff` lets somebody route a
+machine through the relay deliberately, at which point a badge keyed on it would
+vanish from the machine they are sitting at. Identity and reachability are one file
+read and two questions.
+
+**A memo, where `localBaseFor` refuses one, and the asymmetry is argued rather than
+inherited.** Routing re-reads per resolution because a daemon that starts *after*
+the app — on a laptop where both come up at login, the ordinary case — must be found
+without a restart. A badge may be one wake late, so `refreshLocalMachine` hangs off
+`runResume`, the funnel every wake, every machine mutation and the bootstrap
+promotion already pass through.
+
+**One thing this cost, and it was a latent defect rather than a new one.** The retry
+that disambiguates a collision now matters on the *first* computer rather than the
+second, so it was read properly for the first time: `machineLabelFor` applies its
+`.slice(0, 64)` **last**, so appending `-2` to a maximal name and re-shaping answers
+the original name — the retry re-posted what had just collided. The base is sliced
+to 61 first, and `webcheck` pins the boundary case, which the old assertion (built
+from an eight-character label) could never have reached.
+
+**Not migrated.** A machine already created as `local` keeps that label. Renaming is
+`cp.renameMachine`, one tap from the machine's own screen; an automatic rewrite is a
+write nobody asked for, can itself `409` on `nameVisibleTo` leaving half a
+migration, and is cosmetic for a grantee anyway — `machines.name` was minted as
+`qualifiedName(label, id)` at creation and is permanently unchangeable.
+
+**Status.** Reverses the decision of 2026-09-15 recorded in `store.ts` and pinned in
+`webcheck.machine-limit-and-probe.ts`, on the owner's word the same day.
+
+### Q7.140 — Where a failed setup's output goes
+
+**Question.** *"Remove the error listing wherever they are listed; just add a logs
+section in settings."*
+
+**Decision. The listing left the session rail and Settings → Logs is where it
+went.** `SetupNotice` drew `host_daemon_state`'s two-hundred-line ring verbatim in a
+`<pre>` under the sentence *"This computer could not be set up."* — program output on
+a rail whose subject is somebody's sessions, in the one place they are reading prose.
+`LogsSection` draws it now; the rail keeps one sentence.
+
+**`SetupState.detail` became `said`, and the rename is the substance.** That field
+carried a *mixture*: four arms put an app-authored remedy in it and three put the
+daemon's own output, so deleting the `<pre>` without splitting it either loses the
+remedies or keeps feeding a listing into prose. `said` is a sentence, and every
+failure that has evidence ends by naming the screen it went to — `LOGS_POINTER`,
+one string rather than a clause per arm.
+
+**The pointer is not decoration.** `SetupNotice`'s own docblock records why it
+exists: the cause sitting in a string nothing renders cost a whole round trip to
+diagnose on the first real run. Moving the evidence and saying nothing would
+re-create exactly that, one layer further away.
+
+**A second host command rather than a wider `DaemonState`.** `host_daemon_log`
+answers `Supervisor::log_lines`. The obvious alternative — let `detail` carry the
+ring whenever there is one — puts a log on the setup screen's one-second poll and
+turns a field meaning *what explains this failure* into a log field by accident.
+`nativecheck` pins both halves: the command exists, and the `running` and `foreign`
+arms still answer `detail: None`.
+
+**⚠ Not a reversal of Q3.225**, and the distinction is the whole argument for the
+screen. That removed the *delivery log* from Server settings as noise: it answered a
+question nobody was asking on a screen people go to in order to configure things, and
+the one person who ever needed it had a terminal. This is the output of a process the
+app itself spawns, supervises and hides — and the person it is for has no terminal
+**by construction**, because the point of the desktop app is that they never opened
+one.
+
+**What it deliberately does not show, said on the screen rather than left blank.**
+One ring, from the daemon this app started on this computer. A daemon
+`deploy/install.sh` installed is somebody else's child with no pipe to this process;
+a machine across the relay serves no log route at all. `nothingHere` draws a
+different sentence for each of `running`, `foreign`, `exited` and nothing-yet, and
+the browser arm says the output is on the computer it runs on — because an empty
+scroller under a machine picker would be a screen promising four things it can
+answer one of.
+
+**Left alone, and named so the scope is a decision rather than an oversight.**
+`PluginsPanel`'s *What it printed* block and its install-failure dump are a
+different subject — per-plugin, bounded at 500 characters by `MAX_FAILURE_CHARS`,
+and with nowhere else to go, since this screen is about one process and that one is
+about another. `AgentsPanel`'s login transcript is a live terminal for a flow
+somebody is driving, and `rawTranscriptIsOpen`'s fallback role is measured. Both are
+the owner's call to make separately.
+
+**Status.** Shipped.
+
+### Q7.141 — Why an agent could not authenticate while the same CLI worked in a terminal
+
+**Question.** On the machine the desktop app set up, every `claude` turn failed with
+`Failed to authenticate: OAuth session expired and could not be refreshed`, while
+`claude` in a terminal on that same machine, as that same user, worked. Signing in
+again changed nothing.
+
+**Decision. `Supervisor::start` passes `USER` and `LOGNAME`, from `getpwuid` rather
+than from its own environment.**
+
+**The mechanism, and it is a name rather than a credential.** `env_clear` is
+deliberate — the app's own environment is a GUI process's, carrying Tauri's
+variables, launchd's, and, if somebody started the app from a terminal inside a
+coding agent, that agent's session — so the daemon's environment is *built*. What
+the allowlist did not carry was `USER`. On macOS `claude` derives its **Keychain
+account** from that variable and falls back to the literal `unknown`. So the agent
+looked up `(Claude Code-credentials, "unknown")`, found nothing, **wrote an empty
+credential there on its first start**, and from then on read back `expiresAt: 0`
+with no refresh token to repair. Two items with that service then existed on the
+machine: the real one under the account name, alive; and a stub under `unknown`,
+created the same second the first session started.
+
+**Why it could not be diagnosed from the symptom.** The sentence is about a login
+that lapsed, and the fault is a lookup under the wrong name — so every remedy the
+sentence suggests is wrong, and one of them actively cannot work: signing in again
+writes the *right* account while the agent keeps reading the wrong one. Measured
+`env -i HOME=… PATH=… LANG=…` against the user's own `claude` 2.1.272: refused;
+plus `USER=… LOGNAME=…`: answered.
+
+**Both spellings.** `LOGNAME` is the standardised name and `USER` is the one
+software actually reads; setting one is the same bug waiting for a different
+program.
+
+**`getpwuid` first, the environment second**, which is the ordering `HOME` already
+has — `commands.rs` takes the home from `app.path().home_dir()` rather than from
+`$HOME`, because a value the system answers cannot be a stale export from whoever
+launched the bundle. And set **before** the env file is applied, so a `USER=` line
+written there as an interim workaround still wins.
+
+**⚠ Two ruled out by measurement, and both were plausible enough to have been
+acted on.** A pasted `CLAUDE_CODE_OAUTH_TOKEN` shadowing the ambient credential —
+`launch` does merge `secrets(agent)` last, and a copied *access* token carries no
+refresh token, which would produce this exact sentence: refuted, `agent_credentials`
+held **no rows**. And the Keychain ACL binding the item to the creating process's
+code identity, the daemon running under an ad-hoc-signed bundle's own `node`:
+refuted, the ACLs on both items were identical. Neither was a bad guess; both were
+guesses about *access* where the fault was about *identity*.
+
+**The class, not the instance.** `SHELL` and `TMPDIR` were added beside it — not
+because either was measured breaking anything, but because the finding is not
+"claude is unusual", it is "a clean environment is missing what every tool assumes
+a session has". Anything that keys a credential, a cache or a config directory on
+the account name had the same hole.
+
+**Asserted in three places, because no one of them can see the whole path.**
+`nativecheck` reads the spawn: `env_clear` still there, both names set, set before
+the env file, and the name taken from `getpwuid` rather than from a variable. A
+Rust test asserts `login_name` answers this account and does not disagree with
+`$USER`. And `daemoncheck` asserts the *second* hop — that `agentEnv` does not
+strip what the shell just set, which it does not do today only by `USER` not being
+on `SESSION_SCOPED_ENV`'s list.
+
+**Status.** Fixed. The empty `unknown` Keychain item on an affected machine is
+inert but stays until deleted by hand.
+### Q7.143 — The flag day that was taken on purpose, and what it cost
+
+**Question.** `compatibility.md` describes a four-step rollout whose whole point
+is that a protocol bump is never a flag day: ship a relay speaking `1..2`, let
+daemons move to 2 whenever their owners get to it, raise the floor only once
+nothing is left below it. Phase 5 raised `RELAY_PROTOCOL_MIN_VERSION` to 2 in the
+same commit that introduced v2. Why break the rule the range exists for?
+
+**Decision. Because the range cannot span this change.** v2 *is* the version on
+which a stream is always encrypted. A v1 daemon and a v2 relay cannot both be
+right about what the bytes on a stream mean, because v1's answer is "plaintext
+HTTP". Keeping the floor at 1 would mean keeping a relay that still carries
+plaintext — which is the thing being removed — for as long as one machine in the
+fleet had not been touched.
+
+**What it costs, plainly.** A daemon that has not been updated stops dialling in.
+It is refused with a `426` naming what to do, its machine draws as offline, and it
+comes back the moment somebody runs `deploy/deploy.sh` on that host. Nothing in
+the fleet updates itself; that script is the whole mechanism.
+
+**Three things were given up with the plaintext path, and each is named rather
+than discovered later:**
+
+- **`pnpm client` loses its relay arm.** Opening a channel needs a device key and
+  a capability bound to it with `cnf.jkt`; `REEMOAT_TOKEN` is a long-lived bearer
+  capability with no `cnf`, which is exactly what the binding makes worthless.
+  The CLI refuses with a sentence naming the remedy — the app for a remote
+  machine, `REEMOAT_URL` for a local one — rather than degrading. Adding a
+  plaintext path back for one CLI would put the fleet's traffic in the clear again
+  for whoever holds a token.
+- **The relay's CORS surface is gone**, and `CORS_ALLOW_METHODS` had its only
+  relay-side driver there. A WebSocket handshake is not preflighted, so there is
+  no browser question left for that process to answer. `src/cors.ts` is still the
+  daemon's and `daemoncheck` still drives it.
+- **`x-forwarded-for` no longer reaches a daemon.** It cost nothing: nothing under
+  `src/` reads it, and the Authority's throttle reads its own on its own listener.
+
+**Rejected: a transition mode.** A relay speaking both, gated on a header, was the
+obvious middle — and it is a downgrade oracle by construction. Whatever chooses
+the mode is a thing an attacker or a misconfiguration can choose *for* you, which
+is the whole reason `STREAM_ENCRYPTION_NONE` was deleted as a constant rather than
+left unused: with the string gone there is nothing to set.
+
+**Status.** Current. Q7.37 is the phase; `.claude/rules/compatibility.md` carries
+the rollout this deliberately did not take.
+
+### Q7.142 — What is still not decided about the server address
+
+**No relay field, and it is refused by construction rather than deferred.** The
+obvious companion to an authority field is a relay one, and it is wrong: a relay is
+a property of a **machine**, not of a person. A daemon receives it once at
+enrollment (`identity.relay_url`) and never asks again; a client learns it
+**per machine** from `POST /v1/tokens`, resolved through `relay_tunnels.relay_id`
+→ `REEMOAT_CP_RELAY_URLS`, so two machines of one account legitimately sit on
+different relays. One field on a settings screen is one value for N machines.
+`native.ts` already said so — *"Not the relay, and never derived from this… a
+client that derived one from the other would break the first fleet that moved its
+relay"* — and this records that the screen was designed against it rather than
+having forgotten. If a per-machine override is ever wanted, its place is
+Settings → Machines → *that machine*, beside the "This device" switch.
+
+**No way back to the compiled default.** Once somebody saves an address the file
+wins for ever, which is the whole point of seeding (Q4.121) and also means there
+is no "reset to the shipped server" control. Deleting `server` from the shell's
+config is the remedy, and nothing surfaces it. Left open rather than built: the
+population that needs it is a fork's users on a build whose default moved, and
+nobody has one yet.
+
+**No deep-link handler, and none is needed.** `/confirm`, `/reset` and `/verify`
+are opened by a mail client in a browser and land on the control plane's own gate.
+`readPastedGateToken` was built for the case where an instance serves no web UI,
+and it works identically in a browser — so there is no URL-scheme registration, no
+Tauri plugin and no second arrival path to secure. `paseo` registers a `paseo:`
+scheme for *agent* deep links, which is a different feature from account recovery.
+
+**Unmeasured.** Nobody has switched servers on a real machine and watched
+`credential#<old origin>` disappear from the OS keyring. The Rust key *shape* is
+unit-tested and the erase is asserted at the call site, but writing and reading a
+real entry needs an unlocked login keychain, which a non-interactive shell does
+not have — the same limit every other keychain item in `credential.rs` has.
+`docs/NATIVE.md`'s hand checklist is where it happens.
+
+### Q7.144 — Can Android's user-CA trust be scoped to the control plane?
+
+**Position.** No, and the answer is structural rather than unfinished.
+`network_security_config.xml` puts `<certificates src="user" />` in its base
+config, which is every origin this app reaches. The narrower mechanism Android
+offers is a domain config, and it takes **literal hostnames written at build
+time**. This app has none to write: `REEMOAT_DEFAULT_SERVER` is a fork's
+compile-time seed and is unset in this repository, the address is otherwise typed
+into `ChooseServer` at run time and stored in the shell's config, and the relay is
+resolved **per machine** from `POST /v1/tokens` — so two machines of one account
+legitimately sit on different relays and there is not even one relay hostname per
+installation. Any list invented at build time would be exactly the self-hosted
+deployment this clause exists for, broken.
+
+**Why the clause is there at all.** `reqwest` resolves to rustls with
+`rustls-platform-verifier` on Android, which calls the platform's own trust
+manager over JNI, so one resource file governs the Rust leg and both webview legs.
+A control plane behind a CA somebody installed on their own phone is the ordinary
+deployment for this software; drop the user entry and it is refused while the same
+URL works in Chrome.
+
+**What it loosens, named rather than implied.** Somebody who installs a hostile CA
+profile gets all three legs, and they are not worth the same:
+
+1. `proxy.rs`'s `/v1` calls, which carry the account's bearer credential in an
+   authorization header. An intercepting CA reads and can replay it against the
+   control plane. There is nothing under the TLS layer here — it is an ordinary
+   HTTPS API call, and this is the leg the clause actually trades.
+2. The webview's relay leg. Inside it is a Noise_IK session keyed on the device
+   key and the machine key `machinekey.ts` announces, so an interceptor sees relay
+   framing and ciphertext it holds no key for. What it learns is who is talking to
+   which machine, and when.
+3. The webview's daemon leg. Over the relay this is case 2. Over a LAN or a
+   loopback address it is cleartext by this same file's first clause, which a user
+   CA is not needed to read at all.
+
+**Rejected.** *Move the clause into a domain config for the default server.* It
+scopes nothing in the build this repository produces, because that default is
+empty — and in a fork that sets one, it silently stops working for every user who
+typed a different address, which is the population the clause exists for.
+*Ship two resource files and pick at run time.* A network security config is
+resolved from the manifest at install time; there is no run-time selection.
+*Drop the user entry and pin the control plane's certificate instead.* Pinning
+needs a certificate known at build time, which is the same missing input one level
+down, and it would break every self-hosted instance on renewal.
+
+**Status.** Known limitation, recorded rather than mitigated. The mitigation that
+exists is Android's own: a user CA is an explicit per-device install that the
+system warns about persistently. The comment in the resource file names all three
+legs so that nobody reading it concludes the end-to-end encryption covers the one
+leg it does not.
+
+### Q7.145 — Which folder picker a local daemon gets, and what stops it being the route
+
+**Question.** `DirectoryPicker` walks the tree over the wire — `GET /fs/roots`, then
+`GET /fs/list` per level — for every machine. On the computer the app is *running
+on*, that is a network round trip to answer a question the operating system already
+has a panel for.
+
+**Decision.** On a local daemon the OS panel **replaces** the tree. Remote machines
+are untouched. The predicate is `inNativeShell() && state.localMachineId === selected`,
+derived once at the mount site and passed down as one boolean.
+
+**Not `route.kind === "local"`**, for three reasons and any one is sufficient. The
+route is a *preference* — `setLocalOff` turns loopback off per machine, so a picker
+keyed on it puts the tree back the instant somebody chooses the relay on the machine
+they are sitting at. It answers *reachability* while this question is *identity*; a
+local daemon momentarily unreachable is still this computer. And a screen cannot
+reach it at all: `MachineConnection` is pinned to an exact four-module set with no
+`ui/` file among them. `AppState.localMachineId` already carries this argument for
+the `this device` badge; the picker is its second reader.
+
+**No daemon change, no wire change, no new route.** `resolveCwd` is deliberately
+unconfined and `POST /sessions` takes any non-empty string, so `REEMOAT_ROOTS`
+narrows what `GET /fs/list` *lists* and nothing else. One new Rust command,
+`host_pick_folder`, on a dialog plugin already linked and already driven from Rust —
+so `capabilities/default.json` stays `"permissions": []`.
+
+**What it loosens, named.** The panel is not narrowed by `REEMOAT_ROOTS`; that was
+never a boundary, and who can take this path at all is the uid that already owns
+`~/.reemoat`.
+
+⚠ **One genuinely new failure mode, recorded rather than pre-mitigated.** Picking
+`~/Desktop`, `~/Documents` or `~/Downloads` on macOS puts the agent inside a
+TCC-protected directory. The panel grants access to the *app* through the powerbox;
+the reader is the **daemon's child**, a separate process. To measure: start a session
+in `~/Desktop` on a full build and ask the agent to `ls`. No `NS*UsageDescription`
+key is added before that answer exists.
+
+**A `(async)` rule became a mechanism in passing.** `commands.rs` argued at length
+that a command waiting on a platform panel must carry the argument form — the panel's
+result is delivered *by* the main event loop, so a main-thread command blocking on it
+waits on the loop it is holding — and nothing held it to that. `nativecheck` now
+splits the file on the attribute and requires it of every body reaching `.dialog()`
+or a `blocking_` call. Verified non-vacuous.
+
+**Alternatives tried and taken back out.** *Beside the tree rather than instead of
+it* — two controls answering one question, and the footer's `cwd` then has two
+writers, which is the defect `onPick`'s unconditional report exists for.
+*`showDirectoryPicker()` in the browser* — it answers a `FileSystemDirectoryHandle`
+and yields **no real path**, and a real path is the entire payload since `cwd` is
+interpreted on the daemon's own filesystem. *A Rust `read_dir` command feeding the
+existing tree* — it would make the shell a filesystem browser for a page that renders
+agent output, and would answer about the wrong disk whenever the daemon is elsewhere.
+
+**One thing the tree arm being kept bought.** Four existing assertions —
+`webcheck.navigation.ts`'s crumb bar and **Up one folder**, `webcheck.typography.ts`'s
+crumb class string, `decision-surfaces`' `aimed === 9`, `refusing-controls`' two
+`disabled:opacity-40` — stay green **because both arms live in one component**.
+Deleting the tree outright would have taken all four with it.
+
+⚠ **It shipped broken on Android, and the fix changed the predicate.**
+`blocking_pick_folder` does not exist on mobile in `tauri-plugin-dialog` 2.7.3 —
+Android's own answer to "choose a folder" is `ACTION_OPEN_DOCUMENT_TREE`, a Storage
+Access Framework tree *URI* rather than a path, which the plugin does not wrap.
+`host_save_file` survives beside it only because a *file* panel has a mobile arm.
+The command was declared and registered unconditionally, so the APK failed to
+compile: `error[E0599]: no method named blocking_pick_folder`.
+
+Three things came out of that. **Only the body is gated**, not the declaration or
+the `generate_handler!` line — a `#[cfg]` there would leave all three text-based
+censuses asserting a surface a mobile build does not have. **The page now reads a
+declared capability**, `Boot.picksFolder`, rather than `inNativeShell()`: a shell
+exists on Android too, and the two available guesses are both wrong — `platform`
+narrows `"android"` to `"other"` along with every future desktop target, and "a
+phone has no local daemon so it never matches `localMachineId`" is true today and
+is luck. And **`nativecheck` gained the static half** of the lesson: a named list
+of desktop-only dialog APIs, each required to sit behind a gate naming the
+platforms it is missing on, plus a comparison of `PICKS_FOLDER`'s `cfg!` against
+the `#[cfg]` on the function it describes — one condition written twice, because a
+macro and an attribute cannot share a token, and a build where they disagree
+compiles perfectly while drawing a control the shell refuses. Verified by
+reverting: the check goes red on the code that shipped.
+
+**Status.** Built. `.claude/rules/native-panels.md` is the area; Q7.146 is the
+gap that let it through.
+
+### Q7.146 — Two build targets, and only one of them is what "green" means
+
+**Question.** `pnpm check`, `cargo clippy` and 74 `cargo test`s were green while
+the Android APK would not compile (Q7.145). What is the standing gap?
+
+**Position.** **Nothing in the automated gate builds for
+`aarch64-linux-android`**, and nothing in it is wrong. `pnpm check` is TypeScript
+and the offline drivers. `cargo clippy` and `cargo test` run on the **host**
+target. So a function that references an API a crate does not offer on mobile is
+invisible to all of them, and the APK build is the only thing that sees it — and
+it is run by hand, rarely, from one session.
+
+**What has been done about it.** The static half, in `nativecheck`: a named list
+of desktop-only dialog APIs, each required to sit behind a gate naming the
+platforms it is missing on, with a `report` so a rename cannot make it go quiet;
+and `PICKS_FOLDER`'s `cfg!` held against the `#[cfg]` on its implementation. That
+catches the *class* that shipped. It cannot catch the general case: a driver
+cannot know what a crate offers on a target without asking the compiler.
+
+**What has not, and the condition for doing it.** `cargo check --target
+aarch64-linux-android` in the drivers. Not built now, and the reason is a cost
+rather than a doubt: it needs the NDK on whatever runs it, and this development
+machine has a Homebrew Rust toolchain with **no `rustup`** — the same fact that
+makes desktop builds arm64-only (`docs/NATIVE.md`). So it would be a check that
+is green on one machine and absent on another, which is worse than a stated gap.
+
+⚠ **And one trap about what counts as evidence, found while checking the fix.**
+The obvious confirmation — grep the shipped Android `.so` for
+`blocking_pick_folder` and find it absent — proves **nothing**. That name is a Rust
+method; it never reaches a binary as a string literal on *any* target, and it is
+equally absent from the macOS build. `host_pick_folder` *is* greppable, because Tauri
+emits it for the IPC table — so the two names look alike and answer different
+questions. **The compilation is the proof**, and it is sufficient: the previous
+commit failed at `E0599` on that method and this one reaches a signed APK.
+
+⚠ **A third instance, and it is the one where the tool was honest.** Checking that
+a new `pt-[max(1rem,env(safe-area-inset-top))]` reached the built stylesheet, a grep
+for `padding-top:max(1rem,env(...))` returned nothing — reading as a class that had
+not generated. It had: Tailwind prints `max(1rem, env(...))`, with a space after the
+comma that the generator inserts and the author never typed.
+
+**What all three share is one sentence.** Each searched for a *string* while wanting
+to know about a *property*, and took the match — or its absence — as the answer.
+The Rust method name is not a string in any binary; the invented-symbol control
+answered a different question; the generator's whitespace is not the author's. A
+search is evidence about a property only when something has established that the
+two coincide, and in none of the three had anything.
+
+⭐ **And the transferable half is not about `grep`, it is about what the control
+tested.** There *was* a control — an invented symbol, searched for and correctly
+not found — and it was green, which is exactly why the conclusion was believed. It
+answered *"does this search work"*. The question that needed answering was *"does
+this search distinguish a symbol the gate removed from one that was never a string
+in the first place"*, and against that hypothesis the control is silent: both
+answers look identical. A green control over the wrong hypothesis is worse than no
+control, because it converts a guess into a finding. The same shape appears
+throughout this document under a different name — an assertion written from the
+code rather than from the intent, which then agrees with the code.
+
+**The trigger to revisit.** While the APK is built by hand and rarely, a compile
+error found at build time is a cheap failure. The moment it joins the ordinary
+cycle — a CI leg, or a release that ships it — that target has to be in something
+that runs before a person is waiting on it. `native-packaging.md`'s platform
+matrix is where that change would show up first.
+
+**Status.** Open. The class is covered; the target is not.
+
+
+
+### Q7.147 — The xAI routed arm: what was probed, and the one call still missing
+
+**`SYSTEMS.xai` ships `baseUrl: null`, so Grok is reached by the CLI that ships for
+it and by nothing else.** This entry is the record of why the routed arm — Claude
+Code pointed at `api.x.ai` — is *not* in that row, and exactly what would put it
+there.
+
+**Probed 2026-09-21, no credential and a bogus one:**
+
+| Probe | Answer |
+|---|---|
+| `POST /v1/nonsense-abc` | `404`, `{"error":{"code":404,…docs.x.ai…}}` |
+| `POST /anthropic/v1/messages` | `404`, same envelope |
+| `POST /v1/messages`, no key | `401`, `{"code":"unauthenticated:no-credentials"}` |
+| `POST /v1/messages`, bogus key in `x-api-key` | `400`, `{"code":"invalid-argument","error":"Incorrect API key provided…"}` |
+| `POST /v1/messages`, bogus key in `authorization: Bearer` | **identical** `400` |
+| `GET /v1/models`, no key | `401` |
+
+So something **is** routed at `/v1/messages` and it is behind auth — a wrong path
+answers 404 in a different envelope — and both header conventions are read, as with
+OpenRouter and unlike MiniMax, whose 401 names one header in prose.
+
+**That is not enough, and the gap is the whole entry.** Every other routed row in
+`SYSTEMS` rests on the vendor *publishing* an Anthropic-compatible endpoint. xAI
+documents none: the string `anthropic` does not occur anywhere in `docs.x.ai`'s own
+`llms.txt`, and the REST reference describes the API as OpenAI-compatible
+(`/v1/responses`, `/v1/chat/completions`). A bogus key is refused **before** any
+body-shape check, so the one thing the probe cannot show is the one thing that
+matters. Naming the base on this evidence would offer a pairing the picker draws,
+`POST /custom-agents` accepts, and somebody's first turn discovers is wrong — which
+is worse than the row not existing.
+
+**What opens it is one call with a real key**: an Anthropic body to
+`api.x.ai/v1/messages` coming back with a `content` array. Then `baseUrl` becomes
+`"https://api.x.ai"` (the SDK appends `/v1/messages`, the path the `openrouter` row
+is pinned against), `authHeader` becomes `authorization`/`Bearer ` — both
+conventions read, so it follows the four rows above — and `models` gets a
+written-down starting set, because `GET /v1/models` answers 401 unauthenticated and
+so fails the browser door `openrouter` goes through, and a daemon-side fetch would
+be the fourth `fetch` in `src/` that `compatibility.md` states as a property.
+
+⚠ **`apiType: "openai"` with a `baseUrl` is never the answer here**, and the row
+says so. `hostable`'s fourth arm refuses an OpenAI-shaped routed system for every
+harness, because `ROUTED_MODEL_ENV` has no OpenAI-shaped door — it would pass the
+protocol test and die on the pinning one. That is what `zen` is `baseUrl: null`
+for, and `ROUTED_MODEL_ENV`'s own comment forbids closing it by inventing a codex
+arm: which variable codex reads for a custom-gateway model is a measurement nobody
+has taken, and guessing produces exactly the silent wrong-model failure the whole
+table exists to prevent.
+
+**Meanwhile Grok is not absent from this product.** OpenRouter serves
+`x-ai/grok-4.6`, `x-ai/grok-4.3` and `x-ai/grok-build-0.1` among others, and
+`packages/web/src/openrouter.ts` fetches that catalogue in the browser — so a
+machine with an OpenRouter key has been able to run Claude Code at Grok since
+before any of this. What the `xai` row adds is a **direct** key and grok's own
+harness.
+
+⚠ **The model ids in circulation are retired.** Per xAI's May-15 2026 notice,
+`grok-code-fast-1` redirects to `grok-build-0.1`, and `grok-4`, `grok-4-fast`,
+`grok-4-1-fast-*` and `grok-3` all redirect to `grok-4.3`. Whatever list this row
+eventually carries must be read off `docs.x.ai/developers/models` on the day it is
+written — the `moonshot` row shipped three ids that had been retired four months
+earlier and nothing noticed.

@@ -1,3 +1,5 @@
+import { copyNative, inNativeShell } from "../native";
+
 /**
  * Copying text, in the one place that knows this origin is not always secure.
  *
@@ -26,8 +28,16 @@
  *
  * Nothing here runs at import: `webcheck` imports this file's consumers under a
  * `window` stub with no `document` and no `navigator` at all.
+ *
+ * **Three arms now, and the native one is first.** `tauri://localhost` *is* a
+ * secure context, so `navigator.clipboard` should be there — but "should be, from a
+ * specification" is exactly the class of claim this file exists because of, and a
+ * webview that has the object and refuses it without focus would fall through to
+ * `execCommand`, which some webviews have removed. The platform's own clipboard is
+ * the one call that cannot be absent on the platform it belongs to.
  */
 export async function copyText(text: string): Promise<boolean> {
+  if (inNativeShell()) return await copyNative(text);
   try {
     // Both optional: a browser can carry the object without the method, and on the
     // insecure origin above the whole object is undefined.

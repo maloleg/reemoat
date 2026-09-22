@@ -1,15 +1,19 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { installCommand } from "../enrollment";
+import { useEffect, useSyncExternalStore, type ReactNode } from "react";
+import { AGENT_HOST_OS, installCommand } from "../enrollment";
+import { controlPlaneOrigin } from "../native";
 import { keyOf } from "../ids";
 import { machineQuotaNotice, mayAddMachine } from "../quota";
 import type { Route } from "../router";
 import type { AppState } from "../store";
 import { CommandLine } from "./CommandLine";
 import { MachineOffer } from "./MachineOffer";
+import { MachineColumn } from "./MachineColumn";
 import { SessionBrowser } from "./SessionBrowser";
 import { useKeyboard } from "./keyboard";
 import { LAYER } from "./overlay";
-import { RAIL_DEFAULT, RAIL_MAX, RAIL_MIN, clampRailWidth, railWidth, setRailWidth, subscribeRail } from "./rail";
+import { PaneHandle } from "./PaneHandle";
+import { rail, railWidth, subscribeRail } from "./rail";
+import { subscribeTaskWidth, taskWidth } from "./taskWidth";
 
 /**
  * One layout, two shapes.
@@ -33,10 +37,13 @@ import { RAIL_DEFAULT, RAIL_MAX, RAIL_MIN, clampRailWidth, railWidth, setRailWid
 export function AppShell({
   state,
   route,
+  onMenu,
   children,
 }: {
   state: AppState;
   route: Route;
+  /** Opens the menu drawer. Held in `App`, because two triggers share one panel. */
+  onMenu: () => void;
   children: ReactNode;
 }): ReactNode {
   const activeKey = route.name === "session" ? keyOf(route.ref) : null;
@@ -58,9 +65,27 @@ export function AppShell({
    * value outlives any component, and `webcheck` reads it with no React at all.
    */
   const width = useSyncExternalStore(subscribeRail, railWidth);
+  /*
+   * ⚠ **The background panel's width is written here rather than by the panel**,
+   * and the reason is the frame before the panel exists. `TaskPanel` mounts only
+   * while it is open, so a property written from inside it would land one commit
+   * after the card had already painted at `index.css`'s declared width — the exact
+   * mount-jump `--rail-w`'s own declaration exists to prevent, arriving on every
+   * open instead of on every reload.
+   *
+   * `null` is *nobody has chosen*, and it is removed rather than written: the
+   * stylesheet declares 20rem and steps to 26rem at `xl`, and an inline declaration
+   * on `documentElement` beats both media blocks. So a reader who has never dragged
+   * gets the two breakpoints, one who has gets their own number at every size, and
+   * a double-click on the separator hands the breakpoints back by removing this
+   * again. `taskWidth.ts` carries the argument for the two defaults.
+   */
+  const taskW = useSyncExternalStore(subscribeTaskWidth, taskWidth);
   useEffect(() => {
     document.documentElement.style.setProperty("--rail-w", `${width}px`);
-  }, [width]);
+    if (taskW === null) document.documentElement.style.removeProperty("--task-w");
+    else document.documentElement.style.setProperty("--task-w", `${String(taskW)}px`);
+  }, [width, taskW]);
 
   return (
     /*
@@ -123,14 +148,23 @@ export function AppShell({
       {/*
        * **`overflow-hidden`, with the scroll moved inside `SessionBrowser`.**
        *
-       * Three things needed that. The account row has to sit at the bottom of the
-       * column rather than at the bottom of a scrolling list. The profile popover
-       * opens *upward* out of that row, and an `absolute` panel inside an
-       * `overflow-y-auto` ancestor is a panel with its top half clipped away — the
-       * alternative being to portal it and measure the viewport, which this app
-       * does not do. And the footer stops being a `sticky` strip with a
-       * `backdrop-blur`, which was blurring content that no longer passes under it
-       * while costing a stacking context.
+       * Three things needed that, and the middle one has since been replaced by a
+       * fourth. The New session button has to sit at the bottom of the column
+       * rather than at the bottom of a scrolling list. The footer stops being a
+       * `sticky` strip with a `backdrop-blur`, which was blurring content that no
+       * longer passes under it while costing a stacking context. ⚠ And the two
+       * children of this element scroll *independently* — the machine folders and
+       * the session list are each their own scrollport — which only works while
+       * nothing above them scrolls.
+       *
+       * ⚠ **The reason that is no longer here is the one to know about**, because
+       * it is why this rule reads as over-specified: the account row used to live
+       * in that footer and open a popover *upward* out of it, and an `absolute`
+       * panel inside an `overflow-y-auto` ancestor is a panel with its top half
+       * clipped away. That row is the menu drawer now, portaled to
+       * `document.body`, and could not be clipped by anything here. The clause is
+       * recorded rather than deleted because it is the one that would otherwise be
+       * re-discovered by somebody putting a popover back in the footer.
        *
        * **`border-r` is back, and it has now been argued in both directions with
        * the same sentence, which is why the number is written down.** It was
@@ -159,8 +193,27 @@ export function AppShell({
        * here knows what `lg` is; the width is a number, and CSS decides whether
        * there is anything to apply it to.
        */}
-      <aside className="hidden shrink-0 flex-col overflow-hidden border-r border-edge bg-ink lg:flex lg:w-[var(--rail-w)]">
-        <SessionBrowser state={state} activeKey={activeKey} />
+      {/*
+       * ⚠ **A row, not a column, and `--rail-w` measures both children.**
+       *
+       * The machines are the leading column — this app's folders — and the session
+       * list is beside them. Putting the folders *inside* this element rather than
+       * before it is what keeps `RailHandle` anchored on `left: var(--rail-w)`: the
+       * handle divides the rail from the conversation, and that join is this
+       * element's trailing edge whichever way its own children are arranged. The
+       * alternative, a sibling column before this one, forces the handle onto a
+       * `calc` of two lengths — and the second of them would be written once in
+       * `rail.ts` in device pixels and once in a class string, which is exactly the
+       * `19.5rem`/`312` defect `index.css` records at the top of the file.
+       *
+       * `MachineColumn` is fixed at 72px and `SessionBrowser` takes the rest, so a
+       * drag moves the list alone. `rail.ts`'s bounds are stated as
+       * `MACHINE_COLUMN_PX` plus the old numbers for that reason: the floor is still
+       * "240px of session row", now measured where the rows actually are.
+       */}
+      <aside className="hidden shrink-0 overflow-hidden border-r border-edge bg-ink lg:flex lg:w-[var(--rail-w)]">
+        <MachineColumn state={state} onMenu={onMenu} />
+        <SessionBrowser state={state} activeKey={activeKey} onMenu={onMenu} />
       </aside>
 
       {/*
@@ -244,7 +297,7 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
         <p className="text-sm text-muted">No machines yet.</p>
         {mayAddMachine(state.me) ? (
           <>
-            <p className="text-xs text-muted">Run this on the machine you want to use:</p>
+            <p className="text-xs text-muted">Run this on the {AGENT_HOST_OS} machine you want to use:</p>
             {/* ⚠ **One flex child, not two, and the column's `gap-3` is the
                 reason.** As siblings the offer inherited 12px above its own 16
                 and the `Or` rule sat visibly closer to the button than to the
@@ -253,7 +306,7 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
                 copy of this pair is inside its own `lg:hidden`, so at every width
                 exactly one of the two is on screen. */}
             <div className="w-full max-w-lg text-left">
-              <CommandLine command={installCommand(location.origin)} />
+              <CommandLine command={installCommand(controlPlaneOrigin())} />
               <MachineOffer config={state.config} me={state.me} />
             </div>
           </>
@@ -281,7 +334,18 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
 }
 
 /**
- * The divider you can drag, and the three ways to move it.
+ * The divider you can drag — and what is left here is *where it sits*, nothing
+ * about the gesture.
+ *
+ * ⚠ **`PaneHandle` owns the drag, and this file may not carry a second copy of
+ * it.** Four paragraphs describing the capture, the commit, the cancel and the
+ * keyboard stayed behind when the mechanism was extracted, over a wrapper that has
+ * no state, no handlers and no capture — and one of them was the *pre-correction*
+ * version of a measurement: it said a captured drag leaves "nothing to leak when
+ * this unmounts mid-drag", which `PaneHandle`'s unmount effect records as measured
+ * wrong and repairs. A reader who found this copy first would have believed a
+ * mid-drag unmount was safe, and it is not. The corrected measurement is therefore
+ * deliberately **not** restated here: read it at the effect that acts on it.
  *
  * **Out of flow entirely, anchored on `--rail-w`.** It straddles the rail's own
  * `border-r` instead of displacing it, so the rail keeps the geometry it had and
@@ -290,9 +354,10 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
  * inserted 8px of nothing between the rail and the conversation and pushed that
  * line off the join.
  *
- * It sits *outside* the `<aside>` because that element is `overflow-hidden` — so
- * the account row's popover can open upward without a scrolling ancestor clipping
- * it — and anything hanging past its right edge would be clipped by the same rule.
+ * It sits *outside* the `<aside>` because that element is `overflow-hidden` — which
+ * is what lets the machine folders and the session list inside it scroll
+ * independently — and anything hanging past its right edge would be clipped by the
+ * same rule.
  *
  * **After `<main>` in the DOM, and at `LAYER.header`, which together are one fix
  * rather than two choices.** The first draft was a zero-width flex child sitting
@@ -306,153 +371,40 @@ export function NothingSelected({ state }: { state: AppState }): ReactNode {
  * wins, which is what puts it above both without reaching `LAYER.menu` and
  * painting over an open dropdown. Out of flow is what makes the DOM move free: the
  * position comes from `left: var(--rail-w)`, not from where it sits in the row.
- *
- * **A drag writes the custom property and nothing else.** No React state moves
- * while the pointer does — not width, not a "dragging" transform — because
- * `AppShell` re-renders on the four-second poll and on every streamed event, and a
- * width owned by `style={{ width }}` would be reset to where the drag *started*
- * every time one landed. `dragging` is React state, but it is set once at
- * `pointerdown` and once at `pointerup`, never in between.
- *
- * **`setPointerCapture`, not listeners on `window`.** A pointer moving faster than
- * the layout follows leaves the 8px strip on the first frame, so the element's own
- * handlers are only enough once the capture redirects every later event for that
- * `pointerId` back to it. The first draft used `window` listeners instead, which
- * covers the fast pointer and *not* the case that strands the drag: release the
- * button outside the browser window and no `pointerup` is delivered to the
- * document at all, so the strip stays armed, the next click anywhere resizes the
- * rail, and nothing looks wrong until it happens. Capture also makes teardown
- * structural — there is nothing to remove, so there is nothing to leak when this
- * unmounts mid-drag.
- *
- * `pointercancel` is a real outcome rather than defensive: on a touch laptop the
- * browser can decide mid-gesture that this was a scroll. It reverts to the
- * committed width rather than keeping wherever the finger was when the gesture was
- * taken away, because a cancelled gesture is not a smaller one.
- *
- * **Keyboard and double-click are not decoration.** A separator that only answers
- * to a pointer is one nobody on a keyboard can move, and `aria-valuenow` would be
- * announcing a number with no way to change it. Home resets, which is also the
- * answer to "I have dragged this somewhere silly" that does not require finding the
- * default by feel.
  */
 function RailHandle(): ReactNode {
-  const [dragging, setDragging] = useState(false);
-  /**
-   * Read for `aria-valuenow` alone — the *visible* width is the custom property,
-   * which a drag writes without telling React. Subscribed rather than read once
-   * because a screen reader has to be told the committed number after a keyboard
-   * step, and that is the one path that does re-render.
-   */
-  const announced = useSyncExternalStore(subscribeRail, railWidth);
-  /** The last width the pointer asked for, so `pointerup` commits what is on screen. */
-  const latest = useRef(RAIL_DEFAULT);
-
-  const apply = (px: number): void => {
-    document.documentElement.style.setProperty("--rail-w", `${px}px`);
-  };
-
-  /** Where this drag began, and `null` whenever one is not in flight. */
-  const from = useRef<{ x: number; width: number } | null>(null);
-
-  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>): void => {
-    // Left button only. A right-click would otherwise arm a drag that no
-    // `pointerup` on the same button ever disarms.
-    if (event.button !== 0) return;
-    // One pointer at a time. A second one landing on the strip mid-drag would
-    // rebase `from` onto `railWidth()` — the width as it was *before* the drag
-    // started, since nothing commits until `pointerup` — and the rail would jump
-    // by however far the first finger had already travelled.
-    if (from.current !== null) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    from.current = { x: event.clientX, width: railWidth() };
-    latest.current = railWidth();
-    setDragging(true);
-  };
-
-  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>): void => {
-    const origin = from.current;
-    if (origin === null) return;
-    latest.current = clampRailWidth(origin.width + event.clientX - origin.x);
-    apply(latest.current);
-  };
-
-  const finish = (commit: boolean): void => {
-    if (from.current === null) return;
-    from.current = null;
-    setDragging(false);
-    if (commit) setRailWidth(latest.current);
-    // Re-stated from the committed value either way: on commit `setRailWidth`
-    // clamps and may land where the pointer did not, and on cancel the property is
-    // still showing wherever the gesture was abandoned.
-    apply(railWidth());
-  };
-
-  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
-    // Inline-start/end rather than "smaller/bigger": this app is LTR throughout —
-    // `Header`'s leading control, the rail on the left — so the two coincide, and
-    // spelling it this way is what a future RTL pass has to change rather than
-    // discover.
-    const step = event.shiftKey ? 48 : 16;
-    if (event.key === "ArrowLeft") setRailWidth(railWidth() - step);
-    else if (event.key === "ArrowRight") setRailWidth(railWidth() + step);
-    else if (event.key === "Home") setRailWidth(RAIL_DEFAULT);
-    else return;
-    // Only after one of the three matched. An unconditional `preventDefault` here
-    // would eat Tab off a focused separator, which is the one key that has to keep
-    // working on a control whose whole purpose is to be reachable.
-    event.preventDefault();
-  };
-
   return (
+    /*
+     * ⚠ **Out of flow, anchored on `--rail-w`, and *after* `<main>`** — all three
+     * are held by a driver reading this file, which is why this wrapper exists at
+     * all rather than `<PaneHandle>` being mounted here directly. `Header` is
+     * `sticky` at `LAYER.header` and `Composer` is `sticky` in the same pane; a
+     * positioned element with `z-auto` loses to one with `z-30`, so the strip has
+     * to carry `LAYER.header` **and** be the later sibling. Move it back between
+     * the panes, or drop the layer class, and the top and bottom of a full-height
+     * divider go dead while the app looks entirely normal.
+     */
     <div
-      className={`absolute inset-y-0 hidden w-2 -translate-x-1/2 lg:block ${LAYER.header}`}
+      /*
+       * ⚠ **`[@media(pointer:fine)]` nested inside `lg:`, and this was false here
+       * before the panel's separator existed.** `lg` is 1024px, which an iPad Pro
+       * in portrait matches exactly, so this 8px `touch-action: none` strip was
+       * grabbable by a finger lying across the first character of every session
+       * title — with `bg-transparent group-hover:` as its whole appearance, i.e.
+       * none. `PaneHandle`'s docblock has always said these exist only where the
+       * pointer is a mouse, and that is the standing argument for an 8px target
+       * under this app's 44px floor; it is a mechanism rather than a claim now.
+       *
+       * Nested rather than a competing `[@media(pointer:coarse)]:hidden`: two
+       * `display` utilities in one string are resolved by Tailwind's emission order
+       * rather than by the string. Narrowing the one that turns it on has no such
+       * contest.
+       */
+      className={`absolute inset-y-0 hidden w-2 -translate-x-1/2 lg:[@media(pointer:fine)]:block ${LAYER.header}`}
       style={{ left: "var(--rail-w)" }}
     >
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Sidebar width"
-        aria-valuenow={announced}
-        aria-valuemin={RAIL_MIN}
-        aria-valuemax={RAIL_MAX}
-        tabIndex={0}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={() => finish(true)}
-        onPointerCancel={() => finish(false)}
-        onDoubleClick={() => setRailWidth(RAIL_DEFAULT)}
-        onKeyDown={onKeyDown}
-        /*
-         * `-left-1` centres the 8px target on the 1px border rather than beside it,
-         * so the thing under the cursor is the line somebody is aiming at. 8px is
-         * under the 44px this app gives a *tap* target and deliberately so: this
-         * control exists only at `lg`, where the pointer is a mouse, and a 44px
-         * grab strip there would swallow clicks aimed at the first character of
-         * every session title in the list.
-         *
-         * `touch-none` because a touchscreen laptop is still `lg`: without it the
-         * browser claims the gesture as a scroll and `pointercancel` fires instead
-         * of a drag.
-         */
-        className="group absolute inset-0 cursor-col-resize touch-none"
-      >
-        {/*
-         * The line itself, which is the rail's border thickening under the cursor.
-         * `bg-edge-strong` is the token every control in this app is identified by
-         * and the only one with a ≥3:1 floor — the same reason a field's border is
-         * that and never `edge`. Transparent at rest: the `border-r` underneath is
-         * already drawing the division, and a permanently visible second line beside
-         * it is two dividers where the palette argument asks for one.
-         */}
-        <div
-          aria-hidden="true"
-          className={`absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 transition-colors ${
-            dragging ? "bg-edge-strong" : "bg-transparent group-hover:bg-edge-strong/60"
-          }`}
-        />
-      </div>
+      {/* `sign: 1` — the rail is to the left of its handle, so rightwards is wider. */}
+      <PaneHandle pane={rail} label="Sidebar width" sign={1} className="absolute inset-0" />
     </div>
   );
 }

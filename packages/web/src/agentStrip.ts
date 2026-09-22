@@ -125,6 +125,14 @@ export function stripEntries(rows: readonly StripRow[]): AgentStripEntry[] {
 /**
  * Move one row, for both the drag and the keyboard.
  *
+ * **Generic over its element, because it has a second subject now.** The machine
+ * folders reorder through this same body rather than a copy of it — the splice
+ * semantics below are the property both lists need, and nothing here knows or
+ * needs to know what an agent is. Its sibling {@link dropIndex} deliberately did
+ * **not** travel: that one divides travel by one measured row, which is exact on a
+ * uniform column and drifts on a strip where a tab is its label's width, so it
+ * keeps its one caller and `machineOrder.ts`'s `slotFor` answers the other axis.
+ *
  * ⚠ **Splice semantics, not swap.** Dragging row 0 to position 3 must leave 1, 2
  * and 3 shifted up by one — a swap would leave the list in an order nobody asked
  * for the moment a drag crosses more than one row, and the two gestures would
@@ -132,14 +140,20 @@ export function stripEntries(rows: readonly StripRow[]): AgentStripEntry[] {
  * rather than throwing: the drag reports a position measured from a pointer, and
  * a pointer that left the list is not an error.
  */
-export function moveRow(rows: readonly StripRow[], from: number, to: number): StripRow[] {
+export function moveRow<T>(rows: readonly T[], from: number, to: number): T[] {
   const next = [...rows];
   if (from < 0 || from >= next.length) return next;
   const target = Math.min(Math.max(to, 0), next.length - 1);
   if (target === from) return next;
-  const [moved] = next.splice(from, 1);
-  if (moved === undefined) return next;
-  next.splice(target, 0, moved);
+  const cut = next.splice(from, 1);
+  // ⚠ **A length test, not `moved === undefined`.** That spelling was an emptiness
+  // check that read a *value*, which is correct only while `T` is a row type that
+  // cannot itself be `undefined` — and the moment this became generic it would
+  // have bailed on a perfectly valid move of such an element. The bounds are
+  // already checked above, so this arm is unreachable either way; what matters is
+  // that it stays unreachable for reasons that survive the type widening.
+  if (cut.length === 0) return next;
+  next.splice(target, 0, ...cut);
   return next;
 }
 

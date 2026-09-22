@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The bundled Node runtime's entitlements, and ONLY the bundled runtime's.
+
+  ⚠ **This file is not the app's.** `entitlements.plist` beside it holds one
+  entitlement and is meant to stay that way; these five would be a real loosening
+  of the window that holds the fleet's credential. They belong to
+  `Contents/MacOS/node`, which is a separate Mach-O with a separate signature and
+  therefore a separate set.
+
+  **Every key here was measured rather than chosen.** The official Node build from
+  nodejs.org already ships signed with the hardened runtime, and this is the set it
+  carries — read off `node-v24.21.0-darwin-arm64` with:
+
+      codesign -d --entitlements - --xml bin/node
+
+  which answered `allow-jit`, `allow-unsigned-executable-memory`,
+  `disable-executable-page-protection`, `disable-library-validation`,
+  `allow-dyld-environment-variables` and `get-task-allow`. So this is not a guess
+  about what V8 needs; it is what the people who build V8 ask for.
+
+  ⚠ **`com.apple.security.get-task-allow` is deliberately absent**, and it is the
+  one key in that measurement that must never be copied. It lets another process
+  attach a debugger and read this one's memory — which for the daemon means every
+  transcript, the machine's signing keys and `identity.tunnel_key`. Node ships it
+  because Node's own builds are debuggable; notarization rejects it outright, and
+  that rejection is the only reason anybody would find it by accident rather than
+  by reading this.
+
+  **What each of the rest is for**, so a later reader can argue one away rather
+  than assume all five are load-bearing:
+
+    allow-jit                        V8 writes and then executes machine code.
+                                     Without it the runtime does not start.
+    allow-unsigned-executable-memory V8's older allocation path, still reached on
+                                     some code paths; Node asks for both.
+    disable-executable-page-protection
+                                     the page-permission flips the JIT makes.
+    disable-library-validation       Node `dlopen`s native addons, which are not
+                                     signed by this project. The daemon ships
+                                     none — `node:sqlite` is built in and the
+                                     whole dependency set is pure JS — but a
+                                     plugin is somebody else's code running as a
+                                     child of this runtime, and `plugins.md` is
+                                     explicit that the daemon does not control
+                                     what it imports.
+    allow-dyld-environment-variables
+                                     Node reads DYLD_* for its own diagnostics.
+
+  **None of this is exercised yet.** `bundle.macOS.signingIdentity` is null, so
+  the bundler skips signing entirely and a development build is `adhoc,
+  linker-signed` with no entitlements at all — `docs/NATIVE.md` records the
+  measurement and says a development build is not evidence. What this file is for
+  is the first signed build, where `Contents/MacOS/node` has to be signed with
+  this set *before* the app around it is sealed. Tauri's `entitlements` key names
+  one file for the app, so that nested pass is a step of its own rather than
+  something the config expresses.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-executable-page-protection</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+  </dict>
+</plist>

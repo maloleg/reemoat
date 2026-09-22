@@ -81,9 +81,9 @@ process.stdout.write("\nthe three documents, and the box that points at them\n")
   check("and no panel head names it", sheetTitle(asRoute as never), null);
   /*
    * ⚠ **The way out is a destination and never `null`.** `App` hands this value
-   * straight to `setTelegramBack`, which draws **✕ Close** on `null` — so a
-   * document opened from the sign-up form inside the mini app would have no way
-   * back to it that was not closing the app.
+   * straight to `LegalScreen`'s `up`, which draws its control only where there is
+   * somewhere for it to go — so a document opened from the sign-up form would have
+   * no way back to it at all.
    */
   check("the way out of a document is the root", upFrom(asRoute as never, "/", null), "/");
   check("and never nothing", upFrom(asRoute as never, "/", null) !== null, true);
@@ -439,22 +439,35 @@ process.stdout.write("\nthe three documents, and the box that points at them\n")
    * is in `ready`, and `submit` is unchanged because it already refuses when
    * `ready` is false.
    */
-  const readyBlock = gate.slice(gate.indexOf("const ready"), gate.indexOf("const submit"));
-  report("the submit predicate was found", readyBlock.length > 0, `${readyBlock.length} chars`);
+  /*
+   * ⚠ **The end anchor searches from the start one, and it did not.** Both
+   * declarations live inside `Register`, but `indexOf("const submit")` found the
+   * *first* one in the whole file — so the day any earlier component in `Gate.tsx`
+   * declared a `submit`, this slice ran backwards, came back empty, and the
+   * assertion under it went red about the consent box while the consent box was
+   * fine. A reader that fails for a reason it does not name is the shape this
+   * file's own header calls crying wolf; passing `start` makes the window
+   * `Register`'s own whichever else exist.
+   */
+  const readyAt = gate.indexOf("const ready");
+  const readyBlock = gate.slice(readyAt, gate.indexOf("const submit", readyAt));
+  report("the submit predicate was found", readyAt >= 0 && readyBlock.length > 0, `${readyBlock.length} chars`);
   check("the form will not send without the box ticked", /\(!wantsConsent \|\| accepted\);/.test(readyBlock), true);
 
   /*
    * **Nothing else in the app links a document, and each refusal has its own
-   * reason.** `ProfileMenu`'s own docblock sets the test a fourth row must pass —
-   * *"it is about **you** rather than about what is on screen"* — and a policy is
-   * about the service. `SignIn`'s two doors are argued at length and its
+   * reason.** `MenuDrawer`'s own docblock sets the test a row must pass — *"it is
+   * about **you** rather than about what is on screen"* — and a policy is about the
+   * service. (It was `ProfileMenu`'s docblock, and the clause quoted here is one of
+   * the two that survived that file being replaced by the drawer intact; the one
+   * that did not is named there.) `SignIn`'s two doors are argued at length and its
    * `${LINK}` count is pinned at two one module over. `registrationConfirm` is
    * forbidden a second link by `templates.ts` itself.
    */
   const DOC_LINK = /legalPath\(|href="\/(?:terms|acceptable-use|privacy)"/;
   check("the link sweep can see a document link", DOC_LINK.test('href={legalPath("terms")}'), true);
   for (const [what, where] of [
-    ["the profile menu", "../src/ui/ProfileMenu.tsx"],
+    ["the menu drawer", "../src/ui/MenuDrawer.tsx"],
     ["the sign-in screen", "../src/ui/SignIn.tsx"],
   ] as const) {
     const text = stripComments(readFileSync(new URL(where, import.meta.url), "utf8"));

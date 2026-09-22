@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 
 import { check, report, skip } from "./webcheck.env.js";
-import { stripComments } from "./webcheck.source.js";
+import { srcFile, srcFiles, stripComments } from "./webcheck.source.js";
 
 /*
  * The two families, the scale, and the one copy of both that lives somewhere else.
@@ -186,6 +186,155 @@ process.stdout.write("\nthe three caps constants, and the colour that may not be
   check("no colour is appended to a heading constant", composed, []);
 }
 
+process.stdout.write("\nevery site of the caps idiom, and the ones that are outside the constants\n");
+{
+  /*
+   * **A census, because the rule was carrying a count and a count cannot see a
+   * skipped item.**
+   *
+   * `.claude/rules/web-typography.md` said "*four* sites spend the idiom outside
+   * the constants **on purpose**, and every one of them says so at the code", and
+   * then named four. That sentence was the only record of the set, and it went
+   * wrong the first time somebody added a fifth: `MenuDrawer`'s `DRAWER_HEADING`
+   * arrived with its own docblock arguing for itself, every driver stayed green —
+   * the sweep one block up only looks for a *colour appended to a constant* — and
+   * the rule went on saying four. Prose that nothing differences is prose that
+   * drifts, which is the same failure `SETTINGS_HEADING`'s own count had (Q5.115)
+   * and the reason that one is a `report` rather than a number.
+   *
+   * So the list lives here and the rule cites it. This differences **two
+   * derivations**: every `tracking-wider` under `packages/web/src`, read off the
+   * files, against the table below. A sixth site reddens this as "found, not
+   * listed"; a fifth deleted reddens it as "listed, not found". Neither is
+   * reachable by a `length === N` over the same sweep, which is what a count is.
+   *
+   * ⚠ **Comments are stripped, and that is load-bearing rather than tidy.**
+   * `bits.tsx` and `SessionBrowser.tsx` each *quote* the idiom in a docblock — one
+   * to say what the trio is, the other to record the folder header that lost it —
+   * so over raw text both files would be findings with a count one too high, and
+   * the table would have to be wrong to match. The two controls below assert
+   * exactly that difference rather than trusting it.
+   */
+  type Site = { file: string; hits: number; constant: boolean; anchor: string; why: string };
+
+  /*
+   * The three constants first. `FIELD_LABEL` is the one that surprises a reader of
+   * the rule: it is a constant rather than an exception, and it lives beside the
+   * form control that uses it rather than in `bits.tsx` with the other two.
+   */
+  const SITES: Site[] = [
+    { file: "ui/bits.tsx", hits: 2, constant: true, anchor: "", why: "MENU_HEADING and SETTINGS_HEADING" },
+    { file: "ui/settings/SettingField.tsx", hits: 1, constant: true, anchor: "", why: "FIELD_LABEL, the third constant" },
+    {
+      file: "ui/SessionBrowser.tsx",
+      hits: 1,
+      constant: false,
+      anchor: 'text-2xs font-semibold tracking-wider text-fg uppercase',
+      why: "the waiting-elsewhere band, at text-fg — louder than the rows under it on purpose",
+    },
+    {
+      file: "ui/settings/MachineSection.tsx",
+      hits: 1,
+      constant: false,
+      anchor: "const RETIRE_HEADING =",
+      why: "text-danger, written out rather than composed onto SETTINGS_HEADING",
+    },
+    {
+      file: "ui/MachineOffer.tsx",
+      hits: 1,
+      constant: false,
+      anchor: 'text-2xs tracking-wider text-faint uppercase">or<',
+      why: "the word between two doors: no font-semibold, because it is not a heading",
+    },
+    {
+      file: "ui/AgentBuilder.tsx",
+      hits: 1,
+      constant: false,
+      anchor: "const HIDDEN_PROVIDER_HEADING =",
+      why: "text-faint, written out rather than `${SETTINGS_HEADING} text-faint`",
+    },
+    {
+      file: "ui/MenuDrawer.tsx",
+      hits: 1,
+      constant: false,
+      anchor: "const DRAWER_HEADING =",
+      why: "the drawer's own px-3 inset, which MENU_HEADING's px-2.5 would put 2px inboard of its rows",
+    },
+    {
+      file: "ui/TaskPanel.tsx",
+      hits: 1,
+      constant: false,
+      anchor: "const FINISHED_HEADING =",
+      why: "text-faint, spent by both arms of the finished band: every other heading there names work that is going",
+    },
+  ];
+
+  const IDIOM = /tracking-wider/g;
+  const hitsIn = (text: string): number => (text.match(IDIOM) ?? []).length;
+
+  const files = srcFiles();
+  // A sweep that found nothing to sweep passes silently, so the floor is first.
+  report("there are files to sweep at all", files.length >= 50, `${files.length} files under src/`);
+  check("the sweep can see the idiom", hitsIn('className="text-2xs tracking-wider uppercase"'), 1);
+
+  const found: string[] = [];
+  for (const file of files) {
+    const n = hitsIn(stripComments(srcFile(file)));
+    if (n > 0) found.push(`${file} ×${n}`);
+  }
+  check(
+    "every site of the caps idiom is one the rule accounts for, and no other",
+    found.sort(),
+    SITES.map((site) => `${site.file} ×${site.hits}`).sort(),
+  );
+
+  /*
+   * The two controls for the paragraph about stripping: each of these files really
+   * does quote the idiom in prose, so the raw count is higher than the counted one
+   * — which is what makes the table's numbers the code's rather than the docs'.
+   */
+  for (const file of ["ui/bits.tsx", "ui/SessionBrowser.tsx"]) {
+    const raw = srcFile(file);
+    report(
+      `${file} quotes the idiom in a comment, so stripping is what keeps the count honest`,
+      hitsIn(raw) > hitsIn(stripComments(raw)),
+      `${hitsIn(raw)} raw against ${hitsIn(stripComments(raw))} in code`,
+    );
+  }
+
+  /*
+   * **And the other half of the rule's sentence: every exception *says so at the
+   * code*.** A list of five files is a list of five places somebody chose not to
+   * use a constant; what keeps that from becoming five accidents is the argument
+   * written beside each. So the site is located by an anchor of its own and a
+   * comment is required to close immediately above it.
+   *
+   * ⚠ **`indexOf` guarded before the slice.** A missing anchor gives -1, and
+   * `slice(-1 - 600, -1)` would read the *end* of the file and quite possibly find
+   * a comment terminator there — the widening-slice false-green this repository has
+   * measured four times. The anchor's absence is its own failing check, and the gap is only
+   * computed when it was found.
+   */
+  for (const site of SITES.filter((s) => !s.constant)) {
+    const raw = srcFile(site.file);
+    const at = raw.indexOf(site.anchor);
+    check(`${site.file}: the site the rule names is there exactly once`, [at >= 0, at === raw.lastIndexOf(site.anchor)], [true, true]);
+    const before = at < 0 ? "" : raw.slice(0, at);
+    const closes = before.lastIndexOf("*/");
+    /*
+     * 80 characters: measured, the five gaps are 3, 3, 3, 38 and 39 — a docblock
+     * ending on the line above a `const`, or a `{/* … *\/}` above the element. A
+     * generous bound would pass on a comment about something else entirely.
+     */
+    report(
+      `${site.file}: and it says why it is outside the constants, at the code`,
+      closes >= 0 && before.length - closes <= 80,
+      site.why,
+    );
+    check(`${site.file}: a comment closes immediately above it`, closes >= 0 && before.length - closes <= 80, true);
+  }
+}
+
 process.stdout.write("\nevery path this app draws, at the one size a path is drawn at\n");
 {
   /*
@@ -197,9 +346,16 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
    * folder name is the size of the session name", which is a hierarchy failure
    * rather than a font one.
    *
-   * `text-2xs` is the floor for a path, and these four are every place one is
-   * drawn. Two carry the size themselves; two inherit a line that is already
+   * `text-2xs` is the floor for a path, and these **five** are every place one is
+   * drawn. Two carry the size themselves; three inherit a line that is already
    * `text-2xs`, so those are asserted on the line rather than on the span.
+   *
+   * ⚠ **It said four, and the fifth shipped past it** — the agents screen's
+   * provenance line, which interpolated an absolute `settings.json` path straight
+   * into a sans sentence. A count in prose is not a census: nothing here derives
+   * the list, so a new path is caught only by somebody reading this paragraph.
+   * That is the standing limitation of this block and is why each entry is a pair
+   * rather than a single `.test`.
    */
   const read = (rel: string): string =>
     stripComments(readFileSync(new URL(rel, WEB_SRC), "utf8"));
@@ -278,6 +434,33 @@ process.stdout.write("\nevery path this app draws, at the one size a path is dra
       /className="min-w-0 flex-1 truncate text-2xs text-muted" title=\{into\}/.test(read("ui/ImportCode.tsx")),
     ],
     [true, true],
+  );
+
+  /*
+   * ⚠ **The fifth, and it is three runs on one line rather than one.** The agents
+   * screen says where a claude session's opening mode came from, and the sentence
+   * carries a settings **key**, the **value** written against it and a **path** —
+   * three of the four things `web-typography.md`'s mono list names, in what was a
+   * single sans template string. Asserted as the same pair the two above are, plus
+   * that the path goes through `paths.ts` rather than being interpolated raw:
+   * `shortPath` and not `displayCwd`, because this file sits under no browse root
+   * and this screen fetches none.
+   */
+  check(
+    "the agents screen's provenance line is mono where it quotes the machine, on a text-2xs line",
+    [
+      /<span className="font-mono">permissions\.defaultMode<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
+      /<span className="font-mono">\{settingsMode\.value\}<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
+      /<span className="font-mono">\{shortPath\(settingsMode\.file\)\}<\/span>/.test(read("ui/settings/MachineAgentsSection.tsx")),
+      /className="mt-2 text-2xs text-muted wrap-anywhere" title=\{settingsMode\.file\}/.test(read("ui/settings/MachineAgentsSection.tsx")),
+    ],
+    [true, true, true, true],
+  );
+  // The negative that makes the three above a rule: no raw path left in the prose.
+  check(
+    "and the file is never interpolated into the sentence raw",
+    /from \$\{settingsMode\.file\}/.test(read("ui/settings/MachineAgentsSection.tsx")),
+    false,
   );
 }
 

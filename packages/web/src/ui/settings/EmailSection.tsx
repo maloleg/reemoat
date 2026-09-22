@@ -14,6 +14,7 @@ import {
   type SmtpDraft,
 } from "../../instance";
 import { store } from "../../store";
+import { controlPlaneOrigin } from "../../native";
 import { Button, Empty, FIELD, SETTINGS_HEADING, Spinner, TwoStep } from "../bits";
 import { toast } from "../Toast";
 import { FIELD_LABEL, SettingField, settingValue } from "./SettingField";
@@ -112,7 +113,7 @@ function SmtpForm({
    * and no sentence saying what had been missing (E14's review, against D15's
    * "not silent"). The first edit or a Save clears it, since that dirt is theirs.
    */
-  const [seed] = useState(() => seedPublicUrl(fromAnswer(answer), field("mail.public_url"), window.location.origin));
+  const [seed] = useState(() => seedPublicUrl(fromAnswer(answer), field("mail.public_url"), controlPlaneOrigin()));
   const [draft, setDraft] = useState<SmtpDraft>(seed.draft);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -392,7 +393,7 @@ function SmtpForm({
         // from is, on every ordinary deployment, the one links in mail should
         // point at. On a fresh server it is the *value*, seeded above; the
         // placeholder is what is left after somebody empties the field.
-        placeholder={window.location.origin}
+        placeholder={controlPlaneOrigin()}
         hint="Links in mail point here."
         type="url"
       />

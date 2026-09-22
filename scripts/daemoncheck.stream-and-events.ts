@@ -88,6 +88,16 @@ function streamFrames(
   sessionId: string,
   sub: string,
   since: number,
+  /**
+   * Filled with each message's raw byte length, index-aligned with the frames.
+   *
+   * ⚠ **Optional, because the byte count is a different subject from the frame
+   * sequence.** Only the batch-ceiling section below asks for it, and the number
+   * has to be taken HERE — `JSON.stringify(frame)` re-serialised at the call site
+   * is not the bytes that crossed, and the whole defect this measures was an
+   * estimate standing in for the bytes that crossed.
+   */
+  sizes?: number[],
 ): Promise<Record<string, any>[]> {
   return new Promise((resolve) => {
     const out: Record<string, any>[] = [];
@@ -110,6 +120,7 @@ function streamFrames(
         return;
       }
       out.push(frame);
+      sizes?.push(data.length);
       if (frame["type"] === "caught_up") done();
     });
     socket.on("error", done);
@@ -460,6 +471,436 @@ process.stdout.write("\nan attach too large to replay down a socket\n");
   check("and the socket still goes live there rather than being closed", caughtUp?.["seq"], stats.lastSeq);
 
   await new Promise<void>((resolve) => fatServer.close(() => resolve()));
+}
+
+/* ------------------------------------------------------------------ *
+ * the outbound batch is cut on the bytes it writes, not on an estimate
+ * ------------------------------------------------------------------ */
+
+/*
+ * ⚠ **A transcript that stalled for good, on the encrypted path only.**
+ * `StreamConnection.flush` used to accumulate `estimateBytes`, which charges
+ * `String.length` — UTF-16 units of the UNESCAPED string — while what goes on the
+ * wire is `JSON.stringify` in UTF-8. `MAX_SOCKET_MESSAGE_BYTES` (1 MiB) is
+ * enforced by the *receiver*, in `MessageAssembler.push`, and no sender enforced
+ * anything: so a batch charged under `BATCH_MAX_BYTES` (512 KiB) could be several
+ * times that on the wire, the far end refused the message, the channel failed,
+ * and `stream.ts` reconnected with the cursor unchanged onto the same batch —
+ * which produced the same oversized message, for ever, with nothing logged.
+ *
+ * ESC is the sharp input because a coding CLI's stderr is made of it: one charged
+ * UTF-16 unit escapes to `\u001b`, six bytes of JSON. So this fixture is
+ * escape-heavy on purpose and not a curiosity.
+ *
+ * ⚠ **Measured here rather than on the encrypted path, and that is the whole
+ * reason this section is in *this* file.** Over a channel the overflow is
+ * answered by `fail()`, which ends the stream — so exactly one frame crosses
+ * whether or not the bug is present, and no count taken at the peer can tell
+ * "refused" from "fine". That is the shape this repository has shipped green six
+ * times. On the direct path the daemon's own `raw.send(payload)` **is** the
+ * message, so `data.length` at the driver's `ws` client is precisely the number
+ * `MessageAssembler` would have accumulated. The WebSocket client is the third
+ * party that can see the truth.
+ */
+process.stdout.write("\nthe outbound batch, cut on bytes rather than on an estimate\n");
+{
+  const cutRegistry = new SessionRegistry(
+    new MemoryEventStore(),
+    storeOf([rowFor("s_cut", join(users, "u_alice", "cut"))]),
+  );
+  cutRegistry.restore({ reapOrphans: false });
+  const { app: cutApp, injectWebSocket: injectCut } = createApp({
+    registry: cutRegistry,
+    verifier,
+    instanceId: "i_cut",
+    startedAt: now,
+    credentials,
+    roots: [users],
+  });
+  const cutServer = serve({ fetch: cutApp.fetch, hostname: "127.0.0.1", port: 0 });
+  injectCut(cutServer as unknown as Server);
+  await new Promise<void>((resolve) => cutServer.once("listening", resolve));
+  const cutPort = (cutServer.address() as AddressInfo).port;
+
+  const managed = cutRegistry.get("s_cut");
+  // 24 000 escapes: charged ~24 KiB by `estimateBytes`, ~144 KiB on the wire.
+  // Well under DEFAULT_MAX_EVENT_BYTES, so nothing is clipped at ingest and the
+  // disagreement below is the batch ceiling's alone.
+  const escapes = "\u001b".repeat(24_000);
+  const appended: { type: "text"; role: "agent"; thought: false; text: string; messageId: null }[] = [];
+  for (let n = 0; n < 40; n += 1) {
+    const event = { type: "text", role: "agent", thought: false as const, text: escapes, messageId: null } as const;
+    managed?.log.append(event);
+    appended.push(event as (typeof appended)[number]);
+  }
+  const lastSeq = managed?.log.stats().lastSeq ?? 0;
+
+  const sizes: number[] = [];
+  const frames = await streamFrames(cutPort, "s_cut", "u_alice", 0, sizes);
+  const eventFrames = frames
+    .map((frame, at) => ({ frame, bytes: sizes[at] ?? 0 }))
+    .filter((f) => f.frame["type"] === "events");
+
+  /*
+   * ⚠ **Before any `Math.max`.** `Math.max(...[])` is `-Infinity`, which makes
+   * the ceiling assertion below vacuously true — verbatim the sixth green-because-
+   * it-could-not-fail shape this repository has filed.
+   */
+  report("the socket delivered event frames at all", eventFrames.length > 0, `${eventFrames.length} events frame(s)`);
+  const widest = eventFrames.reduce((most, f) => (f.bytes > most ? f.bytes : most), 0);
+
+  /*
+   * ⚠ **The non-vacuity control, and it is the one that matters.** Replay the
+   * *estimate* rule over the events actually delivered and serialise what it
+   * would have sent. If somebody later makes `estimateBytes` count UTF-8 bytes,
+   * or this fixture stops being escape-heavy, this goes red and says the section
+   * has stopped testing anything — instead of the two assertions below passing
+   * for a reason that has nothing to do with the fix.
+   */
+  let charged = 0;
+  let wouldTake = 0;
+  for (const event of appended) {
+    const one = estimateBytes(event) + 64;
+    if (wouldTake > 0 && charged + one > 512 * 1024) break;
+    charged += one;
+    wouldTake += 1;
+  }
+  const wouldHaveSent = Buffer.byteLength(
+    JSON.stringify({ type: "events", events: appended.slice(0, wouldTake).map((event, at) => ({ seq: at + 1, event })) }),
+    "utf8",
+  );
+  report(
+    "and the fixture really is one where the two numbers disagree",
+    wouldHaveSent > 1024 * 1024,
+    `the estimate rule would have written ${wouldHaveSent} bytes for ${wouldTake} events, charging ${charged}`,
+  );
+
+  /*
+   * The defect itself. With the estimate cut restored this reads about 3 MiB
+   * against a 1 MiB bound, and the failure prints the real number.
+   */
+  report(
+    "no stream frame is larger than the far end will reassemble",
+    widest <= 1024 * 1024,
+    `widest ${widest} bytes against MAX_SOCKET_MESSAGE_BYTES 1048576`,
+  );
+  /*
+   * The *invariant* rather than a count, because the only licensed way past the
+   * ceiling is the unconditional first event — and pinning "exactly three frames"
+   * would move with the envelope rather than with the rule.
+   */
+  check(
+    "and a frame over the batch ceiling carries exactly one event",
+    eventFrames.filter((f) => f.bytes > 512 * 1024).every((f) => (f.frame["events"] as unknown[]).length === 1),
+    true,
+  );
+  // Progress, so a fix that bounded the frame by dropping events is not mistaken
+  // for one that bounded it by cutting the batch.
+  const delivered = eventFrames.reduce((n, f) => n + (f.frame["events"] as unknown[]).length, 0);
+  check("every event still arrives", delivered, 40);
+  check("with the socket caught up at the head", frames.find((f) => f["type"] === "caught_up")?.["seq"], lastSeq);
+
+  await new Promise<void>((resolve) => cutServer.close(() => resolve()));
+}
+
+/*
+ * ⚠ **The wedge the fix must not trade into.** The cut keeps an unconditional
+ * first event precisely so an event larger than the ceiling is still sent alone;
+ * without that clause `flush` emits `{"type":"events","events":[]}` for ever, the
+ * queue never drains and the socket never reaches the head. So this is the
+ * negative control for the *repair's own* risk rather than for the original
+ * defect, and the two are different failures.
+ *
+ * 200 000 escapes is clipped by `truncateEvent` at ingest to ~131 KiB charged,
+ * which is ~768 KiB escaped: over `BATCH_MAX_BYTES` and under
+ * `MAX_SOCKET_MESSAGE_BYTES`, which is the only window where "alone" is both
+ * necessary and sufficient.
+ */
+process.stdout.write("\nand one event too large for the batch is still sent\n");
+{
+  const soloRegistry = new SessionRegistry(
+    new MemoryEventStore(),
+    storeOf([rowFor("s_solo", join(users, "u_alice", "solo"))]),
+  );
+  soloRegistry.restore({ reapOrphans: false });
+  const { app: soloApp, injectWebSocket: injectSolo } = createApp({
+    registry: soloRegistry,
+    verifier,
+    instanceId: "i_solo",
+    startedAt: now,
+    credentials,
+    roots: [users],
+  });
+  const soloServer = serve({ fetch: soloApp.fetch, hostname: "127.0.0.1", port: 0 });
+  injectSolo(soloServer as unknown as Server);
+  await new Promise<void>((resolve) => soloServer.once("listening", resolve));
+  const soloPort = (soloServer.address() as AddressInfo).port;
+
+  const managed = soloRegistry.get("s_solo");
+  managed?.log.append({
+    type: "text",
+    role: "agent",
+    thought: false,
+    text: "\u001b".repeat(200_000),
+    messageId: null,
+  });
+  const lastSeq = managed?.log.stats().lastSeq ?? 0;
+
+  const sizes: number[] = [];
+  const frames = await streamFrames(soloPort, "s_solo", "u_alice", 0, sizes);
+  const eventFrames = frames
+    .map((frame, at) => ({ frame, bytes: sizes[at] ?? 0 }))
+    .filter((f) => f.frame["type"] === "events");
+
+  check(
+    "one event past the batch ceiling is sent alone rather than wedging the socket",
+    [eventFrames.length, (eventFrames[0]?.frame["events"] as unknown[] | undefined)?.length],
+    [1, 1],
+  );
+  check("and the socket still reaches the head", frames.find((f) => f["type"] === "caught_up")?.["seq"], lastSeq);
+  report(
+    "while that frame is still one the far end will reassemble",
+    (eventFrames[0]?.bytes ?? 0) > 512 * 1024 && (eventFrames[0]?.bytes ?? 0) <= 1024 * 1024,
+    `${eventFrames[0]?.bytes ?? 0} bytes: over BATCH_MAX_BYTES, under MAX_SOCKET_MESSAGE_BYTES`,
+  );
+
+  await new Promise<void>((resolve) => soloServer.close(() => resolve()));
+}
+
+/* ------------------------------------------------------------------ *
+ * the control frame, reduced until it fits
+ * ------------------------------------------------------------------ */
+
+/*
+ * ⚠ **The same byte ceiling as the batch above, on the frame that cannot be
+ * split.** `hello` is the FIRST frame of every attach and it carries
+ * `managed.snapshot()`. A batch over `MAX_SOCKET_MESSAGE_BYTES` stalls a
+ * transcript partway; a `hello` over it means the transcript never starts, and
+ * `stream.ts` reconnects onto the same attach and produces the same frame. There
+ * is no cursor to advance past it.
+ *
+ * ⚠ **Driven against the exported ladder rather than through a socket, and that
+ * is the honest shape rather than a shortcut.** Every rung is reached only by a
+ * snapshot no offline fixture can assemble: pending permissions are minted by an
+ * ACP agent, a driver that can raise one raises exactly one, and one is far under
+ * 512 KiB. Attaching a real socket would therefore assert the rung that does
+ * nothing — the frame already fits — and report green over a ladder that never
+ * ran. Measured: deleting `fitSnapshotFrame` entirely and calling `safeStringify`
+ * alone left every driver in this repository green, which is why the function is
+ * exported at all.
+ */
+process.stdout.write("\na control frame too large to send whole\n");
+{
+  const { fitSnapshotFrame, CONTROL_MAX_BYTES } = await import("../src/server.js");
+  const bytes = (text: string): number => Buffer.byteLength(text, "utf8");
+
+  const permission = (n: number, blob: number): Record<string, unknown> => ({
+    id: `p_${n}`,
+    toolCallId: `tc_${n}`,
+    title: `Permission ${n}`,
+    rawInput: { command: "x".repeat(blob) },
+    content: "y".repeat(blob),
+    options: [{ optionId: "o_yes", name: "Yes", kind: "allow_once" }],
+  });
+  const frameWith = (session: Record<string, unknown>): Record<string, unknown> => ({
+    type: "hello",
+    instanceId: "i_fit",
+    firstSeq: 1,
+    lastSeq: 1,
+    since: 0,
+    session,
+  });
+
+  /*
+   * The control, and the section is worth nothing without it: a frame that
+   * already fits must come back **byte-identical**, so no session that worked
+   * before can tell this function exists.
+   *
+   * ⚠ **It carries a second property now, and it is the half a reader would
+   * skip.** The frame this function returns declares `session.reduced` — the
+   * marker a client reads to keep `waitingCount` honest across the poll/frame
+   * alternation — and *absent means whole*. So byte-identity here is also the
+   * assertion that a fitting frame carries **no marker**: a `reduced` on a frame
+   * nothing was cut from would make every ordinary attach claim it was a lossy
+   * projection, and the client would go on refetching the fuller record for ever.
+   */
+  const small = frameWith({ backgroundTasks: [], pendingPermissions: [], pendingElicitations: [], id: "s_small" });
+  const smallBuilt = JSON.stringify(small);
+  check("a frame that already fits is returned unchanged", fitSnapshotFrame(small, smallBuilt), smallBuilt);
+  check(
+    "and therefore carries no reduction marker at all",
+    Object.hasOwn(
+      (JSON.parse(fitSnapshotFrame(small, smallBuilt)) as { session: Record<string, unknown> }).session,
+      "reduced",
+    ),
+    false,
+  );
+
+  /*
+   * Rung one: `rawInput` and `content` are emptied and `outputFilePath` nulled.
+   * Sized so the first rung alone is enough, which is what says the ladder stops
+   * as soon as it can rather than cutting everything it is allowed to.
+   */
+  const fatBlobs = frameWith({
+    id: "s_blobs",
+    backgroundTasks: [{ id: "b_1", outputFilePath: "/tmp/" + "p".repeat(4_000) }],
+    pendingPermissions: [permission(1, 400_000)],
+    pendingElicitations: [],
+  });
+  const fatBlobsBuilt = JSON.stringify(fatBlobs);
+  report("the blob fixture really is over the ceiling", bytes(fatBlobsBuilt) > CONTROL_MAX_BYTES, `${bytes(fatBlobsBuilt)} bytes against ${CONTROL_MAX_BYTES}`);
+  const fittedBlobs = fitSnapshotFrame(fatBlobs, fatBlobsBuilt);
+  report("and the fitted frame is under it", bytes(fittedBlobs) <= CONTROL_MAX_BYTES, `${bytes(fittedBlobs)} bytes`);
+  const blobsBack = JSON.parse(fittedBlobs) as { session: { pendingPermissions: { id: string }[]; backgroundTasks: { outputFilePath: string | null }[] } };
+  // Reduced, not dropped: the rung empties the blobs and keeps the row, because a
+  // permission the app cannot see is a turn nobody can answer.
+  check("with the permission still there to be answered", blobsBack.session.pendingPermissions.map((p) => p.id), ["p_1"]);
+  check("and the background task's path nulled rather than the task removed", blobsBack.session.backgroundTasks.map((t) => t.outputFilePath), [null]);
+  /*
+   * ⚠ **Rung one loses something too, and for one release nothing on the frame
+   * said so.** `rawInput` and `content` become `clampBlob(…, 0)` — the identical
+   * `{truncated, bytes}` shape a permission gets when the *agent's* own payload
+   * was over 8 KiB at ingest — so `PermissionCard`'s "Part of this request was
+   * too large to keep" banner reads the same either way, while only one of the
+   * two is recoverable by asking `GET /sessions/:id`. `blobs` is what tells them
+   * apart, and it is asserted here rather than only on the halving fixture
+   * because this is the rung that can fire *with no row cut at all*: the counts
+   * beside it still equal the arrays.
+   */
+  const blobsMark = (JSON.parse(fittedBlobs) as { session: { reduced?: Record<string, unknown> } }).session.reduced;
+  check("and the frame says it is a reduction rather than a whole record", blobsMark, {
+    pendingPermissions: 1,
+    pendingElicitations: 0,
+    blobs: true,
+  });
+
+  /*
+   * Rung two: halving the two lists. Reached only when emptying every blob was
+   * not enough, so the fixture's weight has to be in the row COUNT rather than in
+   * the blobs — otherwise this exercises rung one a second time and reports green
+   * over a rung that never ran.
+   */
+  const many = frameWith({
+    id: "s_many",
+    backgroundTasks: [],
+    // ⚠ The weight is in `title` and `options`, which rung one does NOT touch.
+    // Written first with the weight in `rawInput`/`content` instead, and measured:
+    // rung one took 1,666,637 bytes to 85,037 on its own and the halving never
+    // ran, while every assertion below it still reported green. That is this
+    // section's own trap — a fixture that exercises the earlier rung twice.
+    pendingPermissions: Array.from({ length: 400 }, (_, i) => ({
+      id: `p_${i}`,
+      toolCallId: `tc_${i}`,
+      title: `Permission ${i} ${"t".repeat(2_000)}`,
+      rawInput: { command: "x" },
+      content: "y",
+      options: [
+        { optionId: "o_yes", name: "Yes ".repeat(200), kind: "allow_once" },
+        { optionId: "o_no", name: "No ".repeat(200), kind: "reject_once" },
+      ],
+    })),
+    pendingElicitations: [],
+  });
+  const manyBuilt = JSON.stringify(many);
+  report("the count fixture really is over the ceiling", bytes(manyBuilt) > CONTROL_MAX_BYTES, `${bytes(manyBuilt)} bytes`);
+  const fittedMany = fitSnapshotFrame(many, manyBuilt);
+  const manyBack = JSON.parse(fittedMany) as { session: { pendingPermissions: unknown[] } };
+  report("the halving rung ran, not just the blob one", manyBack.session.pendingPermissions.length < 400, `${manyBack.session.pendingPermissions.length} of 400 kept`);
+  report("and the fitted frame is under the ceiling", bytes(fittedMany) <= CONTROL_MAX_BYTES, `${bytes(fittedMany)} bytes`);
+  // The floor the loop is written around: halving stops at one rather than at none,
+  // because a hello carrying no permission at all is a turn that looks answerable
+  // and is not.
+  report("with at least one permission left", manyBack.session.pendingPermissions.length >= 1, `${manyBack.session.pendingPermissions.length} kept`);
+  /*
+   * ⚠ **And the count the client draws is on the frame, which is the half of
+   * this that is a wire change.** `store.ts` writes the four-second poll's snapshot and this frame
+   * into the same `row.snapshot`, and a halved list is a well-formed list — so
+   * without a marker `waitingCount` fell and rose on every alternation over a
+   * session nobody had touched, `SessionView`'s `more` line flipped with it, and
+   * each flip re-armed an effect that fires `store.loadAll`. The number asserted
+   * is the **true** length rather than the surviving one, which is the only form
+   * that is worth anything: `reduced.pendingPermissions === kept` would be
+   * satisfied by reading the array back out.
+   */
+  const manyMark = (JSON.parse(fittedMany) as { session: { reduced?: { pendingPermissions?: number } } }).session.reduced;
+  check("and the frame says how many there really are", manyMark?.pendingPermissions, 400);
+  report(
+    "which is more than it is carrying, or the marker says nothing",
+    (manyMark?.pendingPermissions ?? 0) > manyBack.session.pendingPermissions.length,
+    `${manyMark?.pendingPermissions} against ${manyBack.session.pendingPermissions.length} on the frame`,
+  );
+
+  /*
+   * The same rung driven from the **questions** side, which nothing reached
+   * before: `keep` is `Math.max` of the two lengths and the slice is applied to
+   * both, so a fixture whose weight is all in `pendingPermissions` exercises the
+   * elicitation half only by accident of it being empty.
+   *
+   * Sized at the real ingest ceiling rather than at an arbitrary number:
+   * `MAX_ELICITATION_MESSAGE_CHARS` is 4096, so 4 KiB is the largest `message` a
+   * question can carry past `session.ts` and 200 of them is the worst case this
+   * ladder can actually be handed. ⚠ Before that clip was restored the same
+   * worst case was **one** question of any size, which no rung can cut at all —
+   * `while (keep > 1)` does not run at `keep === 1`.
+   */
+  const asking = frameWith({
+    id: "s_asking",
+    backgroundTasks: [],
+    pendingPermissions: [],
+    pendingElicitations: Array.from({ length: 200 }, (_, i) => ({
+      elicitationId: `e_${i}`,
+      toolCallId: null,
+      message: "m".repeat(4_096),
+      fieldCount: 2,
+      raisedAt: 1_700_000_000_000 + i,
+    })),
+  });
+  const askingBuilt = JSON.stringify(asking);
+  report("the question fixture really is over the ceiling", bytes(askingBuilt) > CONTROL_MAX_BYTES, `${bytes(askingBuilt)} bytes`);
+  const fittedAsking = fitSnapshotFrame(asking, askingBuilt);
+  const askingBack = JSON.parse(fittedAsking) as {
+    session: { pendingElicitations: { elicitationId: string }[]; reduced?: { pendingElicitations?: number } };
+  };
+  report("and the fitted frame is under it", bytes(fittedAsking) <= CONTROL_MAX_BYTES, `${bytes(fittedAsking)} bytes`);
+  report(
+    "the halving cut questions rather than only permissions",
+    askingBack.session.pendingElicitations.length < 200 && askingBack.session.pendingElicitations.length >= 1,
+    `${askingBack.session.pendingElicitations.length} of 200 kept`,
+  );
+  // The prefix is the *oldest*, which is what keeps `oldestWait` naming the real
+  // one and `humanRequests()[0]` drawing the right card out of a cut list.
+  check("keeping the oldest rather than an arbitrary slice", askingBack.session.pendingElicitations[0]?.elicitationId, "e_0");
+  check("and the frame says how many questions there really are", askingBack.session.reduced?.pendingElicitations, 200);
+
+  /*
+   * And the refusal to wedge. A frame that cannot be brought under the ceiling by
+   * either rung is SENT anyway — `BATCH_MAX_BYTES`'s argument one arm over: a
+   * `hello` that never arrives is the stall, not the cure for it.
+   */
+  const stubborn = frameWith({
+    id: "s_stubborn",
+    backgroundTasks: [],
+    pendingPermissions: [permission(1, 10)],
+    pendingElicitations: [],
+    note: "z".repeat(CONTROL_MAX_BYTES + 1_000),
+  });
+  const stubbornBuilt = JSON.stringify(stubborn);
+  const fittedStubborn = fitSnapshotFrame(stubborn, stubbornBuilt);
+  report(
+    "a frame neither rung can shrink is still sent rather than dropped",
+    fittedStubborn.length > 0 && JSON.parse(fittedStubborn)["type"] === "hello",
+    `${bytes(fittedStubborn)} bytes, still a hello`,
+  );
+
+  /*
+   * And a frame carrying no session at all — a `lagged`, a `caught_up` — is not
+   * this function's business and must come back untouched, since `snapshotOnFrame`
+   * answering `null` is the only thing standing between the ladder and every other
+   * control frame the daemon sends.
+   */
+  const noSession = { type: "caught_up", seq: 7 };
+  const noSessionBuilt = JSON.stringify(noSession);
+  check("a control frame with no snapshot is left alone", fitSnapshotFrame(noSession, noSessionBuilt), noSessionBuilt);
 }
 
 /* ------------------------------------------------------------------ *

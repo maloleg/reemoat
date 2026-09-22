@@ -17,6 +17,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { AGENT_IDS, AGENT_LOGIN, MANAGED_CLI_DIRS } from "../src/acp/agents.js";
+// The parser for the one grammar this script and `src/` share. Imported rather
+// than restated, so the emitter below is driven against the real reader.
+import { readStep } from "../src/agentinstall.js";
 import { SETTING_KEYS, envNameFor } from "../packages/control-plane/src/settings.js";
 import { tmp } from "./tmp.js";
 
@@ -799,6 +802,19 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   codex: "@openai/codex",
   opencode: "opencode-ai",
   kimi: "@moonshot-ai/kimi-code",
+  /*
+   * ⚠ **A launcher shim, not the agent, and the difference is a real install
+   * hazard.** The published tarball is ~18 kB; the platform binaries ride in
+   * `optionalDependencies` (`@xai-official/grok-{darwin,linux,win32}-{arm64,x64}`)
+   * brotli-compressed, and a postinstall decompresses one into `$GROK_HOME/bin`.
+   * So `npm i -g --no-optional` installs something that cannot run — the shim
+   * detects it and says so on stderr — and `ensure_npm` must never grow that flag.
+   * Measured 2026-09-21 on 1.0.40: even with npm 11's `allow-scripts` gate
+   * blocking the postinstall, the shim decompressed on first invocation and
+   * `~/.grok/bin/grok -> grok-1.0.40` appeared, so the door survives a blocked
+   * script — it just moves the work to the first run.
+   */
+  grok: "@xai-official/grok",
 };
 
 /*
@@ -1251,15 +1267,44 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("and neither channel is written into a command in that function", claudeCommands.filter((line) => /\b(stable|latest)\b/.test(line)), []);
   check("the channel defaults to latest, before any flag is read", lineIn("agents.sh", agentLines, "the channel default", "CHANNEL="), "CHANNEL=latest");
   const npmCalls = agentLines.filter((line) => /\bensure_npm\b/.test(line) && !/^ensure_npm\(\)/.test(line));
+  /*
+   * The harnesses that take the npm door under **either** `--source`, so they have
+   * one call site rather than two. Each is here for its own measured reason and
+   * neither is a default — see the shapes below.
+   */
+  const UNCONDITIONAL_NPM = ["kimi", "grok"] as const;
   const npmCallShapes = [
     /^\s*toolchain\) ensure_npm \S+ \S+ "[^"]*"; return 0 ;;$/,
     /^\s*if \[ "\$SOURCE" = npm \]; then ensure_npm \S+ \S+ "[^"]*"; return 0; fi$/,
     /^\s*ensure_npm kimi \S+ "[^"]*"$/,
+    /*
+     * ⚠ **The second unconditional row, and it is here for a different reason from
+     * kimi's.** kimi takes this door because its own updater lies — without a TTY
+     * `kimi upgrade` exits 0 having installed nothing. grok's vendor installer
+     * works fine; what it also does is symlink into `~/.local/bin` and append to
+     * `~/.bashrc`/`~/.zshrc`, and *this script edits no shell profile* is a
+     * property `CLAUDE.md` states about it. The npm door writes none, and it is
+     * the copy `ensure_npm` can refresh on a timer with nobody watching — which is
+     * the whole reason this row exists rather than a vendor arm.
+     *
+     * Two exceptions rather than a rule, and they stay spelled out one per line so
+     * that a third is a decision somebody makes here instead of a pattern that
+     * quietly admits it.
+     */
+    /^\s*ensure_npm grok \S+ "[^"]*"$/,
   ];
   check(
-    "every reach into the npm arm is a toolchain copy, an absent harness behind the flag, or kimi",
+    "every reach into the npm arm is a toolchain copy, an absent harness behind the flag, or one of the two that must take it",
     [npmCalls.filter((line) => !npmCallShapes.some((shape) => shape.test(line))), npmCalls.length],
-    [[], 2 * (AGENT_IDS.length - 1) + 1],
+    /*
+     * Two call sites for a harness that can take either door — the `toolchain)`
+     * refresh and the `--source npm` install — and **one** for each of the two that
+     * always take this one, kimi and grok. Derived from `AGENT_IDS` rather than
+     * written as a number so that a sixth harness fails here until somebody says
+     * which kind it is; `UNCONDITIONAL` is spelled out for the same reason the
+     * shapes above are, since it is the list that carries the argument.
+     */
+    [[], 2 * (AGENT_IDS.length - UNCONDITIONAL_NPM.length) + UNCONDITIONAL_NPM.length],
   );
 
   /*
@@ -1280,11 +1325,16 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check(
     "ensure_npm reads the same answer: absent is an install, toolchain a refresh, anything else somebody else's",
     [
-      ensureNpmLines.includes('"") _verb=install ;;'),
+      // The absent arm carries `--refresh-only`'s guard now, so it is two lines.
+      // Pinned as "the guard, then the verb, in that order" rather than as one
+      // string: a guard placed *after* `_verb=install` would still contain both
+      // substrings and would install on a run that promised not to.
+      at('"") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "$_pad"; return 0; fi') !== -1,
+      at('"") if [ "$REFRESH_ONLY" = 1 ]; then not_installed "$_pad"; return 0; fi') < at("_verb=install ;;"),
       ensureNpmLines.includes("toolchain) _verb=refresh ;;"),
       ensureNpmLines.includes('*) outside_note "$_pad" "$_agent"; return 0 ;;'),
     ],
-    [true, true, true],
+    [true, true, true, true],
   );
   check(
     "a failure is said by what is true afterwards, and that differs by verb",
@@ -1352,10 +1402,35 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
     ],
     [true, true],
   );
+  /*
+   * ⚠ **It counts `$attempted` rather than the roster, and that stopped being a
+   * style question when `--only` landed.** A one-harness run that failed reported
+   * "1 of 5 agents were not installed or refreshed", which reads as four that
+   * quietly worked and were never touched. Asserted as source text because the
+   * number is a variable now and no run can show a wrong *constant* is absent.
+   */
   check(
-    "and the summary counts against the four rather than a number retyped elsewhere",
-    agents.includes(`warn "  $failed of ${AGENT_IDS.length} agents were not installed or refreshed; the lines above say why"`),
-    true,
+    "and the summary counts the harnesses this run walked, not the roster",
+    [
+      agents.includes('warn "  $failed of $attempted agents were not installed or refreshed; the lines above say why"'),
+      agents.includes(`of ${AGENT_IDS.length} agents were not installed`),
+    ],
+    [true, false],
+  );
+  /*
+   * ⚠ **One list of harnesses, shared with `src/` and compared as a *set*.**
+   * `main` iterates `$AGENTS` and `--only` validates against it, so a sixth
+   * harness is one line there rather than three. The orders differ deliberately —
+   * the script's is cheapest-first — which is why this is membership rather than
+   * sequence. Same rule `MANAGED_CLI_DIRS` already holds for the other list these
+   * two files share, and for the same reason: two places naming the same set is
+   * how they come to disagree.
+   */
+  const scriptAgents = (agents.match(/^AGENTS="([^"]*)"/m)?.[1] ?? "").split(/\s+/).filter(Boolean);
+  check(
+    "the script's harness list is the daemon's, as a set",
+    [[...scriptAgents].sort(), scriptAgents.length],
+    [[...AGENT_IDS].sort(), AGENT_IDS.length],
   );
 
   /*
@@ -1443,6 +1518,32 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   check("an unknown flag is refused with 2", runAgents(["--bogus"]).status, 2);
   const bareSkip = runAgents(["--skip"]);
   check("and so is --skip with no name", [bareSkip.status, bareSkip.err.includes("--skip needs an agent name")], [2, true]);
+  const bareOnly = runAgents(["--check", "--only"]);
+  check("and --only with no name", [bareOnly.status, bareOnly.err.includes("--only needs an agent name")], [2, true]);
+  /*
+   * And a flag in the value slot is refused rather than eaten, which falls out of
+   * checking the value at all: `--only --check` cannot quietly become a run of
+   * every harness with `--check` consumed. `--skip --check` really does eat it,
+   * which is the cost of that field not being checked and is why the one whose
+   * caller is a button is.
+   */
+  const eaten = runAgents(["--only", "--check"]);
+  check("and a flag in --only's value slot is refused, not swallowed", [eaten.status, eaten.err.includes("not --check")], [2, true]);
+  /*
+   * ⚠ **`--only` checks its value where `--skip` does not, and the asymmetry is
+   * the assertion rather than an oversight somebody should tidy.** A `--skip
+   * typo` withholds a prune that was not going to matter. A `--only typo` is a
+   * run that walks no harness, prints a header, exits 0 and reports success — and
+   * the caller that passes `--only` is an install somebody pressed, which would
+   * draw exactly that as "installed". Refused by name, with the list, so the
+   * message is the fix.
+   */
+  const badOnly = runAgents(["--only", "gemini", "--check"]);
+  check(
+    "an --only naming a harness this script does not install is refused with 2, by name",
+    [badOnly.status, badOnly.err.includes("--only takes one of"), badOnly.err.includes("not gemini")],
+    [2, true, true],
+  );
   /*
    * `--source` takes two spellings and nothing else. The daemon passes it from
    * `REEMOAT_AGENT_SOURCE` after reading the same two, so a third value reaching
@@ -1804,7 +1905,174 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   );
   const heldCheck = runAgents(["--source", "npm", "--check"], { HOME: lockHome });
   check("while --check needs no lock and previews past one", [heldCheck.status, heldCheck.err, heldCheck.out.includes("nothing will be changed")], [0, "", true]);
-  const gone = spawnSync("sh", ["-c", 'echo "$$"'], { encoding: "utf8" }).stdout.trim();
+  /*
+   * ⚠ **The same contended lock, and one caller needs to be able to tell.** Three
+   * of the four contract that this script never fails, and for them `exit 0` with
+   * nothing installed really is nothing to report. The fourth is an install
+   * somebody pressed: there, an empty stdout and a clean exit cannot be told from
+   * a successful run that found nothing to do, and the screen would draw it as
+   * installed. Same sentence on stderr, same nothing changed — only the status
+   * moves, and only behind the flag, so no existing caller's contract does.
+   */
+  writeFileSync(join(lockDir, "pid"), `${process.pid}\n`);
+  const heldLoud = runAgents(["--source", "npm", "--fail-if-locked"], { HOME: lockHome, FAKE_VER: "1.0.0" });
+  check(
+    "a contended run exits 3 under --fail-if-locked, with the same sentence and nothing installed",
+    [heldLoud.status, heldLoud.err.includes("is in progress; nothing was changed"), heldLoud.out, AGENT_IDS.map((id) => buildsOf(lockHome, id))],
+    [3, true, "", AGENT_IDS.map(() => [])],
+  );
+  /* ------------------------------------------------------------------ *
+   * `--refresh-only`: what is here moves, what is not stays away
+   *
+   * ⚠ **The whole of the posture change rests on this flag holding at *five*
+   * doors**, and four of them are easy to miss: "absent" is spelled once in
+   * `ensure_npm` and three more times as a vendor `case` that had no `""` arm at
+   * all and fell through into its install path. A guard missing from one of them
+   * is a harness that still downloads on a run that promised not to — and the
+   * symptom is 200 MB and a vendor's host, on a machine nobody asked.
+   *
+   * So the assertion is an **absence over the whole transcript**: no install verb
+   * of any kind, from any of the five. That is the only shape that catches the
+   * door somebody forgot rather than the doors somebody remembered.
+   * ------------------------------------------------------------------ */
+  const bareHome = join(sandbox, "agents-bare-home");
+  mkdirSync(bareHome, { recursive: true });
+  const refreshOnly = runAgents(["--refresh-only", "--check"], { HOME: bareHome });
+  const INSTALL_VERBS = /would download|npm i -g|claude install|codex update|opencode upgrade|would install/;
+  check(
+    "--refresh-only on a machine with no harness installs nothing, from any door",
+    [
+      refreshOnly.status,
+      INSTALL_VERBS.test(refreshOnly.out),
+      INSTALL_VERBS.test(refreshOnly.err),
+      AGENT_IDS.every((id) => refreshOnly.out.includes(`${id} `) || refreshOnly.out.includes(`${id}\n`)),
+    ],
+    [0, false, false, true],
+  );
+  check(
+    "and says so per harness rather than silently doing nothing",
+    (refreshOnly.out.match(/not installed; --refresh-only fetches nothing new/g) ?? []).length,
+    AGENT_IDS.length,
+  );
+  /*
+   * ⚠ **And none of it is counted as a failure.** `$failed` means "a vendor could
+   * not be reached", which the daemon forwards to an operator as a warning. A
+   * harness nobody has installed is the ordinary state of a machine now, and
+   * warning about five of them daily is how somebody learns to ignore the one
+   * counter that does mean something. Asserted as an empty stderr, not as a
+   * count: the summary line is the thing that must not appear.
+   */
+  check("and none of it is counted as a failure", [refreshOnly.err, refreshOnly.err.includes("were not installed or refreshed")], ["", false]);
+  /*
+   * The other half, or the flag would pass by doing nothing at all: a copy that
+   * *is* there still takes its vendor's own refresh verb.
+   */
+  const refreshHome = join(sandbox, "agents-refresh-home");
+  const refreshClaude = join(refreshHome, ".local", "bin", "claude");
+  mkdirSync(dirname(refreshClaude), { recursive: true });
+  claudeStub(refreshClaude);
+  const stillRefreshes = runAgents(["--refresh-only", "--check"], { HOME: refreshHome });
+  check(
+    "while a copy that is there is still refreshed",
+    [
+      /^  claude: would run: claude install latest$/m.test(stillRefreshes.out),
+      stillRefreshes.out.includes("claude        not installed"),
+    ],
+    [true, false],
+  );
+  /* ------------------------------------------------------------------ *
+   * The step grammar, from the emitter's side
+   *
+   * ⚠ **Both ends of this grammar are in this repository, and that is the only
+   * reason it may be a grammar at all.** `ui/login.ts` parses a *vendor's*
+   * sentences, which is why it is a guess with a raw-transcript fallback. Here
+   * the script prints the lines and `readStep` reads them, so the driver imports
+   * the parser and runs the emitter — the trick `MANAGED_CLI_DIRS` already uses
+   * for the other list these two files share.
+   *
+   * ⚠ **It exists because the script is otherwise silent for minutes.** `attempt`
+   * and `ensure_npm` send every vendor installer's and npm's own output to
+   * `/dev/null`, so between the header and the first finished harness there is
+   * nothing on the wire at all.
+   * ------------------------------------------------------------------ */
+  const stepHome = join(sandbox, "agents-step-home");
+  mkdirSync(stepHome, { recursive: true });
+  const stepped = runAgents(["--only", "kimi", "--source", "npm"], { HOME: stepHome, FAKE_VER: "1.0.0" });
+  const stepLines = stepped.out.split("\n").filter((line) => line.startsWith("step:"));
+  check(
+    "a real run prints checkpoints, and every one of them parses",
+    [stepLines.length > 0, stepLines.every((line) => readStep(line) !== null)],
+    [true, true],
+  );
+  check(
+    "they are this harness's, and they run start → … → done",
+    [
+      stepLines.every((line) => readStep(line)?.agent === "kimi"),
+      readStep(stepLines[0] ?? "")?.phase,
+      readStep(stepLines.at(-1) ?? "")?.phase,
+    ],
+    [true, "start", "done"],
+  );
+  /*
+   * ⚠ **And `--check` emits none.** A `download` checkpoint under a flag that
+   * downloads nothing would be the script claiming an act it did not perform,
+   * which is what every other `--check` arm in this file is careful not to do.
+   */
+  check(
+    "while --check emits none, having performed none",
+    runAgents(["--only", "kimi", "--check"], { HOME: stepHome }).out.includes("step:"),
+    false,
+  );
+
+  /*
+   * ⚠ **`--only` and `--refresh-only` compose, and the summary counts the run.**
+   * A one-harness run that failed reporting "1 of 5" reads as four that quietly
+   * worked, which is the defect the `$attempted` assertion above pins in source
+   * text and this one drives.
+   */
+  const narrowed = runAgents(["--only", "codex", "--refresh-only", "--check"], { HOME: refreshHome });
+  check(
+    "--only narrows the walk, and the header names both modes",
+    [
+      narrowed.out.includes("codex only"),
+      narrowed.out.includes("refresh only, nothing new is installed"),
+      narrowed.out.includes("claude"),
+      // claude is not in the run, so its channel is not a choice this run made.
+      narrowed.out.includes("claude on its latest channel"),
+    ],
+    [true, true, false, false],
+  );
+
+  /*
+   * ⚠ **A pid that was never live, rather than one that has just exited.** A
+   * recycled pid reads as a live lock and fails this for a reason that is not
+   * about the script. Anything past `pid_max` is refused by `kill -0` on both
+   * platforms this deploys to.
+   *
+   * ⚠ **And that premise is asserted rather than trusted, because the case below
+   * cannot assert it.** Measured 2026-09-22 on macOS by standing `1` in for this
+   * constant: the takeover assertion stayed **green** over a pid that is
+   * unambiguously alive. The script's test is `kill -0`, and as a non-root uid
+   * `kill -0 1` exits 1 with *Operation not permitted* — so a live process this
+   * uid does not own reads to it exactly as a dead one does, and the case would
+   * have gone on reporting that a stale lock is taken over while holding a live
+   * one. Nothing else in the block can tell the two apart.
+   *
+   * So the refusal is required to be `ESRCH`, *no such process*, and never
+   * `EPERM`. `4194305` is one past Linux's own ceiling for `pid_max` and far past
+   * anything macOS issues; if a future platform starts handing the number out,
+   * this line is what says so instead of the takeover quietly changing subject.
+   */
+  const gone = "4194305";
+  const pidState = (pid: number): string => {
+    try {
+      process.kill(pid, 0);
+      return "alive";
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code ?? "unknown";
+    }
+  };
+  check("the pid this lock names is no process at all, which is what makes it stale", pidState(Number(gone)), "ESRCH");
   writeFileSync(join(lockDir, "pid"), `${gone}\n`);
   const stale = runAgents(["--source", "npm"], { HOME: lockHome, FAKE_VER: "1.0.0" });
   check(
@@ -2209,10 +2477,45 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
    * would otherwise be neither — every npm-installed harness "skipped: no npm to
    * install it with" on a machine that had just installed one.
    */
-  const agentsCall = bootFn("install_agents").split("\n").find((line) => line.includes("deploy/agents.sh")) ?? "";
+  const installAgentsFn = bootFn("install_agents");
+  /*
+   * ⚠ **Comments are skipped, or the finder picks up the docblock that *names*
+   * the script.** This found a prose line the moment `install_agents` grew one
+   * mentioning `deploy/agents.sh --only`, and reported the call as missing.
+   */
+  const installAgentsLines = installAgentsFn
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line));
+  const agentsCall = installAgentsLines.find((line) => line.includes("deploy/agents.sh")) ?? "";
   check(
     "install_agents runs the script with the installed node's directory in front",
-    agentsCall.trim().startsWith('( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" )'),
+    agentsCall.trim().startsWith('( PATH="$(dirname -- "$NODE_BIN"):$PATH" "$CHECKOUT/deploy/agents.sh" --source "$AGENT_SOURCE" --channel "$AGENT_CHANNEL" $_only )'),
+    true,
+  );
+  /*
+   * ⚠ **And it returns before that line unless somebody named a harness**, which
+   * is the whole posture change at the one door a fresh machine comes through.
+   * This used to install all five, so a harness added to this repository arrived
+   * on every machine in the fleet by itself — offering a sign-in for a program
+   * nobody had asked for, which is the reported symptom. Asserted as an *early
+   * return placed before the call*, because a guard after it installs everything
+   * and still contains both strings.
+   */
+  const guardAt = installAgentsLines.findIndex((line) => line.includes('[ -n "$INSTALL_AGENTS" ] ||'));
+  const callAt = installAgentsLines.findIndex((line) => line.includes("deploy/agents.sh"));
+  check(
+    "and installs nothing at all unless somebody named a harness",
+    [guardAt !== -1, guardAt < callAt, installAgentsFn.includes("press Install")],
+    [true, true, true],
+  );
+  /*
+   * Each name goes through `--only`, which `deploy/agents.sh` validates against
+   * its own list — so a typo is an `exit 2` naming the five rather than a run
+   * that walks no harness, exits 0 and reports success.
+   */
+  check(
+    "each named harness is forwarded as --only, for the script to validate",
+    installAgentsFn.includes('_only="$_only --only $_one"'),
     true,
   );
 
@@ -2349,10 +2652,35 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
   for (const envOnly of [
     "REEMOAT_CP_PLUGIN_CATALOGUE_URL",
     "REEMOAT_CP_MACHINES_OFFER_URL",
+    /*
+     * The offer's twin, and it earns the list for the same reason plus one of its
+     * own: it names one particular build published by whoever runs *this*
+     * deployment, and there is no compiled-in default because this repository
+     * publishes no signed build at all. Unset is the truthful state, so an
+     * operator who wants the handoff page to offer a download has to discover
+     * this variable — and a `.env.example` is the only place that can happen.
+     */
+    "REEMOAT_CP_APP_DOWNLOAD_URL",
     // The third member, and the same argument at its sharpest: the documents this
     // switch publishes name one party, so a row on every fork's Server settings
     // screen would offer somebody else's contract as a toggle.
     "REEMOAT_CP_LEGAL_DOCUMENTS",
+    /*
+     * The one that decides what this process *serves* rather than what it says.
+     * It cannot be a row for a reason the others do not have: it is read once, at
+     * app construction, and Hono cannot unregister a route — so a database-owned
+     * value and the behaviour would disagree until a restart, which is a switch
+     * that lies. It was documented in **no** example file in the tree until the
+     * deployment modes were written down, which is precisely the failure this loop
+     * exists to catch and could not, because nothing named it.
+     *
+     * ⚠ **`REEMOAT_CP_WEB` was the other one and is deleted.** It named a built
+     * copy of the *app* for a checkout to serve; a browser holds no device key and
+     * therefore cannot open an encrypted channel to a daemon, so what it could load
+     * it could not use. The gate is served unconditionally and there is no variable
+     * for it.
+     */
+    "REEMOAT_CP_INSTALL",
   ]) {
     check(
       `the example documents ${envOnly} as a commented assignment`,
@@ -2367,6 +2695,55 @@ const NPM_PACKAGES: Record<(typeof AGENT_IDS)[number], string> = {
       true,
     );
   }
+  /*
+   * **One switch, and the trap it was given is worth keeping written down.**
+   *
+   * ⚠ **This compared *two* switches, and the other one is deleted.**
+   * `REEMOAT_CP_WEB` and `REEMOAT_CP_INSTALL` were the only pair in this service
+   * where a value is *either* a boolean *or* a path, and that shape has one trap:
+   * an affirmative spelling read as a path resolves to a directory named `1`,
+   * which does not exist, and the service then answers a permanent 404
+   * indistinguishable from a trimmed image. `REEMOAT_CP_INSTALL` was given the
+   * three-and-three and the other was not — and the comment sitting beside the fix
+   * *named* the other variable as carrying the same trap, for two releases, while
+   * it stayed open. A paragraph that knows about a defect is not a check.
+   *
+   * With one variable left there is nothing to compare it against, so what is
+   * asserted is the rule itself: the three spellings of *off* and the three of
+   * *the default*, read off the source. That is what a fourth spelling arriving on
+   * a **next** variable of this shape would be measured against, which is the way
+   * this goes wrong again.
+   *
+   * Read off the source by regex because nothing can import `main.ts`: it is a
+   * process entry with side effects at module load, which is also why the rule is
+   * otherwise unasserted.
+   */
+  {
+    const mainTs = readFileSync(join(repoRoot, "packages/control-plane/src/main.ts"), "utf8");
+    const spellings = (name: string, sense: "Off" | "Default"): string[] => {
+      const found = new RegExp(`const ${name}${sense} =([^;]+);`).exec(mainTs)?.[1] ?? "";
+      return [...found.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").sort();
+    };
+    check("the installer switch spells off three ways", spellings("install", "Off"), ["0", "false", "no"]);
+    check(
+      "and still has a default for an affirmative to mean",
+      spellings("install", "Default"),
+      ["1", "true", "yes"],
+    );
+    /*
+     * And the deletion, asserted as an absence so it cannot come back quietly: a
+     * variable naming an app bundle is a browser reaching a daemon it has no key
+     * for, which is the whole of what this release removed.
+     */
+    /*
+     * ⚠ **The *read*, not the name.** Two docblocks in that file still say
+     * `REEMOAT_CP_WEB` — they are where the deletion is argued, which is exactly
+     * where this repository puts a reason — so matching the string would fail on
+     * the explanation. What must not come back is a process reading it.
+     */
+    check("and nothing reads a variable naming a web bundle", /process\.env\["REEMOAT_CP_WEB"\]/.test(mainTs), false);
+  }
+
   /*
    * And asks rather than assuming. A `set_env` with a literal would be a
    * decision made on the operator's behalf about whether a proxy exists, which
@@ -3652,7 +4029,7 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   // `stable` host to `latest` on the way through a restart (Q4.115).
   const readsChannel = armLines.indexOf(`_agent_channel=$(file_value "$_daemon_env" REEMOAT_AGENT_CHANNEL | tr '[:upper:]' '[:lower:]')`);
   const defaultsChannel = armLines.indexOf('[ "$_agent_channel" = stable ] || _agent_channel=latest');
-  const announces = armLines.indexOf('echo "  agents ($_agent_source)"');
+  const announces = armLines.indexOf('echo "  agents ($_agent_source, refresh only)"');
   const callAt = armLines.findIndex((line) => line.startsWith('"$REPO_ROOT/deploy/agents.sh" --source "$_agent_source" --channel "$_agent_channel"'));
   const call = armLines[callAt] ?? "";
   const guardAt = armLines.indexOf(') || echo "  agents: the script did not finish; the daemon retries daily" >&2');
@@ -3687,6 +4064,16 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   check("says which, then runs the same script the bootstrap and the daemon run, with that source", [announces > defaults, callAt > announces], [true, true]);
   check("with node's directory in front, as the bootstrap puts it", armLines.some((line) => line.startsWith('PATH="${NODE_BIN:+$(dirname -- "$NODE_BIN"):}$PATH"')), true);
   check("withholding every prune, since it cannot know which harnesses are live", AGENT_IDS.filter((id) => !call.includes(` --skip ${id}`)), []);
+  /*
+   * ⚠ **And installing nothing, which is the half of the posture change a deploy
+   * carries.** A deploy used to install whatever this repository had learned to
+   * install, so adding a harness here put it on every machine in the fleet on its
+   * next update — offering a sign-in nobody had asked for, on a machine that did
+   * not have it. That was the reported symptom. What a deploy does now is move
+   * the copies that are already there; a harness arrives when somebody presses a
+   * button about it.
+   */
+  check("and installing nothing that is not already there", call.includes(" --refresh-only"), true);
   check("with exactly one --skip per harness", (call.match(/ --skip /g) ?? []).length, AGENT_IDS.length);
   check("never fatal, and saying who retries", guardAt === callAt + 1, true);
   check("before the restart decision, so the copies are there when the daemon comes back", callAt !== -1 && restartAt > callAt, true);
@@ -3759,15 +4146,15 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   const npmDeploy = runArm({ REEMOAT_ENV_FILE: envSaying("npm") });
   check(
     "an env file saying npm runs the script with --source npm, the channel spelled out, and every prune withheld",
-    [npmDeploy.run.status, meaning(npmDeploy.argv), npmDeploy.run.out.includes("  agents (npm)\n"), npmDeploy.run.err],
-    [0, { source: "npm", channel: "latest", skips: everyHarness, rest: [] }, true, ""],
+    [npmDeploy.run.status, meaning(npmDeploy.argv), npmDeploy.run.out.includes("  agents (npm, refresh only)\n"), npmDeploy.run.err],
+    [0, { source: "npm", channel: "latest", skips: everyHarness, rest: ["--refresh-only"] }, true, ""],
   );
   check("and adds nothing to the restart list by itself", npmDeploy.run.out.includes("restart_list=[]\n"), true);
   const noEnv = runArm({ REEMOAT_ENV_FILE: envSaying(null) });
   check(
     "no env file at all is vendor and latest, which is what the daemon reads absent values as",
-    [noEnv.run.status, meaning(noEnv.argv), noEnv.run.out.includes("  agents (vendor)\n")],
-    [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }, true],
+    [noEnv.run.status, meaning(noEnv.argv), noEnv.run.out.includes("  agents (vendor, refresh only)\n")],
+    [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: ["--refresh-only"] }, true],
   );
   /*
    * A spelling the daemon would warn about and read as `vendor` is passed as
@@ -3776,7 +4163,7 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
    * would then report as a run that did not finish.
    */
   const bogus = runArm({ REEMOAT_ENV_FILE: envSaying("bogus") });
-  check("and a spelling that is neither is passed as vendor rather than as itself", [bogus.run.status, meaning(bogus.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }]);
+  check("and a spelling that is neither is passed as vendor rather than as itself", [bogus.run.status, meaning(bogus.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: ["--refresh-only"] }]);
   /*
    * The channel, read the way `agentChannelFrom` reads it (Q4.115): `stable`
    * however it is cased is `stable`, and a spelling that is neither is `latest`
@@ -3788,10 +4175,10 @@ process.stdout.write("\nwhat a deploy does to the agents\n");
   check(
     "an env file saying STABLE passes --channel stable, lowercased as the daemon reads it",
     [stableDeploy.run.status, meaning(stableDeploy.argv), stableDeploy.run.err],
-    [0, { source: "npm", channel: "stable", skips: everyHarness, rest: [] }, ""],
+    [0, { source: "npm", channel: "stable", skips: everyHarness, rest: ["--refresh-only"] }, ""],
   );
   const bogusChannel = runArm({ REEMOAT_ENV_FILE: envSaying("vendor", "REEMOAT_AGENT_CHANNEL='nightly'\n") });
-  check("and a channel that is neither is passed as latest rather than as itself", [bogusChannel.run.status, meaning(bogusChannel.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: [] }]);
+  check("and a channel that is neither is passed as latest rather than as itself", [bogusChannel.run.status, meaning(bogusChannel.argv)], [0, { source: "vendor", channel: "latest", skips: everyHarness, rest: ["--refresh-only"] }]);
   const failed = runArm({ REEMOAT_ENV_FILE: envSaying("npm") }, 1);
   check(
     "a script that did not finish is a line on stderr, and the deploy goes on",
@@ -4163,6 +4550,20 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     description?: string;
     notes?: string;
     rootManifest?: string;
+    productName?: string;
+    /**
+     * The platform whose overlay **stops** taking the daemon payload away — one
+     * of `linux`, `windows`, `android`, `ios`.
+     *
+     * ⚠ **Without it `app_profile`'s refusal is unreachable.** Every overlay
+     * this fixture writes carries `"externalBin": null`, so the `grep` always
+     * matched, `client` was always the answer, and the `else` arm was taken by
+     * no case in this file — the arm that catches an overlay which quietly
+     * stopped removing the payload, which is `tauri-build` copying 130 MB of
+     * Node runtime into a bundle that can never run it. One knob is what turns
+     * a paragraph that is read into a refusal that is driven.
+     */
+    overlayKeepingPayload?: string;
   }
 
   /** A synthetic workspace with all six version sites, and nothing else. */
@@ -4179,6 +4580,42 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     // that cannot be released, and the fixture has to carry it or every publish
     // case below fails for a reason that is not the case's subject.
     writeFileSync(join(dir, "deploy", "bootstrap.sh"), "#!/bin/sh\nmain() { :; }\nmain \"$@\"\n");
+    /*
+     * And the native app's configuration, for `bootstrap.sh`'s reason one act
+     * over: `ci-release.sh` reads `productName` out of it **above the verb
+     * dispatch**, so a tree without one is a tree where `plan` and `publish`
+     * fail for a reason that is not the case's subject.
+     *
+     * The overlays come with it because `app_profile()` reads them to answer
+     * *does this platform carry a daemon* — deliberately, rather than
+     * restating the answer here, so a target added to one and not the other is
+     * a refusal rather than a silent disagreement.
+     */
+    mkdirSync(join(dir, "packages", "native", "src-tauri"), { recursive: true });
+    writeFileSync(
+      join(dir, "packages", "native", "src-tauri", "tauri.conf.json"),
+      JSON.stringify({ productName: t.productName ?? "Reemoat" }, null, 2),
+    );
+    for (const platform of ["linux", "windows", "android", "ios"]) {
+      writeFileSync(
+        join(dir, "packages", "native", "src-tauri", `tauri.${platform}.conf.json`),
+        /*
+         * `resources: null` alone for the named platform, rather than an empty
+         * object: that is the *half-edit* the refusal exists for — somebody
+         * writing an overlay for a new platform and remembering one of the two
+         * deletions — and it is still a shape `nativecheck`'s allowlist admits,
+         * so this fixture is not standing in a file the real tree could never
+         * hold.
+         */
+        JSON.stringify(
+          platform === t.overlayKeepingPayload
+            ? { bundle: { resources: null } }
+            : { bundle: { externalBin: null, resources: null } },
+          null,
+          2,
+        ),
+      );
+    }
 
     writeFileSync(
       join(dir, "package.json"),
@@ -4451,9 +4888,18 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
   const publishWork = join(tmp("relpub-"), "w");
   mkdirSync(publishWork, { recursive: true });
   writeFileSync(join(publishWork, "notes.md"), "notes\n");
+  /*
+   * ⚠ **The publish cases below are about the notes and the installer, so they
+   * publish no app.** `publish` refuses a release whose `RELEASE_APP_TARGETS`
+   * names an artifact that is not there — which is the point of that gate and is
+   * driven on its own further down. Without this every case here would go red
+   * for a reason that is not its subject, and somebody would "fix" it by
+   * weakening the gate.
+   */
+  const noApps = { RELEASE_APP_TARGETS: "" };
   check(
     "publish is not blocked by the image manifest just created",
-    release("publish", { DOCKER: dockerPublished, RELEASE_WORK: publishWork }).status,
+    release("publish", { DOCKER: dockerPublished, RELEASE_WORK: publishWork, ...noApps }).status,
     0,
   );
 
@@ -4558,7 +5004,7 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
   check("and it refuses with no digests at all", release("manifest", { RELEASE_DIGEST_DIR: noDigests }).status, 2);
 
   /* The publish verb. */
-  const published = release("publish", { RELEASE_WORK: publishWork });
+  const published = release("publish", { RELEASE_WORK: publishWork, ...noApps });
   check("the release is created from the section somebody wrote", published.out.includes("publishing v0.1.0"), true);
   /*
    * **And it carries the installer.** `README.md`'s one-liner points at
@@ -4576,6 +5022,895 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     true,
   );
   check("publish refuses when plan never wrote the notes", release("publish").status, 2);
+
+  /*
+   * ── the app verb ──────────────────────────────────────────────────────────
+   *
+   * The native app rides the same tag, and every refusal it owns is driven here
+   * for the reason the whole file exists: a workflow is exercised by pushing and
+   * watching, so a decision in one is a decision no driver can reach.
+   *
+   * `TAURI` is the seam, and there are two stubs of it for `DOCKER`'s reason.
+   * The echoing one makes the **argv** an assertion — which triple, and whether
+   * anything passes `--bundles` — and the producing one is what makes naming,
+   * collision and packaging reachable at all. A single stub that both echoed and
+   * produced would let a verb that passed the wrong triple pass.
+   */
+  process.stdout.write("\nthe app verb, and what it refuses\n");
+
+  /** A `tauri` that echoes its argv and builds nothing. */
+  const tauriEcho = stub('echo "tauri $*"');
+  /**
+   * And one that writes the file it claims to have built, under the bundler's
+   * own naming, so the rest of the verb is reachable.
+   *
+   * It writes the **file**, never the directory alone: an empty bundle directory
+   * is its own refusal, and a stub that made one would drive that case by
+   * accident rather than on purpose.
+   */
+  const tauriProduces = (relative: string): string =>
+    stub(`out="$TAURI_FIXTURE_ROOT/${relative}"; mkdir -p "$(dirname "$out")"; printf 'bundle\\n' > "$out"; echo "tauri $*"`);
+  /**
+   * And one that writes several files in one run, which is what makes the loop
+   * over `app_artifacts` reachable at more than one line.
+   *
+   * Two things need it and neither is reachable with the single-file stub. A
+   * Linux leg produces a `.deb` **and** an AppImage, so `app_artifacts` answers
+   * two lines and the `while … read` body runs twice — every case above produces
+   * exactly one file, so that body had only ever run once and one that stopped
+   * after its first line would have been green here for ever. And two files
+   * behind one glob is the `matched $# files` refusal, which exists because a
+   * runner is reused: a bundle a previous run left in `target/` is what gets
+   * published under this release's name.
+   */
+  const tauriProducesAll = (relatives: readonly string[]): string =>
+    stub(
+      relatives
+        .map((r) => `out="$TAURI_FIXTURE_ROOT/${r}"; mkdir -p "$(dirname "$out")"; printf 'bundle\\n' > "$out"`)
+        .join("\n") + `\necho "tauri $*"`,
+    );
+  /**
+   * And one that creates the file and puts nothing in it.
+   *
+   * The byte count at the end of the verb is reachable no other way:
+   * `tauriProduces` writes seven bytes, so `[ "$bytes" -gt 0 ]` has never seen a
+   * zero. A bundler that exits 0 having written nothing is the failure that
+   * guard is for, and a release page carrying a 0-byte installer looks finished
+   * to everybody but the person who downloads it.
+   */
+  const tauriProducesEmpty = (relative: string): string =>
+    stub(`out="$TAURI_FIXTURE_ROOT/${relative}"; mkdir -p "$(dirname "$out")"; : > "$out"; echo "tauri $*"`);
+  /** A `node` that says what it was asked to stage and stages nothing. */
+  const nodeEcho = stub('echo "node $*"');
+
+  const app = (target: string, env: Record<string, string> = {}, root?: string): Run => {
+    const tree = root ?? fixture();
+    return release(
+      "app",
+      {
+        RELEASE_APP_TARGET: target,
+        /*
+         * A leg is always for a target the release asked for, so the list
+         * defaults to the target under test. `RELEASE_APP_TARGETS` itself is
+         * empty in the script until `check.yml` builds something, which is the
+         * rule the cross-file assertion at the end of this section enforces —
+         * so every case here would otherwise refuse for that reason instead of
+         * its own.
+         */
+        RELEASE_APP_TARGETS: target,
+        TAURI: tauriEcho,
+        NODE: nodeEcho,
+        TAURI_FIXTURE_ROOT: tree,
+        ...env,
+      },
+      tree,
+    );
+  };
+
+  check("app with no target is refused", app("").status, 2);
+  const unknown = app("plan9");
+  check("an unknown app target is refused rather than assumed", unknown.status, 2);
+  check("and the refusal names every target this release knows", unknown.err.includes("macos-arm64 macos-x64 linux-x64 linux-arm64 windows-x64 android"), true);
+  /*
+   * The `RELEASE_PLATFORMS` rule, in words, on the refusal a person actually
+   * reads: adding a target is two edits or it is none.
+   */
+  check("and says check.yml is the other half of adding one", unknown.err.includes("check.yml"), true);
+  const notAsked = app("windows-x64", { RELEASE_APP_TARGETS: "macos-arm64" });
+  check("a known target that is not in RELEASE_APP_TARGETS is refused", notAsked.status, 2);
+  check("and the refusal says the matrix has drifted from the list", notAsked.err.includes("drifted"), true);
+
+  /*
+   * What reaches the bundler — the `dockerEcho` device, one act over.
+   */
+  /*
+   * ⚠ **Read off a *client* target, because a daemon-host one never gets here.**
+   * macOS stages first and the fixture stages nothing, so that leg refuses above
+   * the bundler — which is its own assertion below and is why this one cannot
+   * use it.
+   */
+  const winArgv = app("windows-x64");
+  check("the app build names the triple it was asked for", winArgv.out.includes("--target x86_64-pc-windows-msvc"), true);
+  check("and RELEASE_APP_TARGET is the one variable that decides it", app("linux-x64").out.includes("--target x86_64-unknown-linux-gnu"), true);
+  /*
+   * ⚠ **No `--bundles`, and its absence is the assertion.** The kinds are
+   * `bundle.targets` in the platform overlay; a flag here would be a second copy
+   * of that list, with the silent direction being a release that publishes a
+   * `.deb` while the checked-in configuration says AppImage.
+   */
+  check("and it passes no --bundles, the overlay being where kinds are written", winArgv.out.includes("--bundles"), false);
+  /**
+   * The four values an Android release key is, in one place because the loop
+   * below needs three of them right while the fourth is missing.
+   *
+   * A JKS carries two passwords and they are routinely different, which is why
+   * `ci-release.sh` asks for all four by name rather than asking whether "the
+   * key" is configured: somebody who set three finds out which one they did not.
+   */
+  const androidKey: Record<string, string> = {
+    RELEASE_ANDROID_KEYSTORE: "eA==",
+    RELEASE_ANDROID_KEYSTORE_PASSWORD: "p",
+    RELEASE_ANDROID_KEY_ALIAS: "a",
+    RELEASE_ANDROID_KEY_PASSWORD: "k",
+  };
+  check(
+    "android is built through the android subcommand rather than the desktop one",
+    app("android", androidKey).out.includes("android build --apk"),
+    true,
+  );
+  /*
+   * ⚠ **All four set at once was the only android case there was, and it is the
+   * one shape of this that cannot fail.** The promise is four `[ -n … ]` lines
+   * accumulating into one string, and the ordinary way to break it is a copied
+   * line still naming the variable above it — which a run with all four set
+   * reads as green. So each is driven with exactly that one blank.
+   *
+   * ⚠ **Asserted as a *set* rather than with `includes`, because
+   * `RELEASE_ANDROID_KEYSTORE` is a prefix of
+   * `RELEASE_ANDROID_KEYSTORE_PASSWORD`.** The obvious pair — names mine, does
+   * not name the others — reads true for the keystore on the run where only the
+   * *password* is missing, so it would answer both halves wrongly for exactly
+   * the two a copied line confuses. The missing list is parsed back out of the
+   * sentence and compared whole.
+   *
+   * And the status is not enough on its own. Measured against a copy with one of
+   * the four checks deleted: the build runs, the APK glob then matches nothing,
+   * and the verb still exits 2 — so each case also asserts the bundler was never
+   * reached.
+   */
+  for (const blank of [
+    "RELEASE_ANDROID_KEYSTORE",
+    "RELEASE_ANDROID_KEYSTORE_PASSWORD",
+    "RELEASE_ANDROID_KEY_ALIAS",
+    "RELEASE_ANDROID_KEY_PASSWORD",
+  ]) {
+    const oneShort = app("android", { ...androidKey, [blank]: "" });
+    check(`android with ${blank} unset is refused`, oneShort.status, 2);
+    check(`and the bundler is never reached without ${blank}`, oneShort.out.includes("android build --apk"), false);
+    const listed = (/android is being built and([^\n]*) is unset\./.exec(oneShort.err)?.[1] ?? "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    check(`and the refusal names ${blank} and none of the other three`, listed, [blank]);
+  }
+
+  /*
+   * ── android: the subcommand, the key on disk, and the signature ──────────
+   */
+  const APK_REL = "packages/native/src-tauri/gen/android/app/build/outputs/apk/universal/release";
+  /** The four secrets, which every android case needs before it reaches its own subject. */
+  const androidSecrets = {
+    RELEASE_ANDROID_KEYSTORE: "eA==",
+    RELEASE_ANDROID_KEYSTORE_PASSWORD: "p",
+    RELEASE_ANDROID_KEY_ALIAS: "a",
+    RELEASE_ANDROID_KEY_PASSWORD: "k",
+  };
+  /** An `apksigner` that verifies anything, and one that verifies nothing. */
+  const apksignerOk = stub('echo "apksigner $*"');
+  const apksignerBad = stub('echo "apksigner $*" >&2; exit 1');
+  /**
+   * A `tauri` that writes the APK **and reports the keystore while it still
+   * exists**, which is the only vantage point that has one.
+   *
+   * ⚠ **The mode and the path cannot be read after the verb returns, because the
+   * trap is part of what is being tested.** By the time `spawnSync` resolves the
+   * key and its directory are gone — which is itself asserted below — so a driver
+   * that stat'ed the path afterwards would be asserting the cleanup and calling
+   * it the permissions. The bundler stub runs in the middle of that window with
+   * `ANDROID_KEYSTORE_PATH` exported into it, so it is where the observation
+   * belongs. `ls -l | cut -c1-10` rather than `stat`, because `stat`'s mode flag
+   * is `-c` on GNU and `-f` on BSD and this driver runs on both.
+   */
+  const tauriAndroid = (apkName: string): string =>
+    stub(
+      `out="$TAURI_FIXTURE_ROOT/${APK_REL}/${apkName}"; mkdir -p "$(dirname "$out")"; printf 'apk\\n' > "$out"\n` +
+        'echo "tauri $*"\n' +
+        'echo "keystore-path $ANDROID_KEYSTORE_PATH"\n' +
+        'echo "keystore-mode $(ls -l "$ANDROID_KEYSTORE_PATH" | cut -c1-10)"\n' +
+        'echo "keystore-bytes $(wc -c < "$ANDROID_KEYSTORE_PATH" | tr -d " ")"',
+    );
+
+  const androidWork = join(tmp("relwork-android-"), "w");
+  const signed = app("android", {
+    ...androidSecrets,
+    RELEASE_WORK: androidWork,
+    TAURI: tauriAndroid("app-universal-release.apk"),
+    APKSIGNER: apksignerOk,
+  });
+  check("and a signed build names its asset", /app: android \S+-android\.apk \d+ bytes/.test(signed.out), true);
+
+  const keystorePath = /keystore-path (\S+)/.exec(signed.out)?.[1] ?? "";
+  check("the keystore is written with no bits for anybody but this user", /keystore-mode (\S+)/.exec(signed.out)?.[1] ?? null, "-rw-------");
+  check("and it is the decoded secret rather than an empty file", /keystore-bytes (\d+)/.exec(signed.out)?.[1] ?? null, "1");
+  /*
+   * ⚠ **Not under `$RELEASE_WORK`, whose child is the directory `publish`
+   * uploads out of.** Nothing globs the parent today; this is the assertion that
+   * stops "today" from being the argument.
+   */
+  check("and it does not live inside RELEASE_WORK", keystorePath.length > 0 && keystorePath.startsWith(androidWork), false);
+  check("and nothing is left on disk once the verb returns", keystorePath.length > 0 && existsSync(keystorePath), false);
+  /*
+   * ⚠ **The trap's *ordering*, and this is the one assertion in this section
+   * over the script's text rather than its behaviour.** Nothing observable from
+   * outside distinguishes "armed then wrote" from "wrote then armed": both leave
+   * the same file and both clean it up on a normal exit. What differs is an
+   * interrupt delivered into the window between them, which a driver cannot place
+   * reliably. So this reads the two lines and compares their positions — the
+   * weaker check, labelled as one, rather than a stronger one pretended.
+   */
+  const releaseText = readFileSync(join(repoRoot, "deploy", "ci-release.sh"), "utf8");
+  const armedAt = releaseText.indexOf("trap 'rm -rf \"$android_key_dir\"'");
+  const wroteAt = releaseText.indexOf('base64 -d > "$ANDROID_KEYSTORE_PATH"');
+  check("the keystore trap is armed before anything secret is written", [armedAt > 0, wroteAt > 0, armedAt < wroteAt], [true, true, true]);
+
+  const emptyKey = app("android", {
+    ...androidSecrets,
+    RELEASE_ANDROID_KEYSTORE: "\n",
+    TAURI: tauriAndroid("app-universal-release.apk"),
+    APKSIGNER: apksignerOk,
+  });
+  check("a keystore secret that decodes to nothing is refused", emptyKey.status, 2);
+  check("and the refusal says it is the secret rather than the toolchain", emptyKey.err.includes("decoded to nothing"), true);
+
+  /*
+   * ⚠ **The unsigned name, which the old `*.apk` glob matched exactly as well as
+   * the signed one.** With one file present the collision gate saw nothing wrong,
+   * and the release would have published an APK that installs on no device under
+   * the signed asset's name.
+   */
+  const unsigned = app("android", {
+    ...androidSecrets,
+    TAURI: tauriAndroid("app-universal-release-unsigned.apk"),
+    APKSIGNER: apksignerOk,
+  });
+  check("an unsigned APK is refused rather than published under the signed name", unsigned.status, 2);
+  check("and the refusal names the file AGP actually wrote", unsigned.err.includes("app-universal-release-unsigned.apk"), true);
+  check("and names the Gradle daemon, which is how it happens", unsigned.err.includes("--no-daemon"), true);
+
+  const badSig = app("android", {
+    ...androidSecrets,
+    TAURI: tauriAndroid("app-universal-release.apk"),
+    APKSIGNER: apksignerBad,
+  });
+  check("an APK at the signed name whose signature does not verify is refused", badSig.status, 2);
+  check("and the refusal says so rather than blaming the name", badSig.err.includes("not validly signed"), true);
+
+  const noSigner = app("android", {
+    ...androidSecrets,
+    TAURI: tauriAndroid("app-universal-release.apk"),
+    APKSIGNER: "",
+    ANDROID_HOME: "",
+    ANDROID_SDK_ROOT: "",
+  });
+  check("a missing apksigner is a refusal rather than a skipped check", noSigner.status, 2);
+  check("and the refusal says where it comes from", noSigner.err.includes("build-tools"), true);
+  /*
+   * Staging, and which profile it belongs to. macOS is the only build that
+   * carries a daemon; every other platform's overlay takes the payload away, and
+   * staging one there would download 122 MB of runtime nothing will ship.
+   */
+  const macArgv = app("macos-arm64");
+  check("a daemon-host target stages the runtime first", macArgv.out.includes("build-daemon.mjs aarch64-apple-darwin"), true);
+  check("and refuses when nothing was staged", macArgv.status, 2);
+  check("a client target stages nothing at all", app("windows-x64").out.includes("build-daemon.mjs"), false);
+  check("and still reaches the bundler", app("windows-x64").out.includes("tauri "), true);
+  /*
+   * ⚠ **The stale-runtime refusal, which is the one with a real path to it.** A
+   * runner is reused and a matrix leg is re-run, so `binaries/node-*` outlives
+   * the build that staged it — and `tauri-build` copies whatever it finds, with
+   * no configuration saying it should not.
+   */
+  const staleTree = fixture();
+  mkdirSync(join(staleTree, "packages", "native", "src-tauri", "binaries"), { recursive: true });
+  writeFileSync(join(staleTree, "packages", "native", "src-tauri", "binaries", "node-x86_64-pc-windows-msvc"), "x");
+  const stale = app("windows-x64", {}, staleTree);
+  check("a client target with a staged runtime left behind is refused", stale.status, 2);
+  check("and the refusal names the file rather than the class", stale.err.includes("node-x86_64-pc-windows-msvc"), true);
+
+  /*
+   * ⚠ **And the other arm of the profile question, which no case could reach
+   * until the fixture grew a knob.** `app_profile` answers *does this platform
+   * carry a daemon* by reading the overlay rather than by restating
+   * `.claude/rules/native-packaging.md`'s table, and it refuses when a platform
+   * the table calls a client has an overlay that no longer takes the payload
+   * away. That refusal is the only thing standing between a half-edited overlay
+   * and 130 MB of Node runtime shipped to people it can never run for, copied in
+   * by `tauri-build` with nothing configured to stop it.
+   *
+   * ⚠ **The status is not the assertion here, the sentence is.** Measured
+   * against a copy whose `else fail` arm was replaced by `echo "client"`: the
+   * run still exits 2, because the bundle glob is empty and it refuses one
+   * screen later for an unrelated reason. A driver reading `status` alone would
+   * have been green over a deleted refusal.
+   */
+  const keepsPayload = app("linux-x64", {}, fixture({ overlayKeepingPayload: "linux" }));
+  check("a client target whose overlay stopped taking the payload away is refused", keepsPayload.status, 2);
+  check(
+    "and the refusal names the overlay that has to say it",
+    keepsPayload.err.includes("tauri.linux.conf.json does not take the daemon payload away"),
+    true,
+  );
+  check("and it refuses before the bundler rather than after", keepsPayload.out.includes("tauri "), false);
+  check(
+    "while the overlay every other case writes is not refused for that reason",
+    app("linux-x64").err.includes("does not take the daemon payload away"),
+    false,
+  );
+
+  /*
+   * What the bundler produced, or did not.
+   */
+  const noBundle = app("windows-x64");
+  check("a build that produced no bundle is refused", noBundle.status, 2);
+  check("and says the absence means the build did not finish", noBundle.err.includes("did not finish"), true);
+
+  const made = (target: string, relative: string, env: Record<string, string> = {}): Run => {
+    const tree = fixture();
+    return app(target, { TAURI: tauriProduces(relative), ...env }, tree);
+  };
+  const win = made("windows-x64", "packages/native/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Reemoat_0.1.0_x64-setup.exe");
+  check("a client target that produced a bundle names its asset", win.status, 0);
+  /*
+   * Naming, proved by **mutation** rather than by equality — `labelFollows`'
+   * argument: a transcribed constant passes a string comparison.
+   */
+  check("the asset name carries the version the tag names", win.out.includes("Reemoat-0.1.0-windows-x64-setup.exe"), true);
+  const forked = fixture({ productName: "Nomeer" });
+  const renamed = app(
+    "windows-x64",
+    { TAURI: tauriProduces("packages/native/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/x-setup.exe") },
+    forked,
+  );
+  check(
+    "and the product name is read from the configuration rather than transcribed",
+    renamed.out.includes("Nomeer-0.1.0-windows-x64-setup.exe"),
+    true,
+  );
+  /*
+   * The OS token is `std::env::consts::OS`'s spelling — the vocabulary this app
+   * already reports about itself — and the arch token is one word rather than
+   * the four the bundlers use between them. Both are public URL surface.
+   */
+  /*
+   * ⚠ **Read off the `app:` line, never off the whole run.** Written against
+   * `win.out` this could not fail: the verb prints `building windows-x64 …` and
+   * `--target x86_64-pc-windows-msvc` before any asset is named, so the token
+   * matched the progress output and the naming rule was reached by nothing.
+   */
+  const winAsset = /^app: \S+ (\S+) /m.exec(win.out)?.[1] ?? "";
+  check("the app: line names an asset at all", winAsset.length > 0, true);
+  check("and the OS token is the one the app reports about itself", winAsset.split("-").includes("windows"), true);
+  check("and it is the OS spelling rather than the triple's", winAsset.includes("msvc"), false);
+  /*
+   * The space is looked for in the *name*, not in the line. The old spelling
+   * needed ` <letters>.<ext>` — a space immediately before the final token — so
+   * `My App-0.1.0-windows-x64-setup.exe` read as having none.
+   */
+  check("and no asset name carries a space, which GitHub would rewrite", winAsset.includes(" "), false);
+
+  /*
+   * ── everything the naming loop does after the first line ──────────────────
+   *
+   * Four refusals and one green path live inside `while IFS='|' read …`, and
+   * every case above it produced exactly one file from one target — so the loop
+   * had run once, always, and four of its five outcomes were reached by nothing.
+   */
+  const linuxBundle = "packages/native/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle";
+  const winNsis = "packages/native/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis";
+
+  /* Two artifacts from one leg, which is what a Linux build actually is. */
+  const bothLinux = app("linux-x64", {
+    TAURI: tauriProducesAll([
+      `${linuxBundle}/deb/reemoat_0.1.0_amd64.deb`,
+      `${linuxBundle}/appimage/reemoat_0.1.0_amd64.AppImage`,
+    ]),
+  });
+  check("a leg that produces two artifacts names both", bothLinux.status, 0);
+  check("and it is two app: lines rather than one", (bothLinux.out.match(/^app: /gm) ?? []).length, 2);
+  check("the deb is one of them", bothLinux.out.includes("Reemoat-0.1.0-linux-x64.deb"), true);
+  check("and the AppImage the same build produced is the other", bothLinux.out.includes("Reemoat-0.1.0-linux-x64.AppImage"), true);
+
+  /*
+   * ⚠ **Two files behind one glob, refused rather than resolved.** `set -- $R/$glob`
+   * and `[ "$#" -eq 1 ]` is the whole of it, and publishing the first of several
+   * is how a bundle a previous run left in `target/` goes out under this
+   * release's name — on runners that are reused by design and matrix legs that
+   * are re-run by hand.
+   *
+   * Measured against a copy relaxing that to `-ge 1`: the run still exits 2,
+   * because it packages the first `.deb` and then finds no AppImage. So the
+   * count in the sentence is the assertion, not the status.
+   */
+  const twoDebs = app("linux-x64", {
+    TAURI: tauriProducesAll([
+      `${linuxBundle}/deb/reemoat_0.1.0_amd64.deb`,
+      `${linuxBundle}/deb/reemoat_0.0.9_amd64.deb`,
+    ]),
+  });
+  check("a glob that matches two files is refused rather than resolved", twoDebs.status, 2);
+  check("and the refusal counts them", twoDebs.err.includes("matched 2 files"), true);
+  check("and says the build directory is what to clean", twoDebs.err.includes("Clean the build directory"), true);
+  check("and nothing was packaged under this release's name", twoDebs.out.includes("app: "), false);
+
+  /*
+   * An asset name already sitting in the output directory — the same collision
+   * `plan` refuses one act earlier, at the last place it can be caught.
+   *
+   * Driven by seeding the directory rather than by two colliding table rows,
+   * because the table has none: every name carries its own target. The shape
+   * that produces one in practice is a re-run writing into a `RELEASE_WORK` the
+   * first run left behind, which is why the second half is asserted too — the
+   * file that was there is still the file that is there.
+   */
+  const seeded = join(tmp("relseed-"), "w");
+  mkdirSync(join(seeded, "apps"), { recursive: true });
+  writeFileSync(join(seeded, "apps", "Reemoat-0.1.0-windows-x64-setup.exe"), "an older one\n");
+  const occupied = app("windows-x64", {
+    TAURI: tauriProduces(`${winNsis}/Reemoat_0.1.0_x64-setup.exe`),
+    RELEASE_WORK: seeded,
+  });
+  check("an asset name already in the output directory is refused", occupied.status, 2);
+  check(
+    "and the refusal names the asset rather than the file it came from",
+    occupied.err.includes("Reemoat-0.1.0-windows-x64-setup.exe is already in"),
+    true,
+  );
+  check(
+    "and what was there is still what is there",
+    readFileSync(join(seeded, "apps", "Reemoat-0.1.0-windows-x64-setup.exe"), "utf8"),
+    "an older one\n",
+  );
+
+  /* A bundler that exited 0 having written nothing this could package. */
+  const hollow = app("windows-x64", { TAURI: tauriProducesEmpty(`${winNsis}/Reemoat_0.1.0_x64-setup.exe`) });
+  check("a bundle the bundler wrote nothing into is refused", hollow.status, 2);
+  check("and the refusal names the asset and says it is empty", hollow.err.includes("Reemoat-0.1.0-windows-x64-setup.exe is empty"), true);
+  check("and it never reaches the app: line", hollow.out.includes("app: "), false);
+
+  /*
+   * And `plan`'s own half of the collision question, asked before a single
+   * runner starts. Driven with one target named twice — a duplicated matrix
+   * entry, which is the shape that actually produces it — since no two rows of
+   * `app_artifacts` compute one name today.
+   */
+  const collided = release("plan", { RELEASE_APP_TARGETS: "windows-x64 windows-x64" });
+  check("plan refuses two targets that compute one asset name", collided.status, 2);
+  check("and names the asset both of them wanted", collided.err.includes("two targets both produce Reemoat-0.1.0-windows-x64-setup.exe"), true);
+  check("and it refuses before writing anything", collided.out.includes("notes_file="), false);
+
+  /*
+   * And `publish`'s completeness gate: refused by name, never by count.
+   */
+  const partialWork = join(tmp("relpart-"), "w");
+  mkdirSync(join(partialWork, "apps"), { recursive: true });
+  writeFileSync(join(partialWork, "notes.md"), "notes\n");
+  writeFileSync(join(partialWork, "apps", "Reemoat-0.1.0-windows-x64-setup.exe"), "x");
+  const partial = release("publish", {
+    RELEASE_WORK: partialWork,
+    RELEASE_APP_TARGETS: "windows-x64 macos-arm64",
+  });
+  check("publish refuses a release missing an artifact it said it would carry", partial.status, 2);
+  check("and names the one that is missing", partial.err.includes("Reemoat-0.1.0-macos-arm64.app.zip"), true);
+  check("and not the one that is there", partial.err.includes("windows-x64-setup.exe"), false);
+  const whole = release("publish", { RELEASE_WORK: partialWork, RELEASE_APP_TARGETS: "windows-x64" });
+  check("and publishes when every named artifact is there", whole.status, 0);
+  check("with the app artifact on the same call as the installer", /release create[\s\S]*install\.sh[\s\S]*windows-x64-setup\.exe/.test(whole.out), true);
+  check("and there is no second upload call", whole.out.includes("release upload"), false);
+
+  /*
+   * ── a name in RELEASE_APP_TARGETS that the table does not know ────────────
+   *
+   * ⚠ **A typo used to publish a release with that platform simply absent**,
+   * which is the exact outcome `publish`'s refusal one screen up says cannot
+   * happen. `app_artifacts` answers 1 for a name the table does not know and is
+   * called inside a pipeline; there is no `pipefail` here, so `set -e` never
+   * sees it, the name contributes no asset, and both gates pass over nothing.
+   * The `app` verb refuses an unknown *singular* target and a typo'd list never
+   * reaches it — no matrix leg runs for a name nobody wrote a job for.
+   *
+   * ⚠ **Asserted on the exit status and on the work not happening, never on the
+   * refusal text alone — and that is the whole reason these cases exist.** The
+   * first fix called `app_check_targets` from inside `app_asset_names`, which
+   * both verbs invoke as `$( )`, and `fail` in a command substitution exits the
+   * *subshell*. Measured against a copy spelled that way: the refusal prints on
+   * stderr, `plan` goes on to write the notes and emit every output, the exit
+   * status is **0**, and the release is published. A driver reading `err` would
+   * have been green over precisely that.
+   */
+  const typoed = "windows-x64 windwos-x64";
+  const typoWork = join(tmp("reltypo-"), "w");
+  const planTypo = release("plan", { RELEASE_APP_TARGETS: typoed, RELEASE_WORK: typoWork });
+  check("plan refuses a name RELEASE_APP_TARGETS has and the table does not", planTypo.status, 2);
+  check("and quotes the one it could not resolve", planTypo.err.includes('names "windwos-x64"'), true);
+  check("and offers the list it does know", planTypo.err.includes("macos-arm64 macos-x64 linux-x64 linux-arm64 windows-x64 android"), true);
+  check("and the notes it would have written are not there", existsSync(join(typoWork, "notes.md")), false);
+  check("nor did it emit a single output", planTypo.out.includes("notes_file="), false);
+  /*
+   * And from `publish`, which is the call site that matters: it is the verb that
+   * would otherwise create the release. The same name, and nothing created.
+   */
+  const publishTypo = release("publish", { RELEASE_WORK: partialWork, RELEASE_APP_TARGETS: typoed });
+  check("publish refuses the same name from its own call site", publishTypo.status, 2);
+  check("and quotes it too", publishTypo.err.includes('names "windwos-x64"'), true);
+  check("and no release was created", publishTypo.out.includes("created "), false);
+  /* Both halves: a list the table knows passes, and so does the empty default. */
+  check("a list the table knows is not refused", release("plan", { RELEASE_APP_TARGETS: "windows-x64 macos-arm64" }).status, 0);
+  check(
+    "and neither is the empty default, which is what this release publishes today",
+    release("plan").err.includes("not a target this release knows"),
+    false,
+  );
+
+  /*
+   * AGPL §6. `bundle.licenseFile` is read by the `dmg` and `nsis` bundlers and by
+   * nothing that builds a macOS `.app`, so the offer rides the release page —
+   * and it names **this tag**, because `main` is routinely ahead of every tag.
+   */
+  const offerWork = join(tmp("reloffer-"), "w");
+  release("plan", { RELEASE_WORK: offerWork, ...noApps });
+  const offerText = readFileSync(join(offerWork, "notes.md"), "utf8");
+  check("the notes carry the source offer a binary distribution needs", offerText.includes("corresponding source"), true);
+  check("and it names this tag rather than a branch", offerText.includes("/tree/v0.1.0"), true);
+  check("and it follows SOURCE_URL rather than repository.url", 
+    readFileSync(join((() => { const w = join(tmp("relfork-"), "w"); release("plan", { RELEASE_WORK: w, ...noApps }, fixture({ sourceUrl: "https://forge.example/fork/reemoat" })); return w; })(), "notes.md"), "utf8")
+      .includes("https://forge.example/fork/reemoat/tree/v0.1.0"),
+    true,
+  );
+
+  /*
+   * ── the script against the workflow, in both directions ───────────────────
+   */
+  process.stdout.write("\nthe release script against the workflow that calls it\n");
+
+  /**
+   * A YAML file with its comments taken out.
+   *
+   * ⚠ **The `target:` grep below decides whether a platform may be published,
+   * and it used to run over the raw file.** So a comment in `check.yml` *about*
+   * the matrix key satisfied the gate that comment was explaining — which is why
+   * that paragraph had to describe the key without ever writing it, and why the
+   * next person editing there would not have known they were under that rule. An
+   * assertion a comment can satisfy is the shape this file calls worse than no
+   * assertion at all.
+   *
+   * Two rules, and between them they are what YAML means by a comment: a line
+   * whose first non-space character is `#`, and, on every other line, the first
+   * `#` that is **preceded by whitespace** and is **not inside a quoted scalar**.
+   * The whitespace rule is what leaves `https://example/x#y` alone — a URL
+   * fragment is not a comment in YAML either — and the quote tracking is what
+   * leaves `run: echo "a # b"` alone. Both are asserted directly below, because
+   * neither is reachable through the `target:` grep that motivates them.
+   *
+   * ⚠ **It is deliberately biased toward removing too much.** Block scalars
+   * (`run: |`) hold shell, where `#` is a comment to a different language, and
+   * this strips inside them too. That direction is loud: text removed can only
+   * make a target read as *unbuilt*, which is a refusal somebody reads. Text left
+   * in is the silent direction, and it is the bug this exists to fix.
+   */
+  const withoutComments = (yaml: string): string =>
+    yaml
+      .split("\n")
+      .map((line) => {
+        if (/^\s*#/.test(line)) return "";
+        let quote: string | null = null;
+        for (let i = 0; i < line.length; i += 1) {
+          const c = line[i] as string;
+          if (quote !== null) {
+            if (c === quote) quote = null;
+          } else if (c === '"' || c === "'") {
+            quote = c;
+          } else if (c === "#" && /\s/.test(line[i - 1] ?? " ")) {
+            return line.slice(0, i).replace(/[ \t]+$/, "");
+          }
+        }
+        return line;
+      })
+      .join("\n");
+
+  check("a whole-line comment becomes nothing", withoutComments("      # - target: android"), "");
+  check("a trailing comment goes", withoutComments("    runs-on: ubuntu-latest  # the only one"), "    runs-on: ubuntu-latest");
+  check("a # inside a quoted scalar stays", withoutComments('    run: echo "a # b"'), '    run: echo "a # b"');
+  check(
+    "and so does a URL fragment, which YAML does not call a comment either",
+    withoutComments("    url: https://example.invalid/x#y"),
+    "    url: https://example.invalid/x#y",
+  );
+
+  /** Shell with its comments taken out, for the same reason one line up. */
+  const shellCode = (src: string): string =>
+    src
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+
+  const releaseSh = readFileSync(join(repoRoot, "deploy", "ci-release.sh"), "utf8");
+  const releaseCode = shellCode(releaseSh);
+  const releaseYml = withoutComments(
+    readFileSync(join(repoRoot, ".github", "workflows", "release.yml"), "utf8"),
+  );
+
+  /*
+   * ⚠ **Every verb the `case` accepts, against every verb a job calls.** Four
+   * documents described a workflow half that did not exist: `ci-release.sh` grew
+   * an `app` verb with nine refusals and ~125 lines, two of its own refusals told
+   * a reader to go and edit `release.yml`'s `app` matrix, and no job called the
+   * verb at all. Nothing was red, because nothing compared the two files — the
+   * `case` statement is the script's list and the `run:` lines are the workflow's,
+   * the same "written down twice" shape as `.dockerignore` and the Dockerfile.
+   *
+   * Both directions, because each is a different failure. A verb no job calls is
+   * dead code documentation goes on describing. A job calling a verb the `case`
+   * does not accept is a release that dies on `unknown verb` — after `manifest`
+   * has already moved tags somebody can pull.
+   *
+   * Read off the two files rather than off a list restated here, for the reason
+   * `MANAGED_CLI_DIRS` is imported rather than retyped: a third copy is the one
+   * that goes stale. Which makes both "readable at all" guards load-bearing — an
+   * unreadable `case` gives an empty list, and an empty list passes a subset
+   * comparison in either direction while asserting nothing.
+   */
+  const verbArm = /case "\$verb" in\n[ \t]*([a-z][a-z |]*)\)[ \t]*;;/.exec(releaseCode);
+  const verbs = (verbArm?.[1] ?? "")
+    .split("|")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .sort();
+  const invoked = [
+    ...releaseYml.matchAll(/^[ \t]*run:[ \t]*deploy\/ci-release\.sh[ \t]+(\S+)[ \t]*$/gm),
+  ].map((m) => m[1] as string);
+  check("the script's verb list is readable at all", verbs.length > 0, true);
+  check("and the workflow's calls are readable at all", invoked.length > 0, true);
+  check("every verb the script accepts is invoked by a job", verbs.filter((v) => !invoked.includes(v)), []);
+  check(
+    "and every verb a job invokes is one the script accepts",
+    [...new Set(invoked)].sort().filter((v) => !verbs.includes(v)),
+    [],
+  );
+
+  /*
+   * The shape the app jobs are gated on, which is the part of a workflow a
+   * driver can read. An empty matrix in GitHub Actions is a job that **fails**
+   * rather than one that skips, and `RELEASE_APP_TARGETS` ships empty — so an
+   * `if:` deleted here turns every release red on the ordinary day.
+   */
+  check(
+    "the app matrix is plan's output rather than a list written in YAML",
+    /matrix: \$\{\{ fromJSON\(needs\.plan\.outputs\.app_matrix\) \}\}/.test(releaseYml),
+    true,
+  );
+  check(
+    "and the job reading it is gated on there being a leg at all",
+    releaseYml.includes("if: ${{ needs.plan.outputs.app_desktop != '' }}"),
+    true,
+  );
+  check(
+    "android is gated on its own flag, being a job rather than a leg",
+    releaseYml.includes("if: ${{ needs.plan.outputs.app_android == '1' }}"),
+    true,
+  );
+  /*
+   * ⚠ **And that `publish` survives both of them being skipped.** GitHub skips a
+   * job whose `needs` includes a skipped one unless it carries a conditional, so
+   * without this line adding the app jobs would have stopped every release
+   * creating a release page — silently, after `manifest` had pushed the tags.
+   */
+  check(
+    "publish runs even when no app job did",
+    releaseYml.includes("if: ${{ !cancelled() && needs.manifest.result == 'success' }}"),
+    true,
+  );
+
+  /*
+   * The four Android secrets, and **which job reads them**. `ci-release.sh`'s
+   * `plan` gives that scoping as its whole reason for not checking them itself —
+   * "who can read the keystore is answerable by reading release.yml" — so it is a
+   * claim about this workflow that this workflow had better hold. The names alone
+   * would not say it: all four could sit in `plan`, the job whose stated property
+   * is that it can write nothing anywhere.
+   *
+   * Job ids are the only two-space keys with no value under `jobs:`, which is
+   * what makes splitting on them safe here rather than a YAML parser's job.
+   */
+  const jobsBody = releaseYml.slice(releaseYml.indexOf("\njobs:\n")).split("\n");
+  const jobOf = (needle: string): string => {
+    let job = "";
+    for (const line of jobsBody) {
+      const head = /^  ([a-z][a-z0-9-]*):[ \t]*$/.exec(line);
+      if (head) job = head[1] as string;
+      if (line.includes(needle)) return job;
+    }
+    return "";
+  };
+  const secretLines = jobsBody.filter((line) => line.includes("secrets."));
+  check(
+    "the workflow reads exactly the four Android secrets",
+    secretLines.map((line) => (/secrets\.(\w+)/.exec(line) ?? [])[1]).sort(),
+    [
+      "RELEASE_ANDROID_KEYSTORE",
+      "RELEASE_ANDROID_KEYSTORE_PASSWORD",
+      "RELEASE_ANDROID_KEY_ALIAS",
+      "RELEASE_ANDROID_KEY_PASSWORD",
+    ],
+  );
+  check(
+    "and every one of them is read by the android job alone",
+    [...new Set(secretLines.map((line) => jobOf(line)))],
+    ["app-android"],
+  );
+
+  /*
+   * ── the matrix plan emits, driven against fixture lists ───────────────────
+   *
+   * The `labelFollows` argument one act over: asserting that `release.yml` names
+   * a runner proves nothing, because a runner transcribed into YAML passes it.
+   * What is asserted is that `plan` **computes** the matrix from
+   * `RELEASE_APP_TARGETS`, so a target added to the list appears as a leg with
+   * its triple and its runner and no workflow edit anywhere.
+   */
+  const planOutputs = (targets: string): Record<string, string> => {
+    const run = release("plan", {
+      RELEASE_WORK: join(tmp("relmx-"), "w"),
+      RELEASE_APP_TARGETS: targets,
+    });
+    const out: Record<string, string> = {};
+    for (const line of run.out.split("\n")) {
+      const m = /^(app_[a-z_]+)=(.*)$/.exec(line);
+      if (m) out[m[1] as string] = m[2] as string;
+    }
+    return out;
+  };
+  interface Leg {
+    target: string;
+    triple: string;
+    runner: string;
+  }
+  const legs = (matrix: string | undefined): Leg[] =>
+    (JSON.parse(matrix ?? '{"include":[]}') as { include: Leg[] }).include;
+
+  const noTargets = planOutputs("");
+  /*
+   * ⚠ **The empty case, spelled so an `if:` can compare it.** This is the state
+   * the tree ships in, and it is the one where getting the shape wrong costs an
+   * ordinary release rather than a hypothetical one.
+   */
+  check("an empty target list plans an empty matrix and empty gates", noTargets, {
+    app_targets: "",
+    app_matrix: '{"include":[]}',
+    app_desktop: "",
+    app_android: "",
+  });
+  const two = planOutputs("linux-x64 windows-x64");
+  check("and a list plans one leg per target, carrying the triple and the runner", legs(two["app_matrix"]), [
+    { target: "linux-x64", triple: "x86_64-unknown-linux-gnu", runner: "ubuntu-latest" },
+    { target: "windows-x64", triple: "x86_64-pc-windows-msvc", runner: "windows-latest" },
+  ]);
+  check("and the desktop gate names them", two["app_desktop"], "linux-x64 windows-x64");
+  check("and announces no android when nothing asked for one", two["app_android"], "");
+  /*
+   * ⚠ **Android is not a leg, and the case that proves it is android *alone*.** A
+   * release asking only for an APK has a non-empty target list and an empty
+   * matrix — which is exactly the combination that makes `app_desktop` a separate
+   * output rather than `app_targets` reused.
+   */
+  const droidOnly = planOutputs("android");
+  check("android alone plans no matrix leg", legs(droidOnly["app_matrix"]), []);
+  check("and leaves the desktop gate shut while raising its own", [droidOnly["app_desktop"], droidOnly["app_android"]], ["", "1"]);
+  const mixed = planOutputs("android macos-arm64");
+  check("and beside a desktop target it is still not one of them", legs(mixed["app_matrix"]), [
+    { target: "macos-arm64", triple: "aarch64-apple-darwin", runner: "macos-latest" },
+  ]);
+  /*
+   * Both macOS targets on one runner, which is the row worth asserting because it
+   * is the one that is not obvious: `x86_64-apple-darwin` is a cross-compile on
+   * arm64 and `build-daemon.mjs`'s `TARGETS` already carries the x64 Node build,
+   * so a second runner label would be a second thing to re-check every time
+   * GitHub moves its Intel image.
+   */
+  check(
+    "both macOS targets build on one runner",
+    legs(planOutputs("macos-arm64 macos-x64")["app_matrix"]).map((leg) => leg.runner),
+    ["macos-latest", "macos-latest"],
+  );
+
+  /*
+   * And the fourth column against the first, which is the drift the refusal in
+   * `plan` can only catch on a runner: every name the table knows must have a
+   * runner, except android, which must **not** — a row there would be a value
+   * with no reader, since it is a job rather than a leg.
+   */
+  const known = (/^app_known="([^"]*)"$/m.exec(releaseCode)?.[1] ?? "").split(/\s+/).filter(Boolean);
+  check("the table's known targets are readable at all", known.length > 0, true);
+  const runnerBody = /^app_runner\(\) \{\n([\s\S]*?)^\}$/m.exec(releaseCode)?.[1] ?? "";
+  check("the runner table was found to read", runnerBody.length > 0, true);
+  check(
+    "and it answers for every known target but android",
+    known.filter((t) => t !== "android" && !new RegExp(`(^|[ |])${t}(?![\\w-])`, "m").test(runnerBody)),
+    [],
+  );
+  check("and deliberately not for android", /(^|[ |])android(?![\w-])/m.test(runnerBody), false);
+
+  /*
+   * ⚠ **And the one assertion that makes "no platform is first built on the
+   * release path" mechanical rather than a comment.** `RELEASE_APP_TARGETS` and
+   * `check.yml`'s native matrix are two lists in two files, and the silent
+   * direction is publishing a target nothing ever compiled.
+   */
+  const declaredLine = /^RELEASE_APP_TARGETS=\$\{RELEASE_APP_TARGETS-([^}]*)\}$/m.exec(releaseCode);
+  check("the published target list is readable at all", declaredLine !== null, true);
+  const declared = (declaredLine?.[1] ?? "").split(/\s+/).filter(Boolean);
+  /*
+   * ⚠ **Comment-stripped, and line-anchored, and both halves were holes.** The
+   * grep ran over the raw workflow, so a comment naming the key satisfied the
+   * gate — `check.yml`'s own paragraph about the android matrix was one sentence
+   * away from making this green over a platform nothing builds. And the pattern
+   * was unanchored, so any `target:<name>` anywhere on a line — inside a URL
+   * fragment, say — would have done. It is a key at the head of a line now, with
+   * an optional `-` or `{` in front for either matrix spelling.
+   */
+  const unbuilt = (targets: string[], workflow: string): string[] => {
+    const code = withoutComments(workflow);
+    return targets.filter(
+      (target) => !new RegExp(`^[ \\t]*[-{ \\t]*target:[ \\t]*["']?${target}(?![\\w-])`, "m").test(code),
+    );
+  };
+  /*
+   * ⚠ **Driven against a synthetic pair first, because the real one is empty
+   * today and an empty filter is empty for either reason.** `RELEASE_APP_TARGETS`
+   * ships unset until `check.yml` grows the legs, so the comparison below would
+   * pass on a tree where this rule had been deleted — which is the one outcome
+   * this file calls worse than no check. So the *mechanism* is exercised on a
+   * fixture, and the real lists are compared after it.
+   */
+  const fakeWorkflow = "        include:\n          - target: linux-x64\n            runner: ubuntu-latest\n";
+  check("a target with a check leg passes the comparison", unbuilt(["linux-x64"], fakeWorkflow), []);
+  check("and one without it is named", unbuilt(["linux-x64", "android"], fakeWorkflow), ["android"]);
+  check(
+    "a target named only in a whole-line comment is still unbuilt",
+    unbuilt(["android"], `${fakeWorkflow}          # - target: android\n`),
+    ["android"],
+  );
+  check(
+    "and one named only in a trailing comment is too",
+    unbuilt(["android"], `${fakeWorkflow}          runner: ubuntu-latest  # - target: android\n`),
+    ["android"],
+  );
+  check(
+    "and one named only inside a URL is too",
+    unbuilt(["android"], `${fakeWorkflow}          url: https://example.invalid/x#target:android\n`),
+    ["android"],
+  );
+  const checkYml = readFileSync(join(repoRoot, ".github", "workflows", "check.yml"), "utf8");
+  /*
+   * Printed rather than asserted, because the honest statement about today is
+   * "there is nothing to compare yet" and an assertion saying so would have to be
+   * deleted the day there is.
+   */
+  process.stdout.write(
+    declared.length === 0
+      ? "  note  RELEASE_APP_TARGETS is empty: no app is published until a check leg builds one\n"
+      : `  note  published targets: ${declared.join(" ")}\n`,
+  );
+  check("every target this release publishes is built by a check.yml job", unbuilt(declared, checkYml), []);
 
   /*
    * Nothing leaks, and nothing is required that a laptop would not have.
@@ -4906,9 +6241,31 @@ process.stdout.write("\nwhat the control plane's migration is allowed to do\n");
    */
   const statements = [...body.matchAll(/"([A-Z]+ [^"]*)"/g)].map((m) => m[1] ?? "");
   check("the migration names some SQL at all", statements.length > 0, true);
+  /*
+   * Three shapes, and the third is named rather than the pattern being loosened.
+   *
+   * `ALTER … ADD COLUMN` and `PRAGMA table_info` are the two that cannot make an
+   * older build wrong, which is the property this assertion is really about.
+   * `CREATE INDEX IF NOT EXISTS` is the third with that property — it changes no
+   * row, no column and no meaning, an older build never uses it, and it is
+   * idempotent so two processes racing on one file both succeed.
+   *
+   * ⚠ **It is here because one index genuinely could not live in `schema.sql`.**
+   * That file runs *before* this function, so an index naming a column this
+   * function adds fails with `no such column` against every database that
+   * already exists — `openControlStore` throws, `main.ts` exits 2, and the unit
+   * restarts into a crash loop. `idx_user_sessions_device` is that index. The
+   * spelling is pinned, `IF NOT EXISTS` included: a bare `CREATE INDEX` here
+   * would throw on the second open and is not the thing being allowed.
+   */
   check(
-    "and every statement it names is a read or an ADD COLUMN",
-    statements.filter((sql) => !/^ALTER TABLE \w+ ADD COLUMN /.test(sql) && !/^PRAGMA \w+\(/.test(sql)),
+    "and every statement it names is a read, an ADD COLUMN, or an idempotent index",
+    statements.filter(
+      (sql) =>
+        !/^ALTER TABLE \w+ ADD COLUMN /.test(sql) &&
+        !/^PRAGMA \w+\(/.test(sql) &&
+        !/^CREATE INDEX IF NOT EXISTS \w+ ON \w+ \(/.test(sql),
+    ),
     [],
   );
   /*
@@ -5360,6 +6717,70 @@ process.stdout.write("\nthe one-line installer\n");
     check("without installing anything on the way", existsSync(join(home, ".reemoat", "toolchain")), false);
     const goodChannel = runBootstrap(["--agent-channel", "stable"]);
     check("while stable passes the parser and fails on the control plane instead", [goodChannel.status, goodChannel.err.includes("--url"), goodChannel.err.includes("--agent-channel")], [2, true, false]);
+
+    /*
+     * ⚠ **`--install-agents ,,,` installed all five**, and every guard
+     * between that flag and the installer read as satisfied on the way.
+     * Reproduced in `sh` before it was fixed: the shape pattern refuses a
+     * character outside `[a-z,]` and a value of nothing but separators holds
+     * none, so the shape passed; the emptiness guard inside `install_agents` is
+     * satisfied by any non-empty string, so that passed too; and the loop under
+     * it then emitted **no** `--only` argument at all, which `deploy/agents.sh`
+     * documents as the flag being *absent* — meaning every harness. So the one
+     * flag that exists to be the narrow door into "nothing is installed by
+     * default" inverted that policy for a caller handing it a computed-and-empty
+     * list: ~700 MB of CLIs and a sign-in prompt for programs nobody asked for.
+     *
+     * Driven rather than read off the source, and **in both directions**, since
+     * the whole content of this refusal is *which* values reach the installer.
+     * A list that names a harness has to get past the parser, and what proves it
+     * did is the shape the two flags above already use: the run fails later, on
+     * the missing control plane, with nothing about this flag anywhere in it. An
+     * assertion on the three refusals alone would stay green under a parser that
+     * refused every value, which is the failure this driver has shipped before.
+     */
+    for (const nameless of [",,,", ",", ""]) {
+      const run = runBootstrap(["--install-agents", nameless]);
+      check(
+        `--install-agents ${JSON.stringify(nameless)} names no harness and is refused by name`,
+        [run.status, run.err.includes(`--install-agents names no agent in "${nameless}"`), run.err.includes("omit the flag to install none")],
+        [2, true, true],
+      );
+    }
+    const named = runBootstrap(["--install-agents", "claude,codex"]);
+    check("while a list that names two passes the parser and fails on the control plane instead", [named.status, named.err.includes("--url"), named.err.includes("--install-agents")], [2, true, false]);
+    /*
+     * And a stray separator *inside* a real list is still a list: the loop drops
+     * the empty field and forwards the two names, so refusing this value would
+     * refuse one that installs exactly what it says. That is the line the middle
+     * arm draws, and it is the reason the guard is "holds a name" rather than
+     * "holds no empty field".
+     */
+    const stray = runBootstrap(["--install-agents", "claude,,codex"]);
+    check("and a separator between two names is not a nameless list", [stray.status, stray.err.includes("--install-agents")], [2, false]);
+    /*
+     * The shape refusal is the arm the new one had to be added *beside* rather
+     * than in front of — a value outside the shape is still refused for its
+     * shape, and still names the value, which is what keeps the two errors
+     * telling a caller different things.
+     *
+     * ⚠ **`LC_ALL=C` on this one run, because `[!a-z,]` is a *range* and a range
+     * collates.** Measured 2026-09-22 under macOS `/bin/sh`: `case Claude in
+     * *[!a-z,]*)` matches under `LC_ALL=C` and does **not** match under
+     * `en_US.UTF-8` or `ru_RU.UTF-8`, where `A`–`Z` collate inside `a`–`z`. So
+     * this arm holds an ASCII-uppercase name out in the C locale only; under a
+     * UTF-8 one the middle arm accepts it and the refusal arrives late and soft
+     * instead — `deploy/agents.sh --only` exits 2 by name and `install_agents`
+     * downgrades that to a warning. Everything else the shape keeps out was
+     * refused under all three: a digit, a space, `;`, `/`, `.` and a non-ASCII
+     * letter, and so was the nameless list the arm above this one owns. Pinned
+     * rather than inherited: `baseEnv` carries no locale, so the child already
+     * gets C, and writing it here is what stops a locale added there later from
+     * retiring this assertion silently.
+     */
+    const badShape = runBootstrap(["--install-agents", "Claude"], { LC_ALL: "C" });
+    check("while a name outside the shape is still refused by the shape, naming it", [badShape.status, badShape.err.includes("--install-agents takes a comma-separated list of agent names, not Claude")], [2, true]);
+    check("and no harness was installed on the way to any of those", existsSync(join(home, ".reemoat", "toolchain")), false);
   }
 
   /*

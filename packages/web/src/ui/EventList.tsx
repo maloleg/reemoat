@@ -26,7 +26,7 @@ import type {
   SessionEvent,
 } from "../wire";
 import { taskFinished } from "../wire";
-import { TASK_NOUNS } from "../tasks";
+import { TASK_NOUNS, type BackgroundReporting } from "../tasks";
 import type { PendingEcho } from "../echo";
 import { UserBubble } from "./Bubble";
 import { Markdown } from "./Markdown";
@@ -132,6 +132,8 @@ export function EventList({
   tasksOpen,
   onOpenTasks,
   onCloseTasks,
+  hiddenFinished,
+  onClearFinished,
   onStopTask,
 }: {
   transcript: Transcript;
@@ -236,7 +238,9 @@ export function EventList({
    */
   background: readonly BackgroundTask[];
   /**
-   * Whether this agent reports background work at all — see {@link TaskPanel}.
+   * Whether anybody has been able to ask this session about background work — see
+   * {@link TaskPanel}. Three-valued: a daemon restart leaves no agent to ask, which
+   * is not the same fact as an agent that does not report.
    *
    * It rides through this component untouched: the panel is rendered from here
    * because this is where both of its sources already are — the delegations are
@@ -244,12 +248,23 @@ export function EventList({
    * `SessionView` would be the same walk over the same conversation to answer the
    * same question twice.
    */
-  reportsTasks: boolean;
+  reportsTasks: BackgroundReporting;
   /** Whether the panel is open. Held in `SessionView`, which makes room for it. */
   tasksOpen: boolean;
   /** Opens the background-tasks panel, which is where they are drawn now. */
   onOpenTasks: () => void;
   onCloseTasks: () => void;
+  /**
+   * Which finished rows the reader has cleared, and the way to clear them.
+   *
+   * ⚠ **Both ride through untouched, and this component still learns no session
+   * id** — which is the rule every other prop on it already follows. `Transcript`
+   * resolves them three lines from `echo`'s pair, so what crosses here is a value
+   * and a bound callback rather than a key this component would have to know what
+   * to do with.
+   */
+  hiddenFinished: ReadonlySet<string>;
+  onClearFinished: (ids: readonly string[]) => void;
   /**
    * Stop one of them, or `null` where nothing can.
    *
@@ -397,38 +412,28 @@ export function EventList({
   );
   const foot = footSays(working, tasks.length, elapsedSays(turnElapsedMs), stale, background);
   /*
-   * What the foot says once nothing is outstanding and there is still a record.
+   * ⚠ **There was a `history` line here — `N background tasks finished` — and the
+   * owner's call is that it goes.** Post factum it is information nobody needs: the
+   * work is over, its output is already in the transcript, and the sentence stood
+   * for the rest of the session because `Session.backgroundTasks` keeps terminal
+   * rows by decision.
    *
-   * ⚠ **Deliberately not an arm of `footSays`, and the split is the rule rather
-   * than an accommodation.** That function answers *what is outstanding*, and
-   * finished work is not outstanding — a terminal row alone makes it say nothing,
-   * which is correct and is asserted as such. This is a different sentence about a
-   * different thing: the panel keeps a `Completed` section, so there is something
-   * to read, and the foot is the **only** way into it. Without this line the one
-   * door disappears at exactly the moment the history becomes worth opening, and
-   * the `role="status"` region below falls silent in the same frame — so a
-   * completion is never announced to a reader who cannot see the panel.
+   * **Two things went with it, and neither is an accident.** The foot was the only
+   * door into the panel's `Completed` section, so that history is unreachable once
+   * nothing is running — which is the same information the line was removed for,
+   * reached a second way. And `footSpoken` no longer falls through to it, so a
+   * completion is not announced in the `role="status"` region either; what that
+   * region says is now exactly what the foot draws, which is the pair those two
+   * were always meant to keep. The panel is still reachable for the whole time work
+   * is outstanding, which is when it can be acted on.
    *
-   * The words stay keyed on the *live* count everywhere else, which is why this is
-   * reached only where `footSays` answered `null`: nothing here inflates
-   * `waiting for N` with rows nobody is waiting for.
-   *
-   * ⚠ **It says `background task` where `outstandingSays` would have said `shell`,
-   * and that is a deliberate exception to the noun rule one function over rather
-   * than an oversight.** That rule gives an all-of-one-kind *live* set its kind's
-   * noun because the reader is being told what they are waiting for, and the kind
-   * is the useful half — `2 shells` is a different wait from `2 monitors`. This
-   * sentence is a door into a history, where the kind has stopped deciding
-   * anything and the count is the whole of what it has to say; the canonical noun
-   * is also the only one that stays honest as the panel's `Completed` section
-   * fills with rows of several kinds, which is the ordinary case for it and the
-   * minority case for the line above.
+   * `retained` stays: it is a different question, asked by `WaitingFoot` itself —
+   * whether there is a history *behind* the door — and it decides nothing about
+   * whether the foot is drawn.
    */
   const retained = background.length;
-  const history =
-    foot === null && retained > 0 ? `${retained} background task${retained === 1 ? "" : "s"} finished` : null;
-  const footLine = foot?.line ?? history;
-  const footSpoken = foot?.spoken ?? history;
+  const footLine = foot?.line ?? null;
+  const footSpoken = foot?.spoken ?? null;
 
   return (
     /*
@@ -464,8 +469,16 @@ export function EventList({
      * `ASK_CLEARANCE - 8` — the card frame's own `pb-2` is the other 8 — which is
      * 12px of air rather than a band.
      */
+    /*
+     * `sel-root` is one property in `index.css`, and the space it owns is the
+     * space **between** messages — the margin between two rows, and the empty
+     * column beside a right-aligned bubble. No message can own that, because no
+     * message is drawn in it. Each markdown body and each bubble carries its own
+     * for the text inside them; this one is the only element above all of them
+     * that is still a plain block, which is what the property needs.
+     */
     <div
-      className={`${COLUMN} px-4 pt-2`}
+      className={`sel-root ${COLUMN} px-4 pt-2`}
       style={{ paddingBottom: Math.max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE) }}
     >
       {/*
@@ -738,10 +751,12 @@ export function EventList({
               holding both of its sources. */}
           <TaskPanel
             background={background}
+            hiddenFinished={hiddenFinished}
+            onClearFinished={onClearFinished}
             onClose={onCloseTasks}
             onStopTask={onStopTask}
             open={tasksOpen}
-            reports={reportsTasks}
+            reporting={reportsTasks}
             tasks={tasks}
           />
         </div>
@@ -1099,9 +1114,18 @@ export function footSays(
    * ⚠ **`null` on an idle session with only finished rows, and that stays true.**
    * This function answers *what is outstanding*, and terminal rows are not: the
    * panel keeps a `Completed` section precisely because a finished task is
-   * something to read rather than something to wait for. The foot is still
-   * pressable in that state — `EventList` draws its own sentence for it and
-   * `WaitingFoot` takes `retained` — so the door does not close with this answer.
+   * something to read rather than something to wait for.
+   *
+   * ⚠ **This paragraph went on to say the foot stays pressable in that state, and
+   * that stopped being true when the `N background tasks finished` line went.**
+   * That sentence *was* the foot in this state — `EventList` draws `WaitingFoot`
+   * only where `footLine !== null` — so with it removed by the owner's call this
+   * `null` is exactly what closes the door on the retained history until something
+   * else is outstanding. Recorded rather than repaired: the line was removed
+   * because a standing report of finished work is not information anybody asked
+   * for twice, and re-adding a door for it would be re-adding the line under
+   * another name. `retained` below still decides the disclosure, in the narrower
+   * set of states this leaves it.
    */
   if (outstanding === 0) return working ? { line: runs, spoken: said } : null;
   const many = outstandingSays(tasks, background);
@@ -1179,10 +1203,17 @@ function WaitingFoot({
    * How many task rows the panel is still holding, finished ones included.
    *
    * ⚠ **This is what makes the row pressable, and it had to stop being
-   * `outstanding`.** The panel keeps a `Completed` section, and this row is the
-   * only way into it — so keyed on the live count the one door would disappear at
-   * the instant the retained history became worth reading, and a reader who had
-   * watched a build go into the background could never see how it ended.
+   * `outstanding`.** The panel keeps a `Completed` section, and this row is the way
+   * into it — so keyed on the live count the door would disappear at the instant
+   * the retained history became worth reading.
+   *
+   * ⚠ **The state it decides is narrower than this once claimed.** It read *"the
+   * only way into it"*, and the sentence carrying a foot for an idle session
+   * holding nothing but finished rows is gone — so this row is not drawn there at
+   * all, and the finished history is unreachable until something else is
+   * outstanding. What `retained` still buys is every state where the foot *is*
+   * drawn: a live task beside a finished one, a delegation outstanding while a
+   * build has ended. `footSays`'s own ⚠ is the other half of this.
    *
    * ⚠ **The two numbers are not complements over one set, and reading them as a
    * partition is wrong in both directions.** `retained` is `background.length`,
@@ -1236,8 +1267,16 @@ function WaitingFoot({
          box and reaches 32px from this one — and growing symmetrically would put
          this target 12px into a `space-y-1.5` gap and onto the card above, which
          is itself a disclosure somebody aims at. The box stays `h-5`, so the row
-         is the same height whether or not a task is outstanding. */
-      className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint after:absolute after:inset-x-0 after:top-0 after:-bottom-6 after:content-[''] hover:bg-raised hover:text-fg"
+         is the same height whether or not a task is outstanding.
+
+         ⚠ **And it is a thumb's 24px, which is why every class carries
+         `[@media(pointer:coarse)]:`.** A pad extends `:hover` exactly as far as
+         it extends hit-testing, and this row's `hover:bg-raised hover:text-fg`
+         was lighting from 24px *below* itself — a caption in the transcript
+         answering a pointer that was nowhere near it. `bits.tsx`'s top docblock
+         has the mechanism; this is the widest of the leaks it names, because
+         `h-5 w-full` is the one shape that driver's square sweep cannot see. */
+      className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-x-0 [@media(pointer:coarse)]:after:top-0 [@media(pointer:coarse)]:after:-bottom-6 [@media(pointer:coarse)]:after:content-[''] hover:bg-raised hover:text-fg"
     >
       {/* Three marks for three claims, and the third is the new one. `Dot
           tone="off"` is the hollow **static** dot, which is what this app already
@@ -1841,7 +1880,11 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
  * `1 failed` is on the collapsed row already, which is the same "the number survives
  * collapse" idiom as a folder's waiting count and a card's step badge. A bare
  * `ToolCall` still opens itself on failure, and the difference is exactly that — it
- * has no badge to say so.
+ * has no count of its own to say so. ⚠ **That clause read "no badge" until the
+ * count stopped being one**: the run's own `1 failed` is a bare `text-muted` run
+ * of text now (the fill was `UserBubble`'s, and it read as one), and the property
+ * this paragraph rests on is that the collapsed row *says* how many — never what
+ * shape the saying takes.
  *
  * The re-measure stays an **effect on `open`** rather than moving into the click
  * handler like `ToolCall`'s, and the reason it used to give is gone: the height no
@@ -1922,16 +1965,31 @@ function GroupRow({ node, files }: { node: GroupNode; files: FileAccess | null }
             This one went rather than the others because of what its own note
             already said about it: it says you were asked and you answered, "which
             is not a thing that needs anybody's attention again". `N failed` and the
-            counts are unresolved facts; this is a settled one. "An approval cannot
+            counts are unresolved facts; this is a settled one — and the ranking
+            survives the badge that used to carry it, `text-muted` against this
+            line's `text-faint`. "An approval cannot
             be hidden" is untouched — that property rests on `tail.ts` refusing to
             fold a *refusal* at all, which is the asymmetry that carries it, and the
             count is still on screen the moment the run is open. */}
+        {/* ⚠ **Not a `Badge`, and that was the last thing on this row still
+            arguing with the paragraph below it.** `Badge`'s plain tone is
+            `bg-raised` — the token `UserBubble` paints, at the same strength, on
+            the same `bg-surface` pane — so a count on a machinery row was drawn
+            in the fill reserved for the message somebody wrote, three inches
+            under one. Reported as *it blends with the message*, which is
+            literally what it was: the bubble's own rectangle, shrunk.
+            `ToolCall`'s frame note below already says machinery is unfilled and
+            that what a failure keeps is "two signals, neither of them a
+            rectangle"; this was the rectangle, and it survived the pass that took
+            the border off this row and the semibold off its title.
+
+            `text-muted` rather than the row's own `text-fg/85`, because the ask
+            was for something quieter — and rather than `text-faint`, which is
+            `N approved`'s tone one fold down and is spent on a *settled* fact.
+            The ranking Q3.106 records is the thing that may not invert: a
+            failure outranks an approval, and it still does. */}
         {node.failed > 0 && (
-          <span className="shrink-0">
-            <Badge>
-              {node.failed} failed
-            </Badge>
-          </span>
+          <span className="shrink-0 text-2xs text-muted">{node.failed} failed</span>
         )}
         {/* What the run being open used to say, now that it never is. The hollow
             pulse rather than `WorkingMark`'s blink, deliberately: the loud one is
@@ -2245,7 +2303,7 @@ function ToolCall({ node, files }: { node: ToolNode; files: FileAccess | null })
         }}
         disabled={!expandable}
         aria-expanded={expandable ? open : undefined}
-        className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-1 py-1 text-left text-fg/85 disabled:cursor-default ${
+        className={`tap flex min-h-11 w-full items-center gap-2 rounded-md px-1 py-1 text-left text-fg/85 ${
           expandable ? "hover:bg-raised hover:text-fg" : ""
         }`}
       >
@@ -2619,13 +2677,22 @@ function DownloadButton({ label, run }: { label: string; run: () => Promise<void
         setBusy(true);
         void run().finally(() => setBusy(false));
       }}
-      /* 15px of ink, 44px of target. This is the smallest control in the app and it
-         sits 6px from `ChangeRow`'s expander — the adjacency `ICON_BUTTON_SIZE.sm`
-         names, and the one where the mis-tap *does* something rather than merely
-         opening a card. `TAP_GROW_Y` is vertical only for its documented reason;
-         `-right-2` is added because this is the last child of its row, so growing
-         outward on that side lands in the row's own padding and overlaps nothing. */
-      className={`tap relative shrink-0 rounded p-0.5 text-faint after:-right-2 hover:text-fg disabled:opacity-50 ${TAP_GROW_Y}`}
+      /* 15px of ink, 44px of target **under a finger**. This is the smallest control
+         in the app and it sits 6px from `ChangeRow`'s expander — the adjacency
+         `ICON_BUTTON_SIZE.sm` names, and the one where the mis-tap *does* something
+         rather than merely opening a card. `TAP_GROW_Y` is vertical only for its
+         documented reason; `-right-2` is added because this is the last child of its
+         row, so growing outward on that side lands in the row's own padding and
+         overlaps nothing.
+
+         ⚠ **Both are `[@media(pointer:coarse)]:`, so a mouse gets the 15px box.**
+         That is the trade `bits.tsx` argues at the top: a pad extends `:hover` as
+         far as it extends hit-testing, and there is no CSS that separates them.
+         What it costs here is bounded by what the pad was over — nothing. The
+         growth was vertical plus `-right-2`, and every direction it reached is row
+         padding or an unclickable container, so the adjacency this note is about is
+         the same 6px before and after. */
+      className={`tap relative shrink-0 rounded p-0.5 text-faint [@media(pointer:coarse)]:after:-right-2 hover:text-fg disabled:opacity-50 ${TAP_GROW_Y}`}
     >
       <Icon as={busy ? Loader : Download} size={11} className={busy ? "animate-spin" : ""} />
     </button>

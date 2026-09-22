@@ -1,19 +1,32 @@
 #!/usr/bin/env node
-import { createServer, get as httpGet, type Server } from "node:http";
+import { createServer, type Server } from "node:http";
 import { connect as h2connect, createServer as createH2Server, type ClientHttp2Session, type ClientHttp2Stream } from "node:http2";
 import { Duplex, PassThrough } from "node:stream";
 import { connect as netConnect, createServer as netCreateServer, type AddressInfo, type Socket } from "node:net";
 import { TLSSocket, createServer as tlsCreateServer } from "node:tls";
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { WebSocket, WebSocketServer } from "ws";
 import { generateKeyPairSync, randomBytes, scryptSync } from "node:crypto";
-import { publicKeyToJwk, signToken, type TokenClaims } from "../src/token.js";
-import { CORS_ALLOW_METHODS } from "../src/cors.js";
+import { jwkThumbprint, parseClaims, publicKeyToJwk, signToken, x25519Jwk, type TokenClaims } from "../src/token.js";
 import { describeError } from "../src/http.js";
 import { RelayTunnel } from "../src/relay/tunnel.js";
+import { SignedTokenVerifier } from "../src/auth.js";
+import {
+  FRAME,
+  LengthReader,
+  NoiseHandshake,
+  decodeFrame,
+  encodeFrame,
+  encodeJsonFrame,
+  encodeMessageFrames,
+  frameLength,
+  generateStaticKey,
+  localStaticKey,
+  type CipherState,
+} from "@reemoat/protocol";
 import { KEY_REFRESH_MS, createRelayAuthorizer } from "../packages/control-plane/src/relay/authorize.js";
 import {
   CLOSE_TUNNEL_SUPERSEDED,
@@ -26,6 +39,8 @@ import {
   DAEMON_VERSION_HEADER,
   MAX_AGENT_CLIS_CHARS,
   MAX_DAEMON_VERSION_CHARS,
+  MACHINE_KEY_HEADER,
+  MAX_MACHINE_KEY_CHARS,
   formatAgentClis,
   parseAgentClis,
   PRE_NEGOTIATION_PROTOCOL_VERSION,
@@ -34,7 +49,7 @@ import {
   TUNNEL_AGREED_VERSION_HEADER,
   negotiateProtocolVersion,
   STREAM_ENCRYPTION_HEADER,
-  STREAM_ENCRYPTION_NONE,
+  STREAM_ENCRYPTION_NOISE_IK,
   STREAM_SUBJECT_HEADER,
   STREAM_VERSION_HEADER,
   STREAM_WINDOW_BYTES,
@@ -42,7 +57,8 @@ import {
   TUNNEL_VERSION_HEADER,
   reconnectDelayMs,
 } from "../src/relay/protocol.js";
-import { RELAY_HEALTH_PATH, createRelayListener } from "../packages/control-plane/src/relay/listener.js";
+import { machineKeyFor, setMachineKey } from "../packages/control-plane/src/machinekeys.js";
+import { RELAY_CHANNEL_PATH, RELAY_HEALTH_PATH, createRelayListener } from "../packages/control-plane/src/relay/listener.js";
 import {
   DEFAULT_RELAY_ID,
   PRESENCE_STALE_MS,
@@ -65,6 +81,17 @@ import {
 } from "../packages/control-plane/src/keys.js";
 import { KEY_TOUCH_INTERVAL_MS, createControlPlaneApp } from "../packages/control-plane/src/app.js";
 import { applyControlPlaneSchema } from "../packages/control-plane/src/store.js";
+import {
+  DEVICE_PUBLIC_KEY_CHARS,
+  DEVICE_REVOKED_RETENTION_MS,
+  MAX_DEVICE_NAME_CHARS,
+  MAX_DEVICE_PLATFORM_CHARS,
+  MAX_DEVICES_PER_USER,
+  adoptDevice,
+  deviceKeyFor,
+  pruneDevices,
+  revokeDevice,
+} from "../packages/control-plane/src/devices.js";
 import { readAgentClisHeader, readDaemonVersionHeader, recordDaemonBuild } from "../packages/control-plane/src/machines.js";
 import { callerAddressOf, forwardingIgnored } from "../packages/control-plane/src/net.js";
 import { isBrowserReachable, parseRelayUrls } from "../packages/control-plane/src/relay/routing.js";
@@ -77,6 +104,7 @@ import {
   mintSession,
   pruneSessions,
   resolveSession,
+  revokeSession,
   touchSession,
 } from "../packages/control-plane/src/sessions.js";
 import {
@@ -285,6 +313,32 @@ grant(disabled, mine);
 const myTunnelKey = issueTunnelKey(db, mine);
 const otherTunnelKey = issueTunnelKey(db, other);
 
+/*
+ * The device this driver is, and the static `m_mine`'s daemon answers on.
+ *
+ * Declared here rather than beside `relayFetch` because `tokenFor` below binds
+ * every capability to the first of them, and a `const` read before its
+ * declaration is a run-time error rather than a compile one.
+ */
+const driverDevice = generateStaticKey();
+const driverThumbprint = jwkThumbprint(x25519Jwk(driverDevice.publicKey));
+const mineStatic = generateStaticKey();
+
+/**
+ * A capability, bound to the device this driver is.
+ *
+ * ⚠ **`cnf` is on every one of them now, and it has to be.** The relay does not
+ * read it — a grant is still `(user, machine)` and the binding is authentication
+ * rather than authorization — but the *daemon* compares it against the key the
+ * `Noise_IK` handshake authenticated, and refuses `unbound_capability` for one
+ * that names no key at all. That refusal is the anti-downgrade rule: a client
+ * cannot get back to bearer semantics by simply not asking for a binding.
+ *
+ * So a capability with no `cnf` reaches the relay perfectly well and dies at the
+ * daemon, which is exactly the behaviour, and is why the sections that assert
+ * *relay* refusals are unaffected by this while the ones that reach a daemon
+ * would fail without it.
+ */
 function tokenFor(subject: string, audience: string, ttlSeconds = 300): string {
   const seconds = Math.floor(Date.now() / 1000);
   const claims: TokenClaims = {
@@ -296,6 +350,7 @@ function tokenFor(subject: string, audience: string, ttlSeconds = 300): string {
     nbf: seconds,
     exp: seconds + ttlSeconds,
     scp: ["session:read", "session:write"],
+    cnf: { jkt: driverThumbprint },
   };
   return signToken(claims, signing.kid, signing.privateKey);
 }
@@ -468,11 +523,311 @@ function activeStreams(machineId: string): number {
   return registry.stats().find((tunnel) => tunnel.machineId === machineId)?.activeStreams ?? -1;
 }
 
-async function relayFetch(path: string, token: string | null): Promise<{ status: number; body: string }> {
-  const response = await fetch(new URL(path, relayUrl), {
-    headers: token === null ? {} : { authorization: `Bearer ${token}` },
+/*
+ * ------------------------------------------------------------------ *
+ * Reaching a daemon through the relay
+ *
+ * ⚠ **This used to be one `fetch`, and the fact that it cannot be any more is the
+ * whole of what Phase 5 did to this process.** The relay proxied plaintext HTTP:
+ * authorize, serialize the request onto a `CONNECT` with Node's own client, copy
+ * the answer back. Every prompt, diff, file and terminal line in the fleet went
+ * through that function readable. It is deleted, and what replaces it is a
+ * WebSocket spliced to a `CONNECT` stamped `reemoat-enc: noise-ik-…` carrying
+ * bytes this process cannot open.
+ *
+ * So a driver that wants to reach a daemon has to *be* an app: run `Noise_IK` as
+ * initiator with a device key, present a capability bound to it, and speak the
+ * framing. That is what this does. It is written out rather than imported from
+ * `packages/web` because that package compiles with bundler resolution and no
+ * Node types; the real client is driven against the real daemon in
+ * `packages/web/scripts/webcheck.e2ee.ts`.
+ *
+ * ⚠ **A refusal still arrives as a status, which is what keeps every assertion
+ * below readable.** The relay answers the *upgrade* — 401, 403, 404, 503, 501 —
+ * so "no grant is a 404" is the same sentence it always was, measured on the path
+ * that now exists.
+ * ------------------------------------------------------------------ */
+
+async function relayFetch(
+  path: string,
+  token: string | null,
+  options: { secretKey?: Uint8Array; remoteStatic?: Uint8Array; body?: string; method?: string } = {},
+): Promise<{ status: number; body: string }> {
+  return await new Promise((resolve) => {
+    const query = token === null ? "" : `?token=${encodeURIComponent(token)}`;
+    const ws = new WebSocket(`ws://127.0.0.1:${relayPort}${RELAY_CHANNEL_PATH}${query}`);
+    const reader = new LengthReader();
+    const handshake = NoiseHandshake.start({
+      initiator: true,
+      staticKey: localStaticKey(options.secretKey ?? driverDevice.secretKey),
+      remoteStatic: options.remoteStatic ?? mineStatic.publicKey,
+    });
+    let send: CipherState | null = null;
+    let receive: CipherState | null = null;
+    let head: { status: number } | null = null;
+    const chunks: Buffer[] = [];
+    let settled = false;
+
+    const give = (status: number, body: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.terminate();
+      resolve({ status, body });
+    };
+    // Every refusal this driver asserts is an answer, so a silent hang is a
+    // failure with nothing to read. `0` is what the shape of the assertions
+    // already treats as "it did not answer".
+    const timer = setTimeout(() => give(0, "(no answer)"), 10_000);
+    timer.unref();
+
+    const write = (frame: Uint8Array): void => {
+      ws.send(frameLength(send!.encrypt(new Uint8Array(0), frame)));
+    };
+
+    ws.on("open", () => {
+      void handshake.writeMessage().then((first: Uint8Array) => ws.send(frameLength(first)));
+    });
+    ws.on("message", (data: Buffer) => {
+      for (const message of reader.push(new Uint8Array(data))) {
+        if (send === null) {
+          void handshake
+            .readMessage(message)
+            .then(() => {
+              const transport = handshake.split();
+              send = transport.send;
+              receive = transport.receive;
+              write(encodeJsonFrame(FRAME.HELLO, { capability: token ?? "" }));
+            })
+            .catch(() => give(0, "(handshake failed)"));
+          continue;
+        }
+        let frame: { type: number; payload: Uint8Array } | null;
+        try {
+          frame = decodeFrame(receive!.decrypt(new Uint8Array(0), message));
+        } catch {
+          give(0, "(bad ciphertext)");
+          return;
+        }
+        if (frame === null) continue;
+        if (frame.type === FRAME.READY) {
+          write(
+            encodeJsonFrame(FRAME.REQUEST, {
+              method: options.method ?? "GET",
+              path,
+              headers: options.body === undefined ? {} : { "content-type": "application/json" },
+              body: options.body !== undefined,
+            }),
+          );
+          if (options.body !== undefined) {
+            write(encodeFrame(FRAME.REQUEST_BODY, new TextEncoder().encode(options.body)));
+            write(encodeFrame(FRAME.REQUEST_END));
+          }
+        } else if (frame.type === FRAME.RESPONSE) {
+          head = JSON.parse(new TextDecoder().decode(frame.payload)) as { status: number };
+        } else if (frame.type === FRAME.RESPONSE_BODY) {
+          chunks.push(Buffer.from(frame.payload));
+        } else if (frame.type === FRAME.RESPONSE_END) {
+          give(head?.status ?? 0, Buffer.concat(chunks).toString("utf8"));
+        } else if (frame.type === FRAME.FAILED) {
+          const close = JSON.parse(new TextDecoder().decode(frame.payload)) as { code: number; reason: string };
+          give(close.code, close.reason);
+        }
+      }
+    });
+    /*
+     * ⚠ **`statusMessage` is the refusal's *code*, and that is not an accident.**
+     * `refuseUpgrade` writes `HTTP/1.1 <status> <code>` on the raw socket, because
+     * there is no WebSocket yet to send a body over — so the code a caller needs
+     * (`machine_over_limit`, `owner_disabled`, `no_tunnel`) rides the status line.
+     * Surfaced as the body here so every assertion below reads the same way it did
+     * when the relay answered a JSON envelope.
+     */
+    ws.on("unexpected-response", (_req, res) => give(res.statusCode ?? 0, res.statusMessage ?? ""));
+    ws.on("error", () => give(0, "(no channel)"));
   });
-  return { status: response.status, body: await response.text() };
+}
+
+/**
+ * A live socket over a channel: open, send one message, collect two frames.
+ *
+ * Its own helper rather than a flag on {@link relayFetch}, because a socket is a
+ * different pair of frames and a different lifetime — `OPEN`/`OPENED`/`MESSAGE`/
+ * `CLOSE` rather than `REQUEST`/`RESPONSE`, and it stays open instead of ending
+ * on an answer. Written out for the same reason the request helper is: this
+ * package cannot import `packages/web`, and what is being driven here is the
+ * *relay's* splice rather than the app's client.
+ */
+/**
+ * Ask for a body over a channel and then stop reading it.
+ *
+ * ⚠ **The one helper whose whole purpose is to *not* consume**, which is why it
+ * is separate from {@link relayFetch}: that one reassembles an answer, and this
+ * one exists to leave an answer un-reassembled so the window behind it closes.
+ * `ws.pause()` is the stall — it stops reading the TCP socket, which is the only
+ * honest way to reach h2's `WINDOW_UPDATE`-on-consumption from the outside.
+ */
+async function channelFlood(path: string, token: string): Promise<{ destroy: () => void }> {
+  return await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${relayPort}${RELAY_CHANNEL_PATH}?token=${encodeURIComponent(token)}`);
+    const reader = new LengthReader();
+    const handshake = NoiseHandshake.start({
+      initiator: true,
+      staticKey: localStaticKey(driverDevice.secretKey),
+      remoteStatic: mineStatic.publicKey,
+    });
+    let cipher: CipherState | null = null;
+    let receive: CipherState | null = null;
+    let settled = false;
+    const give = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve({ destroy: () => ws.terminate() });
+    };
+    setTimeout(give, 5_000).unref();
+
+    ws.on("open", () => {
+      void handshake.writeMessage().then((first: Uint8Array) => ws.send(frameLength(first)));
+    });
+    ws.on("message", (data: Buffer) => {
+      for (const message of reader.push(new Uint8Array(data))) {
+        if (cipher === null) {
+          void handshake
+            .readMessage(message)
+            .then(() => {
+              const transport = handshake.split();
+              cipher = transport.send;
+              receive = transport.receive;
+              ws.send(frameLength(cipher.encrypt(new Uint8Array(0), encodeJsonFrame(FRAME.HELLO, { capability: token }))));
+            })
+            .catch(give);
+          continue;
+        }
+        let frame: { type: number; payload: Uint8Array } | null;
+        try {
+          frame = decodeFrame(receive!.decrypt(new Uint8Array(0), message));
+        } catch {
+          give();
+          return;
+        }
+        if (frame?.type !== FRAME.READY) continue;
+        ws.send(
+          frameLength(
+            cipher.encrypt(
+              new Uint8Array(0),
+              encodeJsonFrame(FRAME.REQUEST, { method: "GET", path, headers: {}, body: false }),
+            ),
+          ),
+        );
+        // The phone on bad LTE. Everything the daemon writes from here on backs
+        // up through the relay's socket, its `pipe`, and the h2 window.
+        ws.pause();
+        give();
+      }
+    });
+    ws.on("unexpected-response", give);
+    ws.on("error", give);
+  });
+}
+
+/**
+ * A socket inside a channel, driven by hand, and the messages that came back.
+ *
+ * ⚠ **`MESSAGE` then `MESSAGE_END`, in both directions, and neither half is
+ * optional any more.** A socket message is *chunked* to `MAX_FRAME_PAYLOAD` and
+ * the terminator is the only thing that says the chunks are a whole message —
+ * `frames.ts` carries the argument and the measurement. This helper sent a bare
+ * `MESSAGE` and read each one as a message, which was right for exactly as long
+ * as the protocol had no terminator: the moment `src/e2ee.ts` grew a
+ * `MessageAssembler`, the frame it sent was held and never forwarded to the
+ * daemon's loopback socket, and the echo this section asserts simply never came
+ * back. So the send is `encodeMessageFrames` — the one implementation, rather
+ * than a chunk loop written here that would have to agree with the reassembler's
+ * bound — and the read accumulates until the terminator.
+ *
+ * Reassembled over **bytes**, decoded once at the end, for the reason the two
+ * shipped ends already are: a chunk boundary is a byte count and can land inside
+ * a multi-byte UTF-8 sequence. Nothing this section sends is large enough to be
+ * cut, and that is precisely why the loop has to be written correctly here — a
+ * helper that only works below 65518 bytes is a helper that agrees with the
+ * protocol by accident.
+ */
+async function channelSocket(path: string, token: string, send: string): Promise<string[]> {
+  return await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${relayPort}${RELAY_CHANNEL_PATH}?token=${encodeURIComponent(token)}`);
+    const reader = new LengthReader();
+    const handshake = NoiseHandshake.start({
+      initiator: true,
+      staticKey: localStaticKey(driverDevice.secretKey),
+      remoteStatic: mineStatic.publicKey,
+    });
+    let cipher: CipherState | null = null;
+    let receive: CipherState | null = null;
+    const seen: string[] = [];
+    /** The chunks of the message currently arriving, held until `MESSAGE_END`. */
+    let assembling: Uint8Array[] = [];
+    let settled = false;
+    const give = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(bail);
+      ws.terminate();
+      resolve(seen);
+    };
+    // Nothing should take five seconds on loopback; this is here so a regression
+    // reports a missing frame rather than hanging the whole driver.
+    const bail = setTimeout(give, 5_000);
+    bail.unref();
+
+    const write = (frame: Uint8Array): void => {
+      ws.send(frameLength(cipher!.encrypt(new Uint8Array(0), frame)));
+    };
+
+    ws.on("open", () => {
+      void handshake.writeMessage().then((first: Uint8Array) => ws.send(frameLength(first)));
+    });
+    ws.on("message", (data: Buffer) => {
+      for (const message of reader.push(new Uint8Array(data))) {
+        if (cipher === null) {
+          void handshake
+            .readMessage(message)
+            .then(() => {
+              const transport = handshake.split();
+              cipher = transport.send;
+              receive = transport.receive;
+              write(encodeJsonFrame(FRAME.HELLO, { capability: token }));
+            })
+            .catch(give);
+          continue;
+        }
+        let frame: { type: number; payload: Uint8Array } | null;
+        try {
+          frame = decodeFrame(receive!.decrypt(new Uint8Array(0), message));
+        } catch {
+          give();
+          return;
+        }
+        if (frame === null) continue;
+        if (frame.type === FRAME.READY) write(encodeJsonFrame(FRAME.OPEN, { path }));
+        else if (frame.type === FRAME.OPENED) {
+          for (const one of encodeMessageFrames(new TextEncoder().encode(send))) write(one);
+        } else if (frame.type === FRAME.MESSAGE) assembling.push(frame.payload);
+        else if (frame.type === FRAME.MESSAGE_END) {
+          const whole = new Uint8Array(assembling.reduce((total, part) => total + part.length, 0));
+          let at = 0;
+          for (const part of assembling) {
+            whole.set(part, at);
+            at += part.length;
+          }
+          assembling = [];
+          seen.push(new TextDecoder().decode(whole));
+          if (seen.length === 2) give();
+        } else if (frame.type === FRAME.FAILED) give();
+      }
+    });
+    ws.on("unexpected-response", give);
+    ws.on("error", give);
+  });
 }
 
 function sleep(ms: number): Promise<void> {
@@ -512,11 +867,16 @@ process.stdout.write("\nreconnect backoff\n");
 process.stdout.write("\ntunnel identity\n");
 
 /** `version: null` omits the header entirely, which is what a pre-header daemon does. */
-async function tryTunnel(key: string | null, version: string | null): Promise<number | "connected"> {
+async function tryTunnel(
+  key: string | null,
+  version: string | null,
+  machineKey: string | null = null,
+): Promise<number | "connected"> {
   return new Promise((resolve) => {
     const headers: Record<string, string> = {};
     if (version !== null) headers[TUNNEL_VERSION_HEADER] = version;
     if (key !== null) headers["authorization"] = `Bearer ${key}`;
+    if (machineKey !== null) headers[MACHINE_KEY_HEADER] = machineKey;
     const ws = new WebSocket(`ws://127.0.0.1:${relayPort}${TUNNEL_PATH}`, { headers });
     ws.on("open", () => {
       ws.terminate();
@@ -591,7 +951,23 @@ check("a version that is not a number is refused", await tryTunnel(myTunnelKey, 
  * definition, and refusing it would be the flag day arriving through the one
  * door left open.
  */
-check("a daemon that predates the header connects", await tryTunnel(myTunnelKey, null), "connected");
+/*
+ * ⚠ **This inverts, and the inversion *is* the flag day.**
+ *
+ * A daemon that sends no version header is read as speaking `1` — that is what
+ * `PRE_NEGOTIATION_PROTOCOL_VERSION` is for, and it is deliberately not the floor
+ * — and the floor is `2` now, so it is refused with a `426` naming what to do.
+ * It used to connect, because the floor was `1` and every daemon in the fleet was
+ * below the header.
+ *
+ * `RELAY_PROTOCOL_MIN_VERSION`'s own docblock carries the argument for taking the
+ * flag day: v2 is the version on which a stream is always encrypted, and there is
+ * no arrangement where a v1 daemon and a v2 relay are both right about what the
+ * bytes on a stream mean. Asserted here rather than left implicit, because the
+ * day somebody lowers the floor back to 1 to make an old machine work, this is
+ * the line that goes red.
+ */
+check("a daemon that predates the header is refused, not let in", await tryTunnel(myTunnelKey, null), 426);
 /*
  * ⚠ **Against the literal 1, not against `RELAY_PROTOCOL_MIN_VERSION`.** This
  * assertion was written against the floor, which is the same number today and is
@@ -601,11 +977,22 @@ check("a daemon that predates the header connects", await tryTunnel(myTunnelKey,
  * never heard of — while this check stayed green and defended it. Silence means
  * "predates negotiation", which is 1 for ever.
  */
-check(
-  "and is read as speaking v1, the version that predates the header",
-  await agreedVersion(myTunnelKey, null),
-  "1",
-);
+/*
+ * ⚠ **`null`, because a refused dial is never told what it agreed** — which is
+ * the *other* half of the property and is now the only observable one. The
+ * assertion it replaces read the agreed version off a completed handshake, and
+ * there is no completed handshake for a pre-header daemon any more.
+ *
+ * What is still asserted, one line down and against the literal rather than
+ * against the floor, is the thing that matters: `PRE_NEGOTIATION_PROTOCOL_VERSION`
+ * is 1 and is *not* `RELAY_PROTOCOL_MIN_VERSION`. Read as the floor, a pre-header
+ * daemon would be taken to have offered 2, negotiated to 2 and **accepted** — so
+ * the one class of machine raising the floor exists to cut off would be let in
+ * and handed frames it has never heard of. That is exactly the state the floor
+ * just moved into, which makes the distinction load-bearing today rather than
+ * hypothetically.
+ */
+check("and is told nothing, because the dial never completed", await agreedVersion(myTunnelKey, null), null);
 check(
   "which is what PRE_NEGOTIATION_PROTOCOL_VERSION is, and it is not the floor by definition",
   PRE_NEGOTIATION_PROTOCOL_VERSION,
@@ -824,8 +1211,8 @@ check("and refuses NaN, which is what a non-numeric header parses to", negotiate
  */
 {
   const revoked = issueTunnelKey(db, other); // rotating `other` retires the previous key
-  check("re-issuing retires the previous credential", await tryTunnel(otherTunnelKey, "1"), 401);
-  check("the newly issued credential works", await tryTunnel(revoked, "1"), "connected");
+  check("re-issuing retires the previous credential", await tryTunnel(otherTunnelKey, String(RELAY_PROTOCOL_VERSION)), 401);
+  check("the newly issued credential works", await tryTunnel(revoked, String(RELAY_PROTOCOL_VERSION)), "connected");
 }
 
 /*
@@ -890,8 +1277,121 @@ check("and refuses NaN, which is what a non-numeric header parses to", negotiate
 }
 
 /* ------------------------------------------------------------------ *
+ * A machine's own identity, pinned on the dial
+ *
+ * A daemon generates an X25519 static and announces the public half on every
+ * dial. This service pins the first one it is told and refuses a later
+ * disagreement — trust on first use, because an app is handed this key and
+ * authenticates the machine by it, so silently adopting a new one would make the
+ * app's check decorative.
+ *
+ * Driven on `m_other`, which holds no live tunnel, so nothing here disturbs the
+ * one every section below rides.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nmachine identity, pinned on the dial\n");
+{
+  const version = String(RELAY_PROTOCOL_VERSION);
+  const keyOf = (machineId: string): string | null => machineKeyFor(db, machineId);
+  const first = "A".repeat(MAX_MACHINE_KEY_CHARS);
+  const second = "B".repeat(MAX_MACHINE_KEY_CHARS);
+
+  /*
+   * Its own machine and its own credential.
+   *
+   * `m_other`'s tunnel key is deliberately retired further up, by the section that
+   * asserts re-issuing retires the previous one — so borrowing it here would make
+   * every assertion below a 401 about something else entirely. A driver section
+   * that reads a fixture another section has spent is the shape this file already
+   * avoids elsewhere by minting what it needs.
+   */
+  const keyed = addMachine("m_keyed");
+  const keyedTunnelKey = issueTunnelKey(db, keyed);
+
+  /*
+   * The migration path, and it is the first thing asserted because it is the one
+   * every machine in the fleet takes: a daemon that predates the header dials,
+   * connects, and pins nothing. If this ever became a refusal, an upgrade of the
+   * control plane would dark every machine that had not been touched yet.
+   */
+  check("a daemon that announces no key still dials", await tryTunnel(keyedTunnelKey, version), "connected");
+  check("and nothing was pinned for it", keyOf(keyed), null);
+
+  check("the first announcement dials", await tryTunnel(keyedTunnelKey, version, first), "connected");
+  check("and it is what got pinned", keyOf(keyed), first);
+
+  check("the same key again dials", await tryTunnel(keyedTunnelKey, version, first), "connected");
+  check("and the pin did not move", keyOf(keyed), first);
+
+  /*
+   * The refusal the whole feature rests on. 409 rather than 403: nothing is
+   * forbidden — the credential is right and the machine is real — two statements
+   * about one machine disagree, which is what a conflict is.
+   */
+  check("a different key is refused at the dial", await tryTunnel(keyedTunnelKey, version, second), 409);
+  check("and the refusal changed nothing", keyOf(keyed), first);
+
+  /*
+   * ⚠ **A refused announcement must not be a way to take a machine offline.**
+   * Somebody holding a stolen tunnel key could otherwise dial with a key of their
+   * own, be refused, and leave the row in a state the real daemon cannot dial
+   * against. It cannot: the refusal is a read, so the real daemon's next dial is
+   * accepted exactly as before.
+   */
+  check("and the real daemon still dials afterwards", await tryTunnel(keyedTunnelKey, version, first), "connected");
+
+  /*
+   * A malformed announcement is one the reader refuses rather than one it cuts —
+   * half a public key is a key nobody holds, not a shorter one. It must not cost
+   * the dial either: that would be a daemon bug taking a machine off the network.
+   */
+  check("a key of the wrong length is ignored, not refused", await tryTunnel(keyedTunnelKey, version, "short"), "connected");
+  check(
+    "and one with bytes outside the alphabet too",
+    await tryTunnel(keyedTunnelKey, version, "!".repeat(MAX_MACHINE_KEY_CHARS)),
+    "connected",
+  );
+  check("neither of which moved the pin", keyOf(keyed), first);
+
+  /*
+   * Enrollment is the other door, and the only one that replaces a pin. It is
+   * handled by the API process against a single-use code, so it never passes
+   * through the relay at all — which is why it may overwrite where a dial may not.
+   */
+  setMachineKey(db, keyed, second);
+  check("redeeming a code records a key whatever was there", keyOf(keyed), second);
+  check("and the daemon holding the new key dials", await tryTunnel(keyedTunnelKey, version, second), "connected");
+
+  /*
+   * And a pin can be given up, which is what a machine that is being started over
+   * needs. Asserted rather than assumed because every other statement here is
+   * about a pin *arriving*, and a column that could only ever be filled would make
+   * a lost key unrecoverable without a support conversation.
+   */
+  db.prepare("UPDATE machines SET machine_key = NULL, machine_key_set_at = NULL WHERE id = ?").run(keyed);
+  check("and a pin can be given up again", keyOf(keyed), null);
+}
+
+/* ------------------------------------------------------------------ *
  * A real tunnel, and everything that rides it
  * ------------------------------------------------------------------ */
+
+/**
+ * The daemon's own verifier for `m_mine`, as `scripts/daemon.ts` builds one.
+ *
+ * ⚠ **Required now, not optional.** A tunnel with no `staticKey`/`verifier` can
+ * serve nothing at all: the only stream mode is `Noise_IK`, and a daemon with no
+ * machine key answers `501` on every one. That is the honest shape of the change
+ * — "no key" and "no remote access" are the same state — and the case that used
+ * to be implicit here is now its own machine below.
+ */
+const mineVerifier = new SignedTokenVerifier({
+  identity: {
+    machineId: mine,
+    issuer: ISSUER,
+    keys: [{ kid: signing.kid, jwk: signing.jwk }],
+  },
+});
 
 const tunnel = RelayTunnel.start({
   relayUrl,
@@ -900,6 +1400,8 @@ const tunnel = RelayTunnel.start({
   // What `scripts/daemon.ts` wires in, as a value: the tunnel everything below
   // rides announces an inventory, and the row is read once it is up.
   agentClis: async () => ({ claude: "2.1.259", codex: null }),
+  staticKey: localStaticKey(mineStatic.secretKey),
+  verifier: mineVerifier,
 });
 
 process.stdout.write("\nthe tunnel\n");
@@ -943,68 +1445,20 @@ process.stdout.write("\nauthorization, checked before a byte is forwarded\n");
 }
 
 /*
- * The browser's preflight.
+ * ⚠ **The CORS-preflight section is deleted rather than converted, and the loss
+ * is named here rather than left to be discovered.**
  *
- * It carries no token — that is what a preflight is — so there is no `aud` to
- * read and no machine to route it to. The relay therefore answers it itself, and
- * the two things worth pinning are that it answers at all (without one, no
- * browser can reach any daemon on either path) and that answering does not look
- * like proxying: `requestsProxied` is how "the client went direct" stays a
- * measurement, and a counter that moved on preflights would quietly stop
- * measuring anything.
+ * It drove the preflight the relay answered itself: `204` with no credential,
+ * `allow-origin: *`, the whole `CORS_ALLOW_METHODS` list, a refusal still
+ * readable cross-origin, and a bare `OPTIONS` forwarded rather than swallowed.
+ * Every one of those was about `handleRequest`, which no longer exists — the
+ * relay carries WebSocket channels, and a WebSocket handshake is not
+ * preflighted, so there is no browser question left for this process to answer.
+ *
+ * What is genuinely given up: `CORS_ALLOW_METHODS` had its only relay-side
+ * driver here. `src/cors.ts` is still the daemon's and `daemoncheck` still drives
+ * it there; the relay simply has no CORS surface any more.
  */
-process.stdout.write("\nCORS preflight\n");
-{
-  const before = proxied(mine);
-
-  const preflight = await fetch(new URL("/sessions", relayUrl), {
-    method: "OPTIONS",
-    headers: {
-      origin: "http://ui.example",
-      "access-control-request-method": "POST",
-      "access-control-request-headers": "authorization,content-type",
-    },
-  });
-  check("answered without a token", preflight.status, 204);
-  check("and allows the credential header", preflight.headers.get("access-control-allow-origin"), "*");
-  report(
-    "and the headers a session needs",
-    (preflight.headers.get("access-control-allow-headers") ?? "").includes("authorization") &&
-      (preflight.headers.get("access-control-allow-methods") ?? "").includes("POST"),
-    preflight.headers.get("access-control-allow-headers") ?? "(none)",
-  );
-
-  // The whole set, not just the one verb this case happens to use. The relay and
-  // the daemon must answer a preflight identically — a browser that preflights
-  // against the relay and then talks to the daemon directly (or the reverse, on a
-  // route change) would otherwise get two different answers about the same API.
-  // `PUT` is named because it is the one that was missing: `PUT /agent-auth/:agent`
-  // shipped while `CORS_ALLOW_METHODS` still read GET/POST/DELETE/OPTIONS, so the
-  // paste-a-token path failed in a browser and nowhere else. `daemoncheck` asserts
-  // the other direction — that no daemon route uses a verb this list withholds.
-  const answered = (preflight.headers.get("access-control-allow-methods") ?? "")
-    .split(",")
-    .map((method) => method.trim().toUpperCase())
-    .filter((method) => method.length > 0)
-    .sort();
-  check("the relay advertises exactly the shared method list", answered, [...CORS_ALLOW_METHODS].sort());
-
-  // A refusal has to be readable too, or the client cannot tell "asleep" from
-  // "your token expired" — they are the same opaque network error otherwise.
-  const refused = await relayFetch("/x", null);
-  check("a refusal is still a refusal", refused.status, 401);
-  const refusedHeaders = await fetch(new URL("/x", relayUrl), { headers: { origin: "http://ui.example" } });
-  check("and readable cross-origin", refusedHeaders.headers.get("access-control-allow-origin"), "*");
-
-  // An OPTIONS that is *not* a preflight must still be forwarded: it is a method
-  // a daemon could legitimately answer, and swallowing it here would be the relay
-  // deciding what the daemon supports.
-  const plainOptions = await fetch(new URL("/x", relayUrl), { method: "OPTIONS" });
-  check("a bare OPTIONS is not treated as a preflight", plainOptions.status, 401);
-
-  const after = proxied(mine);
-  report("none of it touched the tunnel", before === after, `requestsProxied stayed at ${before}`);
-}
 
 /* ------------------------------------------------------------------ *
  * A request target the URL parser refuses
@@ -1075,19 +1529,30 @@ process.stdout.write("\nan unparseable request target\n");
   ]);
 
   const refused = await rawResponse("//%", ["connection: close"]);
-  check("and the relay answers rather than holding the socket", refused.split("\r\n")[0], "HTTP/1.1 401 Unauthorized");
   /*
-   * `missing_token` is the honest code and not a stand-in: there is no readable
-   * credential in a target nothing can parse. It also puts the case on the
-   * refusal path that already exists, so nothing new writes to the socket.
+   * ⚠ **`426` where this was `401`, and the number is the only thing that
+   * changed.** The property is the same one and it is the whole reason this
+   * section exists: a target the HTTP parser accepts and the URL parser refuses
+   * is **answered**, not held — an unguarded `new URL` throw escaped the
+   * `'request'` emit before anything wrote a response or destroyed the socket,
+   * one leaked fd per unauthenticated line against the only ingress this system
+   * has.
+   *
+   * What moved is which handler answers. `listener.ts`'s own `pathOf` catches the
+   * throw and returns `"/"`, so an unparseable target can never reach the channel
+   * path; it lands on the retired plaintext handler, which refuses every shape
+   * with `426 upgrade_required` before reading anything at all. That is a
+   * *stronger* guarantee than the one this used to assert — the old answer had to
+   * run `readToken` on the way to its refusal, and this one cannot get that far.
    */
-  check("with the code that says there was no credential to read", refused.includes('"missing_token"'), true);
+  check("and the relay answers rather than holding the socket", refused.split("\r\n")[0], "HTTP/1.1 426 Upgrade Required");
+  check("with the sentence saying a plaintext request is not carried", refused.includes("encrypted channels only"), true);
   check(
     "the other two shapes are answered the same way",
     [await rawResponse("/\\", ["connection: close"]), await rawResponse("//[", ["connection: close"])].map(
       (answer) => answer.split(" ")[1] ?? "(none)",
     ),
-    ["401", "401"],
+    ["426", "426"],
   );
 
   /*
@@ -1102,7 +1567,7 @@ process.stdout.write("\nan unparseable request target\n");
     "sec-websocket-version: 13",
     `sec-websocket-key: ${randomBytes(16).toString("base64")}`,
   ]);
-  check("an upgrade with the same target is refused too", upgrade.split("\r\n")[0], "HTTP/1.1 401 missing_token");
+  check("an upgrade with the same target is refused too", upgrade.split("\r\n")[0], "HTTP/1.1 426 upgrade_required");
 
   // The guard answers `null` rather than swallowing the query branch, so a
   // target the parser *does* accept still hands its `?token=` over — which is
@@ -1142,6 +1607,9 @@ process.stdout.write("\nkey rotation\n");
       nbf: seconds,
       exp: seconds + 300,
       scp: ["session:read"],
+      // Bound like every other capability this driver mints: the relay does not
+      // read `cnf`, and the daemon refuses `unbound_capability` without one.
+      cnf: { jkt: driverThumbprint },
     },
     rotatedKid,
     rotated.privateKey,
@@ -1150,69 +1618,100 @@ process.stdout.write("\nkey rotation\n");
   // Warm the throttle with an unknown kid first, exactly as a flood would.
   check("an unknown key is refused", (await relayFetch("/x", tokenFor(alice, mine).replace(/^[^.]+/, "eyJhbGciOiJFZERTQSIsInR5cCI6InJlbW9zbG9wK2p3dCIsImtpZCI6Il9ub25lXyJ9"))).status, 401);
   await sleep(1_100);
-  check("a token signed by a newly added key is accepted", (await relayFetch("/sessions", freshlySigned)).status, 200);
+  /*
+   * ⚠ **The relay accepts it and the daemon does not, and both halves are the
+   * point.**
+   *
+   * What this section is about is the relay's key cache refreshing on a miss, so
+   * a rotation does not require a restart — and the way that is now observable is
+   * that the channel *opens*: a relay that had not refreshed would refuse the
+   * upgrade with `401 unknown_key` and never reach a tunnel at all.
+   *
+   * The daemon then refuses it, and that is correct rather than a gap: this
+   * daemon's key set was captured at enrollment and predates the rotation, which
+   * is exactly what `auth-and-tokens.md` says a daemon holds. A fleet re-enrolls
+   * between `rotatekey` and `retirekey` for this reason, and the section below
+   * drives what `retirekey` then does.
+   */
+  /*
+   * ⚠ **The discriminator is the stream counter, not the code**, and that is a
+   * trap worth naming: the relay and the daemon both answer `unknown_key` for a
+   * `kid` they do not hold, so reading the code cannot tell which of them
+   * refused. What can is whether a tunnel stream was ever opened — the relay
+   * authorizes *before* `tunnel.open`, so a refusal there moves nothing.
+   */
+  const beforeRotated = proxied(mine);
+  const rotatedAnswer = await relayFetch("/sessions", freshlySigned);
+  report(
+    "a token signed by a newly added key gets past the relay, so the cache refreshed",
+    proxied(mine) - beforeRotated === 1,
+    `${proxied(mine) - beforeRotated} streams, answered ${rotatedAnswer.status} ${rotatedAnswer.body}`,
+  );
+  check(
+    "and the daemon refuses it, because its own key set predates the rotation",
+    [rotatedAnswer.status, rotatedAnswer.body],
+    [401, "unknown_key"],
+  );
 }
 
-process.stdout.write("\nforwarding\n");
+process.stdout.write("\nwhat reaches the daemon\n");
 {
   const ok = await relayFetch("/sessions?x=1", tokenFor(alice, mine));
   check("an authorized request reaches the daemon", ok.status, 200);
   check("the path arrives intact", JSON.parse(ok.body).path, "/sessions?x=1");
 
   /*
-   * Nothing in the relay's own namespace reaches the daemon's HTTP layer, from
-   * either direction.
+   * ⚠ **Nothing in the relay's own namespace reaches the daemon's HTTP layer,
+   * and this is now true by construction rather than by a strip.**
    *
-   * The relay's advisory `reemoat-sub` rides the CONNECT headers and stops at
-   * the daemon's tunnel code, and a client-supplied copy is stripped before
-   * forwarding. So the daemon's request handling sees this namespace as empty no
-   * matter who tried to fill it — which is what makes the reserved headers safe
-   * to extend later without re-auditing what a caller could smuggle through.
+   * `forwardHeaders` used to drop a client-supplied `reemoat-*` header before
+   * assembling the proxied request, and the case below used to forge one through
+   * `fetch` to prove the strip ran. Both are gone with the assembly: the relay
+   * writes no request headers at all, and a client's bytes are ciphertext it
+   * cannot open let alone edit. `reemoat-sub` still rides the CONNECT handshake
+   * and still stops at the daemon's tunnel code.
+   *
+   * So the assertion that remains is the one that was always the point — the
+   * daemon's request handling sees this namespace as empty — and the *forgery*
+   * half is unforgeable rather than stripped. Q5.10 is the entry; the encrypted
+   * channel section below carries what replaced its driver.
    */
   check("relay metadata stays on the tunnel, out of the request", JSON.parse(ok.body).subject, null);
-
-  const forged = await fetch(new URL("/sessions", relayUrl), {
-    headers: { authorization: `Bearer ${tokenFor(alice, mine)}`, "reemoat-sub": "u_root" },
-  });
-  const forgedBody = (await forged.json()) as { subject: string | null };
-  check("a client-supplied relay header is stripped", forgedBody.subject, null);
 }
 
 /* ------------------------------------------------------------------ *
- * A WebSocket through the relay — a WebSocket inside a WebSocket
+ * A WebSocket inside a channel inside a WebSocket
  * ------------------------------------------------------------------ */
 
 /*
- * The path the relay mostly carries, and the one with the least code behind it.
+ * The path the relay mostly carries, and it has *less* code behind it now than
+ * it did.
  *
  * `/sessions/:id/stream` is where a browser spends its whole session, and the
- * claim it rests on is that tunnelling it needed no special case: the tunnel
- * carries opaque bytes, so `proxy.handleUpgrade` replays a raw 101 onto the
- * client socket and then pipes. "No special case" is a pleasant thing to believe
- * and a bad thing to assume, because the parts that are hand-written here — the
- * status line, the `rawHeaders` replay, the `head` buffer, the two pipes — are
- * exactly the parts a framework is not checking for us.
+ * old claim was that tunnelling it needed no special case: the tunnel carried
+ * opaque bytes, so `proxy.handleUpgrade` replayed a raw 101 onto the client
+ * socket and piped. ⚠ **The parts that were hand-written there — the status
+ * line, the `rawHeaders` replay, the `head` buffer, the two pipes — are deleted,
+ * and Q6.37's warning that they were "precisely the part no framework checks"
+ * is answered by there no longer being one.** A socket is a frame inside a
+ * channel now: `OPEN`, `OPENED`, `MESSAGE`, `CLOSE`, with the daemon's own `ws`
+ * client making the loopback dial.
  *
- * The browser cannot set headers on a WebSocket handshake, so the token rides as
- * `?token=`, which also exercises `readToken`'s query-string branch under a real
- * upgrade rather than a synthetic request.
+ * ⚠ **And the credential stops travelling in a URL on this hop.** `?token=`
+ * existed because a browser cannot set a header on a WebSocket handshake; the
+ * app still sends one to the *relay* for that reason, and the daemon's own
+ * loopback dial now carries a header, because Node makes that request. The fake
+ * daemon below echoes what it saw, so this is measured rather than argued.
  */
-process.stdout.write("\na websocket through the relay\n");
+process.stdout.write("\na websocket through a channel\n");
 {
   const before = proxied(mine);
 
-  const wsUrl = (token: string | null): string => {
-    const url = new URL("/stream", relayUrl);
-    url.protocol = "ws:";
-    if (token !== null) url.searchParams.set("token", token);
-    return url.toString();
-  };
-
-  // An upgrade with no token must be refused by the relay, before any tunnel
-  // stream is opened — the same rule as the request path, on the path where the
-  // credential arrives somewhere else entirely.
+  // An upgrade with no token is refused by the relay before any tunnel stream is
+  // opened — the same rule as every other path, on the one where the credential
+  // arrives somewhere else entirely.
   const refused = await new Promise<string>((resolve) => {
-    const ws = new WebSocket(wsUrl(null));
+    const ws = new WebSocket(`ws://127.0.0.1:${relayPort}${RELAY_CHANNEL_PATH}`);
     ws.on("open", () => {
       ws.close();
       resolve("opened");
@@ -1220,39 +1719,21 @@ process.stdout.write("\na websocket through the relay\n");
     ws.on("unexpected-response", (_req, res) => resolve(`http ${res.statusCode}`));
     ws.on("error", (error: Error) => resolve(`error ${error.message}`));
   });
-  check("an unauthorized upgrade is refused", refused, "http 401");
+  check("an unauthorized channel is refused", refused, "http 401");
 
   const unauthorized = proxied(mine);
   report("and never reached the tunnel", before === unauthorized, `requestsProxied stayed at ${before}`);
 
-  const frames = await new Promise<string[]>((resolve) => {
-    const seen: string[] = [];
-    const ws = new WebSocket(wsUrl(tokenFor(alice, mine)));
-    const done = (): void => {
-      ws.close();
-      resolve(seen);
-    };
-    // Nothing should take five seconds on loopback; this is here so a regression
-    // reports a missing frame rather than hanging the whole driver.
-    const bail = setTimeout(done, 5_000);
-    ws.on("open", () => ws.send("ping through the tunnel"));
-    ws.on("message", (data: Buffer) => {
-      seen.push(data.toString());
-      if (seen.length === 2) {
-        clearTimeout(bail);
-        done();
-      }
-    });
-    ws.on("error", (error: Error) => {
-      clearTimeout(bail);
-      seen.push(`error ${error.message}`);
-      resolve(seen);
-    });
-  });
+  const frames = await channelSocket("/stream", tokenFor(alice, mine), "ping through the tunnel");
 
-  check("the 101 is replayed and the daemon's first frame arrives", JSON.parse(frames[0] ?? "null"), {
+  check("the daemon's first frame arrives through the channel", JSON.parse(frames[0] ?? "null"), {
     type: "hello",
-    token: "present",
+    // ⚠ **`null`, and it used to be `"present"`.** The fake daemon reports
+    // whether it found a `?token=` on its own handshake. Over a channel there is
+    // none: `src/e2ee.ts` puts the session's verified capability in an
+    // `authorization` header instead, because the dial is made by Node. That is
+    // `SECURITY.md`'s `?token=` leak path shrinking to exactly one hop, measured.
+    token: null,
   });
   check("and a frame sent by the client comes back", JSON.parse(frames[1] ?? "null"), {
     type: "echo",
@@ -1260,15 +1741,24 @@ process.stdout.write("\na websocket through the relay\n");
   });
 
   const after = proxied(mine);
-  report("the authorized upgrade took exactly one stream", after - unauthorized === 1, `${after - unauthorized}`);
+  report("the authorized channel took exactly one stream", after - unauthorized === 1, `${after - unauthorized}`);
 
-  // A tunnel that carried a WebSocket must still be an ordinary tunnel
-  // afterwards: an upgrade holds its h2 stream open for the socket's whole life,
-  // so a leak here would show as the next request never being answered.
+  // A tunnel that carried a socket must still be an ordinary tunnel afterwards:
+  // a channel holds its h2 stream open for the socket's whole life, so a leak
+  // here would show as the next request never being answered.
   await sleep(50);
   check("the tunnel still serves ordinary requests", (await relayFetch("/sessions", tokenFor(alice, mine))).status, 200);
+  /*
+   * Polled rather than read once. A channel's stream is released when its
+   * WebSocket closes, and the request above opens and closes one of its own — so
+   * a single read here is a race against that one's teardown rather than a
+   * measurement of the socket's. The leak this guards against is unbounded, so a
+   * second is more than enough to tell it from a close in flight.
+   */
+  const settled = Date.now() + 2_000;
+  while (Date.now() < settled && activeStreams(mine) !== 0) await sleep(25);
   report(
-    "and the upgrade's stream was released",
+    "and the channel's stream was released",
     activeStreams(mine) === 0,
     `activeStreams ${activeStreams(mine)}`,
   );
@@ -1290,17 +1780,20 @@ process.stdout.write("\nflow control\n");
    * side hold, and stays stopped. Without it, `floodWritten` climbs until
    * something dies.
    */
-  const stalled = await new Promise<{ destroy: () => void }>((resolve) => {
-    const req = httpGet(
-      new URL("/flood", relayUrl),
-      { headers: { authorization: `Bearer ${tokenFor(alice, mine)}` } },
-      (res) => {
-        res.pause(); // the phone on bad LTE
-        resolve({ destroy: () => res.destroy() });
-      },
-    );
-    req.on("error", () => resolve({ destroy: () => {} }));
-  });
+  /*
+   * ⚠ **The stall is applied to the *socket* rather than to a `res`, and it has
+   * to be, which is the one real change this section needed.**
+   *
+   * There is no `http.get` through the relay any more. The chain being measured
+   * is the same one it always was and it is now one link longer: the daemon
+   * writes → the h2 stream's window → the relay reads → `createWebSocketStream`
+   * → `ws.send` → this socket. `ws.pause()` stops reading from the TCP socket, so
+   * the kernel receive buffer fills, the window closes, the relay's send callback
+   * stops firing, `pipe` stops reading the h2 stream, and the window stops being
+   * granted. Every link is the real one — this is a phone on bad LTE, not a
+   * `res.pause()` standing in for one.
+   */
+  const stalled = await channelFlood("/flood", tokenFor(alice, mine));
 
   await sleep(1_200);
   const parked = floodWritten;
@@ -1311,7 +1804,13 @@ process.stdout.write("\nflow control\n");
    * the assertion worth making is "bounded", not a specific number that would
    * turn every buffer-size change into a failing test.
    */
-  const bound = MAX_TUNNEL_BUFFERED_BYTES + STREAM_WINDOW_BYTES + 8 * 1024 * 1024;
+  /*
+   * ⚠ **One term wider than it was**, because there is one more buffer in the
+   * chain: the relay's channel socket, bounded by `MAX_CHANNEL_BUFFERED_BYTES`.
+   * Still generous on purpose — the assertion worth making is "bounded", not a
+   * specific number that would turn every buffer-size change into a failing test.
+   */
+  const bound = MAX_TUNNEL_BUFFERED_BYTES * 2 + STREAM_WINDOW_BYTES + 8 * 1024 * 1024;
 
   /*
    * Guard against a vacuous pass.
@@ -1331,10 +1830,23 @@ process.stdout.write("\nflow control\n");
   );
 
   await sleep(800);
+  /*
+   * ⚠ **"Stopped" is now "bounded by one window", not "exactly zero", and the
+   * reason is one more buffer rather than weaker flow control.**
+   *
+   * The chain gained a link: the relay's channel socket sits between the h2
+   * stream and the stalled peer, so as its own send buffer drains the window is
+   * granted once more and the daemon writes one more window's worth before
+   * parking again. That is the flow control working — a fixed-size trickle that
+   * converges — and it is categorically different from the failure this guards
+   * against, which is a sender that never stops. Measured at 64 KiB against a
+   * 1 MiB window.
+   */
+  const grew = floodWritten - parked;
   report(
-    "and it stays stopped",
-    floodWritten === parked,
-    floodWritten === parked ? "no further growth" : `grew by ${floodWritten - parked} bytes`,
+    "and it stays stopped, bar the one window the extra hop was holding",
+    grew < STREAM_WINDOW_BYTES,
+    grew === 0 ? "no further growth" : `grew by ${grew} bytes, under one ${STREAM_WINDOW_BYTES}-byte window`,
   );
 
   /*
@@ -1474,31 +1986,16 @@ process.stdout.write("\na client that reads\n");
    */
   const want = 4 * STREAM_WINDOW_BYTES;
   const started = Date.now();
-  const got = await new Promise<number>((resolve) => {
-    let bytes = 0;
-    let settled = false;
-    const done = (): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(bytes);
-    };
-    const req = httpGet(
-      new URL(`/flood?bytes=${want}`, relayUrl),
-      { headers: { authorization: `Bearer ${tokenFor(alice, mine)}` } },
-      (res) => {
-        res.on("data", (chunk: Buffer) => {
-          bytes += chunk.length;
-        });
-        res.on("close", done);
-      },
-    );
-    req.on("error", done);
-    const timer = setTimeout(() => {
-      req.destroy();
-      done();
-    }, 10_000);
-  });
+  /*
+   * Over a channel now, which makes this a longer chain and a stronger check: the
+   * body is chunked into Noise messages, sealed, carried as WebSocket frames,
+   * reassembled by `LengthReader` and decrypted — and the assertion is still that
+   * every byte arrives and that nobody waits on credit for it. A window that
+   * stopped being granted on consumption shows up here as the same hang it always
+   * did, with more between the two ends to hide in.
+   */
+  const flood = await relayFetch(`/flood?bytes=${want}`, tokenFor(alice, mine));
+  const got = Buffer.byteLength(flood.body);
   const elapsed = Date.now() - started;
 
   check("a reading client gets a body several windows long", got, want);
@@ -1512,95 +2009,87 @@ process.stdout.write("\na client that reads\n");
 process.stdout.write("\nan upstream that dies mid-body\n");
 {
   /*
-   * ⚠ **The bound fired and reached nobody.**
+   * ⚠ **The bound fired and reached nobody, and the defect is now impossible to
+   * express rather than merely fixed.**
    *
-   * `upstream.setTimeout` is armed on every proxied request, and the comment
+   * `upstream.setTimeout` was armed on every proxied request, and the comment
    * beside it claimed that destroying the request "lands on the `error` handler
-   * below". That holds only *before* `writeHead`: once the response has started,
+   * below". That held only *before* `writeHead`: once the response had started,
    * `ClientRequest.destroy()` with no argument emits no `'error'`, so nothing
    * destroyed `res`, and the browser kept an open response whose `content-length`
    * promised bytes nobody was going to send. Measured: the bound fired at
    * +2017ms and the client was still waiting at +12s. The same hole swallowed
    * *every* mid-body upstream death, a tunnel drop included — `pipe` forwards
-   * `end` and never a premature close.
+   * `end` and never a premature close. That is the whole distance between "the
+   * transcript failed, retry" and a spinner with no end. Q6.103.
    *
-   * That is the whole distance between "the transcript failed, retry" — which
-   * `isReplayable` already handles for a `GET` — and a spinner with no end,
-   * which is what it looked like in the browser. Q6.103.
+   * ⚠ **The code it was about is deleted and the discipline moved rather than
+   * going with it.** There is no `res` to leave open: the daemon terminates the
+   * session itself, and `src/e2ee.ts` reads `response.complete` and sends either
+   * `RESPONSE_END` or `FAILED` — two different frames, which is the entire reason
+   * they are two. A short body cannot arrive looking like a whole one, because
+   * "whole" is a byte on the wire rather than the absence of an event.
    *
-   * Its own relay with a short `upstreamTimeoutMs`, for the reason the wedged
-   * daemon below gives: the real number is two minutes, and a driver that spent
-   * two minutes to watch it would not assert it at all.
+   * So this section is re-driven rather than retired, on the same `/halfbody` and
+   * against the code that owns the rule now. It is also a **stronger** assertion
+   * than the one it replaces: that one could only say the client stopped waiting,
+   * and this one says what it was told.
    */
-  const halfRegistry = new TunnelRegistry();
-  const halfListener = createRelayListener({
-    db,
-    issuer: ISSUER,
-    host: "127.0.0.1",
-    port: 0,
-    registry: halfRegistry,
+  /*
+   * Its own machine and its own tunnel, with a short `upstreamTimeoutMs` — the
+   * seam that used to live on the relay's proxy and moved to `src/e2ee.ts` with
+   * the bound it names. `/halfbody` writes 64 KiB of a promised megabyte and then
+   * says nothing at all: no end, no FIN, no reset, which is what a daemon wedged
+   * behind a stalled filesystem call looks like from the far side.
+   */
+  const half = addMachine("m_halfbody");
+  grant(alice, half);
+  const halfStatic = generateStaticKey();
+  const halfTunnel = RelayTunnel.start({
+    relayUrl,
+    tunnelKey: issueTunnelKey(db, half),
+    local: { host: "127.0.0.1", port: daemonPort },
+    staticKey: localStaticKey(halfStatic.secretKey),
+    verifier: new SignedTokenVerifier({
+      identity: { machineId: half, issuer: ISSUER, keys: [{ kid: signing.kid, jwk: signing.jwk }] },
+    }),
     upstreamTimeoutMs: 300,
   });
-  await listening(halfListener.server);
-  const halfUrl = `http://127.0.0.1:${(halfListener.server.address() as AddressInfo).port}`;
-
-  const halfTunnel = RelayTunnel.start({
-    relayUrl: halfUrl,
-    tunnelKey: myTunnelKey,
-    local: { host: "127.0.0.1", port: daemonPort },
-  });
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline && !halfRegistry.isOnline(mine)) await sleep(25);
-  check("the tunnel to the half-answering daemon is up", halfRegistry.isOnline(mine), true);
+  check("the half-answering daemon's tunnel is up", await waitForTunnel(half), true);
 
   const started = Date.now();
-  const ended = await new Promise<{ how: string; bytes: number }>((resolve) => {
-    let bytes = 0;
-    let settled = false;
-    const done = (how: string): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ how, bytes });
-    };
-    const req = httpGet(
-      new URL("/halfbody", halfUrl),
-      { headers: { authorization: `Bearer ${tokenFor(alice, mine)}` } },
-      (res) => {
-        res.on("data", (chunk: Buffer) => {
-          bytes += chunk.length;
-        });
-        /*
-         * `complete` rather than the event, because a *clean* end here is the
-         * other way of failing: a body short of its own `content-length` that
-         * says nothing about it is a truncated transcript a client would take
-         * for a whole one.
-         */
-        res.on("close", () => done(res.complete ? "ended whole" : "aborted"));
-        res.on("error", () => done("aborted"));
-      },
-    );
-    req.on("error", () => done("aborted"));
-    const timer = setTimeout(() => {
-      req.destroy();
-      done("still hanging");
-    }, 4_000);
-  });
+  const ended = await relayFetch("/halfbody", tokenFor(alice, half), { remoteStatic: halfStatic.publicKey });
   const waited = Date.now() - started;
 
   report(
-    "a daemon that dies mid-body does not hang the browser",
-    ended.how === "aborted",
-    `${ended.how} after ${waited}ms with ${ended.bytes} bytes`,
+    "a daemon that dies mid-body does not hand back a short answer",
+    ended.status === 502,
+    `status ${ended.status} after ${waited}ms`,
   );
+  /*
+   * ⚠ **`tunnel_failed` rather than `truncated`, and the difference is which
+   * event got there first.** The bound destroys the upstream *with* an error —
+   * `ClientRequest.destroy()` with no argument emits none, which is the original
+   * defect — so `response.on("error")` fires before `close`. Either way it is a
+   * `FAILED` frame rather than a `RESPONSE_END`, which is the whole of Q6.103:
+   * "gave up" and "complete" are different bytes, so a short body cannot arrive
+   * looking like a whole one.
+   */
   report(
-    "and the bound is what ends it, not the client giving up",
-    ended.how === "aborted" && waited < 3_000,
-    `${waited}ms`,
+    "and it is named as a failure rather than delivered as an answer",
+    ended.body === "tunnel_failed" || ended.body === "truncated",
+    ended.body,
   );
-
+  report("with the bound ending it rather than the client giving up", waited < 3_000, `${waited}ms`);
   await halfTunnel.stop();
-  halfListener.close();
+  /*
+   * And the pair that makes it mean something: a body that *is* whole comes back
+   * as one. Without this the case above passes for a channel that fails
+   * everything, which is the vacuous-pass shape this file guards against
+   * elsewhere by measuring that the flood actually ran.
+   */
+  const whole = await relayFetch("/sessions", tokenFor(alice, mine));
+  check("while a complete answer is still delivered as one", whole.status, 200);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1698,7 +2187,7 @@ process.stdout.write("\none caller's share of a tunnel\n");
    * raw socket and for the same reason.
    */
   const hold = (subject: string): ClientHttp2Stream | null => {
-    const stream = shared.open(subject);
+    const stream = shared.open(subject, STREAM_ENCRYPTION_NOISE_IK);
     stream?.on("error", () => {});
     return stream;
   };
@@ -1805,11 +2294,18 @@ process.stdout.write("\nover the machine limit, immediately\n");
     refused.body.includes("machine_over_limit"),
     refused.body.slice(0, 120),
   );
-  report(
-    "and a sentence naming the remedy, because the owner is the one who can act",
-    refused.body.includes("nothing has been deleted"),
-    refused.body.slice(0, 200),
-  );
+  /*
+   * ⚠ **The remedy sentence is gone from the wire and the reason is structural,
+   * not an oversight.** It used to ride a JSON envelope `sendJson` wrote; a
+   * refused WebSocket upgrade has no body to put one in, only a status line. The
+   * sentence itself still exists — `machineStanding` composes it and the
+   * Authority's own routes still answer it — and it is asserted there. What a
+   * channel refusal carries is the code, which is what a client branches on.
+   *
+   * Pinned as an absence rather than dropped, so that a future body on this path
+   * is a decision somebody makes rather than something that quietly reappears.
+   */
+  check("and the refusal carries a code rather than prose, because an upgrade has no body", refused.body, "machine_over_limit");
 
   /*
    * ⭐ **The enumeration oracle, and the assertion nothing else in this file
@@ -1936,7 +2432,10 @@ process.stdout.write("\nthe reserved encryption seam\n");
       ":method": "CONNECT",
       ":authority": "daemon",
       [STREAM_VERSION_HEADER]: "99",
-      [STREAM_ENCRYPTION_HEADER]: STREAM_ENCRYPTION_NONE,
+      // ⚠ **Stamped with the mode the daemon *does* speak**, so this case still
+      // isolates the version arm. `none` is a 501 in its own right now, which
+      // would make the check pass for the wrong reason.
+      [STREAM_ENCRYPTION_HEADER]: STREAM_ENCRYPTION_NOISE_IK,
       [STREAM_SUBJECT_HEADER]: alice,
     }),
     501,
@@ -1947,7 +2446,7 @@ process.stdout.write("\nthe reserved encryption seam\n");
       ":method": "CONNECT",
       ":authority": "daemon",
       [STREAM_VERSION_HEADER]: "banana",
-      [STREAM_ENCRYPTION_HEADER]: STREAM_ENCRYPTION_NONE,
+      [STREAM_ENCRYPTION_HEADER]: STREAM_ENCRYPTION_NOISE_IK,
       [STREAM_SUBJECT_HEADER]: alice,
     }),
     501,
@@ -1959,6 +2458,272 @@ process.stdout.write("\nthe reserved encryption seam\n");
   );
   report("the tunnel is still up", registry.isOnline(mine), "online");
   check("and still serving", (await relayFetch("/sessions", tokenFor(alice, mine))).status, 200);
+}
+
+/* ------------------------------------------------------------------ *
+ * The encrypted channel, and the relay that cannot read it
+ *
+ * ⚠ **This is the path on which the relay stops being trusted with what it
+ * carries.** Everything above forwards a *request* — it reads a method, a path
+ * and every header, and it could read a body. `handleChannel` reads a token,
+ * decides whether the caller holds a grant, and then moves bytes between a
+ * WebSocket and one h2 `CONNECT` stamped `reemoat-enc: noise-ik-…`. The Noise
+ * handshake and every request inside it run between the app and the daemon; this
+ * process holds no key for them.
+ *
+ * What is driven here is the relay's half. The *app's* half — the real
+ * `MachineChannel` against the real `serveSecureSession` — is
+ * `packages/web/scripts/webcheck.e2ee.ts`, which cannot live in this file
+ * because that package compiles with bundler resolution and no Node types.
+ * Between them the two ends are each driven against a real counterpart, and the
+ * protocol underneath both is pinned byte-for-byte against the published vectors
+ * by `protocolcheck`.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe encrypted channel\n");
+{
+  /** Open a channel and report what the relay answered, without upgrading past it. */
+  const channel = (query: string): Promise<number | "connected"> =>
+    new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${relayPort}${RELAY_CHANNEL_PATH}${query}`);
+      ws.on("open", () => {
+        ws.terminate();
+        resolve("connected");
+      });
+      ws.on("unexpected-response", (_req, res) => {
+        ws.terminate();
+        resolve(res.statusCode ?? 0);
+      });
+      ws.on("error", () => resolve(0));
+      setTimeout(() => {
+        ws.terminate();
+        resolve(-1);
+      }, 6_000).unref();
+    });
+
+  /*
+   * Authorization first, and it is the same authorization. A channel that could
+   * not read a prompt is not a channel that lets anybody through — those are
+   * different properties and both are wanted.
+   */
+  check("a channel with no credential is refused", await channel(""), 401);
+  check("a made-up one too", await channel("?token=not-a-jws"), 401);
+  /*
+   * `404` rather than `403`, and that is the authorizer's own rule showing
+   * through rather than a quirk of this path: a caller with no grant is told the
+   * machine does not exist, so the relay is not an oracle for which machines are
+   * in the fleet. It matters here because a channel is the *only* way in now — an
+   * enumeration oracle on this path would be one on every path.
+   */
+  check(
+    "and one for a machine this caller has no grant on is not even told it exists",
+    await channel(`?token=${encodeURIComponent(tokenFor(mallory, mine))}`),
+    404,
+  );
+
+  /*
+   * ⚠ **The ordering that makes a refusal legible, and the reason the WebSocket
+   * handshake is completed *after* the daemon's `200` rather than before.**
+   *
+   * Its own machine and its own tunnel, started with **no** `staticKey` — which is
+   * every daemon in the fleet until its host is updated, and is the state a
+   * machine that has never announced a key is permanently in. It answers `501` on
+   * the stream. Had the upgrade already completed, the app would see an opaque
+   * close with no status and no body, indistinguishable from a network drop and
+   * therefore retried for ever. Answering the *upgrade* keeps the distinction, and
+   * it is the one the app turns into a sentence about updating that machine.
+   *
+   * ⚠ A separate machine because the shared tunnel **has** a key now: a daemon
+   * with none can serve nothing at all, so it could not be the one every other
+   * section rides.
+   */
+  const keyless = addMachine("m_keyless");
+  grant(alice, keyless);
+  const keylessTunnel = RelayTunnel.start({
+    relayUrl,
+    tunnelKey: issueTunnelKey(db, keyless),
+    local: { host: "127.0.0.1", port: daemonPort },
+  });
+  check("a daemon with no machine key still dials in", await waitForTunnel(keyless), true);
+
+  const before = proxied(keyless);
+  check(
+    "but a caller is refused at the upgrade rather than at the stream",
+    await channel(`?token=${encodeURIComponent(tokenFor(alice, keyless))}`),
+    501,
+  );
+  report(
+    "and the refusal was decided after authorization, on a stream this tunnel opened",
+    proxied(keyless) - before === 1,
+    `${proxied(keyless) - before} streams`,
+  );
+  await keylessTunnel.stop();
+
+  /*
+   * A machine with no tunnel at all, which is the ordinary "that laptop is
+   * asleep" state and must not be confused with the one above. Its own machine
+   * with its own grant, because the distinction being drawn is *tunnel* against
+   * *encryption* — borrowing an ungranted one would answer `404` for a reason
+   * that has nothing to do with either.
+   */
+  const asleep = addMachine("m_asleep");
+  grant(alice, asleep);
+  check(
+    "a machine holding no tunnel is a 503, never a queue",
+    await channel(`?token=${encodeURIComponent(tokenFor(alice, asleep))}`),
+    503,
+  );
+}
+
+{
+  /*
+   * And the positive case, end to end through the shipped relay: a daemon that
+   * *does* hold a machine key, a real `Noise_IK` initiator on this side, and a
+   * real `serveSecureSession` on the other with the relay in between reading
+   * nothing.
+   *
+   * The initiator is written out here rather than imported from the app for the
+   * reason `daemoncheck.e2ee.ts` writes one out too — this package cannot import
+   * `packages/web` — and what it proves is narrower and different: not that the
+   * client is right, but that **this relay's splice carries a handshake at all**,
+   * which is the one thing neither of the other two drivers can see.
+   */
+  const encrypted = addMachine("m_encrypted");
+  grant(alice, encrypted);
+  const encryptedTunnelKey = issueTunnelKey(db, encrypted);
+  const machineStatic = generateStaticKey();
+  const deviceStatic = generateStaticKey();
+
+  const encryptedTunnel = RelayTunnel.start({
+    relayUrl,
+    tunnelKey: encryptedTunnelKey,
+    local: { host: "127.0.0.1", port: daemonPort },
+    staticKey: localStaticKey(machineStatic.secretKey),
+    /*
+     * The daemon's own verifier, built from this driver's signing key — the same
+     * shape `scripts/daemon.ts` builds from the identity captured at enrollment.
+     * It is what makes the device binding a check rather than a claim: the
+     * capability names a key, the handshake authenticated one, and this compares
+     * them with no lookup and no fetch.
+     */
+    verifier: new SignedTokenVerifier({
+      identity: {
+        machineId: encrypted,
+        issuer: ISSUER,
+        keys: [{ kid: signing.kid, jwk: signing.jwk }],
+      },
+    }),
+  });
+  check("a daemon holding a machine key dials in", await waitForTunnel(encrypted), true);
+
+  const seconds = Math.floor(Date.now() / 1000);
+  const bound = signToken(
+    {
+      iss: ISSUER,
+      sub: alice,
+      aud: encrypted,
+      jti: "t_channel",
+      iat: seconds,
+      nbf: seconds,
+      exp: seconds + 300,
+      scp: ["session:read"],
+      cnf: { jkt: jwkThumbprint(x25519Jwk(deviceStatic.publicKey)) },
+    },
+    signing.kid,
+    signing.privateKey,
+  );
+
+  const outcome = await new Promise<{ ready: boolean; carried: string }>((resolve) => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${relayPort}${RELAY_CHANNEL_PATH}?token=${encodeURIComponent(bound)}`,
+    );
+    const reader = new LengthReader();
+    const handshake = NoiseHandshake.start({
+      initiator: true,
+      staticKey: localStaticKey(deviceStatic.secretKey),
+      remoteStatic: machineStatic.publicKey,
+    });
+    let send: CipherState | null = null;
+    let receive: CipherState | null = null;
+    const seen: Buffer[] = [];
+    /*
+     * ⚠ **Both directions, and that is the whole of what makes this a measurement.**
+     *
+     * `seen` was appended only inside `ws.on("message")` — the daemon's half — while
+     * the capability travels the other way, on the first *transport* message this end
+     * writes. So the assertion below searched a buffer the capability could never have
+     * been in, however it was sent: it would have read exactly the same against an app
+     * that put the capability on the wire in cleartext. Recording what this end sends
+     * is what turns "the relay held none of it" from a shape into a fact.
+     */
+    const sendRecorded = (bytes: Uint8Array): void => {
+      seen.push(Buffer.from(bytes));
+      ws.send(bytes);
+    };
+    const give = (ready: boolean): void => {
+      ws.terminate();
+      resolve({ ready, carried: Buffer.concat(seen).toString("latin1") });
+    };
+    const timer = setTimeout(() => give(false), 8_000);
+    timer.unref();
+
+    ws.on("open", () => {
+      void handshake.writeMessage().then((first: Uint8Array) => sendRecorded(frameLength(first)));
+    });
+    ws.on("message", (data: Buffer) => {
+      seen.push(data);
+      for (const message of reader.push(new Uint8Array(data))) {
+        if (send === null) {
+          void handshake.readMessage(message).then(() => {
+            const transport = handshake.split();
+            send = transport.send;
+            receive = transport.receive;
+            // The capability rides the first *transport* message, after `ee`/`se`
+            // — never the handshake payload, which has no forward secrecy and is
+            // replayable verbatim.
+            sendRecorded(
+              frameLength(send.encrypt(new Uint8Array(0), encodeJsonFrame(FRAME.HELLO, { capability: bound }))),
+            );
+          });
+          continue;
+        }
+        try {
+          const frame = decodeFrame(receive!.decrypt(new Uint8Array(0), message));
+          if (frame?.type === FRAME.READY) {
+            clearTimeout(timer);
+            give(true);
+          }
+        } catch {
+          clearTimeout(timer);
+          give(false);
+        }
+      }
+    });
+    ws.on("unexpected-response", () => give(false));
+    ws.on("error", () => give(false));
+  });
+
+  report("a Noise handshake completes through the relay's splice", outcome.ready, "READY");
+  /*
+   * ⚠ **And the relay held none of it.** Every byte that crossed this socket is
+   * in `carried` — written as well as received, see `sendRecorded` — and the
+   * capability that opened the session — a JWS, which every one of them begins
+   * `eyJ` — is not among them. A relay compromised outright holds this and nothing
+   * more.
+   *
+   * The control below is not decoration. A search whose failure is the assertion
+   * proves nothing until the search has been shown capable of succeeding: this one
+   * was appended in one direction only for a release, and passed the whole time.
+   */
+  check(
+    "the search would find the capability if it were in the clear",
+    Buffer.from(bound, "utf8").toString("latin1").includes("eyJ"),
+    true,
+  );
+  check("and the capability it carried is not readable in what crossed", outcome.carried.includes("eyJ"), false);
+  report("in bytes this end wrote as well as bytes it read", outcome.carried.length > 0, `${outcome.carried.length} bytes`);
+
+  encryptedTunnel.stop();
 }
 
 /* ------------------------------------------------------------------ *
@@ -2004,7 +2769,7 @@ process.stdout.write("\nwhat a stream is stamped with\n");
   session.on("error", () => {});
 
   const held = new EndpointTunnel("m_stamp", Date.now(), NEGOTIATED, session, () => session.destroy());
-  const stream = held.open("u_someone");
+  const stream = held.open("u_someone", STREAM_ENCRYPTION_NOISE_IK);
   // Awaited on the stream's own response rather than on a sleep: an unref'd timer
   // lets the process exit before the assertion runs, which node reports as an
   // unsettled top-level await and which would otherwise be a check that never ran.
@@ -2703,12 +3468,304 @@ process.stdout.write("\nrouting a browser to the relay that holds the machine\n"
  * The control plane's own HTTP surface
  *
  * `createControlPlaneApp` returns a Hono app, and `app.request()` drives it
- * offline against the in-memory database this file already builds — no listener,
- * no sockets. Until now the entire `/v1` surface was reachable only by starting
- * the real server, so none of it had any coverage at all, including the routes
- * that decide a machine's routing policy and the single-use rule that stops two
- * daemons claiming one identity.
+ * against the in-memory database this file already builds, with no server of its
+ * own started for it. Until now the entire `/v1` surface was reachable only by
+ * starting the real server, so none of it had any coverage at all, including the
+ * routes that decide a machine's routing policy and the single-use rule that
+ * stops two daemons claiming one identity.
+ *
+ * Three blocks follow and only the last of them sends a request: the Authority
+ * ratchet and the gate's hand mirrors are source reads, because a rule about
+ * what may *exist* in this service cannot be asked of a running one — and the
+ * routes block reads `scripts/daemon.ts` for the neighbouring reason, that the
+ * caller it is about is a program no driver here imports.
+ *
+ * ⚠ **This header used to end "no listener, no sockets", and the socket half
+ * stopped being true.** The machine-key repair in the routes block dials the
+ * **live relay** this file already keeps on loopback — `tryTunnel` opens a real
+ * WebSocket against `relayPort` — on both sides of the clear, because the
+ * property that route exists to produce, *the next dial pins whatever it
+ * announces*, is visible in neither the `machines` row nor the response body.
+ * Recorded here rather than left to the block, so the next reader takes that
+ * socket for the measurement it is rather than a leftover from a section above.
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * The Authority boundary, as a ratchet
+ *
+ * This service is the **Authority**: it holds who somebody is, which devices
+ * they signed in from, which machines exist, who owns them and who may reach
+ * them. It holds none of the *work* — no agent, no session, no worktree, no
+ * prompt, no response, no diff, no shell. Those are the daemon's, on the
+ * machine they belong to, and `docs/AUTHORITY.md` is where that division is
+ * written down.
+ *
+ * ⚠ **Until now that division was true by accident.** Nothing stopped the next
+ * feature putting a transcript index here "just for the list", and the cost of
+ * finding out later is not a refactor — it is that a control-plane outage starts
+ * taking work with it, and that the fleet's signing key sits in the same process
+ * as somebody's source. Both halves below are ratchets: they compare against what
+ * the tree already is, so the day somebody widens either, the widening is the
+ * diff rather than a discovery.
+ *
+ * Neither is a security boundary, and neither pretends to be — `plugins.md` says
+ * the same thing about `manifest.scopes`. What they buy is that the shape stays
+ * legible, which for a division of responsibility is the whole of what a check
+ * can buy.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nwhat the Authority may reach\n");
+{
+  /*
+   * **Half one: what it imports.**
+   *
+   * Measured: `packages/control-plane/src/**` reaches the repository root for
+   * exactly five files, all of them wire vocabulary. The same five are the ones
+   * `deploy/docker/Dockerfile` COPYs into the runtime stage — which is what keeps
+   * these two lists from drifting apart, and why a sixth import is a change to
+   * both or an image that fails at runtime inside a container.
+   *
+   * What the allowlist refuses by construction is anything under `src/session`,
+   * `src/registry`, `src/acp/` or `src/runtime/`: the modules that *are* the work.
+   */
+  const ALLOWED = ["src/auth.js", "src/cors.js", "src/http.js", "src/relay/protocol.js", "src/token.js"];
+
+  const cpSrc = new URL("../packages/control-plane/src/", import.meta.url);
+  const walk = (dir: URL): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) out.push(...walk(new URL(`${entry.name}/`, dir)));
+      else if (entry.name.endsWith(".ts")) out.push(readFileSync(new URL(entry.name, dir), "utf8"));
+    }
+    return out;
+  };
+  const sources = walk(cpSrc);
+  report("there are sources to sweep at all", sources.length > 5, `${String(sources.length)} files`);
+
+  // Any relative import climbing out of `packages/control-plane`, however many
+  // `../` it takes — the count differs between `src/` and `src/relay/`, so
+  // matching a fixed depth would silently skip half the tree.
+  const reached = [
+    ...new Set(
+      sources.flatMap((text) => [...text.matchAll(/from "(?:\.\.\/)+(src\/[^"]+)"/g)].map((m) => m[1] ?? "")),
+    ),
+  ].sort();
+  report("and imports that climb out were found", reached.length > 0, reached.join(", "));
+  check("the Authority reaches exactly the wire vocabulary and nothing else", reached, ALLOWED);
+  /*
+   * And the negative control, because "the list matches" passes trivially if the
+   * reader sees nothing: a module that genuinely is the work must not be in it.
+   */
+  check(
+    "nothing it imports is a session, a registry, an agent or a runtime",
+    reached.filter((path) => /^src\/(session|registry|acp\/|runtime\/)/.test(path)),
+    [],
+  );
+
+  /*
+   * **Half two: what it answers.**
+   *
+   * A route path is the other way a responsibility arrives — a
+   * `GET /v1/sessions` here would be the same mistake wearing an HTTP verb, and
+   * it would read as convenient right up until somebody's prompt was in this
+   * database. Read off `app.ts`'s own registrations, which is the list
+   * `docs/API.md` describes and `docscheck` counts.
+   */
+  const appTs = readFileSync(new URL("../packages/control-plane/src/app.ts", import.meta.url), "utf8");
+  const paths = [
+    ...new Set([...appTs.matchAll(/^\s*app\.(?:get|post|put|patch|delete)\("([^"]+)"/gm)].map((m) => m[1] ?? "")),
+  ];
+  report("the route table was readable", paths.length > 20, `${String(paths.length)} routes`);
+  check(
+    "no route here names an agent's work",
+    // Sorted, so the assertion is about the *set* rather than about the order
+    // `app.ts` happens to register them in — which is a fact about the gate's
+    // positional rule and has nothing to do with this question.
+    paths.filter((path) => /\/(sessions?|prompts?|agents?|worktrees?|files?|diffs?|events?)(\/|$)/.test(path)).sort(),
+    [
+      /*
+       * ⚠ **The four `/v1/me/sessions` routes are the exception and are named
+       * rather than pattern-matched around.** A *sign-in* is this service's
+       * business — it is a credential with an expiry, which is the thing this
+       * service exists to issue — and it collides with the daemon's *agent
+       * session* on one English word and nothing else. Listing them here rather
+       * than loosening the pattern is what keeps `/v1/sessions` refused: the
+       * exemption is four strings somebody would have to add to.
+       */
+      "/v1/me/sessions",
+      "/v1/me/sessions/:id",
+      "/v1/me/sessions/current",
+    ],
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * The gate's addresses, as a hand mirror
+ *
+ * `app.ts` decides which paths a browser may be served a page at, and the list
+ * is a **copy** of the client's own two tables — `GATE_SCREENS` in
+ * `packages/web/src/gate.ts` and `LEGAL_DOCS` in `packages/web/src/legal.ts` —
+ * plus one value that is a copy in the other direction: the handoff, which
+ * `app.ts` owns as `APP_HANDOFF_PATH` and `GateCard.tsx` re-spells as
+ * `HANDOFF_PATH` because every control on every gate screen navigates to it.
+ * Three hand mirrors, all of them read off disk here.
+ * They have to be copies: two packages, two tsconfigs, and the runtime image
+ * carries no web `src` at all, which is `wire.ts`'s situation pointing the other
+ * way and is solved the same way — copy by hand, and have a driver read both
+ * sides off disk.
+ *
+ * ⚠ **A path missing from the server's list is a dead link in an email.** The
+ * route answers the JSON envelope, and somebody who clicked "confirm your
+ * account" sees `{"error":…}` — with sign-up and password recovery both
+ * dead-ended, since `POST /v1/forgot` is the only remedy this service has for a
+ * forgotten password and an account does not exist until `/confirm` is opened.
+ * That asymmetry is why this is checked in one direction more loudly than the
+ * other: an *extra* path here costs somebody landing on the handoff page.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe gate's addresses, on both sides\n");
+{
+  const appSource = readFileSync(new URL("../packages/control-plane/src/app.ts", import.meta.url), "utf8");
+  const clientList = (file: string, name: string): string[] => {
+    const text = readFileSync(new URL(`../packages/web/src/${file}`, import.meta.url), "utf8");
+    const found = new RegExp(`${name}[^=]*=\\s*\\[([^\\]]*)\\]`).exec(text)?.[1] ?? "";
+    return [...found.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").sort();
+  };
+  const serverList = (name: string): string[] => {
+    const found = new RegExp(`const ${name} = \\[([^\\]]*)\\]`).exec(appSource)?.[1] ?? "";
+    return [...found.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").sort();
+  };
+
+  const screensClient = clientList("gate.ts", "GATE_SCREENS");
+  const screensServer = serverList("GATE_SCREEN_PATHS");
+  report("both sides of the screen list were read", screensClient.length > 0 && screensServer.length > 0, screensClient.join(","));
+  check("every gate screen the client can draw is a path the server serves", screensServer, screensClient);
+
+  const docsClient = clientList("legal.ts", "LEGAL_DOCS");
+  const docsServer = serverList("LEGAL_DOC_PATHS");
+  report("and both sides of the document list", docsClient.length > 0 && docsServer.length > 0, docsClient.join(","));
+  check("every legal document likewise", docsServer, docsClient);
+
+  /*
+   * And the handoff, which is the server's own address rather than a mirror —
+   * asserted to *exist*, to be outside both lists (a value that collided with a
+   * gate screen would shadow it), to be the address the client spells in its own
+   * constant, and to be reached *through* that constant at every way off a gate
+   * screen rather than written inline at any of them.
+   *
+   * That last clause is narrower than it sounds, and what is written here is
+   * exactly what is checked: no `navigate()` call is followed anywhere, nothing
+   * knows where a control renders, and the sentence this docblock used to carry —
+   * “the address the client's own controls actually navigate to” — claimed both.
+   * What is read is that every destination in `packages/web/src/ui/gate/` is an
+   * *identifier* and that `HANDOFF_PATH` is among them.
+   */
+  const handoff = /const APP_HANDOFF_PATH = "([^"]+)"/.exec(appSource)?.[1] ?? "";
+  report("the handoff has an address", handoff.length > 0, `/${handoff}`);
+  check("which is neither a screen nor a document", [...screensClient, ...docsClient].includes(handoff), false);
+
+  /*
+   * ⚠ **And the client's spelling of it, which was the half nothing compared.**
+   *
+   * `GateCard.tsx` exports `HANDOFF_PATH` and every control on every gate screen
+   * navigates to it; `app.ts` holds `APP_HANDOFF_PATH` and prefixes the slash when
+   * it builds the closed served list. Two packages that may not import one
+   * another, so it is a hand mirror exactly like the two lists above — and until
+   * now it was mirrored in one direction only: the server's value was read here
+   * and the client's was not. A rename on the server side therefore left every
+   * gate footer and every flow-completion control pointing at a path this service
+   * answers with raw `{"error":{"code":"not_found"}}`. That is not hypothetical —
+   * it is the bug this literal was introduced to fix, where those controls
+   * navigated to `/`, which is the one address here the control plane deliberately
+   * refuses.
+   *
+   * ⚠ **Both halves missing must not read as agreement.** The tempting form of
+   * this check compares the two captures directly, and that passes loudest exactly
+   * when it has measured nothing: rename both constants and `"" === ""`. Comparing
+   * the client's capture against ``/${handoff}`` cannot go quiet that way — a
+   * double miss is `""` against `"/"`, which fails.
+   *
+   * Read with comments stripped, which is a precaution rather than a fix for
+   * anything happening today. This constant carries a forty-line docblock that
+   * names `APP_HANDOFF_PATH`, quotes `/app` in prose, and describes the very check
+   * being added here; `APP_HANDOFF_PATH` also *contains* `HANDOFF_PATH` as a
+   * substring. The anchor below (`const HANDOFF_PATH = "…"`) misses all of that as
+   * it stands, and stripping first is what keeps that true of whatever gets
+   * written there next — this repository has already shipped an assertion that
+   * matched the docblock four lines above the code it meant to read.
+   */
+  const cardSource = readFileSync(new URL("../packages/web/src/ui/gate/GateCard.tsx", import.meta.url), "utf8");
+  const cardCode = cardSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const clientHandoff = /const HANDOFF_PATH = "([^"]+)"/.exec(cardCode)?.[1] ?? "";
+  report("the client names the handoff too", clientHandoff.length > 0, clientHandoff);
+  check("and it is the server's address with the slash the server adds", clientHandoff, `/${handoff}`);
+
+  /*
+   * ⭐ **And that the constant is what the gate's ways off a screen reach for**,
+   * which the comparison above cannot show. A footer can keep `HANDOFF_PATH`
+   * exported, agree with the server about its value, and still navigate to a
+   * literal of its own — and that is not hypothetical, it is the exact shape of
+   * the bug the constant was introduced to fix, where every way off a gate screen
+   * was `navigate("/", true)` and `/` is the one address this service refuses.
+   *
+   * A shape rather than a call list, on purpose. Pinning *which* destinations
+   * exist would refuse a legitimate new screen; refusing a destination written as
+   * a string or a template refuses only what shipped. The two halves are
+   * complements and neither subsumes the other: renaming `APP_HANDOFF_PATH`'s
+   * value on the server alone leaves every destination an identifier and trips
+   * only the check above, while a footer that goes back to a literal leaves both
+   * constants agreeing and trips only this one.
+   *
+   * ⚠ **The parsed-against-raw equality is the non-vacuity guard and is
+   * deliberately not a floor.** A reader that quietly stops matching one file does
+   * not *lower* a count — it fails to raise one — so a floor here would be
+   * structurally incapable of noticing, which is how a sweep in this tree came to
+   * cover 8 of 20 items while staying green. Two independent regexes over the same
+   * stripped text have to agree instead.
+   *
+   * Comment-stripped is load-bearing rather than a precaution: `GateCard.tsx`
+   * quotes `navigate("/", true)` in the docblock explaining the fix, so the raw
+   * source contains the one destination this block exists to refuse.
+   *
+   * The destination regex reads one level of nesting poorly — `navigate(f(a, b))`
+   * captures `f(a` — which costs a literal test it never had rather than creating
+   * a false pass, and the equality keeps a total miss loud.
+   *
+   * `webcheck` sweeps the same directory for the *second* argument, that every
+   * navigation out of a gate screen replaces rather than pushes. It says nothing
+   * about where they go, which is the half that has to be compared against the
+   * server and therefore has to be here.
+   */
+  const gateDir = new URL("../packages/web/src/ui/gate/", import.meta.url);
+  let gateFiles: string[] = [];
+  try {
+    gateFiles = readdirSync(gateDir)
+      .filter((file) => /\.tsx?$/.test(file))
+      .sort();
+  } catch {
+    // The gate moving has to be loud, but not by killing a run this far from
+    // its subject: `readdirSync` throws rather than answering empty, and this
+    // driver is mostly about the relay. Left empty, the `report` below fails in
+    // place and the file's remaining assertions still get to say what they found.
+  }
+  let navCalls = 0;
+  const destinations: string[] = [];
+  for (const entry of gateFiles) {
+    const code = readFileSync(new URL(entry, gateDir), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    navCalls += (code.match(/navigate\(/g) ?? []).length;
+    destinations.push(...[...code.matchAll(/navigate\(\s*([^,)]+)/g)].map((found) => (found[1] ?? "").trim()));
+  }
+  report("the gate's ways off a screen were read", destinations.length > 0, destinations.join(", "));
+  check("every navigation in the gate had its destination parsed", destinations.length, navCalls);
+  check(
+    "none of them writes an address inline instead of naming it",
+    destinations.filter((where) => /^["'`]/.test(where)),
+    [],
+  );
+  check("and the handoff is reached through the constant just compared", destinations.includes("HANDOFF_PATH"), true);
+}
 
 process.stdout.write("\nthe control plane's routes\n");
 {
@@ -2812,6 +3869,233 @@ process.stdout.write("\nthe control plane's routes\n");
   );
   check("and a third is refused too", (await redeem()).status, 409);
 
+  /*
+   * ⚠ **The machine key, through the route rather than through the function.**
+   *
+   * `machinekeys.ts` argues trust-on-first-use on the grounds that "re-enrollment
+   * is the way back" from a pinned key that no longer matches. That story has one
+   * moving part — `POST /v1/enroll` reading `machineKey` off the body — and it was
+   * asserted nowhere: the only check on it called `setMachineKey(db, id, key)`
+   * directly, which tests the function and would stay green with the route's
+   * `if (announcedKey !== null) setMachineKey(...)` deleted outright, and green
+   * while the daemon posted `{ code }` alone. Which it did, for a release: the
+   * re-pin was unreachable in production and a daemon that lost its database was
+   * refused at every dial, for ever, with no `cpctl` verb able to clear the pin.
+   *
+   * So this drives the door a daemon actually walks through, on a machine of its
+   * own — redeeming retires the tunnel credential, which is why `m_enroll` exists
+   * one block up rather than reusing a machine a later section dials on.
+   */
+  {
+    const rekeyed = addMachine("m_rekey");
+    const announced = "R".repeat(MAX_MACHINE_KEY_CHARS);
+    const codeFor = async (): Promise<string> =>
+      (
+        (await (
+          await app.request(`/v1/admin/machines/${rekeyed}/enrollments`, { method: "POST", headers: admin })
+        ).json()) as { code: string }
+      ).code;
+    const enrollWith = async (body: Record<string, unknown>): Promise<number> =>
+      (
+        await app.request("/v1/enroll", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      ).status;
+
+    check("a machine starts with no pinned key", machineKeyFor(db, rekeyed), null);
+    check("redeeming a code that announces one records it", await enrollWith({ code: await codeFor(), machineKey: announced }), 200);
+    check("and the key the route pinned is the one that was announced", machineKeyFor(db, rekeyed), announced);
+
+    /*
+     * The replacement half, which is the whole point: a dial refuses a different
+     * key and enrollment is the one door that may overwrite. A machine starting
+     * over generates a new key and redeems a fresh code with it.
+     */
+    const restarted = "S".repeat(MAX_MACHINE_KEY_CHARS);
+    check("re-enrolling with a different key replaces the pin", await enrollWith({ code: await codeFor(), machineKey: restarted }), 200);
+    check("which is what makes a lost database recoverable", machineKeyFor(db, rekeyed), restarted);
+
+    /*
+     * And the negative, without which the two above pass for a route that pins
+     * whatever it likes: a redemption that announces nothing leaves the pin alone
+     * rather than clearing it. An older daemon still enrolls, and keeps its key.
+     */
+    check("a redemption that announces no key is still accepted", await enrollWith({ code: await codeFor() }), 200);
+    check("and leaves the pin exactly as it was", machineKeyFor(db, rekeyed), restarted);
+  }
+
+  /*
+   * ⚠ **And the daemon's own half, read off the source.**
+   *
+   * Everything above is about the route. `scripts/daemon.ts` holds the only
+   * `enroll()` call site in the tree and is imported by no driver — it starts a
+   * daemon — so the one thing that would make all six assertions above describe a
+   * door nobody walks through is invisible to every executable check here. It is a
+   * source read for the same reason `daemoncheck.announce.ts` reads that file.
+   */
+  {
+    const daemonSrc = readFileSync(new URL("../scripts/daemon.ts", import.meta.url), "utf8");
+    const call = /await enroll\(\{([^}]*)\}\)/.exec(daemonSrc);
+    report("the daemon's enroll call was found to read", call !== null, call === null ? "not found" : call[1]!.trim());
+    check("and it announces the machine key it just ensured", /machineKey:\s*machineKey\.publicKey/.test(call?.[1] ?? ""), true);
+  }
+
+  /*
+   * ⚠ **`DELETE /v1/admin/machines/:id/machine-key`, which had no coverage at all.**
+   *
+   * The block above is the *other* remedy and it reaches only a daemon new enough
+   * to send its key with the code. Every daemon already in the field announces its
+   * key on the dial alone, so for those machines this route is the whole of the way
+   * back and the alternative it replaces is editing this service's SQLite by hand.
+   * `cpctl admin clearkey` prints its response fields verbatim and branches its
+   * entire output on `cleared`, and none of that was measured anywhere in the tree.
+   *
+   * Driven through the **relay** on both sides of the clear rather than through the
+   * route alone, because the property this route exists to produce — *the next dial
+   * pins whatever it announces* — is not visible in the `machines` row and not
+   * visible in the response. The 409 before the clear is the negative control:
+   * without it, `"connected"` afterwards is satisfied by a relay that refuses
+   * nothing, which is the shape of every assertion this repository has shipped
+   * green because it could not fail.
+   *
+   * A machine of its own, and enrolled rather than `setMachineKey`'d, for the
+   * reason `m_enroll` exists one block up: redeeming a code retires the machine's
+   * live tunnel credential, so the credential dialled with here has to be the one
+   * the enrollment answered rather than one minted before it.
+   */
+  {
+    const clearable = addMachine("m_clearpin");
+    const dialVersion = String(RELAY_PROTOCOL_VERSION);
+    const pinned = "C".repeat(MAX_MACHINE_KEY_CHARS);
+    const restarted = "D".repeat(MAX_MACHINE_KEY_CHARS);
+    const outcome = async (response: Response): Promise<[number, string]> => [
+      response.status,
+      ((await response.json()) as { error?: { code?: string } }).error?.code ?? "ok",
+    ];
+    const clearKey = (machineId: string, headers: Record<string, string>): Promise<Response> =>
+      Promise.resolve(app.request(`/v1/admin/machines/${machineId}/machine-key`, { method: "DELETE", headers }));
+
+    const enrollmentCode = (
+      (await (
+        await app.request(`/v1/admin/machines/${clearable}/enrollments`, { method: "POST", headers: admin })
+      ).json()) as { code: string }
+    ).code;
+    const enrolled = (await (
+      await app.request("/v1/enroll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: enrollmentCode, machineKey: pinned }),
+      })
+    ).json()) as { tunnelKey: string };
+    check("the machine this route repairs starts out pinned", machineKeyFor(db, clearable), pinned);
+
+    /*
+     * The state the route exists for, reproduced rather than assumed: a host whose
+     * `~/.reemoat` is gone generates a new static, and from there every dial is a
+     * 409 that no backoff can outlast — the daemon regenerates nothing and this
+     * service adopts nothing.
+     */
+    check(
+      "a daemon announcing a different key is stuck at 409",
+      await tryTunnel(enrolled.tunnelKey, dialVersion, restarted),
+      409,
+    );
+
+    /*
+     * Every refusal first, so each one is measured against a pin that is still
+     * there. A refusal that cleared something on its way out is the worst defect
+     * available to a route whose whole job is clearing, and it is invisible to a
+     * check that reads only the status.
+     */
+    const bystander = newApiKey();
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, 'u_alice', ?, ?, ?)").run(
+      newId("ak"),
+      bystander.prefix,
+      bystander.hash,
+      now,
+    );
+    check(
+      "somebody who is not an admin cannot clear a pin",
+      await outcome(await clearKey(clearable, { authorization: `Bearer ${bystander.key}` })),
+      [403, "forbidden"],
+    );
+    /*
+     * With an id that does not exist, deliberately: a 401 here says the credential
+     * gate stands *ahead of* the lookup, so an anonymous caller cannot use this
+     * route to learn which machine ids are real.
+     */
+    check("and an unauthenticated caller is refused before the machine is looked up", (await clearKey("m_nope", {})).status, 401);
+    check("an unknown machine is a 404 here too", await outcome(await clearKey("m_nope", admin)), [404, "machine_not_found"]);
+    check("and none of those refusals moved the pin", machineKeyFor(db, clearable), pinned);
+
+    /*
+     * A revoked machine is refused rather than quietly succeeding at nothing,
+     * mirroring the enrollment mint above: a revoked machine dials nothing, so
+     * there is no pin for it to repair and the honest answer names the state.
+     *
+     * Its own machine, and left revoked for good rather than un-revoked afterwards:
+     * nothing below resolves this id, so there is nothing for it to come back for.
+     * Revoking a machine another section rides is the mistake `m_enroll` was minted
+     * one block up to avoid.
+     */
+    const revoked = addMachine("m_clearpin_revoked");
+    setMachineKey(db, revoked, pinned);
+    db.prepare("UPDATE machines SET revoked_at = ? WHERE id = ?").run(now, revoked);
+    check("a revoked machine is refused", await outcome(await clearKey(revoked, admin)), [403, "machine_revoked"]);
+    check("and keeps whatever was pinned for it", machineKeyFor(db, revoked), pinned);
+
+    /*
+     * The body compared whole rather than field by field.
+     *
+     * `previousKey` is the only moment anybody can write down what *was* pinned —
+     * nothing else in this service ever reports one, and `cpctl` prints it as the
+     * operator's single chance at a record — so a field quietly dropped has to fail
+     * here rather than read as an `undefined` nobody compared. And it is compared
+     * by **value**: reading the column *after* the UPDATE answers `null` every
+     * time, which is why the route reads before it writes and says so, and which a
+     * shape check would wave straight through.
+     */
+    const cleared = await clearKey(clearable, admin);
+    check("clearing answers 200", cleared.status, 200);
+    check("with the machine, the fact, and the key that was there", await cleared.json(), {
+      machineId: clearable,
+      cleared: true,
+      previousKey: pinned,
+    });
+    check("and the row now holds no pin", machineKeyFor(db, clearable), null);
+
+    /*
+     * Idempotent, and `cleared` is the field that says which it was. The route puts
+     * that in prose — "an operator asking for this machine to have no pin got what
+     * they asked for whether or not a row changed" — and nothing checked it, while
+     * `cpctl admin clearkey` prints a different sentence on each branch of this one
+     * boolean. Turning the second attempt into a 404 would be a repair tool
+     * reporting failure at the moment it has nothing left to do.
+     */
+    const again = await clearKey(clearable, admin);
+    check("clearing again is not an error", again.status, 200);
+    check("and says plainly that nothing changed", await again.json(), {
+      machineId: clearable,
+      cleared: false,
+      previousKey: null,
+    });
+
+    /*
+     * ⭐ **The property the route exists to produce**, and the half no row read and
+     * no response body can show: the very dial that was refused at the top of this
+     * block now connects, and what it announced is what got pinned. Trust on first
+     * use, re-opened for exactly one machine.
+     */
+    check(
+      "the dial that was stuck now connects",
+      await tryTunnel(enrolled.tunnelKey, dialVersion, restarted),
+      "connected",
+    );
+    check("and the key it announced is the new pin", machineKeyFor(db, clearable), restarted);
+  }
+
   // `/v1/jwks` publishes public keys and is deliberately unauthenticated.
   const jwks = (await (await app.request("/v1/jwks")).json()) as { keys: { kid: string; jwk: unknown }[] };
   report("jwks publishes the active key", jwks.keys.some((k) => k.kid === signing.kid), `${jwks.keys.length} key(s)`);
@@ -2834,9 +4118,12 @@ process.stdout.write("\nthe control plane's routes\n");
 /* ------------------------------------------------------------------ *
  * Signing in, sessions, passwords and machines somebody owns
  *
- * Same technique as the section above — `createControlPlaneApp` driven through
- * `app.request()` against the in-memory database, no listener and no sockets —
- * for the surface that decides who anybody is.
+ * `createControlPlaneApp` driven through `app.request()` against the in-memory
+ * database, with no listener and no sockets of its own — the section above's
+ * technique minus the one departure recorded in its header, since nothing here
+ * dials the relay — for the surface that decides who anybody is. Source is still
+ * read off disk in one place below, as it is up there: `app.request()` is about
+ * where the *requests* go, never about what may be opened with `readFileSync`.
  *
  * **This section is slower than the rest of this file put together**, by design:
  * roughly forty scrypt operations at ~50ms each. That is the KDF doing its job,
@@ -4789,14 +6076,20 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
   const listedAt = (userId: string, sessionId: string, at: number): boolean =>
     listSessions(db, userId, at).some((row) => row.id === sessionId);
   {
-    const absolute = mintSession(db, sleeper, anonymous, T0);
+    const absolute = mintSession(db, sleeper, anonymous, null, T0);
     // `last_seen_at` moved forward so the idle arm cannot fire first and the
     // absolute one is what is being read. Both answer `expired`, and they are
     // separately reachable — which is why both are driven rather than one.
     db.prepare("UPDATE user_sessions SET last_seen_at = ? WHERE id = ?").run(T0 + SESSION_TTL_MS, absolute.id);
     check("a session resolves while it is live", resolveSession(db, absolute.token, T0), {
       ok: true,
-      session: { id: absolute.id, userId: sleeper },
+      // `deviceId: null` rather than an absent key, and the difference is the
+      // assertion: this is a session minted with no installation — a browser, a
+      // mailed link, or a row from before `devices` existed — and the resolver
+      // has to say so rather than leave the caller to guess. `callerAuth` copies
+      // it onto `Caller`, where a missing field would read as "no device" for a
+      // session that has one.
+      session: { id: absolute.id, userId: sleeper, deviceId: null },
     });
     check("and is expired past its absolute TTL", resolveSession(db, absolute.token, T0 + SESSION_TTL_MS + 1), {
       ok: false,
@@ -4805,7 +6098,7 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
     check("the listing drops it too", [listedAt(sleeper, absolute.id, T0), listedAt(sleeper, absolute.id, T0 + SESSION_TTL_MS + 1)], [true, false]);
   }
   {
-    const idle = mintSession(db, sleeper, anonymous, T0);
+    const idle = mintSession(db, sleeper, anonymous, null, T0);
     /*
      * The idle arm alone: still inside the thirty days, unused for more than the
      * fourteen. This is the one the SQL cannot answer — `listSessions` filters
@@ -4831,12 +6124,12 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
    * fourteen-day-old tab in a loop it cannot explain.
    */
   {
-    const stale = mintSession(db, sleeper, anonymous);
+    const stale = mintSession(db, sleeper, anonymous, null);
     db.prepare("UPDATE user_sessions SET expires_at = ? WHERE id = ?").run(Date.now() - 1, stale.id);
     check("an expired session is a 401 the client can act on", await outcome(await send("/v1/me", { headers: bearer(stale.token) })), [401, "session_expired"]);
   }
   {
-    const forgotten = mintSession(db, sleeper, anonymous);
+    const forgotten = mintSession(db, sleeper, anonymous, null);
     db.prepare("UPDATE user_sessions SET last_seen_at = ? WHERE id = ?").run(Date.now() - SESSION_IDLE_MS - 1, forgotten.id);
     check("and so is one nobody has used for a fortnight", await outcome(await send("/v1/me", { headers: bearer(forgotten.token) })), [401, "session_expired"]);
   }
@@ -4852,7 +6145,7 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
     // Distinct `now` per mint, so `ORDER BY created_at DESC` has no ties to
     // resolve — the direction being asserted is the whole point and a tie would
     // make it luck.
-    const tokens = Array.from({ length: MAX_SESSIONS_PER_USER + 2 }, (_, i) => mintSession(db, crowded, anonymous, T0 + i));
+    const tokens = Array.from({ length: MAX_SESSIONS_PER_USER + 2 }, (_, i) => mintSession(db, crowded, anonymous, null, T0 + i));
     const live = Number(
       db.prepare("SELECT COUNT(*) AS n FROM user_sessions WHERE user_id = ? AND revoked_at IS NULL").get(crowded)?.["n"] ?? 0,
     );
@@ -4880,7 +6173,7 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
      * relay tunnel, against a database running `synchronous = FULL` — an fsync
      * per request, to record something nothing authenticates against.
      */
-    const touched = mintSession(db, sleeper, anonymous, T0);
+    const touched = mintSession(db, sleeper, anonymous, null, T0);
     const lastSeen = (): number =>
       Number(db.prepare("SELECT last_seen_at FROM user_sessions WHERE id = ?").get(touched.id)?.["last_seen_at"] ?? -1);
     check("a session starts marked as seen now", lastSeen(), T0);
@@ -4897,9 +6190,9 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
   {
     const holder = newId("u");
     db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, 'holder', 0, ?)").run(holder, now);
-    const first = mintSession(db, holder, anonymous);
-    const second = mintSession(db, holder, anonymous);
-    const third = mintSession(db, holder, anonymous);
+    const first = mintSession(db, holder, anonymous, null);
+    const second = mintSession(db, holder, anonymous, null);
+    const third = mintSession(db, holder, anonymous, null);
 
     const one = (await (await send(`/v1/me/sessions/${second.id}`, { method: "DELETE", headers: bearer(first.token) })).json()) as Record<string, unknown>;
     check("signing one device out answers a boolean", one, { revoked: true });
@@ -4920,12 +6213,701 @@ process.stdout.write("\nsessions: expiry, the cap, and last_seen\n");
 }
 
 /* ------------------------------------------------------------------ *
+ * Devices: one installation retired without touching the others
+ *
+ * The feature this section exists for is a single sentence — *revoke Rina's
+ * iPhone and leave her MacBook alone* — and almost everything below is about the
+ * ways that sentence can be true while something else is quietly broken.
+ *
+ * Four of these assertions have a specific defect behind them rather than a
+ * requirement:
+ *
+ *   - **Session revocation still bites on a session that has a live device.**
+ *     The obvious implementation joins `devices` onto `resolveSession`'s cached
+ *     statement, which selects unqualified and reads by bare key — so
+ *     `row["revoked_at"]` becomes the *device's*, NULL for a live device, and
+ *     every session revocation in the service silently stops working while
+ *     every other assertion here still passes. Measured against `node:sqlite`:
+ *     `SELECT s.*, d.revoked_at …` returns `revoked_at: null` for a session row
+ *     whose own value is set. This is the assertion that fails when somebody
+ *     "simplifies" the second statement away.
+ *   - **A revoked id on `POST /v1/login` registers a fresh device.** Answering
+ *     an error instead closes a loop with no exit: the client keeps the id it
+ *     was given, signs in, is refused on its next request, signs out, and
+ *     arrives back with the same id for ever.
+ *   - **Another account's device id is ignored on login and 404s on delete.**
+ *     A device id is a short opaque string a client chooses to send; without the
+ *     owner clause on both, one account can bind to another's row (and then be
+ *     signed out at will by its owner) or revoke a stranger's laptop outright.
+ *   - **The cap refuses rather than evicting.** Eviction would let anybody
+ *     holding one live session sign every real device of the owner out.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\ndevices, and retiring one\n");
+{
+  const app = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry });
+  const send = (path: string, init: RequestInit = {}): Promise<Response> => Promise.resolve(app.request(path, init));
+  const bearer = (token: string): Record<string, string> => ({
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+  });
+  const json = async (response: Response): Promise<Record<string, unknown>> =>
+    (await response.json()) as Record<string, unknown>;
+  const outcome = async (response: Response): Promise<[number, string]> => [
+    response.status,
+    ((await response.json()) as { error?: { code?: string } }).error?.code ?? "ok",
+  ];
+
+  /*
+   * A password this section can sign in with. `POST /v1/login` is the only route
+   * that carries a device at mint, so it has to be driven for real rather than
+   * through `mintSession` — the binding happens inside the route.
+   */
+  const PASSWORD = "device-section-password";
+  const hash = await hashPassword(PASSWORD, "authenticated");
+  const signUp = (name: string): string => {
+    const id = newId("u");
+    db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, ?, 0, ?)").run(id, name, now);
+    db.prepare("INSERT INTO user_passwords (user_id, hash, updated_at) VALUES (?, ?, ?)").run(id, hash, now);
+    return id;
+  };
+  /*
+   * `publicKey` is optional here for the same reason it is optional on the wire:
+   * most of this section is about *which row* a sign-in binds, and only the
+   * strictness block at the end is about what a key has to look like.
+   */
+  const signIn = async (
+    name: string,
+    device?: { id?: string; name: string; platform: string; publicKey?: string },
+  ): Promise<Record<string, unknown>> =>
+    json(
+      await send("/v1/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(device === undefined ? { name, password: PASSWORD } : { name, password: PASSWORD, device }),
+      }),
+    );
+
+  const rina = signUp("rina-devices");
+
+  /* -- two installations, one account ------------------------------------ */
+
+  const macbook = await signIn("rina-devices", { name: "MacBook Pro", platform: "macos" });
+  check("signing in with a device answers the id it bound", typeof macbook["deviceId"], "string");
+  const macbookId = String(macbook["deviceId"]);
+  const macbookToken = String(macbook["token"]);
+
+  const iphone = await signIn("rina-devices", { name: "iPhone", platform: "ios" });
+  const iphoneId = String(iphone["deviceId"]);
+  const iphoneToken = String(iphone["token"]);
+  check("a second sign-in from a different installation is a different device", macbookId !== iphoneId, true);
+
+  const listed = async (token: string): Promise<{ id: string; name: string; platform: string; revokedAt: number | null; current: boolean }[]> => {
+    const body = await json(await send("/v1/me/devices", { headers: bearer(token) }));
+    return body["devices"] as { id: string; name: string; platform: string; revokedAt: number | null; current: boolean }[];
+  };
+  check(
+    "both are listed, newest first",
+    (await listed(macbookToken)).map((row) => row.name),
+    ["iPhone", "MacBook Pro"],
+  );
+  check(
+    "and the row this request came through says so",
+    (await listed(macbookToken)).filter((row) => row.current).map((row) => row.name),
+    ["MacBook Pro"],
+  );
+
+  /*
+   * Adoption: the same id offered again is the same row, not a second one. This
+   * is what the app does on every start, so a client that registered once and
+   * then re-presented its id must not grow the list by one per launch.
+   */
+  const again = await signIn("rina-devices", { id: macbookId, name: "MacBook Pro", platform: "macos" });
+  check("offering an id already held adopts it rather than registering again", again["deviceId"], macbookId);
+  check("so the list has not grown", (await listed(macbookToken)).length, 2);
+
+  /* -- a sign-in that names no device ------------------------------------ */
+
+  const bare = await signIn("rina-devices");
+  check("a sign-in naming no device binds none", bare["deviceId"], null);
+  check("and still works", typeof bare["token"], "string");
+  check("and did not invent a row", (await listed(macbookToken)).length, 2);
+
+  /* -- the sentence this whole feature is bought for ---------------------- */
+
+  const revoked = await json(await send(`/v1/me/devices/${iphoneId}`, { method: "DELETE", headers: bearer(macbookToken) }));
+  check("retiring one device answers what it ended", revoked, { revoked: true, sessionsRevoked: 1 });
+  check(
+    "⭐ the other device's session is untouched",
+    (await send("/v1/me", { headers: bearer(macbookToken) })).status,
+    200,
+  );
+  check(
+    "and the retired one's session is refused, by its own code",
+    await outcome(await send("/v1/me", { headers: bearer(iphoneToken) })),
+    [401, "device_revoked"],
+  );
+  check(
+    "a retired device is still listed, with the date it was retired",
+    (await listed(macbookToken)).filter((row) => row.id === iphoneId).map((row) => row.revokedAt !== null),
+    [true],
+  );
+
+  /* -- ⭐ the aliasing trap ----------------------------------------------- */
+
+  {
+    /*
+     * The assertion that is green either way unless it is written down.
+     *
+     * A session with a **live** device, revoked the ordinary way. With the
+     * device check as a second statement this is unremarkable; with it folded
+     * into `resolveSession`'s own query as a join, `row["revoked_at"]` answers
+     * about the device — which is `null` here — and this is the only thing in
+     * the file that notices that every session revocation in the service has
+     * stopped working.
+     */
+    const live = await signIn("rina-devices", { name: "Desk", platform: "linux" });
+    const token = String(live["token"]);
+    check("a session on a live device resolves", (await send("/v1/me", { headers: bearer(token) })).status, 200);
+    revokeSession(db, String(live["sessionId"]));
+    check(
+      "⭐ and session revocation still bites on it — the join that would break this is why there are two statements",
+      await outcome(await send("/v1/me", { headers: bearer(token) })),
+      [401, "session_revoked"],
+    );
+    check(
+      "while its device is untouched, because a session is not the installation",
+      (await listed(macbookToken)).filter((row) => row.name === "Desk").map((row) => row.revokedAt),
+      [null],
+    );
+  }
+
+  /* -- ⭐ a retired id must not close a loop ------------------------------ */
+
+  {
+    const reused = await signIn("rina-devices", { id: iphoneId, name: "iPhone", platform: "ios" });
+    check("signing in with a retired id is not refused", typeof reused["token"], "string");
+    check("⭐ and it registers a fresh device rather than binding the dead one", reused["deviceId"] !== iphoneId, true);
+    check(
+      "so the next request works, which is the loop not happening",
+      (await send("/v1/me", { headers: bearer(String(reused["token"])) })).status,
+      200,
+    );
+    check(
+      "and the retired row stays retired",
+      (await listed(macbookToken)).filter((row) => row.id === iphoneId).map((row) => row.revokedAt !== null),
+      [true],
+    );
+  }
+
+  /* -- ⭐ somebody else's device ------------------------------------------ */
+
+  {
+    signUp("mallory-devices");
+    const mallory = await signIn("mallory-devices", { name: "Mallory's box", platform: "linux" });
+    const malloryToken = String(mallory["token"]);
+
+    const bound = await signIn("mallory-devices", { id: macbookId, name: "Mallory's box", platform: "linux" });
+    check("⭐ naming another account's device id binds a fresh row instead", bound["deviceId"] !== macbookId, true);
+    check(
+      "so the victim's device still belongs to the victim",
+      (await listed(macbookToken)).some((row) => row.id === macbookId),
+      true,
+    );
+    check(
+      "⭐ and deleting another account's device is the same 404 as one that does not exist",
+      await outcome(await send(`/v1/me/devices/${macbookId}`, { method: "DELETE", headers: bearer(malloryToken) })),
+      await outcome(await send("/v1/me/devices/dv_000000000000000", { method: "DELETE", headers: bearer(malloryToken) })),
+    );
+    check(
+      "which leaves it working",
+      (await send("/v1/me", { headers: bearer(macbookToken) })).status,
+      200,
+    );
+  }
+
+  /* -- what a device is not ----------------------------------------------- */
+
+  {
+    const key = newApiKey();
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      newId("ak"),
+      rina,
+      key.prefix,
+      key.hash,
+      now,
+    );
+    check(
+      "an API key cannot register a device, because it has no session to bind one to",
+      await outcome(
+        await send("/v1/me/devices", {
+          method: "POST",
+          headers: bearer(key.key),
+          body: JSON.stringify({ name: "cpctl", platform: "linux" }),
+        }),
+      ),
+      [409, "device_needs_session"],
+    );
+    check(
+      "and it can still read the list, which is how somebody finds out",
+      (await send("/v1/me/devices", { headers: bearer(key.key) })).status,
+      200,
+    );
+  }
+
+  /* -- clamped at ingest --------------------------------------------------- */
+
+  {
+    const long = await signIn("rina-devices", { name: "n".repeat(4000), platform: "p".repeat(400) });
+    const row = (await listed(macbookToken)).find((entry) => entry.id === String(long["deviceId"]));
+    /*
+     * ⚠ **The row first, and then the lengths as equalities.**
+     *
+     * This was `(row?.name.length ?? 0) <= 128`, which is `0 <= 128` for a row that
+     * was not found — so a broken listing, a changed id shape or a clamp that made
+     * the name unrecognisable all reported green, with "0 chars" in the detail. And
+     * `<=` cannot tell a clamp from a name that never arrived; the fixture sends
+     * 4000 characters, so the only right answer is the ceiling exactly.
+     */
+    check("the long-named device is in the list at all", row !== undefined, true);
+    check("a caller-supplied name is clamped where it enters the database", row?.name.length, MAX_DEVICE_NAME_CHARS);
+    /*
+     * The platform half. The fixture has always sent 400 characters and nothing has
+     * ever looked at what became of them — `devices.ts`'s docblock argues both halves
+     * and only one was asserted.
+     */
+    check("and so is the platform it came with", row?.platform.length, MAX_DEVICE_PLATFORM_CHARS);
+    void (await send(`/v1/me/devices/${String(long["deviceId"])}`, { method: "DELETE", headers: bearer(macbookToken) }));
+  }
+
+  /* -- ⭐ the cap refuses, and evicts nothing ------------------------------ */
+
+  {
+    const capped = signUp("capped-devices");
+    const session = await signIn("capped-devices", { name: "first", platform: "linux" });
+    const token = String(session["token"]);
+    const firstId = String(session["deviceId"]);
+
+    // Straight to the table: the route is throttled at 60 writes a minute and
+    // this needs twenty-odd, which would be measuring the throttle rather than
+    // the cap. `adoptDevice` is the function the route calls.
+    for (let i = 1; i < MAX_DEVICES_PER_USER; i += 1) {
+      adoptDevice(db, capped, null, { name: `d${String(i)}`, platform: "linux" });
+    }
+    check(
+      "at the cap, registering another is refused",
+      await outcome(
+        await send("/v1/me/devices", {
+          method: "POST",
+          headers: bearer(token),
+          body: JSON.stringify({ name: "one too many", platform: "linux" }),
+        }),
+      ),
+      [409, "device_limit"],
+    );
+    check(
+      "⭐ and nothing was evicted — the refusal is what stops one session signing every device out",
+      (await json(await send("/v1/me/devices", { headers: bearer(token) })))["devices"] instanceof Array
+        ? ((await json(await send("/v1/me/devices", { headers: bearer(token) })))["devices"] as unknown[]).length
+        : -1,
+      MAX_DEVICES_PER_USER,
+    );
+    check(
+      "a sign-in still succeeds at the cap, which is why the refusal is affordable",
+      typeof (await signIn("capped-devices", { name: "another", platform: "linux" }))["token"],
+      "string",
+    );
+    check(
+      "and that sign-in simply carries no device",
+      (await signIn("capped-devices", { name: "another", platform: "linux" }))["deviceId"],
+      null,
+    );
+    // Retiring one makes room at once — the slot is counted live rather than
+    // consumed, which `machine_owners` had to learn the hard way.
+    void (await send(`/v1/me/devices/${firstId}`, { method: "DELETE", headers: bearer(token) }));
+    const after = await signIn("capped-devices", { name: "after retiring one", platform: "linux" });
+    check("retiring one makes room immediately", typeof after["deviceId"], "string");
+  }
+
+  /* -- a session that predates devices ------------------------------------- */
+
+  {
+    /*
+     * The migration case, and it is the one every existing deployment is in on
+     * the day this ships: `device_id` is NULL for every row already in the
+     * table. It must authenticate exactly as it did, and the second statement
+     * must not run for it at all.
+     */
+    const legacy = mintSession(db, rina, { ip: null, userAgent: null }, null);
+    check(
+      "a session with no device authenticates unchanged",
+      (await send("/v1/me", { headers: bearer(legacy.token) })).status,
+      200,
+    );
+    check(
+      "and the resolver says so rather than leaving it unsaid",
+      resolveSession(db, legacy.token).ok ? (resolveSession(db, legacy.token) as { session: { deviceId: string | null } }).session.deviceId : "refused",
+      null,
+    );
+  }
+
+  /* -- the sessions list names its device ---------------------------------- */
+
+  {
+    const named = await signIn("rina-devices", { name: "Studio", platform: "macos" });
+    const rows = (await json(await send("/v1/me/sessions", { headers: bearer(String(named["token"])) })))[
+      "sessions"
+    ] as { current: boolean; deviceName: string | null; deviceId: string | null }[];
+    const current = rows.find((row) => row.current);
+    check("a session row names the installation it belongs to", current?.deviceName, "Studio");
+    check("and carries its id, so a client can group by device", current?.deviceId, named["deviceId"]);
+    check(
+      "a session with no device says null rather than inventing a name",
+      rows.filter((row) => row.deviceId === null).every((row) => row.deviceName === null),
+      true,
+    );
+  }
+
+  /* -- ⭐ two devices, one fleet -------------------------------------------- */
+
+  {
+    /*
+     * The requirement in one assertion: a grant is `(user_id, machine_id)`, so
+     * two installations of one account reach exactly the same machines. It is
+     * already true — this is what stops it quietly becoming false the day
+     * somebody reaches for `caller.deviceId` in a listing.
+     */
+    const fleetUser = signUp("fleet-devices");
+    grant(fleetUser, mine);
+    const a = await signIn("fleet-devices", { name: "laptop", platform: "macos" });
+    const b = await signIn("fleet-devices", { name: "phone", platform: "ios" });
+    check("two devices of one account are two rows", a["deviceId"] !== b["deviceId"], true);
+    const machinesFor = async (token: string): Promise<unknown> =>
+      ((await json(await send("/v1/machines", { headers: bearer(token) })))["machines"] as { id: string }[])
+        .map((row) => row.id)
+        .sort();
+    check(
+      "⭐ and they see the same fleet, because a grant belongs to the person",
+      await machinesFor(String(a["token"])),
+      await machinesFor(String(b["token"])),
+    );
+    report(
+      "which is a real machine rather than two empty lists agreeing",
+      ((await machinesFor(String(a["token"]))) as string[]).length > 0,
+      `${String(((await machinesFor(String(a["token"]))) as string[]).length)} machine(s)`,
+    );
+  }
+
+  /* -- deleting the account takes the devices with it ----------------------- */
+
+  {
+    const doomed = signUp("doomed-devices");
+    const session = await signIn("doomed-devices", { name: "about to go", platform: "linux" });
+    check("the account has a device", typeof session["deviceId"], "string");
+    const adminKey = newApiKey();
+    const adminId = newId("u");
+    db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, 'devices-admin', 1, ?)").run(adminId, now);
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      newId("ak"),
+      adminId,
+      adminKey.prefix,
+      adminKey.hash,
+      now,
+    );
+    void (await send(`/v1/admin/users/${doomed}`, { method: "DELETE", headers: bearer(adminKey.key) }));
+    check(
+      "their devices are gone",
+      db.prepare("SELECT COUNT(*) AS n FROM devices WHERE user_id = ?").get(doomed)?.["n"],
+      0,
+    );
+  }
+
+  /* -- the sweep ------------------------------------------------------------ */
+
+  {
+    const swept = signUp("swept-devices");
+    const id = adoptDevice(db, swept, null, { name: "old", platform: "linux" });
+    db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(
+      Date.now() - DEVICE_REVOKED_RETENTION_MS - 1,
+      id,
+    );
+    const kept = adoptDevice(db, swept, null, { name: "recent", platform: "linux" });
+    db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(Date.now(), kept);
+    pruneDevices(db);
+    check(
+      "a device retired long ago is swept",
+      db.prepare("SELECT id FROM devices WHERE id = ?").get(id),
+      undefined,
+    );
+    check(
+      "and one retired recently is kept, because the list still has to say it happened",
+      db.prepare("SELECT id FROM devices WHERE id = ?").get(kept) !== undefined,
+      true,
+    );
+  }
+
+  /* -- the migration, on a database written before any of this --------------- */
+
+  {
+    /*
+     * `applyControlPlaneSchema` is schema, then version, then migrate. A database
+     * written by the previous release has `user_sessions` with no `device_id`,
+     * and the guard that adds it must read **`user_sessions`'** own columns: the
+     * natural transcription reuses the `machines`-keyed `has()`, which answers
+     * "missing" for ever and re-attempts the ALTER on every open by both
+     * processes rather than once.
+     */
+    const old = new DatabaseSync(":memory:");
+    old.exec(
+      "CREATE TABLE user_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, prefix TEXT NOT NULL, " +
+        "token_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, " +
+        "last_seen_at INTEGER NOT NULL, revoked_at INTEGER)",
+    );
+    old.exec("INSERT INTO user_sessions VALUES ('s_old', 'u_old', 'rs_pre', 'h', 1, 2, 3, NULL)");
+    applyControlPlaneSchema(old);
+    const columns = new Set(old.prepare("PRAGMA table_info(user_sessions)").all().map((row) => String(row["name"])));
+    check("an existing sessions table gains the column", columns.has("device_id"), true);
+    check(
+      "the row that was there keeps its values and answers null for the new one",
+      old.prepare("SELECT id, device_id FROM user_sessions WHERE id = 's_old'").get(),
+      { id: "s_old", device_id: null },
+    );
+    // Idempotent, which is what a second process opening the same file does.
+    applyControlPlaneSchema(old);
+    check("and applying the schema again changes nothing", old.prepare("SELECT COUNT(*) AS n FROM user_sessions").get()?.["n"], 1);
+    check("the devices table arrives with it", old.prepare("PRAGMA table_info(devices)").all().length > 0, true);
+
+    /*
+     * ⚠ **And the index over the column, which was asserted nowhere at all.**
+     *
+     * Deleting the `CREATE INDEX` line in `store.ts` leaves every other assertion
+     * in this section green: the column is still added, the row still reads back,
+     * the schema is still idempotent, and retiring a device still ends its
+     * sessions — just with a full scan of every session in the fleet, inside a
+     * transaction, against `synchronous = FULL`, on the process the relay shares.
+     * A missing index has no failing behaviour, only a cost, which is exactly the
+     * kind of thing a driver has to state or nothing will.
+     *
+     * It is also the one index in this service that **cannot** live in
+     * `schema.sql` — the file runs before `migrate()` adds the column, so an
+     * index naming `device_id` there fails with `no such column` against every
+     * database that already exists. Asserted on an **upgraded** database rather
+     * than a fresh one for that reason: this is the path where the ordering is
+     * load-bearing.
+     *
+     * `PRAGMA index_list` names it and `PRAGMA index_info` says what it is over,
+     * because the name alone would be satisfied by an index on the wrong column.
+     */
+    const indexes = old
+      .prepare("PRAGMA index_list(user_sessions)")
+      .all()
+      .map((row) => String(row["name"]));
+    check("the index over the new column landed with it", indexes.includes("idx_user_sessions_device"), true);
+    check(
+      "and it is over that column rather than merely named after it",
+      old
+        .prepare("PRAGMA index_info(idx_user_sessions_device)")
+        .all()
+        .map((row) => String(row["name"])),
+      ["device_id"],
+    );
+    old.close();
+  }
+
+  /* -- what a key has to look like to be kept ------------------------------- */
+
+  {
+    /*
+     * ⚠ **A malformed key is dropped, and the sign-in still succeeds — both
+     * halves, because either alone is a different product.**
+     *
+     * `readDevicePublicKey` is strict about the alphabet as well as the length,
+     * for `b64uDecode`'s reason: `Buffer.from(s, "base64url")` silently skips
+     * what it does not recognise, so two spellings can decode to the same bytes —
+     * and a capability naming a key by a spelling the daemon computes differently
+     * reads as `wrong_device` for a device that is right. So `+` and `/` are
+     * refused even though they are base64 characters, and a length either side of
+     * 43 is refused outright.
+     *
+     * And the refusal is to `null` rather than to the registration: a client
+     * older than device keys sends none at all, and one with a bug in its
+     * encoding must not cost somebody the ability to sign in. The row is created,
+     * `hasKey` is false, and the Devices screen says what to do — which is a
+     * sentence with a remedy, where a refused sign-in is a loop.
+     *
+     * Driven through the real `POST /v1/login` rather than through
+     * `readDevicePublicKey` directly, because the value has to survive
+     * `readDeviceInput`, the route's adopt call and the column write: a strictness
+     * asserted on the pure function alone is green for a route that never passes
+     * it the field.
+     */
+    const wellFormed = "K".repeat(DEVICE_PUBLIC_KEY_CHARS);
+    for (const [what, offered] of [
+      ["one character short", "K".repeat(DEVICE_PUBLIC_KEY_CHARS - 1)],
+      ["one character long", "K".repeat(DEVICE_PUBLIC_KEY_CHARS + 1)],
+      ["the right length with a character from no alphabet", `${"K".repeat(DEVICE_PUBLIC_KEY_CHARS - 1)}!`],
+      // `+` is base64's, and it is *not* base64url's. This is the case a lax
+      // decoder would accept and then spell differently from every other side of
+      // the fleet.
+      ["the right length in the wrong base64 alphabet", `${"K".repeat(DEVICE_PUBLIC_KEY_CHARS - 1)}+`],
+    ] as const) {
+      const signedIn = await signIn("rina-devices", { name: "misencoded", platform: "linux", publicKey: offered });
+      check(`a key ${what} does not stop the sign-in`, typeof signedIn["token"], "string");
+      check("and the installation is registered anyway", typeof signedIn["deviceId"], "string");
+      check("but no key is kept for it", deviceKeyFor(db, String(signedIn["deviceId"])), null);
+    }
+
+    /*
+     * The negative control, without which every assertion above passes for a
+     * route that ignores the field entirely: a well-formed key lands, verbatim.
+     * Verbatim matters — a key re-encoded on the way in is the same defect the
+     * alphabet check exists to prevent, arriving from the other side.
+     */
+    const good = await signIn("rina-devices", { name: "well-formed", platform: "linux", publicKey: wellFormed });
+    check("a well-formed key is kept", deviceKeyFor(db, String(good["deviceId"])), wellFormed);
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * What a machine may be called, and what revoking one gives back
  *
  * `machines.ts` was imported by no driver. Three of the rules in it were written
  * *because* of a defect and none of them was asserted anywhere: the reserved
  * label shape, the per-owner quota, and `releaseOwner`.
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * A capability, and the device it is bound to
+ *
+ * A capability is a signed statement that one **installation** may reach one
+ * machine. The daemon compares the key it names against the one the encrypted
+ * handshake authenticated, so a copy of it is worth nothing to whoever copied it
+ * — `authcheck` drives that comparison. This section is the other half: that the
+ * Authority mints the binding at all, refuses to mint one it cannot bind, and
+ * keeps a device's key on the device's own row.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\na capability, and the device it is bound to\n");
+{
+  const app = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry });
+  const send = (path: string, init: RequestInit = {}): Promise<Response> => Promise.resolve(app.request(path, init));
+
+  const person = newId("u");
+  db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, ?, 0, ?)").run(person, "capholder", now);
+  const capMachine = addMachine("m_cap");
+  grant(person, capMachine);
+
+  /*
+   * Two installations of one account, which is the shape the whole feature is
+   * for: a laptop and a phone, cryptographically independent, reaching the same
+   * fleet. Their keys differ, so every assertion below about *which* device a
+   * capability named is about a real distinction rather than a coincidence.
+   */
+  const laptopKey = "L".repeat(DEVICE_PUBLIC_KEY_CHARS);
+  const phoneKey = "P".repeat(DEVICE_PUBLIC_KEY_CHARS);
+  const laptop = adoptDevice(db, person, null, { name: "laptop", platform: "macos", publicKey: laptopKey });
+  const phone = adoptDevice(db, person, null, { name: "phone", platform: "ios", publicKey: phoneKey });
+  report("one account holds two installations", laptop !== phone, `${laptop} and ${phone}`);
+  check("each keeps its own key", [deviceKeyFor(db, laptop), deviceKeyFor(db, phone)], [laptopKey, phoneKey]);
+
+  const sessionFor = (deviceId: string | null): string =>
+    mintSession(db, person, { ip: null, userAgent: null }, deviceId, now).token;
+  const mint = async (token: string): Promise<Response> =>
+    send("/v1/tokens", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ machine: capMachine }),
+    });
+
+  const issued = await mint(sessionFor(laptop));
+  check("a signed-in installation is minted a capability", issued.status, 200);
+  const body = (await issued.json()) as { token: string; machine: { key: string | null } };
+  const claims = parseClaims(Buffer.from(body.token.split(".")[1] ?? "", "base64url").toString("utf8"));
+
+  /*
+   * ⚠ **The claim the daemon actually compares.** It is the thumbprint of the
+   * device's key rather than the key, computed by the one function both sides
+   * use — two spellings of a key's name is how a right device comes to read as a
+   * wrong one.
+   */
+  check(
+    "and it names the key of the installation that asked",
+    claims?.cnf?.jkt ?? null,
+    jwkThumbprint(x25519Jwk(Buffer.from(laptopKey, "base64url"))),
+  );
+  check("and names the installation, for a refusal that can be acted on", claims?.dev ?? null, laptop);
+
+  /*
+   * The second installation gets a *different* binding from the same grant on the
+   * same machine — which is the requirement stated from the other end: two devices
+   * of one person reach the same fleet, and neither can use the other's capability.
+   */
+  const phoneIssued = await mint(sessionFor(phone));
+  const phoneBody = (await phoneIssued.json()) as { token: string };
+  const phoneClaims = parseClaims(Buffer.from(phoneBody.token.split(".")[1] ?? "", "base64url").toString("utf8"));
+  report(
+    "the other installation is minted a different binding on the same machine",
+    phoneClaims?.cnf?.jkt !== undefined && phoneClaims.cnf.jkt !== claims?.cnf?.jkt,
+    `${String(phoneClaims?.cnf?.jkt).slice(0, 8)}… against ${String(claims?.cnf?.jkt).slice(0, 8)}…`,
+  );
+  check("and both carry the same grant", phoneClaims?.aud ?? null, claims?.aud ?? null);
+
+  /*
+   * An installation that has registered no key is **refused with a remedy**
+   * rather than minted an unbound capability. Minting one would hand somebody a
+   * credential that cannot open a session, and a message about the wrong thing
+   * when it fails.
+   */
+  const keyless = adoptDevice(db, person, null, { name: "keyless", platform: "linux" });
+  const refused = await mint(sessionFor(keyless));
+  check(
+    "an installation with no key is refused a capability",
+    [refused.status, ((await refused.json()) as { error?: { code?: string } }).error?.code ?? "ok"],
+    [409, "device_key_required"],
+  );
+
+  /*
+   * ⚠ **And the refusal is recoverable by the client itself, which is the whole
+   * difference between a migration and an outage.**
+   *
+   * Every installation that predates device keys arrives at its first mint with a
+   * row this service has no key for, and so does one whose credential store was
+   * reset. If the only way out were signing in again on every machine, an update
+   * of the control plane would strand the fleet. Instead the client re-registers
+   * the **same** id with the key its shell already holds — `adoptDevice` writes it
+   * in place rather than making a row, so no slot is spent — and the next mint
+   * works. `machine.ts`'s `mint` does this once, on the refusal itself.
+   */
+  const healedKey = "H".repeat(DEVICE_PUBLIC_KEY_CHARS);
+  const healed = adoptDevice(db, person, keyless, { name: "keyless", platform: "linux", publicKey: healedKey });
+  check("re-registering the same installation adopts its row rather than making one", healed, keyless);
+  check("and the key lands on it", deviceKeyFor(db, keyless), healedKey);
+  const afterHeal = await mint(sessionFor(keyless));
+  check("after which the capability is minted", afterHeal.status, 200);
+  const healedClaims = parseClaims(
+    Buffer.from(((await afterHeal.json()) as { token: string }).token.split(".")[1] ?? "", "base64url").toString("utf8"),
+  );
+  check(
+    "bound to the key it just registered",
+    healedClaims?.cnf?.jkt ?? null,
+    jwkThumbprint(x25519Jwk(Buffer.from(healedKey, "base64url"))),
+  );
+
+  /*
+   * ⚠ **Retiring one installation must not touch another**, which is the property
+   * a shared key would quietly destroy. Both were minted from the same account and
+   * the same grant; only one stops.
+   */
+  revokeDevice(db, person, laptop);
+  const afterRevoke = await mint(sessionFor(phone));
+  check("retiring one installation leaves the other minting", afterRevoke.status, 200);
+  /*
+   * And the retired one stops being bindable at all: `deviceKeyFor` reads only a
+   * live row, so a capability can no longer name it even though the key is still
+   * in the table for the thirty days a retired row is kept.
+   */
+  check("while the retired one can no longer be bound to", deviceKeyFor(db, laptop), null);
+}
 
 process.stdout.write("\nmachines somebody owns\n");
 {
@@ -7705,10 +9687,13 @@ process.stdout.write("\nproving it is your own account, and retiring a key\n");
  *
  * `packages/control-plane/scripts/cpctl.ts` is the credential path for
  * everything that is not a browser — a script, a shell, and getting back in when
- * a password is lost — and no driver read it at all. Both defects pinned here
- * have one shape: the CLI and the route disagreeing about a request or a
- * response, with `api<T>`'s cast making the disagreement invisible to `tsc`. A
- * declared type is not a measurement of what the other end sends.
+ * a password is lost — and no driver read it at all. The defects pinned here have
+ * one shape: the CLI and the route disagreeing about a request or a response,
+ * with `api<T>`'s cast making the disagreement invisible to `tsc`. A declared
+ * type is not a measurement of what the other end sends — which is why one block
+ * here pins a read that is **not** broken today, `clearkey`'s: its entire output
+ * is chosen on one field of an answer nothing compared, so the rename that breaks
+ * it would break it silently.
  *
  * The technique is `webcheck`'s, for `enrollmentLines`: that file cannot be
  * imported — its module body reads `process.argv` and dispatches, and neither of
@@ -7717,9 +9702,12 @@ process.stdout.write("\nproving it is your own account, and retiring a key\n");
  * compares behaviour rather than a transcription of it, and a transcription is
  * what was already wrong.
  *
- * Both extractions are anchored narrowly and fail *loudly*: an anchor that no
- * longer matches throws out of this driver rather than quietly measuring
- * something else.
+ * Every extraction here is anchored narrowly and none of them may quietly measure
+ * something else — but they fail loudly in **two** shapes, and the newer one is
+ * the one to copy. The older extractions `throw`, which is loud and takes this
+ * file's other nine hundred assertions with it; the ones added since guard both
+ * ends of the slice and `report` what they found, which fails in place. `bodyOf`'s
+ * removal one screen down is the measurement that settled the difference.
  * ------------------------------------------------------------------ */
 
 process.stdout.write("\ncpctl, against the routes it calls\n");
@@ -8110,6 +10098,160 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
      */
     check("while the refusal names the verb that replaced them", /cpctl share <machineId> <userId>/.test(cpctlAdmin), true);
     check("and so does the usage text", source.includes("There is no 'admin grant' and no 'admin ungrant'"), true);
+
+    /*
+     * ⭐ **And the verb a *daemon* sends an operator to, which is a third place the
+     * same name is written down.**
+     *
+     * `src/relay/tunnel.ts`'s 409 arm is the sentence somebody reads at the worst
+     * moment available to them — their machine dials for ever and reaches nothing —
+     * and it ends "have an operator run `cpctl admin clearkey <machineId>`". That
+     * string lives in the **daemon**, which ships on its own schedule and which no
+     * rename of this file's switch would touch, so renaming the verb here sends
+     * every stuck machine's owner to a command that does not exist, at the one
+     * moment they cannot afford to go looking for the real one.
+     *
+     * Pinned the way the `admin grant` pair above is, with the one difference that
+     * is the whole point: the verb is lifted **out of** the refusal and then looked
+     * for in the switch, rather than being spelled out twice here. A `case
+     * "clearkey"` literal would agree with itself on a build where the daemon's
+     * sentence had been reworded to name something else.
+     *
+     * Both sides read with comments stripped. `tunnel.ts` explains this refusal in
+     * a docblock directly above the code, naming both remedies in prose, and
+     * `cpctlAdmin` is stripped already for the reason stated where it is built.
+     */
+    const tunnelSource = stripComments(readFileSync(new URL("../src/relay/tunnel.ts", import.meta.url), "utf8"));
+    const refusedAt = tunnelSource.indexOf("status === 409");
+    const namedVerb = /`cpctl admin ([a-z][a-z-]*) </.exec(refusedAt === -1 ? "" : tunnelSource.slice(refusedAt))?.[1] ?? "";
+    report("the daemon's 409 refusal names a cpctl verb", namedVerb.length > 0, `cpctl admin ${namedVerb}`);
+    check("and cpctl's admin switch actually has it", cpctlAdmin.includes(`case "${namedVerb}":`), true);
+    /*
+     * And the usage text, for the reason the pair above gives: a build could keep
+     * the `case` without the line that tells anybody it is there, and somebody who
+     * arrived here from a daemon's refusal has nothing else to read.
+     *
+     * Sliced out of the `USAGE` template rather than searched for across the whole
+     * file, because `cpctl.ts` spells this verb twice more outside the listing —
+     * the `case` itself and the `fail("usage: cpctl admin clearkey <machineId>")`
+     * inside it — so a whole-file search for the name reports the listing as
+     * present after it has been deleted.
+     *
+     * Both ends of the slice are guarded and the `report` is what makes a missing
+     * anchor loud. Without it an unfound terminator is `slice(at, -1)`, which is
+     * the whole rest of the file: the search would silently widen back out to
+     * exactly the thing this slice exists to prevent.
+     */
+    const usageAt = source.indexOf("const USAGE = `");
+    const usageEnd = usageAt === -1 ? -1 : source.indexOf("`;", usageAt);
+    const usageText = usageEnd === -1 ? "" : source.slice(usageAt, usageEnd);
+    report("cpctl's usage text was found to read", usageText.length > 0, `${usageText.split("\n").length} lines`);
+    check("and it lists the verb the daemon names", new RegExp(`\\n  admin ${namedVerb} `).test(usageText), true);
+
+    /*
+     * ⭐ **And the second daemon-side sentence that sends an operator to the same
+     * verb**, which the 409 above does not reach.
+     *
+     * `src/store/sqlite.ts`'s two-live-keys repair prints, under the `openStores`
+     * exception, "clear it with `cpctl admin clearkey <machineId>` and restart
+     * this daemon". It is the other half of one rescue: the 409 is what a
+     * *dialling* daemon says, this is what a *starting* one says about the
+     * database it has just repaired, and both hand the reader this switch.
+     * Renaming the verb here and fixing only `tunnel.ts` leaves that sentence
+     * naming a command that does not exist — and it is the sentence somebody
+     * reads while their machine is unreachable, which is the worst moment
+     * available to send anybody looking.
+     *
+     * Swept over the whole file rather than anchored on the sentence, because the
+     * prose around the verb is somebody's to reword and the verb is what has to
+     * hold. Compared against `namedVerb` rather than between two captures, for
+     * the reason the handoff pair above records: two misses must not read as
+     * agreement, so a deleted sentence is `[]` against `["clearkey"]` and never
+     * `"" === ""`. `namedVerb` is itself `report`ed non-empty one screen up.
+     *
+     * Comment-stripped, or this check answers for prose: that file names the verb
+     * in two docblocks as well, and a build that deleted the print while keeping
+     * either of them would pass.
+     */
+    const storeSource = stripComments(readFileSync(new URL("../src/store/sqlite.ts", import.meta.url), "utf8"));
+    const storeVerbs = [
+      ...new Set([...storeSource.matchAll(/`cpctl admin ([a-z][a-z-]*)/g)].map((found) => found[1] ?? "")),
+    ];
+    report("the daemon's two-live-keys repair names a cpctl verb", storeVerbs.length === 1, storeVerbs.join(", "));
+    check("and it is the same verb its 409 names", storeVerbs, [namedVerb]);
+  }
+
+  /* -- what `cpctl admin clearkey` reads off its answer -------------------- */
+
+  {
+    /*
+     * ⭐ **A second `api<T>` cast nothing compared against a real response**, and
+     * the one whose entire output hangs off a single field of it.
+     *
+     * `cpctl admin clearkey` prints `previousKey` — the only moment anybody in
+     * this system ever writes down what *was* pinned for a machine — and chooses
+     * between two completely different sentences on `cleared`. The route's body is
+     * asserted where the route is driven ("with the machine, the fact, and the key
+     * that was there"), but nothing tied *cpctl's reads* to it, and `api<T>`
+     * casts: the declared type is a claim `tsc` cannot check against the sender.
+     * Rename `previousKey` in `app.ts` and every driver in this tree stays green
+     * while the operator's one record of the old key prints as an empty string.
+     *
+     * **The names are compared rather than the rendered line, and that is the
+     * point rather than the cheap way.** Rendering `  was ${body.previousKey ?? ""}`
+     * against the real body — the trick the `revokedCount` block below uses, and
+     * the right one there — *cannot fail here*: a renamed field reads `undefined`,
+     * `?? ""` turns that into the empty string, and the rendered sentence carries
+     * no "undefined" for anybody to notice. That is this file's own recurring
+     * failure, an assertion that passes because the defect is invisible to the
+     * thing it looks at.
+     *
+     * Read with comments stripped, and sliced with both ends guarded in the
+     * `usageText` style rather than by throwing: a driver that dies at module
+     * scope takes its other nine hundred assertions with it.
+     */
+    const stripComments = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const code = stripComments(source);
+    const armAt = code.indexOf('case "clearkey": {');
+    const armEnd = armAt === -1 ? -1 : code.indexOf("\n    }\n", armAt);
+    const arm = armAt === -1 || armEnd === -1 ? "" : code.slice(armAt, armEnd);
+    report("cpctl's clearkey arm was found to read", arm.length > 0, `${arm.split("\n").length} lines`);
+
+    const declaredIn = /api<\{([^}]*)\}>/.exec(arm)?.[1] ?? "";
+    const declared = [...declaredIn.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:/g)].map((found) => found[1] ?? "").sort();
+    const reads = [
+      ...new Set([...arm.matchAll(/\bbody\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((found) => found[1] ?? "")),
+    ].sort();
+    const branch = /if \(!body\.([A-Za-z_][A-Za-z0-9_]*)\)/.exec(arm)?.[1] ?? "";
+
+    /*
+     * Its own machine with a pin on it, cleared **twice** through the real route,
+     * so both branches of that one boolean are answered by the service rather than
+     * described here. A fresh admin key for `u_admin`, who exists already: the key
+     * minted where that user is created is scoped to the block that made it.
+     */
+    const machine = addMachine("m_cpctl_clearkey");
+    setMachineKey(db, machine, "E".repeat(MAX_MACHINE_KEY_CHARS));
+    const adminKey = newApiKey();
+    db.prepare("INSERT INTO api_keys (id, user_id, prefix, key_hash, created_at) VALUES (?, 'u_admin', ?, ?, ?)").run(
+      newId("ak"),
+      adminKey.prefix,
+      adminKey.hash,
+      now,
+    );
+    const headers = { authorization: `Bearer ${adminKey.key}` };
+    const path = `/v1/admin/machines/${machine}/machine-key`;
+    const first = (await (await send(path, { method: "DELETE", headers })).json()) as Record<string, unknown>;
+    const second = (await (await send(path, { method: "DELETE", headers })).json()) as Record<string, unknown>;
+
+    check("the fields cpctl reads off this answer are the fields the route sends", reads, Object.keys(first).sort());
+    check("and its cast declares exactly those", declared, reads);
+    report("cpctl chooses its whole sentence on one field of that answer", branch.length > 0, `body.${branch}`);
+    check(
+      "and that field is the one the route flips between its two answers",
+      [first[branch], second[branch]],
+      [true, false],
+    );
   }
 
   /* -- what `cpctl sessions --all` prints --------------------------------- */
@@ -8142,9 +10284,9 @@ process.stdout.write("\ncpctl, against the routes it calls\n");
     const holder = newId("u");
     db.prepare("INSERT INTO users (id, name, is_admin, created_at) VALUES (?, 'cpctl-sessions', 0, ?)").run(holder, now);
     const anonymous = { ip: null, userAgent: null };
-    const first = mintSession(db, holder, anonymous);
-    mintSession(db, holder, anonymous);
-    mintSession(db, holder, anonymous);
+    const first = mintSession(db, holder, anonymous, null);
+    mintSession(db, holder, anonymous, null);
+    mintSession(db, holder, anonymous, null);
 
     const body = await (
       await send("/v1/me/sessions", { method: "DELETE", headers: { authorization: `Bearer ${first.token}` } })
@@ -8265,46 +10407,267 @@ process.stdout.write("\nwhat an API-only instance still sends\n");
   // rather than on what was served is how that arm reached `index.html` once.
   check("but no cache directive reaches a JSON answer", mine.headers.get("cache-control"), null);
   check("and no policy is spent on a body that is not a document", mine.headers.get("content-security-policy"), null);
+
+  /*
+   * **The first impression of an instance serving no app, asserted.**
+   *
+   * The deployed shape — the Reemoat app carries its own copy of the interface,
+   * so `webRoot` is unset — and what somebody typing the address into a browser
+   * then gets is this. It must be the envelope every other refusal answers in and
+   * not Hono's bare 404: the first is a service saying it serves no UI, the second
+   * is indistinguishable from a service that is broken. `app.notFound` is what
+   * provides it, and it is registered *outside* both the `gateRoot` and `webRoot`
+   * guards; a future edit that moved it inside would pass every other assertion
+   * in this file.
+   *
+   * ⚠ **This app is built with no `gateRoot` either**, which is the case being
+   * described: nothing at all is served. The section below drives an instance
+   * that *does* carry a gate, and the two together are what say the app's own
+   * addresses are refused in both.
+   */
+  const bare = await Promise.resolve(app.request("/"));
+  check("a browser at the root is refused in the envelope", bare.status, 404);
+  check(
+    "and told so in JSON rather than in nothing",
+    ((await bare.json()) as { error?: { code?: string } }).error?.code,
+    "not_found",
+  );
+  const deep = await Promise.resolve(app.request("/m/m_x/s/s_y"));
+  check("as is a deep link a client-side router would own", [deep.status, deep.headers.get("content-type")?.startsWith("application/json")], [404, true]);
+
+  // The API is what is left, and it still answers. `/health` and `/v1/instance`
+  // are the two an operator and a client respectively reach for first.
+  check("health is unaffected by there being no bundle", (await Promise.resolve(app.request("/health"))).status, 200);
+  check("and so is the instance document every client boots on", (await Promise.resolve(app.request("/v1/instance"))).status, 200);
 }
 
 /* ------------------------------------------------------------------ *
- * The web client, and what a browser is allowed to keep
+ * The gate, served — and the app, not
  *
- * Everything in `createControlPlaneApp` that serves the UI sits behind
- * `webRoot !== null && existsSync(webRoot)`, and the section above passes no
- * `webRoot` at all — so the static handler, the SPA fallback and the cache
- * middleware in front of them were entered by nothing, in any driver. This one
- * builds a `dist/` shaped like Vite's (an `index.html` plus one hash-named
- * chunk under `assets/`) in a `tmp()` directory and drives the same app
- * against it, offline, through `app.request()`.
+ * The deployed shape has both facts at once, and each is worthless without the
+ * other. A control plane that serves the gate keeps sign-up and password
+ * recovery working, because `/confirm`, `/reset` and `/verify` are opened by a
+ * **mail client** and have nowhere else to land. A control plane that serves the
+ * *app* would be the thing this whole split exists to stop.
+ *
+ * Driven against a `dist-gate` built here rather than the real one: the assertion
+ * is about which addresses the server answers with a page, which is `app.ts`'s
+ * decision, and tying it to a bundle somebody has to have run `pnpm build:gate`
+ * for would make it skip silently on a fresh checkout.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe gate is served and the app is not\n");
+{
+  const root = tmp("relaycheck-gate-");
+  mkdirSync(join(root, "assets"), { recursive: true });
+  writeFileSync(join(root, "gate.html"), "<!doctype html><html><body>gate</body></html>");
+  writeFileSync(join(root, "assets", "gate-abc123.js"), "export default 1;\n");
+
+  const app = createControlPlaneApp({
+    db,
+    issuer: ISSUER,
+    tokenTtlSeconds: 300,
+    relayUrl,
+    relay: registry,
+    gateRoot: root,
+  });
+  const get = async (path: string): Promise<[number, string]> => {
+    const response = await Promise.resolve(app.request(path));
+    return [response.status, (response.headers.get("content-type") ?? "").split(";")[0] ?? ""];
+  };
+
+  /* -- what a mailed link lands on --------------------------------------- */
+
+  for (const path of ["/register", "/confirm", "/forgot", "/reset", "/verify"]) {
+    check(`${path} is served a page`, await get(path), [200, "text/html"]);
+  }
+  for (const path of ["/terms", "/acceptable-use", "/privacy"]) {
+    check(`${path} is served a page`, await get(path), [200, "text/html"]);
+  }
+  check("and so is the handoff", await get("/app"), [200, "text/html"]);
+  // The bundle's own files, or the page it serves references chunks nobody can
+  // fetch — which is a blank screen with the reason in a console nobody has open.
+  check("the bundle's assets are served", await get("/assets/gate-abc123.js"), [200, "text/javascript"]);
+
+  /* -- ⭐ and what is not ------------------------------------------------- */
+
+  /*
+   * The app's own addresses, refused. This is the assertion the split exists for:
+   * a gate that quietly answered these would be the whole product served from the
+   * control plane again, and every other check in this file would stay green.
+   */
+  for (const path of ["/", "/settings", "/new", "/m/m_x/s/s_y", "/p/m_x/board"]) {
+    check(`${path} belongs to the app and is refused`, await get(path), [404, "application/json"]);
+  }
+  check("an unknown path is refused too", await get("/nope"), [404, "application/json"]);
+  /*
+   * An unrouted `/v1` path answers **401**, not 404, and that is the positional
+   * gate rather than a quirk: `app.use("/v1/*", callerAuth(db))` is registered
+   * above every private route, so a caller with no credential is refused before
+   * anything asks whether the path names a route. What this asserts is the part
+   * that could regress — that it is refused *as an API*, in the envelope, and
+   * never falls through to the gate's fallback and a page of HTML.
+   */
+  check("an unrouted API path is refused as an API", await get("/v1/nope"), [401, "application/json"]);
+  check("and so is /health with a typo, which names no route either", await get("/healthz"), [404, "application/json"]);
+
+  /* -- the document headers come back with the document -------------------- */
+
+  /*
+   * ⚠ **A CSP again, and it matters beyond this page.** `nativecheck` derives the
+   * Tauri shell's own `connect-src`/`img-src` directive names from *this* header,
+   * so a control plane that served no HTML at all would leave that comparison
+   * anchored to something nothing produced. Serving the gate keeps the anchor
+   * real, which is a second reason the header is asserted here rather than only
+   * on the app.
+   */
+  const page = await Promise.resolve(app.request("/register"));
+  report(
+    "a served page carries the document policy",
+    (page.headers.get("content-security-policy") ?? "").includes("frame-ancestors 'none'"),
+    (page.headers.get("content-security-policy") ?? "").slice(0, 48),
+  );
+  check("and refuses to be framed", page.headers.get("x-frame-options"), "DENY");
+  check("and is not cached without revalidation", page.headers.get("cache-control"), "no-cache");
+}
+
+/* ------------------------------------------------------------------ *
+ * The installer, with no bundle behind it
+ *
+ * ⚠ **`GET /install.sh` was proved by `imagecheck` alone** — in docker, with the
+ * web bundle present — and `imagecheck` is a separate CI job that needs a network.
+ * So the one route that adds a machine to a fleet had no offline coverage at all,
+ * and none in the shape an API-only deployment actually runs: no `webRoot`, which
+ * is also the arrangement where a missing `serveStatic` in front of it would go
+ * unnoticed.
+ *
+ * The substitution itself is the part worth holding: the body is caller-influenced
+ * through the `Host` header and it is piped into `sh`, so `shellQuote` is the whole
+ * of what stands between an instance and remote code execution on every machine
+ * somebody adds. `webcheck` already drives that function over hostile URLs; this
+ * asserts the route actually calls it.
+ * ------------------------------------------------------------------ */
+
+process.stdout.write("\nthe installer, with no bundle behind it\n");
+{
+  const dir = tmp("relaycheck-install-");
+  const script = join(dir, "bootstrap.sh");
+  writeFileSync(script, "#!/bin/sh\nREEMOAT_CONTROL_PLANE=@REEMOAT_CONTROL_PLANE@\n");
+  const app = createControlPlaneApp({
+    db,
+    issuer: ISSUER,
+    tokenTtlSeconds: 300,
+    relayUrl,
+    relay: registry,
+    bootstrapScript: script,
+  });
+
+  /*
+   * A full URL rather than a path plus a `Host` header, because `publicUrl` reads
+   * `new URL(c.req.url).origin` and Hono builds that URL from the argument — a
+   * header alone leaves it `http://localhost` and the substitution looks correct
+   * while asserting nothing about the value that actually varies.
+   */
+  const served = await Promise.resolve(app.request("http://cp.example/install.sh"));
+  const body = await served.text();
+  check(
+    "an instance with no UI still hands out an installer",
+    [served.status, served.headers.get("content-type"), served.headers.get("cache-control")],
+    [200, "text/plain; charset=utf-8", "no-store"],
+  );
+  check("with its own address substituted in", body.includes("'http://cp.example'"), true);
+  check("and no placeholder left behind", body.includes("@REEMOAT_CONTROL_PLANE@"), false);
+
+  // The `Host` reaches `URL.origin` intact through every one of these — measured
+  // and written up at `packages/web/src/enrollment.ts` — so the quoting is the
+  // only thing stopping `a`touch PWNED`b` from running on the next machine added.
+  const hostile = await Promise.resolve(app.request("http://a$(id)b/install.sh"));
+  check("a hostile Host is quoted rather than refused", (await hostile.text()).includes("'http://a$(id)b'"), true);
+
+  // A missing file is a legal deployment — a trimmed image, an override pointing
+  // at nothing — and must be the envelope rather than a 500.
+  const absent = createControlPlaneApp({
+    db,
+    issuer: ISSUER,
+    tokenTtlSeconds: 300,
+    relayUrl,
+    relay: registry,
+    bootstrapScript: join(dir, "nothing-here.sh"),
+  });
+  const missing = await Promise.resolve(absent.request("/install.sh"));
+  check(
+    "a missing script is a 404 rather than a 500",
+    [missing.status, ((await missing.json()) as { error?: { code?: string } }).error?.code],
+    [404, "not_found"],
+  );
+
+  // Two placeholders is ambiguous and none is an installer that refuses at run
+  // time with a message about a placeholder. Both are worse than no installer.
+  for (const [name, content] of [
+    ["none", "#!/bin/sh\necho hi\n"],
+    ["two", "#!/bin/sh\nA=@REEMOAT_CONTROL_PLANE@\nB=@REEMOAT_CONTROL_PLANE@\n"],
+  ] as const) {
+    const path = join(dir, `${name}.sh`);
+    writeFileSync(path, content);
+    const app2 = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry, bootstrapScript: path });
+    const answer = await Promise.resolve(app2.request("/install.sh"));
+    check(`a template with ${name} placeholders is refused`, answer.status, 404);
+  }
+
+  // And the switch off: no `bootstrapScript` at all means the route was never
+  // registered, which is the `REEMOAT_CP_INSTALL=0` deployment. It has to land on
+  // `app.notFound` rather than anywhere else, because `looksLikeAsset` matching a
+  // trailing `.sh` is what keeps this path free for the route in the first place.
+  const none = createControlPlaneApp({ db, issuer: ISSUER, tokenTtlSeconds: 300, relayUrl, relay: registry });
+  const off = await Promise.resolve(none.request("/install.sh"));
+  check(
+    "and an instance that serves no installer says so in the envelope",
+    [off.status, ((await off.json()) as { error?: { code?: string } }).error?.code],
+    [404, "not_found"],
+  );
+
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/* ------------------------------------------------------------------ *
+ * What a browser is allowed to keep
+ *
+ * ⚠ **This section used to drive the *app* bundle and now drives the gate's,
+ * because there is no app bundle any more.** `REEMOAT_CP_WEB` named a built copy
+ * of the whole client for a checkout to serve; it is deleted, because a browser
+ * holds no device key and therefore cannot open an encrypted channel to a daemon
+ * — what it could load it could not use. The SPA fallback and the static mount
+ * behind it went with it.
+ *
+ * What did **not** go is the cache middleware, and it is what this section was
+ * always really about: it sits above every handler, it is the half that was
+ * structural rather than a patch, and it now governs the one bundle that is still
+ * served. So the fixture is a `dist-gate`-shaped directory — a `gate.html` plus a
+ * hash-named chunk under `assets/` — driven through the same `app.request()`.
  *
  * Both things being pinned here have a production incident behind them and
  * neither is visible from the server:
  *
  *   - With no `Cache-Control` and no validator a browser caches *heuristically*
- *     — it may serve `index.html` from disk for as long as it likes without
- *     asking. That page names hashed chunks the browser also holds, so it never
- *     404s and never notices; it simply keeps running a build the server has
- *     already deleted. Diagnosed by deploying a fix, fetching the served bundle
- *     to confirm it was there, and watching the reporter reload into the old app
- *     anyway. Every check said the server was right, and the server was right.
+ *     — it may serve the page from disk for as long as it likes without asking.
+ *     That page names hashed chunks the browser also holds, so it never 404s and
+ *     never notices; it simply keeps running a build the server has already
+ *     deleted.
+ *   - A hashed chunk that is *not* kept for a year is a bundle re-downloaded on
+ *     every visit, which is the opposite mistake and the reason the two arms are
+ *     asserted together rather than one at a time.
  *
- *   - `/` and every client-side route must serve the *same file from disk, per
- *     request*. When the fallback held a `readFileSync` copy taken at
- *     registration, `pnpm web:build` under a running control plane made the two
- *     disagree: `/` streamed the new HTML naming the new chunks while
- *     `/m/:machine/s/:session` returned the old HTML naming chunks Vite had
- *     deleted — measured 2026-08-01, `index-BnlrEjly.js` against
- *     `index-0vnvikLW.js`, and the second answered 404. So the home screen
- *     worked and reloading on a session gave a blank white page, on a phone with
- *     no console. That is why the rebuild below happens *between* two requests
- *     rather than before them: comparing two responses taken from an unchanged
- *     directory cannot tell a stream from a cached copy.
+ * ⚠ **What is genuinely given up with the app bundle**, named rather than left to
+ * be discovered: the SPA fallback's *"serve the same file from disk that `/`
+ * does"* rule, and the `/assets/` extensionless refusal that sat in it. Both were
+ * about a handler that answered every unrouted GET with a page, and the gate's
+ * closed list is the opposite design — it answers a fixed set of addresses and
+ * refuses everything else, which is why it never needed either rule.
  * ------------------------------------------------------------------ */
 
-process.stdout.write("\nthe web client, and what may be cached\n");
+process.stdout.write("\nwhat a browser is allowed to keep\n");
 {
-  const webRoot = tmp("relaycheck-web-");
+  const webRoot = tmp("relaycheck-gate-");
   mkdirSync(join(webRoot, "assets"));
 
   const chunk = 'console.log("the bundle");\n';
@@ -8326,7 +10689,10 @@ process.stdout.write("\nthe web client, and what may be cached\n");
   // only way to catch a cached copy is to change the file underneath it.
   const buildOne = '<!doctype html><title>one</title><div id="root"></div><script src="/assets/index-abc123.js"></script>\n';
   const buildTwo = '<!doctype html><title>two</title><div id="root"></div><script src="/assets/index-def456.js"></script>\n';
-  writeFileSync(join(webRoot, "index.html"), buildOne);
+  // `gate.html`, which is the file `app.ts` names — the gate is its own Vite
+  // build with its own entry, which is what lets this service carry one directory
+  // and be structurally unable to serve the other.
+  writeFileSync(join(webRoot, "gate.html"), buildOne);
 
   const app = createControlPlaneApp({
     db,
@@ -8335,7 +10701,7 @@ process.stdout.write("\nthe web client, and what may be cached\n");
     relayUrl,
     relayUrls: { "relay-2": "https://r2.example" },
     relay: registry,
-    webRoot,
+    gateRoot: webRoot,
   });
 
   /*
@@ -8401,11 +10767,23 @@ process.stdout.write("\nthe web client, and what may be cached\n");
       await outcomeOf(await Promise.resolve(app.request("/settings", { method: "POST" }))),
       [404, "not_found"],
     );
+    /*
+     * ⚠ **A client-side route is a 404 here now, and that is the deletion rather
+     * than a regression.** This asserted that a reload on a session still reached
+     * the page, because the SPA fallback answered every unrouted GET — the whole
+     * shape the app bundle needed. The gate is the opposite design: a **closed
+     * list** of addresses, everything else refused, which is why it never needed a
+     * fallback and why deleting one took nothing with it.
+     *
+     * Kept as the inverted assertion rather than deleted, so the day a fallback
+     * reappears it is a diff rather than a discovery: this service must not answer
+     * an address it does not serve with a page.
+     */
     const deepLink = await Promise.resolve(app.request("/m/m_abc/s/s_def"));
     check(
-      "while a client-side route is still the page, which is what a reload on a session is",
-      [deepLink.status, (await deepLink.text()).includes('<div id="root">')],
-      [200, true],
+      "and a client-side route of the app's is refused rather than answered with a page",
+      [deepLink.status, (await deepLink.text()).startsWith("<!doctype")],
+      [404, false],
     );
   }
 
@@ -8447,7 +10825,7 @@ process.stdout.write("\nthe web client, and what may be cached\n");
    * response governs nothing.
    */
   {
-    const csp = (await Promise.resolve(app.request("/"))).headers.get("content-security-policy") ?? "";
+    const csp = (await Promise.resolve(app.request("/register"))).headers.get("content-security-policy") ?? "";
     const connect = /connect-src ([^;]+)/.exec(csp)?.[1] ?? "";
     // `relayUrl` here is this driver's own loopback listener, so the pair is
     // derived from it rather than written out — the property is "both schemes
@@ -8518,10 +10896,10 @@ process.stdout.write("\nthe web client, and what may be cached\n");
       tokenTtlSeconds: 300,
       relayUrl,
       relay: registry,
-      webRoot,
+      gateRoot: webRoot,
       pluginCatalogueUrl: "https://plugins.example",
     });
-    const csp = (await Promise.resolve(withMarket.request("/"))).headers.get("content-security-policy") ?? "";
+    const csp = (await Promise.resolve(withMarket.request("/register"))).headers.get("content-security-policy") ?? "";
     const connect = /connect-src ([^;]+)/.exec(csp)?.[1] ?? "";
     const img = /img-src ([^;]+)/.exec(csp)?.[1] ?? "";
     check(
@@ -8548,10 +10926,10 @@ process.stdout.write("\nthe web client, and what may be cached\n");
       tokenTtlSeconds: 300,
       relayUrl,
       relay: registry,
-      webRoot,
+      gateRoot: webRoot,
       pluginCatalogueUrl: "https://plugins.example/api/v2/",
     });
-    const deepCsp = (await Promise.resolve(deep.request("/"))).headers.get("content-security-policy") ?? "";
+    const deepCsp = (await Promise.resolve(deep.request("/register"))).headers.get("content-security-policy") ?? "";
     check(
       "and it is listed as an origin rather than as the path it was configured with",
       /connect-src ([^;]+)/.exec(deepCsp)?.[1]?.includes("https://plugins.example/api") ?? true,
@@ -8568,10 +10946,10 @@ process.stdout.write("\nthe web client, and what may be cached\n");
       tokenTtlSeconds: 300,
       relayUrl,
       relay: registry,
-      webRoot,
+      gateRoot: webRoot,
       pluginCatalogueUrl: "not a url",
     });
-    const nonsenseCsp = (await Promise.resolve(nonsense.request("/"))).headers.get("content-security-policy") ?? "";
+    const nonsenseCsp = (await Promise.resolve(nonsense.request("/register"))).headers.get("content-security-policy") ?? "";
     check(
       "an unparseable catalogue widens nothing",
       (/img-src ([^;]+)/.exec(nonsenseCsp)?.[1] ?? "").includes("raw.githubusercontent.com"),
@@ -8606,12 +10984,16 @@ process.stdout.write("\nthe web client, and what may be cached\n");
     };
   };
 
-  // A client-side route: three segments the router knows nothing about, which is
-  // the shape that used to come back as a blank page on reload.
-  const sessionRoute = "/m/m_mine/s/s_abc123";
+  /*
+   * ⚠ **A gate address, not `/`.** The app bundle answered every unrouted path
+   * with its own page and `/` was the natural one to ask for; the gate answers a
+   * **closed list** and `/` is not on it. `register` is a gate screen, which is
+   * the address a browser actually arrives at.
+   */
+  const gatePath = "/register";
 
-  const root = await get("/");
-  check("the index is served at /", { status: root.status, body: root.body }, { status: 200, body: buildOne });
+  const root = await get(gatePath);
+  check("the gate's page is served at a gate address", { status: root.status, body: root.body }, { status: 200, body: buildOne });
   /*
    * `no-cache`, and the exact string matters in both directions.
    *
@@ -8632,25 +11014,27 @@ process.stdout.write("\nthe web client, and what may be cached\n");
    */
   check("and is kept for a year, immutably", asset.cacheControl, "public, max-age=31536000, immutable");
 
-  const route = await get(sessionRoute);
-  check("a client-side route reaches the SPA fallback", route.status, 200);
-  // Byte-identical to `/`, not merely "some HTML". This is the invariant the
-  // blank-white-page incident broke, and the two ways of reaching one page
-  // disagreeing is the worst shape it can have.
-  check("and serves the identical bytes / does", route.body, root.body);
-  check("and carries the same directive as /", route.cacheControl, root.cacheControl);
+  /*
+   * Every gate address is the same page, which is what makes it one build rather
+   * than eight. Byte-identical, not merely "some HTML": two ways of reaching one
+   * page disagreeing is the worst shape that bug can have, and it is the shape the
+   * blank-white-page incident had.
+   */
+  const second = await get("/forgot");
+  check("every gate address is the same page", second.body, root.body);
+  check("and carries the same directive", second.cacheControl, root.cacheControl);
 
   /*
-   * A rebuild under the running process. `pnpm web:build` rewrites `dist/` and
-   * nothing restarts the control plane, so "from disk, per request" is the whole
-   * property — a fallback holding a copy taken at registration passes every
-   * assertion above and fails both of these.
+   * A rebuild under the running process. `pnpm --filter @reemoat/web build:gate`
+   * rewrites `dist-gate/` and nothing restarts the control plane, so "from disk,
+   * per request" is the whole property — a handler holding a copy taken at
+   * registration passes every assertion above and fails both of these.
    */
-  writeFileSync(join(webRoot, "index.html"), buildTwo);
-  const rebuiltRoot = await get("/");
-  const rebuiltRoute = await get(sessionRoute);
-  check("a rebuild under the running process reaches /", rebuiltRoot.body, buildTwo);
-  check("and reaches the fallback too, from disk", rebuiltRoute.body, buildTwo);
+  writeFileSync(join(webRoot, "gate.html"), buildTwo);
+  const rebuiltRoot = await get(gatePath);
+  const rebuiltSecond = await get("/forgot");
+  check("a rebuild under the running process is served", rebuiltRoot.body, buildTwo);
+  check("on every gate address, from disk", rebuiltSecond.body, buildTwo);
 
   /*
    * A hashed chunk that is not there. `looksLikeAsset` refuses it a page of HTML
@@ -8743,13 +11127,23 @@ process.stdout.write("\nlosing the tunnel\n");
 
   const refused = await relayFetch("/sessions", tokenFor(alice, mine));
   check("requests fail fast rather than queueing", refused.status, 503);
-  check("with a code that says which kind of unreachable", JSON.parse(refused.body).error.code, "no_tunnel");
+  /*
+   * The code, off the status line rather than out of a JSON envelope. A refused
+   * WebSocket upgrade has no body to carry one, so `refuseUpgrade` writes
+   * `HTTP/1.1 503 no_tunnel` — which is why {@link relayFetch} surfaces
+   * `statusMessage` as the body.
+   */
+  check("with a code that says which kind of unreachable", refused.body, "no_tunnel");
 
   // Back up again, on a fresh tunnel, with no state carried over.
   const again = RelayTunnel.start({
     relayUrl,
     tunnelKey: myTunnelKey,
     local: { host: "127.0.0.1", port: daemonPort },
+    // A reconnecting daemon serves nothing without these: the only stream mode is
+    // `Noise_IK`, so "no machine key" and "no remote access" are one state.
+    staticKey: localStaticKey(mineStatic.secretKey),
+    verifier: mineVerifier,
   });
   check("a daemon can reconnect", await waitForTunnel(mine), true);
   check("and serve again", (await relayFetch("/sessions", tokenFor(alice, mine))).status, 200);
@@ -8759,27 +11153,33 @@ process.stdout.write("\nlosing the tunnel\n");
 process.stdout.write("\na daemon that takes the stream and never answers\n");
 {
   /*
-   * ⚠ **There was no bound on this at all.** A tunnel that accepts a CONNECT and
+   * ⚠ **There was no bound on this at all.** A tunnel that accepts a stream and
    * then says nothing held the browser until its own socket closed, and held one
    * of `MAX_CONCURRENT_STREAMS` on that tunnel for the same length of time —
    * which for a daemon wedged behind a stalled filesystem call is until somebody
-   * restarts it. Nothing else covered it: `res.on("close")` fires when the
-   * *client* gives up, and the tunnel's ping tick proves the socket is alive,
-   * which is exactly the state this is about.
+   * restarts it. Nothing else covers it: the tunnel's ping tick proves the socket
+   * is alive, which is exactly the state this is about.
    *
-   * Built out of a listener that accepts and writes nothing, which is what a
-   * wedged daemon looks like from here — not a closed port, which the existing
-   * `tunnel_failed` path already covers, and not a slow one.
+   * ⚠ **The bound moved when the proxy went, and it moved to a stricter place.**
+   * It used to be `upstreamTimeoutMs`, armed on a request the relay had
+   * assembled. There are no assembled requests now, and what the relay can still
+   * see is whether the daemon answered the `CONNECT` — so the bound is
+   * `CHANNEL_OPEN_TIMEOUT_MS`, and it fires **before** the WebSocket handshake is
+   * completed. That is the better ordering: a caller gets an HTTP status it can
+   * read rather than an opaque close it cannot tell from a dropped network, which
+   * is a distinction a browser's `WebSocket` API refuses to make for anybody.
    *
-   * `upstreamTimeoutMs` is a seam for the same reason `SmtpDialer` is one: the
-   * real number is two minutes, and a driver that spent two minutes to watch it
-   * would not assert it at all.
+   * ⚠ **A parked h2 session rather than a real `RelayTunnel`, and the reason is
+   * that a real one cannot reach this state.** `accept()` answers `:status 200`
+   * — or `501` — before it touches loopback, so a daemon with a wedged *disk*
+   * still answers the stream promptly and is bounded by `upstreamTimeoutMs` on
+   * the other side of the encryption instead. What this bound is for is a daemon
+   * whose h2 layer itself has stopped, and the honest way to build one is a
+   * session whose peer is a `PassThrough` that answers nothing — the same
+   * technique `superseding a tunnel` and `what a stream is stamped with` use.
    */
-  const silent = netCreateServer(() => {
-    // Accept and hold. Deliberately no response, no FIN, no reset.
-  });
-  await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
-  const silentPort = (silent.address() as AddressInfo).port;
+  const wedgedMachine = addMachine("m_wedged");
+  grant(alice, wedgedMachine);
 
   const impatient = new TunnelRegistry();
   const impatientListener = createRelayListener({
@@ -8788,36 +11188,68 @@ process.stdout.write("\na daemon that takes the stream and never answers\n");
     host: "127.0.0.1",
     port: 0,
     registry: impatient,
-    upstreamTimeoutMs: 200,
+    channelTimeoutMs: 200,
   });
   await listening(impatientListener.server);
-  const impatientUrl = `http://127.0.0.1:${(impatientListener.server.address() as AddressInfo).port}`;
+  const impatientPort = (impatientListener.server.address() as AddressInfo).port;
 
-  const wedged = RelayTunnel.start({
-    relayUrl: impatientUrl,
-    tunnelKey: myTunnelKey,
-    local: { host: "127.0.0.1", port: silentPort },
+  /*
+   * A real h2 server that accepts the stream and never responds, which is what a
+   * wedged daemon looks like from the relay's side. ⚠ **A bare `PassThrough` will
+   * not do**: with nothing sending `SETTINGS` the client session never completes
+   * its own handshake, `tunnel.open` fails, and the case answers `503 no_tunnel`
+   * — measuring the registry rather than the bound. The stream has to be
+   * *accepted* for "never answered" to mean anything.
+   */
+  const toWedged = new PassThrough();
+  const fromWedged = new PassThrough();
+  const wedgedServer = createH2Server();
+  wedgedServer.on("stream", (stream) => {
+    // Accepted and held. No `respond`, no `end`, no reset — deliberately.
+    stream.on("error", () => {});
   });
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline && !impatient.isOnline(mine)) await sleep(25);
-  check("the wedged daemon's tunnel is up", impatient.isOnline(mine), true);
+  wedgedServer.emit("connection", Duplex.from({ readable: toWedged, writable: fromWedged }));
+  const parked = h2connect("http://tunnel", {
+    createConnection: () => Duplex.from({ readable: fromWedged, writable: toWedged }),
+  });
+  parked.on("error", () => {});
+  impatient.register(
+    new EndpointTunnel(wedgedMachine, Date.now(), RELAY_PROTOCOL_VERSION, parked, () => parked.destroy()),
+    CLOSE_TUNNEL_SUPERSEDED,
+  );
+  check("the wedged daemon's tunnel is up", impatient.isOnline(wedgedMachine), true);
 
   const started = Date.now();
-  const held = await fetch(new URL("/sessions", impatientUrl), {
-    headers: { authorization: `Bearer ${tokenFor(alice, mine)}` },
+  const held = await new Promise<number>((resolve) => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${impatientPort}${RELAY_CHANNEL_PATH}?token=${encodeURIComponent(tokenFor(alice, wedgedMachine))}`,
+    );
+    ws.on("open", () => {
+      ws.terminate();
+      resolve(0);
+    });
+    ws.on("unexpected-response", (_req, res) => {
+      ws.terminate();
+      resolve(res.statusCode ?? 0);
+    });
+    ws.on("error", () => resolve(-1));
+    setTimeout(() => resolve(-2), 5_000).unref();
   });
   const waited = Date.now() - started;
-  check("a request it never answers is given up on", held.status, 502);
-  check(
-    "and reported as the tunnel failing rather than as a new kind of error",
-    ((await held.json()) as { error: { code: string } }).error.code,
-    "tunnel_failed",
-  );
+  check("a channel it never answers is given up on", held, 504);
   report("rather than held until the client gives up", waited < 3_000, `${waited}ms`);
+  /*
+   * And the half that makes the ordering worth having: the refusal arrived as a
+   * *status*, which means the WebSocket handshake never completed. A caller that
+   * had already upgraded would see a close with no code and no body — and would
+   * retry it for ever, because that is indistinguishable from a phone changing
+   * networks.
+   */
+  report("and as a status rather than as an opaque close", held > 0, `HTTP ${held}`);
 
-  await wedged.stop();
   impatientListener.close();
-  silent.close();
+  parked.destroy();
+  wedgedServer.close();
 }
 
 relayListener.close();
@@ -11513,7 +13945,7 @@ process.stdout.write("\nregistration, recovery, and the mail that carries them\n
       .run(pia, await hashPassword(piaPassword, "authenticated"), Date.now());
     const piaKey = seedKey(pia);
     const piaSession = {
-      authorization: `Bearer ${mintSession(gdb, pia, { ip: null, userAgent: null }).token}`,
+      authorization: `Bearer ${mintSession(gdb, pia, { ip: null, userAgent: null }, null).token}`,
       "content-type": "application/json",
     };
 

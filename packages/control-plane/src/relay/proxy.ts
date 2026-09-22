@@ -1,8 +1,9 @@
-import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { DatabaseSync } from "node:sqlite";
 import type { Duplex } from "node:stream";
+import { WebSocketServer, createWebSocketStream } from "ws";
 import { corsHeaders } from "../../../../src/cors.js";
-import { RELAY_HEADER_PREFIX } from "../../../../src/relay/protocol.js";
+import { MAX_TUNNEL_MESSAGE_BYTES, STREAM_ENCRYPTION_NOISE_IK } from "../../../../src/relay/protocol.js";
 import { bearerToken } from "../../../../src/http.js";
 import { createRelayAuthorizer } from "./authorize.js";
 import type { TunnelRegistry } from "./registry.js";
@@ -32,325 +33,290 @@ export interface RelayProxyOptions {
   registry: TunnelRegistry;
   onEvent?: (event: string, detail: string) => void;
   /**
-   * How long a daemon may hold a proxied request without answering.
+   * How long a daemon may take to answer a channel's `CONNECT`.
    *
    * A seam rather than a constant only, for the reason `SmtpDialer` and
-   * `AgentProcess` are seams: the behaviour is a two-minute wait, and a driver
-   * that had to spend two minutes to see it would not assert it at all. See
-   * {@link UPSTREAM_IDLE_TIMEOUT_MS} for why the real number is what it is.
+   * `AgentProcess` are seams: a driver that had to spend the real number to see
+   * the behaviour would not assert it at all.
+   *
+   * ⚠ **This used to be `upstreamTimeoutMs`, the bound on how long a daemon could
+   * hold a proxied *request*.** There are no proxied requests any more, and the
+   * bound did not disappear — it moved to `src/e2ee.ts`, one hop closer to what it
+   * bounds, on the side of the encryption that can see a request at all. What is
+   * left here is the bound on *reachability*, which is the only thing this process
+   * can still measure. See {@link CHANNEL_OPEN_TIMEOUT_MS}.
    */
-  upstreamTimeoutMs?: number;
+  channelTimeoutMs?: number;
 }
 
 export interface RelayProxy {
   handleRequest(req: IncomingMessage, res: ServerResponse): void;
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void;
+  /**
+   * An encrypted channel: authorize, open a stream, splice, understand nothing.
+   *
+   * Named apart from {@link handleUpgrade} because it is not the same act. That
+   * one *proxies* — it serializes a request with Node's HTTP client and copies a
+   * 101 back — and this one only carries bytes. Merging them would put a parse on
+   * the path of the thing whose whole purpose is that nothing here parses it.
+   */
+  handleChannel(req: IncomingMessage, socket: Duplex, head: Buffer): void;
 }
 
-/**
- * How long a daemon may hold a proxied request without answering.
+/*
+ * ⚠ **`UPSTREAM_IDLE_TIMEOUT_MS` moved rather than vanished.**
  *
- * ⚠ **There was no bound here at all.** A tunnel that accepts a CONNECT stream
- * and then says nothing held the browser until its own socket closed, and held
- * one of `MAX_CONCURRENT_STREAMS` on that tunnel for the same length of time —
- * which on a daemon wedged behind a stalled filesystem call is until somebody
- * restarts it. Nothing else covered it: `res.on("close")` fires when the *client*
- * gives up, and the tunnel's ping tick proves the socket is alive, which is
- * exactly the state this is about.
+ * It was 120 s here: the "nobody is ever coming back" bound on a daemon that took
+ * a stream and then said nothing. That bound still exists and is still 120 s — it
+ * lives in `src/e2ee.ts` now, on the side of the encryption that can see a request
+ * at all, three feet from the listener that produces the answer. So does the
+ * `response.complete` check it was paired with, which is Q6.103's truncation
+ * discipline and is why `RESPONSE_END` and `FAILED` are different frames.
  *
- * 120 s rather than something tighter, because the slowest legitimate request is
- * a real one: `POST /sessions` starts an agent and the web client already allows
- * 90 s for it, `worktree add` runs the repository's own hooks and LFS filters on
- * a 120 s budget, and refusing at 30 s would break creating a session on a large
- * repository. This is the "nobody is ever coming back" bound, not a latency
- * budget — the client's own 15 s and 90 s deadlines are that.
- *
- * **Post-authorization availability only**, so it is deliberately not a defence
- * against anything: a caller who can open a stream already holds a grant.
+ * What is left in this process is the bound below, which is about *reachability*
+ * rather than about work.
  */
-const UPSTREAM_IDLE_TIMEOUT_MS = 120_000;
 
 /**
- * Headers that describe *this* hop and must not be forwarded to the next one.
+ * How long a daemon may take to answer a channel's `CONNECT` with its `200`.
  *
- * `upgrade` and `connection` are in the list but re-added deliberately on the
- * upgrade path — there they are the message, not metadata about the connection.
+ * ⚠ **The WebSocket handshake is deliberately completed *after* this answer**,
+ * which is what this bound exists to make finite. A daemon that has not learned
+ * the encrypted mode refuses the stream with `501`, and a daemon that is wedged
+ * answers nothing at all — and the browser's `WebSocket` API surfaces neither a
+ * status nor a body, only "it closed". Waiting for the daemon first turns both
+ * into an HTTP refusal on the upgrade, which is at least legible in this relay's
+ * own log, and it means a channel that opens has a daemon behind it rather than
+ * merely a tunnel.
+ *
+ * Short, because nothing behind it is work: the daemon answers this before it has
+ * read a byte of the handshake, so the only thing being waited on is one h2
+ * round trip down a socket that is already up. {@link UPSTREAM_IDLE_TIMEOUT_MS}
+ * is the bound on *work*; this one is the bound on *reachability*.
  */
-const HOP_BY_HOP = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "proxy-connection",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-]);
+const CHANNEL_OPEN_TIMEOUT_MS = 10_000;
+
+/**
+ * How much a channel may have queued toward the app before this relay gives up.
+ *
+ * `createWebSocketStream` gives real backpressure — `pipe` stops reading from the
+ * h2 stream while `ws.send`'s callback is outstanding, and the h2 window then
+ * stops being granted, which is the same chain that carries "the phone stopped
+ * reading" all the way back to the daemon today. This is the valve *behind* that,
+ * for the case the chain cannot cover: a socket that is neither draining nor
+ * erroring, which is what a dead phone on a live TCP connection looks like.
+ *
+ * Equal to `MAX_TUNNEL_BUFFERED_BYTES` for the tunnel, and should be just as
+ * unreachable.
+ */
+const MAX_CHANNEL_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 export function createRelayProxy(options: RelayProxyOptions): RelayProxy {
   const { db, registry } = options;
   const onEvent = options.onEvent ?? ((): void => {});
-  const upstreamTimeoutMs = options.upstreamTimeoutMs ?? UPSTREAM_IDLE_TIMEOUT_MS;
+  const channelTimeoutMs = options.channelTimeoutMs ?? CHANNEL_OPEN_TIMEOUT_MS;
   const authorizer = createRelayAuthorizer(db, options.issuer);
+  /*
+   * The channel's WebSocket server, and it exists only to do the handshake.
+   *
+   * `noServer` because the listener already decided which path this is, and the
+   * refusal paths need the raw socket rather than a `WebSocket`. Nothing is ever
+   * read off the resulting connection as a *message*: `createWebSocketStream`
+   * collapses it straight back into bytes, because message boundaries are the
+   * app's business and this process is not in it.
+   */
+  const channels = new WebSocketServer({ noServer: true, maxPayload: MAX_TUNNEL_MESSAGE_BYTES });
 
   return {
+    /**
+     * Anything that is not a channel.
+     *
+     * ⚠ **This used to be the whole of the relay and it is now a refusal**, which
+     * is the single largest thing Phase 5 changed about this process. It
+     * authorized a request, serialized it onto a `CONNECT` stream with Node's own
+     * HTTP client, and copied the answer back — so every prompt, diff, file and
+     * line of terminal output in the fleet passed through this function as
+     * plaintext. `SECURITY.md` said so in as many words: *"It is written to route
+     * and never to parse, but that is a discipline in the code rather than a
+     * property of the protocol."* It is a property of the protocol now, and the
+     * way it was made one is that the code which could parse is gone.
+     *
+     * The refusal is deliberately **not** authorized first. There is nothing to
+     * authorize *for*: no credential makes this path work, so checking one would
+     * only tell a caller whether their token was good for a service that no
+     * longer exists. It opens no stream and touches `requestsProxied` for the same
+     * reason a preflight never did.
+     *
+     * `426` rather than `404`, matching `TUNNEL_PATH`'s own answer to a
+     * non-upgrade request: the endpoint is real, and what is wrong is the shape of
+     * the connection being asked for.
+     */
     handleRequest(req, res) {
-      /*
-       * A CORS preflight, answered here and never forwarded.
-       *
-       * This is not a shortcut, it is the only thing that can happen: a preflight
-       * carries no `Authorization` header and no `?token=` by specification, so
-       * there is no `aud` to read, so there is no machine to route it to. The
-       * alternative to answering it is refusing every browser.
-       *
-       * It opens no stream and does not touch `requestsProxied` — the existing
-       * rule that a request which never reached a tunnel must not move that
-       * counter applies here exactly as it does to a refusal, and for the same
-       * reason: the counter is how "the client went direct" stays a measurement.
-       */
-      if (isPreflight(req)) {
-        res.writeHead(204, { ...corsHeaders(), "content-length": 0 });
-        res.end();
-        return;
-      }
-
-      const auth = authorizer.authorize(readToken(req));
-      if (!auth.ok) {
-        onEvent("proxy_refused", `${auth.code} ${req.method ?? "?"} ${pathOf(req)}`);
-        return sendJson(res, auth.status, { error: { code: auth.code, message: auth.message, detail: null } });
-      }
-
-      const tunnel = registry.get(auth.machineId);
-      if (tunnel === null) return sendNoTunnel(res, auth.machineId);
-
-      const stream = tunnel.open(auth.subject);
-      if (stream === null) return sendNoTunnel(res, auth.machineId);
-
-      const upstream = httpRequest(
-        {
-          createConnection: () => stream,
-          method: req.method,
-          path: req.url,
-          headers: forwardHeaders(req, false),
+      onEvent("proxy_retired", `${req.method ?? "?"} ${pathOf(req)}`);
+      sendJson(res, 426, {
+        error: {
+          code: "upgrade_required",
+          message:
+            "this relay carries encrypted channels only: open a WebSocket to /__relay/channel. " +
+            "A plaintext request cannot be proxied to a daemon any more, by design — the relay " +
+            "is not able to read what it carries",
+          detail: null,
         },
-        (upRes) => {
-          res.writeHead(upRes.statusCode ?? 502, stripHopByHop(upRes.headers));
-          /*
-           * ⚠ **`pipe` forwards `end` and never a premature close.**
-           *
-           * Without these two lines an upstream that dies *after* the response
-           * has started left `res` open for ever, holding a browser against a
-           * `content-length` promising bytes nobody was going to send. Every
-           * mid-body death did it — the idle bound below, a tunnel drop, a
-           * daemon killed mid-answer — and the client had no failure to react
-           * to, so `isReplayable`'s retry never got its turn. Measured: a
-           * half-answering daemon behind a 2s bound still had the client waiting
-           * at 12s. Q6.103.
-           *
-           * `complete` rather than the `aborted` event: it is the undeprecated
-           * check and the wider one, catching an upstream that closes *short of
-           * its own `content-length`* without erroring at all — which would
-           * otherwise hand the client a truncated transcript as a whole one.
-           */
-          upRes.on("error", () => res.destroy());
-          upRes.on("close", () => {
-            if (!upRes.complete) res.destroy();
-          });
-          upRes.pipe(res);
-        },
-      );
-
-      /*
-       * A daemon that took the stream and never answered, or stopped answering
-       * partway through.
-       *
-       * **Destroyed with an error on purpose.** `ClientRequest.destroy()` with no
-       * argument emits no `'error'`, so before the response starts it produced a
-       * socket that merely stopped, and after `writeHead` it reached nothing at
-       * all — the handler below is what closes `res`, and it was never called.
-       * With the error it reports as `tunnel_failed` rather than inventing a
-       * fourth code: from the client's side "the tunnel to this machine failed"
-       * is exactly what happened.
-       */
-      upstream.setTimeout(upstreamTimeoutMs, () => upstream.destroy(new Error("upstream idle")));
-
-      upstream.on("error", () => {
-        // The tunnel died mid-request. A clean 502 so the client retries and
-        // re-probes, rather than a socket that just stops.
-        if (!res.headersSent) {
-          sendJson(res, 502, {
-            error: { code: "tunnel_failed", message: "the tunnel to this machine failed mid-request", detail: null },
-          });
-        } else {
-          res.destroy();
-        }
-        stream.destroy();
       });
-      res.on("close", () => stream.destroy());
-
-      req.pipe(upstream);
-      req.on("error", () => upstream.destroy());
     },
 
     /**
-     * The WebSocket path — `/sessions/:id/stream`.
+     * A WebSocket upgrade that is not a channel.
      *
-     * Nothing here knows it is a WebSocket. The tunnel carries bytes, so an
-     * upgrade is an upgrade the same as it would be on the direct path; the relay
-     * copies the 101 back and then gets out of the way. That is why "tunneling WS
-     * inside WS" needed no special handling: it is not a case, it is the absence
-     * of one.
+     * The same refusal in the shape this path can answer in, and it is reachable
+     * only for a path the listener did not recognise — `/__relay/tunnel` goes to
+     * the endpoint and `/__relay/channel` goes below. What used to arrive here was
+     * a browser opening `/sessions/:id/stream`, which is now a frame inside a
+     * channel rather than a connection of its own.
      */
-    handleUpgrade(req, socket, head) {
-      /*
-       * An error listener, before anything else can happen.
-       *
-       * Node removes its own `socketOnError` handler *before* emitting `upgrade`,
-       * so between this line and the `socket.on("error")` inside the `upgrade`
-       * callback below the socket would carry zero listeners — and an `'error'`
-       * event with no listener is an uncaught exception, which takes down the
-       * process holding the API, the relay, the web UI and every tunnel in the
-       * fleet at once.
-       *
-       * The window is not theoretical and it is not short: authorizing, opening a
-       * CONNECT stream, and waiting for the daemon to dial its own loopback
-       * listener and answer 101 is a full tunnel round trip. A phone that leaves
-       * Wi-Fi during it sends RST rather than FIN, which is exactly this event.
-       * Measured: `upgrade seen; socket error listeners = 0` followed by
-       * `Error: read ECONNRESET` and a non-zero exit.
-       *
-       * It is attached first rather than after `authorize` because the refusal
-       * paths write to this socket too.
-       */
+    handleUpgrade(req, socket, _head) {
+      socket.on("error", () => socket.destroy());
+      onEvent("proxy_retired", `upgrade ${pathOf(req)}`);
+      refuseUpgrade(socket, 426, "upgrade_required");
+    },
+
+    /**
+     * An encrypted channel between one app and one machine.
+     *
+     * ⚠ **This is the path on which the relay stops being trusted with anything.**
+     * Everything above forwards a *request* — it reads a method, a path and every
+     * header, and it could read a body. This reads a token, decides whether the
+     * caller holds a grant, and then moves bytes between two sockets. The Noise
+     * handshake, the capability and every request inside run between the app and
+     * the daemon; this process holds no key material for them and could not
+     * decrypt a byte if it were compromised outright. That is the whole of what
+     * Phase 5 buys, and it is bought *here*.
+     *
+     * Authorization is unchanged and still happens first: the same `authorize`,
+     * the same live user / machine / grant rows, the same refusals. A relay that
+     * cannot read the traffic is not a relay that lets anybody through — those are
+     * different properties and both are wanted.
+     */
+    handleChannel(req, socket, head) {
+      // First, for `handleUpgrade`'s reason: Node has already removed its own
+      // `socketOnError`, and every refusal below writes to this socket.
       socket.on("error", () => socket.destroy());
 
-      // A browser cannot set headers on a WebSocket, so the token arrives as a
-      // query parameter here — exactly as the daemon's own `readCredential`
-      // expects on the direct path.
       const auth = authorizer.authorize(readToken(req));
       if (!auth.ok) {
-        onEvent("proxy_refused", `${auth.code} upgrade ${pathOf(req)}`);
+        onEvent("channel_refused", `${auth.code} ${pathOf(req)}`);
         return refuseUpgrade(socket, auth.status, auth.code);
       }
 
-      /*
-       * Logged on this path too, matching `sendNoTunnel` on the request path.
-       *
-       * The WebSocket is the connection a phone actually holds, so a machine
-       * whose tunnel is down is *most* visible here — and it was the one path
-       * where the relay said nothing at all, which made "the daemon is asleep"
-       * indistinguishable from "the relay is broken" in the log.
-       */
       const tunnel = registry.get(auth.machineId);
       if (tunnel === null) {
-        onEvent("proxy_no_tunnel", auth.machineId);
+        onEvent("channel_no_tunnel", auth.machineId);
         return refuseUpgrade(socket, 503, "no_tunnel");
       }
-
-      const stream = tunnel.open(auth.subject);
-      if (stream === null) {
-        onEvent("proxy_no_tunnel", `${auth.machineId} (stream limit)`);
-        return refuseUpgrade(socket, 503, "no_tunnel");
-      }
-
-      const upstream = httpRequest({
-        createConnection: () => stream,
-        method: req.method,
-        path: req.url,
-        headers: forwardHeaders(req, true),
-      });
-
-      upstream.on("upgrade", (upRes, upSocket, upHead) => {
-        const statusLine = `HTTP/1.1 ${upRes.statusCode ?? 101} ${upRes.statusMessage ?? "Switching Protocols"}`;
-        const lines = [statusLine];
-        for (let i = 0; i < upRes.rawHeaders.length; i += 2) {
-          lines.push(`${upRes.rawHeaders[i]}: ${upRes.rawHeaders[i + 1]}`);
-        }
-        socket.write(`${lines.join("\r\n")}\r\n\r\n`);
-        if (upHead.length > 0) socket.write(upHead);
-
-        socket.on("error", () => upSocket.destroy());
-        upSocket.on("error", () => socket.destroy());
-        socket.pipe(upSocket);
-        upSocket.pipe(socket);
-      });
-
-      // A daemon that answers an upgrade with an ordinary response — a 401 from
-      // its own auth, say. Relay it verbatim; the client has to see its own
-      // daemon's answer, not one this service invented.
-      upstream.on("response", (upRes) => {
-        const lines = [`HTTP/1.1 ${upRes.statusCode ?? 502} ${upRes.statusMessage ?? ""}`.trimEnd()];
-        for (let i = 0; i < upRes.rawHeaders.length; i += 2) {
-          lines.push(`${upRes.rawHeaders[i]}: ${upRes.rawHeaders[i + 1]}`);
-        }
-        socket.write(`${lines.join("\r\n")}\r\n\r\n`);
-        // The same premature-close hole as the request path, and it leaks the raw
-        // client socket rather than a `ServerResponse`. Q6.103.
-        upRes.on("error", () => socket.destroy());
-        upRes.on("close", () => {
-          if (!upRes.complete) socket.destroy();
-        });
-        upRes.pipe(socket);
-      });
 
       /*
-       * The same bound on the handshake, and **cleared the moment it completes**
-       * — a WebSocket that sits quiet between events is healthy, which is the
-       * distinction `tunnel.ts` draws with the same words about its loopback dial
-       * timer. Left armed this would tear down every idle stream at two minutes.
+       * The mode is named here and nowhere else in this process.
+       *
+       * `open` used to write `none` itself, which made the carrier the party that
+       * chose. It is a parameter now precisely so that this — the one call site
+       * that wants encryption — is the thing that says so, and so that a future
+       * mode is a new value at a call site rather than an edit to the registry.
        */
-      upstream.setTimeout(upstreamTimeoutMs, () => upstream.destroy());
-      upstream.once("upgrade", () => upstream.setTimeout(0));
-      upstream.once("response", () => upstream.setTimeout(0));
+      const stream = tunnel.open(auth.subject, STREAM_ENCRYPTION_NOISE_IK);
+      if (stream === null) {
+        onEvent("channel_no_tunnel", `${auth.machineId} (stream limit)`);
+        return refuseUpgrade(socket, 503, "no_tunnel");
+      }
 
-      upstream.on("error", () => {
-        refuseUpgrade(socket, 502, "tunnel_failed");
+      /*
+       * Wait for the daemon's `200` before completing the WebSocket handshake.
+       *
+       * The ordering is the point. A daemon too old to know this mode answers
+       * `501` on the stream, and a browser that has already upgraded would see
+       * that as an opaque close with nothing to say — indistinguishable from a
+       * network drop, and therefore retried for ever. Answering the *upgrade*
+       * with a status instead keeps the distinction in this relay's log, and
+       * leaves the app's own refusal — "that machine has not announced a key" —
+       * the thing a person actually reads, decided before a socket is dialled.
+       */
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         stream.destroy();
-      });
-      socket.on("close", () => stream.destroy());
+        onEvent("channel_timeout", auth.machineId);
+        refuseUpgrade(socket, 504, "tunnel_timeout");
+      }, channelTimeoutMs);
+      // Not `unref`: this relay is a long-lived process and the timer is cleared
+      // on every exit from this function. `unref` here would only hide a leak.
+      const settle = (): boolean => {
+        if (settled) return false;
+        settled = true;
+        clearTimeout(timer);
+        return true;
+      };
 
-      // Bytes the client already sent past the request headers. Rare, but dropping
-      // them silently corrupts the stream in a way that is very hard to find.
-      if (head.length > 0) upstream.write(head);
-      upstream.end();
+      stream.once("error", () => {
+        if (!settle()) return socket.destroy();
+        onEvent("channel_failed", auth.machineId);
+        refuseUpgrade(socket, 502, "tunnel_failed");
+      });
+
+      stream.once("response", (headers) => {
+        if (!settle()) return;
+        const status = Number(headers[":status"] ?? 0);
+        if (status !== 200) {
+          /*
+           * The daemon refused the mode. It is running, it dialled in, and it
+           * cannot speak this — which on a fleet mid-update is an ordinary state
+           * and not an error, so it is reported as its own event rather than
+           * folded into `channel_failed`.
+           */
+          stream.destroy();
+          onEvent("channel_unsupported", `${auth.machineId} answered ${String(status)}`);
+          return refuseUpgrade(socket, 501, "encryption_unsupported");
+        }
+
+        channels.handleUpgrade(req, socket, head, (ws) => {
+          const carrier = createWebSocketStream(ws);
+
+          /*
+           * The valve. See {@link MAX_CHANNEL_BUFFERED_BYTES} — this is behind the
+           * backpressure rather than instead of it, and reaching it means the
+           * chain did not work, which is a reason to end the connection rather
+           * than to grow.
+           */
+          const valve = setInterval(() => {
+            if (ws.bufferedAmount > MAX_CHANNEL_BUFFERED_BYTES) {
+              onEvent("channel_backpressure", `${auth.machineId} ${String(ws.bufferedAmount)} bytes`);
+              ws.terminate();
+            }
+          }, 1_000);
+          valve.unref();
+
+          const done = (): void => {
+            clearInterval(valve);
+            carrier.destroy();
+            stream.destroy();
+          };
+
+          /*
+           * Both directions, and nothing between them. There is no place in these
+           * two lines to read a request line, strip a header or notice a body,
+           * which is the property the whole phase rests on.
+           */
+          carrier.pipe(stream);
+          stream.pipe(carrier);
+
+          carrier.on("error", done);
+          stream.on("error", done);
+          stream.on("close", done);
+          ws.on("close", done);
+          onEvent("channel_open", auth.machineId);
+        });
+      });
     },
   };
-
-  function sendNoTunnel(res: ServerResponse, machineId: string): void {
-    onEvent("proxy_no_tunnel", machineId);
-    /*
-     * Refused immediately, never queued.
-     *
-     * Holding requests until a daemon reappears would turn a relay outage into a
-     * relay memory leak — during precisely the incident it should be surviving.
-     * The client drops its route belief on this code and re-probes; there is no
-     * second path to fall back to, which is what the message says.
-     */
-    sendJson(res, 503, {
-      error: {
-        code: "no_tunnel",
-        message:
-          "this machine has no relay tunnel: its daemon is not running, or cannot dial out. " +
-          "There is no other way in, so there is nothing else to try — it comes back on its own " +
-          "when the daemon reconnects",
-        detail: null,
-      },
-    });
-  }
-}
-
-/**
- * A CORS preflight, rather than an `OPTIONS` somebody meant.
- *
- * Both conditions, because `OPTIONS` alone is a legitimate HTTP method a daemon
- * could one day answer for itself; `access-control-request-method` is what makes
- * it the browser's own question rather than the caller's. Getting this wrong in
- * the lenient direction would silently stop forwarding a method the daemon
- * supports.
- */
-function isPreflight(req: IncomingMessage): boolean {
-  return req.method === "OPTIONS" && req.headers["access-control-request-method"] !== undefined;
 }
 
 /**
@@ -428,40 +394,27 @@ function readToken(req: IncomingMessage): string | null {
   }
 }
 
-function forwardHeaders(req: IncomingMessage, upgrade: boolean): IncomingHttpHeaders {
-  const out: IncomingHttpHeaders = {};
-  for (const [name, value] of Object.entries(req.headers)) {
-    const key = name.toLowerCase();
-    if (HOP_BY_HOP.has(key)) continue;
-    // Everything in the relay's own namespace is relay-controlled. Dropping any
-    // client-supplied copy is what stops `reemoat-sub` being forgeable — though
-    // the reason it is *safe* is that the daemon re-verifies the real token and
-    // never reads this for a decision.
-    if (key.startsWith(RELAY_HEADER_PREFIX)) continue;
-    if (value !== undefined) out[key] = value;
-  }
-
-  if (upgrade) {
-    out["connection"] = "Upgrade";
-    out["upgrade"] = req.headers.upgrade ?? "websocket";
-  }
-
-  const forwarded = req.socket.remoteAddress;
-  if (forwarded !== undefined) {
-    const existing = req.headers["x-forwarded-for"];
-    out["x-forwarded-for"] = existing === undefined ? forwarded : `${String(existing)}, ${forwarded}`;
-  }
-  return out;
-}
-
-function stripHopByHop(headers: IncomingHttpHeaders): IncomingHttpHeaders {
-  const out: IncomingHttpHeaders = {};
-  for (const [name, value] of Object.entries(headers)) {
-    if (HOP_BY_HOP.has(name.toLowerCase())) continue;
-    if (value !== undefined) out[name] = value;
-  }
-  return out;
-}
+/*
+ * ⚠ **`forwardHeaders` and `stripHopByHop` are gone, and so is the only thing
+ * that ever needed them.**
+ *
+ * They were the relay's rule about what may cross a hop: drop `connection`,
+ * `transfer-encoding` and the rest; drop any client-supplied copy of a
+ * `reemoat-*` header so `reemoat-sub` could not be forged; append this hop to
+ * `x-forwarded-for`. Every one of those existed because this process assembled a
+ * request. It does not assemble one any more.
+ *
+ * Q5.10's invariant — *"the relay's own metadata never enters the proxied
+ * request"* — is not weakened by their removal; it is made unfalsifiable. There
+ * is no proxied request to enter. `reemoat-*` headers still ride the `CONNECT`
+ * handshake and still stop at the daemon's tunnel code, and a client cannot put
+ * one anywhere at all, because a client's bytes are ciphertext this process
+ * cannot open let alone edit.
+ *
+ * The `x-forwarded-for` append is the one thing genuinely given up, and it cost
+ * nothing: nothing under `src/` reads it. The Authority's throttle reads its own,
+ * on its own listener, and is untouched.
+ */
 
 /**
  * The relay's own answers — refusals, `no_tunnel`, `tunnel_failed`.

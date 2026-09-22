@@ -111,6 +111,18 @@ jobs:
       - name: typecheck
         run: pnpm typecheck
 
+      # The handshake against the published cross-implementation vectors. It is
+      # in `pnpm check` and was in no workflow for a release — the one driver in
+      # that chain with no step here — so a Noise implementation that had stopped
+      # interoperating with every other one deployed with every check green. The
+      # failures it is the only guard against are silent by construction: a nonce
+      # written big-endian, an HKDF borrowed from RFC 5869, a protocol name hashed
+      # where it should have been padded. Each is a handshake that still talks to
+      # itself, which is exactly what a self-test cannot see.
+      - name: protocolcheck
+        if: '!cancelled()'
+        run: pnpm protocolcheck
+
       - name: authcheck
         if: '!cancelled()'
         run: pnpm authcheck
@@ -142,6 +154,21 @@ jobs:
       - name: webcheck
         if: '!cancelled()'
         run: pnpm webcheck
+
+      # The native shell's *configuration*, which no other check here can see:
+      # `typecheck` compiles no Rust, `webcheck` is scoped to `packages/web`, and
+      # `pincheck` reads version sites by literal path. It belongs in this job and
+      # not beside the `native` job below because it never runs `cargo` — it reads
+      # text and JSON and finishes in milliseconds.
+      #
+      # The assertion worth naming: Tauri intercepts OS file drops by default, which
+      # takes the composer's attachments and the code importer with it while the
+      # paperclip beside them keeps working. Nothing else in this repository can
+      # observe that, and the shape of the failure invites the conclusion that the
+      # feature never existed.
+      - name: nativecheck
+        if: '!cancelled()'
+        run: pnpm nativecheck
 
       # Two files pin the ACP adapter and a third copy is the one that runs.
       # Nothing enforced their agreement until this existed, and nothing but this
@@ -241,3 +268,482 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks version
           /tmp/gitleaks detect --no-git --config .gitleaks.toml --redact --verbose
+
+  # The native shell, compiled. Its own job for the two reasons the `image` job
+  # gives — it is not offline-in-one-process (cargo fetches crates) and it is
+  # minutes rather than seconds — plus one of its own: it is the **first non-Linux
+  # runner in this repository**, and the only one that exercises the Apple bundle.
+  #
+  # ⚠ **It is not "the platform this app is primarily built for", which is what
+  # this comment used to say.** The app is a client on macOS, Windows and Linux;
+  # what is macOS-only is *this runner*, and the sentence was the CI file's own
+  # copy of the assumption. `docs/NATIVE.md`'s *What runs where* is the real
+  # answer, and its *Open measurements* carries what a `ubuntu-latest` leg would
+  # compile for the first time — five things this job cannot reach — and why that
+  # leg is held with the rest of the build work rather than added here.
+  #
+  # It does not `needs: check`. What it catches that nothing else can is a
+  # capability file naming a permission that does not exist — `tauri-build`
+  # compiles `capabilities/*.json` into an ACL, and `nativecheck` can only read
+  # that file as text — and a `version` path that does not resolve. Gating it
+  # behind the other jobs would only delay the one signal nothing else gives.
+  #
+  # ⚠ **Nothing here signs, notarizes or uploads anything.** The permission block
+  # at the top of this file is `contents: read`, and a job that read a signing
+  # identity would not belong in a workflow that runs on every push. `docs/NATIVE.md`
+  # carries what a signed build takes, and `deploy.yml`'s own header carries why
+  # nothing in this repository publishes on a push.
+  # ⚠ **A matrix, and the `target:` keys are load-bearing rather than labels.**
+  # `deploycheck` greps this file for `- target: <name>` to decide whether a
+  # platform may join `RELEASE_APP_TARGETS` in `deploy/ci-release.sh`, so a
+  # platform's first build never happens on the release path. Which means a leg
+  # here has to be the *same* build the release makes — hence a real bundle below
+  # rather than the `--no-bundle` link check this job used to be.
+  #
+  # `fail-fast: false` because the legs are not interchangeable: a Windows
+  # bundler regression and a Linux one are two findings, and cancelling the rest
+  # on the first would report one of them per push.
+  #
+  # Android is deliberately absent — `android-apk` below is its leg, because an
+  # APK is a Gradle run rather than a `tauri build`.
+  native:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both macOS legs on the same arm64 runner: `tauri build --target
+          # x86_64-apple-darwin` cross-compiles there, and `build-daemon.mjs`'s
+          # `TARGETS` already carries the x64 Node build and `@esbuild/darwin-x64`
+          # beside the arm64 pair. Same table as `ci-release.sh`'s `app_runner`.
+          - target: macos-arm64
+            runner: macos-latest
+            triple: aarch64-apple-darwin
+            # macOS is the one platform that carries a daemon inside it, so it is
+            # the one that needs the payload staged before `cargo` runs at all.
+            payload: "yes"
+            # One leg runs the whole-crate gates; they are host-independent and
+            # four copies would be four times the minutes for one answer.
+            gates: "yes"
+          - target: macos-x64
+            runner: macos-latest
+            triple: x86_64-apple-darwin
+            payload: "yes"
+            gates: "no"
+          - target: linux-x64
+            runner: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            payload: "no"
+            gates: "no"
+          - target: windows-x64
+            runner: windows-latest
+            triple: x86_64-pc-windows-msvc
+            payload: "no"
+            gates: "no"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # `dtolnay/rust-toolchain` rather than the runner's preinstalled Rust: the
+      # image's version moves without notice, and `clippy` with `-D warnings` is a
+      # gate that a compiler bump can change the meaning of.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.triple }}
+
+      # WebKitGTK and the bundler's own tools, which no other leg needs and the
+      # runner image does not carry. `libwebkit2gtk-4.1-dev` is what `wry` links
+      # against on Linux; `patchelf` and `librsvg2-dev` are the AppImage
+      # bundler's, and without them the build fails inside a downloaded tool with
+      # no mention of this file.
+      - name: the Linux toolchain
+        if: matrix.target == 'linux-x64'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            desktop-file-utils
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native/src-tauri
+          key: ${{ matrix.target }}
+
+      # Two installs, and the second is not a mistake. `packages/native` is under
+      # `packages/` and deliberately **excluded** from the workspace — the three
+      # deploy behaviours that depend on that line are in `pnpm-workspace.yaml`
+      # beside it — so the root install does not reach it.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir packages/native install --frozen-lockfile
+
+      # `frontendDist` has to exist before Tauri reads the configuration, and the
+      # failure otherwise is a path error that reads like a config bug.
+      - run: pnpm web:build
+
+      # The Node runtime the payload ships, cached across runs by version.
+      #
+      # ⚠ **Its own cache, and it used to have none because it lived inside
+      # `target/`** — where `Swatinem/rust-cache` above already saves. That looked
+      # free and was not: rust-cache treats every subdirectory of `target/` as a
+      # build profile and cleans what it does not recognise before saving, so a
+      # green run saved the cache directory with its 130 MB binary stripped out,
+      # and the next run restored the shell, read the directory's existence as a
+      # hit, and died on `spawnSync … ENOENT`. The script validates by the binary
+      # now, so the worst case is a re-download rather than a red build; this is
+      # what stops it being the every-run case.
+      #
+      # Keyed on the pinned version rather than on the script's hash: the file
+      # changes far more often than `NODE_VERSION` does, and a key that churns is
+      # a cache that never hits.
+      #
+      # ⚠ **Both of these belong to the payload legs alone**, and the reason is
+      # not only that a client build has no payload to cache: this step is a bash
+      # heredoc, and `windows-latest` runs `pwsh` by default, so on a client leg
+      # it failed before `tauri build` was ever reached.
+      - id: node-runtime
+        if: matrix.payload == 'yes'
+        run: |
+          version=$(grep -oE 'const NODE_VERSION = "v[0-9.]+"' packages/native/scripts/build-daemon.mjs | grep -oE 'v[0-9.]+')
+          test -n "$version" || { echo "build-daemon.mjs pins no NODE_VERSION this can read"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        if: matrix.payload == 'yes'
+        with:
+          path: packages/native/src-tauri/.node-cache
+          # ⚠ **Keyed on the target rather than on `runner.arch`.** Both macOS
+          # legs run on the same arm64 runner and stage *different* Node builds,
+          # so an arch key hands the x64 leg the arm64 payload back.
+          key: node-runtime-${{ matrix.target }}-${{ steps.node-runtime.outputs.version }}
+
+      # And the daemon payload, for the sharper version of the same reason.
+      #
+      # ⚠ **This is not a build step, it is a prerequisite of `cargo` itself.**
+      # `bundle.resources` and `bundle.externalBin` are copied from inside
+      # `build.rs`, not by the bundler — so with the staging directory absent
+      # every one of the three cargo steps below fails with
+      # `ResourcePathNotFound`, including `fmt`, which has no business caring
+      # about a 200 MB payload. It is a step of its own rather than a
+      # `beforeBuildCommand` for exactly that: `beforeBuildCommand` runs for
+      # `tauri build` alone and would leave clippy and test broken.
+      #
+      # It downloads an official Node build (checksum-verified) and installs the
+      # payload's dependencies, so it wants the network and roughly a minute.
+      #
+      # ⚠ **Only where the platform carries one.** Every platform but macOS ships
+      # a client build — the overlay takes `externalBin` and `resources` away, and
+      # `tauri-build` reads that overlay at compile time — so staging on a Linux
+      # or Windows leg would build a payload nothing copies and hide the very
+      # refusal `ci-release.sh app` makes about a leftover one.
+      #
+      # ⚠ **The triple is an argument and is not optional on a cross leg.**
+      # `build-daemon.mjs` defaults to the host, and `tauri-build` resolves
+      # `binaries/node-<target-triple>` — so `macos-x64` staged without it fails
+      # inside the build script with *"resource path
+      # `binaries/node-x86_64-apple-darwin` doesn't exist"*, which names neither
+      # this step nor the leg. `ci-release.sh app` passes it the same way.
+      - run: node packages/native/scripts/build-daemon.mjs ${{ matrix.triple }}
+        if: matrix.payload == 'yes'
+
+      - name: cargo fmt
+        if: matrix.gates == 'yes'
+        run: cargo fmt --manifest-path packages/native/src-tauri/Cargo.toml --check
+
+      - name: cargo clippy
+        if: matrix.gates == 'yes' && !cancelled()
+        run: cargo clippy --manifest-path packages/native/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # The Rust unit tests: the origin-escape table `host_cp` rests on, the
+      # normalization that makes one server one credential key, the keyring scope,
+      # and what this window may navigate to.
+      - name: cargo test
+        if: matrix.gates == 'yes' && !cancelled()
+        run: cargo test --manifest-path packages/native/src-tauri/Cargo.toml
+
+      # ⚠ **A real bundle, and the missing `--bundles` is the point.** Which kinds
+      # a platform produces is `bundle.targets` in its own
+      # `tauri.<platform>.conf.json` — `app` on macOS, `deb` and `appimage` on
+      # Linux, `nsis` on Windows — and naming them here would be a second copy of
+      # that list, with the silent direction being a check leg that builds an
+      # AppImage while the checked-in configuration says `deb`. `ci-release.sh`
+      # carries no `--bundles` for the same reason, and `deploycheck` asserts its
+      # absence there.
+      #
+      # This used to be `--no-bundle`, which was right while nothing published an
+      # app: it proved the binary links, the capability files compile into an ACL
+      # and the embedded frontend is where the configuration says. It is not
+      # enough to stand behind `RELEASE_APP_TARGETS`, where the question is
+      # whether the *artifact* builds. Unsigned, which is what a runner with no
+      # identity produces and is the same artifact a developer gets.
+      - name: tauri build
+        if: '!cancelled()'
+        shell: bash
+        run: pnpm --dir packages/native exec tauri build --target ${{ matrix.triple }}
+
+  # The Android arm of the Rust, compiled. Its own job on `ubuntu-latest` rather
+  # than a step in `native`, for two reasons that are both about the runner: the
+  # macOS images carry no Android NDK, and this leg wants no Node payload at all.
+  #
+  # ⚠ **It exists because that arm was compiled by nothing, and two
+  # shipping-breaking defects lived in the gap at once.** `cargo clippy
+  # --all-targets` in the job above means every *crate* target — lib, bin, tests,
+  # examples — on the **host**; it never crosses to another platform. So
+  # `credential.rs`'s `#[cfg(target_os = "android")]` half, its JNI export and
+  # `lib.rs`'s `#[cfg_attr(mobile, …)]` were checked only by `nativecheck`
+  # regexes, which cannot see a signature, a missing initialisation call or a
+  # wrong symbol. Measured 2026-09-19: `rustls-platform-verifier` was never
+  # initialised and every HTTPS call would have panicked, and R8 had stripped the
+  # verifier's Kotlin half out of the signed APK. Both compiled clean.
+  #
+  # ⚠ **`--lib`, and no `pnpm native:stage`.** A client build is
+  # `tauri.android.conf.json` and nothing else — `externalBin: null` and
+  # `resources: null`, which `tauri-build` reads at *compile* time — so there is
+  # no payload for `build.rs` to copy and the `ResourcePathNotFound` that forces
+  # staging in the `native` job cannot happen here. That this job passes with
+  # nothing staged is itself the assertion that the overlay works.
+  #
+  # ⚠ **But the *frontend* is not optional, and the first run of this job is how
+  # that was learned.** `lib.rs` calls `tauri::generate_context!`, which embeds
+  # `frontendDist` at **compile** time — so `packages/web/dist` has to exist even
+  # for a client build that carries no daemon payload, and a checkout without it
+  # fails inside the proc macro with *"this path doesn't exist"* rather than
+  # anywhere that names the frontend. It passed on the author's machine only
+  # because a `dist/` was lying there from an earlier build, which is the whole
+  # reason a CI leg is worth more than a local run.
+  #
+  # ⚠ **This is a compile gate, not a bundle leg, and it deliberately carries no
+  # `target: android` matrix entry.** `deploycheck` greps this file for that key
+  # to decide whether a platform may join `RELEASE_APP_TARGETS` — and what
+  # publishing an APK needs is `tauri android build`: a Gradle run, an SDK, and
+  # the `gen/android` project, none of which `cargo clippy` touches. Satisfying
+  # the release gate from here would be the weaker check standing in for the
+  # stronger one. `android-apk` below is the job that may, because it is the one
+  # that actually assembles the artifact; this one exists beside it because it
+  # answers in two minutes rather than twenty and is what a Rust change wants.
+  #
+  # ⚠ **That key is written out in this comment now, and doing so used to satisfy
+  # the gate it explains.** The grep read this file as *text*, comments included,
+  # so the paragraph above had to describe the key without ever naming it — and
+  # nothing told the next person editing here that they were under that rule.
+  # `deploycheck` strips YAML comments before the grep now, and drives the
+  # stripping on fixtures of its own, so this is prose again rather than a
+  # tripwire.
+  native-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native/src-tauri
+          key: android
+
+      # The NDK the runner already has. Named through `ANDROID_NDK_LATEST_HOME`
+      # rather than a version, because pinning one here would be a third place a
+      # toolchain version is written down and the first that nothing compares.
+      #
+      # `24` is `minSdk` in `gen/android/app/build.gradle.kts`; the API level is
+      # part of the clang triple, so a floor raised there has to be raised here
+      # too. `ring`/`aws-lc-rs` build C from a build script, which is why a
+      # target-specific `CC` and `AR` are needed and not just a linker.
+      - name: the Android toolchain
+        run: |
+          set -euo pipefail
+          ndk=${ANDROID_NDK_LATEST_HOME:?the runner image carries no Android NDK}
+          bin=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin
+          # ⚠ **The compiler is *run*, not looked for.** The `…24-clang` beside
+          # it is a four-line shell wrapper around `clang`, so a truncated or
+          # half-restored NDK still has the wrapper and answers `-x` — measured
+          # on this workflow's second run, where a cached NDK produced
+          # `bin/clang: No such file or directory` from inside the wrapper and
+          # the existence check had already passed. `--version` is the cheapest
+          # thing that fails when the toolchain is not actually there.
+          "$bin/aarch64-linux-android24-clang" --version >/dev/null 2>&1 || {
+            echo "the Android toolchain under $bin does not run" >&2
+            "$bin/aarch64-linux-android24-clang" --version >&2 || true
+            ls "$bin" | head -40 >&2
+            exit 1
+          }
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android24-clang"
+            echo "CC_aarch64_linux_android=$bin/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$bin/llvm-ar"
+          } >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `generate_context!` reads this directory at compile time; see above.
+      - run: pnpm web:build
+
+      - name: cargo clippy (aarch64-linux-android)
+        run: >
+          cargo clippy
+          --manifest-path packages/native/src-tauri/Cargo.toml
+          --target aarch64-linux-android --lib -- -D warnings
+
+  # The APK, actually assembled. The job that makes "Android builds" a statement
+  # about an artifact rather than about a regex.
+  #
+  # ⚠ **It exists because nothing ran Gradle, and the one defect that reached a
+  # shipped artifact could only be seen there.** `native-android` above compiles
+  # the Rust and stops; R8 runs in neither. Measured 2026-09-19 on a release APK:
+  # R8 had deleted all five `org.rustls.platformverifier.*` classes — the ones the
+  # Rust TLS stack looks up by name over JNI — while `classes.dex` still shipped
+  # and the `.so` still carried the string it was about to `FindClass`. Debug
+  # builds were unaffected, which is why it survived: `isMinifyEnabled` is false
+  # there. A keep rule fixes it and `nativecheck` asserts the rule is present, but
+  # a rule that is present and *ineffective* reads exactly the same to a regex.
+  # The dex census at the end of this job is the half no text can give.
+  #
+  # ⚠ **`gen/android` must be committed for this job to run at all.** It is a
+  # checked-in project, the way a checked-in Xcode project is — `.gitignore` says
+  # so in as many words — and `settings.gradle` is the first thing Gradle reads.
+  # A checkout without it fails at configuration, not at compile.
+  #
+  # ⚠ **Unsigned, and that is the point rather than a gap.** Signing needs the
+  # release keystore, which `release.yml`'s `app-android` job holds and a job that
+  # runs on every push must never see. R8 does not care: `isMinifyEnabled` is a
+  # property of the release build type, so the stripping this job exists to catch
+  # happens with or without a key.
+  android-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The key `deploycheck` reads to decide whether a platform may join
+    # `RELEASE_APP_TARGETS`. It belongs on this job and not on `native-android`,
+    # because this is the one that proves the artifact can be built at all.
+    strategy:
+      matrix:
+        include:
+          - target: android
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/native/src-tauri
+          key: android-apk
+
+      # The NDK by version rather than "whatever the image has", because the
+      # clang triple below embeds the API level and the runner image moves.
+      # ⚠ **`local-cache: false`, and the second run of this job is why.** With
+      # the cache on, a restored NDK was missing `toolchains/llvm/prebuilt/
+      # linux-x86_64/bin/clang` itself while keeping the wrapper script that
+      # calls it, so the build failed inside a compiler that looked installed.
+      # A fresh download costs about a minute and is the whole of the fix.
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          local-cache: false
+
+      - name: the NDK actually runs
+        run: |
+          set -euo pipefail
+          clang="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          "$clang" --version
+
+      - run: pnpm install --frozen-lockfile
+
+      # `packages/native` is outside the workspace on purpose — the root install
+      # does not reach it, and the Tauri CLI lives there. `native.yml`'s sibling
+      # job says the same thing one file over.
+      - run: pnpm --dir packages/native install --frozen-lockfile
+
+      # The one thing a fresh checkout cannot supply: `tauri android init` writes
+      # it with this machine's `CARGO_HOME` in it, so it is gitignored and
+      # regenerated rather than committed. Everything else under `gen/android` is
+      # in the tree and must not be overwritten — `init` would revert six
+      # hand-edits, which `nativecheck` asserts are present.
+      - name: the one generated file a clone does not carry
+        run: pnpm --dir packages/native exec tauri android init --skip-targets-install
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+
+      # The second half of `native-packaging.md`'s recipe, and the half its own
+      # text calls "the one that gets forgotten". `init` writes both halves; this
+      # puts the committed half back and leaves the ignored, machine-specific one.
+      # Without it this leg assembles a tree with the six hand-edits reverted —
+      # the R8 keep rule and the rustls context handover among them — so the dex
+      # census below would be reading a build nobody ships. `release.yml` runs no
+      # `init` at all, which is what made the two paths disagree.
+      - name: put the committed half of gen/android back
+        run: git checkout -- packages/native/src-tauri/gen/android
+
+      - name: assemble the release APK
+        run: pnpm --dir packages/native exec tauri android build --apk --target aarch64
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+
+      # ── the census that no regex can stand in for ──────────────────────────
+      #
+      # The verifier's Kotlin half has to survive R8 and be *in* the dex. Read out
+      # of the assembled APK rather than out of the build log, because R8 reports
+      # what it removed in `usage.txt` and a reader who trusts that file is one
+      # rename away from reading the wrong one.
+      - name: the TLS verifier survived R8
+        run: |
+          set -euo pipefail
+          apk=$(find packages/native/src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)
+          [ -n "$apk" ] || { echo "no APK was produced" >&2; exit 1; }
+          echo "APK: $apk ($(wc -c < "$apk") bytes)"
+          work=$(mktemp -d)
+          unzip -q "$apk" -d "$work" 'classes*.dex' 'lib/arm64-v8a/*.so'
+          if ! grep -qa platformverifier "$work"/classes*.dex; then
+            echo "::error::R8 stripped org.rustls.platformverifier out of the APK." >&2
+            echo "The Rust TLS stack looks that class up by name over JNI, so every" >&2
+            echo "HTTPS call would fail at run time. The keep rule in" >&2
+            echo "gen/android/app/proguard-rules.pro is what stops it." >&2
+            exit 1
+          fi
+          echo "ok  the verifier's Kotlin half is in classes.dex"
+          # And the other side of the same fact: the Rust really does look it up,
+          # so the keep rule is load-bearing rather than kept out of habit.
+          grep -qa 'org.rustls.platformverifier' "$work"/lib/arm64-v8a/*.so \
+            && echo "ok  and the native library still resolves it by name"

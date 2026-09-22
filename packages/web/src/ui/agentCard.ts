@@ -35,7 +35,7 @@ import { isBuiltinAgentId } from "../wire";
  *
  * ⚠ **And it is not `signed_out`, though it draws a similar badge.** A harness
  * with no status probe can never be known signed out — see
- * `AgentInfo.lastStartRefusal` — so collapsing the two would put this app's
+ * `AgentAvailability.lastStartRefusal` — so collapsing the two would put this app's
  * "not signed in" over a state it has no evidence for, and `stanceLine`'s
  * signed-out arm would then blame the host's missing `script` for something that
  * has nothing to do with the host.
@@ -51,8 +51,9 @@ export type AgentStance =
 /**
  * Whether a harness is a complete answer on its own, with no model chosen.
  *
- * ⚠ **Three of the four *are* the model, and the fourth is a router.** Claude Code
- * runs Claude, Kimi Code runs Kimi, Codex runs GPT — tapping one of those is a
+ * ⚠ **Four of the five *are* the model, and the fifth is a router.** Claude Code
+ * runs Claude, Kimi Code runs Kimi, Codex runs GPT, Grok runs Grok — tapping one
+ * of those is a
  * whole decision, and the agent that starts is the one the tile names. opencode is
  * not a model at all: it is a CLI that reaches somebody else's catalogue, and
  * started bare it picks `opencode/big-pickle` off its own anonymous free tier.
@@ -64,7 +65,7 @@ export type AgentStance =
  * machine with `OPENROUTER_API_KEY` on opencode's card gets a bare session that
  * publishes **362** models and still starts on `big-pickle`. The key widens the
  * catalogue and moves the default not at all. So this is not "opencode needs
- * setting up" — it is the most self-sufficient of the four — it is that the model
+ * setting up" — it is the most self-sufficient of the five — it is that the model
  * it runs is the one thing nobody on the screen decided.
  *
  * So it is not offered as a **starting point**. It is not removed: it is a harness
@@ -82,11 +83,20 @@ export type AgentStance =
  */
 export function startsBare(agent: { id: string }): boolean {
   /*
-   * ⚠ **Two arms, and the contributed one is a flat `false`.** For the four this
+   * ⚠ **Two arms, and the contributed one is a flat `false`.** For the five this
    * product ships the answer is a literal and stays one: this is the list
    * `webcheck` sweeps to assert that exactly one of them is not a starting point,
    * and deriving it from the wire would make that assertion a statement about
    * whatever the daemon happened to say.
+   *
+   * ⚠ **grok is `true`, and it was weighed rather than assumed** — it is the first
+   * harness added since this predicate existed, so it is the first chance to get it
+   * wrong. Measured 2026-09-21 on 1.0.40: a bare `session/new` publishes a `model`
+   * option with `currentValue: "grok-4.6"` out of exactly two, both xAI's own, and
+   * `initialize` carries the same pair under `_meta.modelState`. So a bare session
+   * runs a model the tile names, which is claude's and codex's situation and not
+   * opencode's — where the default is `opencode/big-pickle`, a model nobody on the
+   * screen chose, out of a list a saved key grows to 362.
    *
    * ⚠ **For a harness a plugin added it was `standalone === true` off the manifest,
    * and that field is gone — a plugin adds a harness, never an agent.** Spelling
@@ -203,6 +213,12 @@ const AGENT_LABEL: Record<string, string> = {
   // `opencode`, an entry that agrees with the fallback by luck is indistinguishable
   // from one that was chosen, and this one no longer does.
   opencode: "Opencode",
+  // The vendor's own product name is "Grok Build" and the binary is `grok`. This
+  // table is the **word**, so it is the half a person says — and "Grok" is what
+  // every sentence built from this reads best with ("Grok cannot run …"). The
+  // daemon's `displayName` carries `Grok Build CLI` for whoever is reading a log,
+  // which is the split the three rows above already make.
+  grok: "Grok",
 };
 
 /** The program's own name. An id this build has never heard of is drawn as itself. */
@@ -275,7 +291,7 @@ const INVISIBLE =
  *
  * ⚠ **Never the daemon's `displayName`, which is the trap this exists to close.**
  * That field is a log line and carries the program: `Claude (claude-agent-acp)`,
- * `Kimi Code CLI`. Two of the four built-ins would fail this file's own rule
+ * `Kimi Code CLI`, `Grok Build CLI`. Three of the five built-ins would fail this file's own rule
  * against a label naming a package or ending in `CLI`, and `webcheck` sweeps for
  * exactly those words — so a client that reached for `displayName` when
  * `AGENT_LABEL` had no row would have put the adapter's package name on a 96px
@@ -437,6 +453,15 @@ export function stanceLine(
    * wording that names nothing.
    */
   os?: string,
+  /**
+   * Whether this machine can put the harness on itself, from here.
+   *
+   * ⚠ **Absent keeps today's sentence, byte for byte**, which is the
+   * compatibility property and — unlike a placement — a *value* a driver can
+   * pin. An older daemon sends no such field, and a card telling somebody to
+   * press a button that is not drawn is worse than the sentence it replaced.
+   */
+  installable?: boolean,
 ): string | null {
   const name = harnessName(agent);
   const host = osName(os);
@@ -457,7 +482,16 @@ export function stanceLine(
     return "No sign-in needed. A key adds more models.";
   }
   if (stance === "not_installed") {
-    return `${name} isn't installed. Install it on the machine itself.`;
+    /*
+     * ⚠ **The remedy is the button eight pixels below, and naming it here would
+     * be the self-reference this file keeps deleting** — the same call
+     * `start_refused`'s `canSignIn` arm already makes one branch down. The other
+     * arm is the old sentence unchanged, because on a daemon that cannot install
+     * anything the machine really is where it has to be done.
+     */
+    return installable === true
+      ? `${name} isn't installed on this machine.`
+      : `${name} isn't installed. Install it on the machine itself.`;
   }
   /*
    * ⚠ **It blames the harness, and it must never blame the host.** The
@@ -519,7 +553,7 @@ export function stanceLine(
 }
 
 /**
- * The six credentials the daemon can send, by what they are rather than by the
+ * The seven credentials the daemon can send, by what they are rather than by the
  * variable a CLI reads them from. The raw name was the visible label *and* the
  * `aria-label`, so a screen reader spelled out
  * "C L A U D E underscore C O D E underscore O A U T H underscore T O K E N".
@@ -537,6 +571,7 @@ export const CREDENTIAL_LABELS: Record<string, { name: string; note: string }> =
   CODEX_API_KEY: { name: "OpenAI API key", note: "From your OpenAI account." },
   OPENROUTER_API_KEY: { name: "OpenRouter API key", note: "From your OpenRouter account." },
   OPENCODE_API_KEY: { name: "OpenCode Zen key", note: "Optional; the free models need none." },
+  XAI_API_KEY: { name: "xAI API key", note: "From your xAI account." },
 };
 
 export function credentialLabel(envName: string): { name: string; note: string } {

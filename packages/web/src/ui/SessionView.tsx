@@ -8,7 +8,9 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { backgroundReporting } from "../tasks";
 import { echoFor, echoVersion, subscribeEchoes } from "../echo";
+import { hiddenFinished, hiddenFinishedVersion, hideFinished, subscribeHiddenFinished } from "../finishedTasks";
 import { permissionContext } from "../permission";
 import { keyOf, type SessionRef } from "../ids";
 import { describe, missingRowReason } from "../machine";
@@ -298,7 +300,7 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
        header and the composer here are one hop from one — so it is out of flow and
        displaces nothing by itself. Padding this element moves the header, the
        transcript and the composer together, which is the whole screen and exactly
-       what should move. Below `xl` the panel is a sheet over all of it and the
+       what should move. Below `md` the panel is a sheet over all of it and the
        padding is not applied, which is the only thing that decides the two
        layouts: no breakpoint is read in JavaScript here, as `AppShell` requires.
 
@@ -387,29 +389,51 @@ export function SessionView({ state, sessionRef }: { state: AppState; sessionRef
         close
       >
         {/*
-         * **The kebab is back, below `lg` only, and the argument that removed it is
-         * the argument for putting it back exactly there.**
+         * ⭐ **The kebab is at every width now, and the `lg:hidden` that used to
+         * wrap it is gone.**
          *
-         * It held Rename, Pin, Resume and Stop and went because "every one of which
-         * is on this session's row in the list, where list-shaped actions belong".
-         * That is true, and it is true *only while the list is on screen*. At `lg`
-         * the rail is beside you and the row is one glance away, so the menu here
-         * would be a second door to a door. Below `lg` this app is one screen at a
-         * time: the list is a different screen, so "it is on the row" means "go
-         * back, find the row, act, come back", for renaming the thing whose name is
-         * in front of you.
+         * The argument for hiding it above `lg` was sound and is unchanged for
+         * every row it was about: Rename, Pin, Resume and Stop are all on this
+         * session's row in the rail, so with the rail beside you the menu was a
+         * second door to a door. Below `lg` this app is one screen at a time, so
+         * "it is on the row" means go back, find the row, act, come back.
          *
-         * `lg:hidden` rather than a prop, for `AppShell`'s reason: the breakpoint is
-         * answered in CSS, so a resized window cannot leave a menu mounted that the
-         * layout says is not there.
+         * What broke it is a row that is on **no** rail row at any width.
+         * `Background tasks` opens a panel whose only other door is the
+         * transcript's foot, and that foot is drawn only while something is
+         * outstanding — so the moment the last task ended, the record the panel now
+         * keeps became unreachable. A door that exists nowhere else is precisely
+         * not a duplicate of the rail, which is the premise the old argument rested
+         * on. Q3.631.
+         *
+         * ⚠ **The four session rows are kept at `lg` rather than hidden inside the
+         * menu**, and that is a choice rather than an oversight. Gating them would
+         * make one control hold different things at different widths, which is a
+         * harder thing to explain than a duplicate that is one glance away — and it
+         * would leave `label="Session actions"` false at the width where the menu
+         * holds no session action. The redundancy is the price and it is small.
+         *
+         * ⚠ **Two paragraphs in `Header.tsx` rested on this wrapper** and are
+         * amended with it: they argued the header's 44px kebab from the premise
+         * that neither it nor the chevron opposite existed above `lg`, so there was
+         * no pointer for a large hover ground to look heavy to. There is one now.
+         * The size stays, because it is a prop and a breakpoint answered in
+         * JavaScript is what `AppShell` forbids.
+         *
+         * The callback handed down is the one declared above this component's
+         * guard clause — deliberately, since nothing here may introduce a hook
+         * below it.
          *
          * Rename stays reachable from the title as well, and that is not a
          * duplicate worth removing — the title is the discoverable path and the menu
          * is the one a thumb finds without knowing the title is a button.
          */}
-        <div className="lg:hidden">
-          <SessionMenu sessionRef={sessionRef} state={state} onRename={() => setRenaming(true)} />
-        </div>
+        <SessionMenu
+          onOpenTasks={openTasks}
+          onRename={() => setRenaming(true)}
+          sessionRef={sessionRef}
+          state={state}
+        />
       </Header>
 
       {/*
@@ -688,7 +712,7 @@ function ExitNotice({ row, machineName }: { row: SessionRow; machineName: string
         >
           {/*
             * ⚠ **The name only where this screen can honestly have one.**
-            * `agentLabel` answers for the four this product ships and falls through
+            * `agentLabel` answers for the five this product ships and falls through
             * to the raw id for anything else — so a session on a harness a plugin
             * added would read *"Sign in to acme:gemini"*, which is wrong twice: the
             * id where a name goes, and a sign-in a contributed harness does not
@@ -848,8 +872,58 @@ function Transcript({
   const row = state.rowsByKey.get(key) ?? null;
   const snapshot = row?.snapshot ?? null;
   const root = snapshot?.workspace.root ?? null;
-  /** Read here rather than in `EventList`, so what crosses the prop is a value. */
-  const working = snapshot !== null && showsWorking(snapshot);
+  /*
+   * The message on its way out, from module state rather than from the store.
+   *
+   * `useSyncExternalStore` over `echo.ts` for the reason `Composer` subscribes to
+   * `attach.ts` the same way: this is keystroke-adjacent, and putting it in the
+   * store would wake every subscriber — the sixty-row session list included — at
+   * the moment somebody presses Enter. It is read here rather than inside
+   * `EventList` so what crosses that prop is a value, which is the rule every
+   * other prop on it already follows.
+   */
+  useSyncExternalStore(subscribeEchoes, echoVersion);
+  const echo = echoFor(key);
+
+  /*
+   * Which finished background rows this reader has cleared — `echo`'s pair, three
+   * lines down, for the same reason and read in the same place: what crosses into
+   * `EventList` is a value, so that component still learns no session id.
+   *
+   * ⚠ **The version is the snapshot, never the set.** `hiddenFinished` answers one
+   * shared empty set for a session nobody has touched, and `useSyncExternalStore`
+   * compares by `Object.is` — a fresh `Set` per call would loop. `groups.ts`
+   * answers the same shape the same way.
+   */
+  useSyncExternalStore(subscribeHiddenFinished, hiddenFinishedVersion);
+  const hiddenFinishedIds = hiddenFinished(key);
+
+  /**
+   * Read here rather than in `EventList`, so what crosses the prop is a value.
+   *
+   * ⚠ **`echo !== null` is ORed in, and the whole point is that it does not wait
+   * for the daemon.** `showsWorking` is a claim about the last snapshot that
+   * arrived, and between pressing Enter and that snapshot there is a gap: a
+   * round trip at best, and on a session coming back from being released the
+   * whole of a restart — during which the conversation said nothing at all while
+   * the message sat in it. This interface is optimistic everywhere else about the
+   * same fact (the message itself is drawn from `echo` before the log confirms
+   * it), and the foot saying nothing beside a message that is plainly on its way
+   * is the one place it was not.
+   *
+   * ⚠ **The predicate is untouched.** `showsWorking` stays pure and stays asserted
+   * as it is; what is optimistic is this local reading of it, which is where an
+   * optimism belongs — `wire.ts`'s four predicates are a partition over what the
+   * daemon said, and an echo is not something the daemon said.
+   *
+   * It costs nothing when it is wrong: `clearEcho` runs on a refused send (the
+   * text goes back in the box), and `landEcho`/`settleEcho` clear it the moment
+   * the log catches up — so the optimistic arm is bounded by the same lifetime the
+   * drawn message already is. And it tells no lie the Stop control could act on:
+   * `canCancelTurn` is read from the snapshot and is still false until there is a
+   * turn to cancel.
+   */
+  const working = echo !== null || (snapshot !== null && showsWorking(snapshot));
   // Read here rather than in `EventList` for `working`'s reason, and separately
   // from it: the state this answers for is the one where the turn has ended and
   // what it delegated has not.
@@ -871,18 +945,6 @@ function Transcript({
    */
   const turnElapsedMs = row === null || turnStartedAt === null ? null : elapsedSince(row, turnStartedAt);
   const transcript = state.transcripts.get(key);
-  /*
-   * The message on its way out, from module state rather than from the store.
-   *
-   * `useSyncExternalStore` over `echo.ts` for the reason `Composer` subscribes to
-   * `attach.ts` the same way: this is keystroke-adjacent, and putting it in the
-   * store would wake every subscriber — the sixty-row session list included — at
-   * the moment somebody presses Enter. It is read here rather than inside
-   * `EventList` so what crosses that prop is a value, which is the rule every
-   * other prop on it already follows.
-   */
-  useSyncExternalStore(subscribeEchoes, echoVersion);
-  const echo = echoFor(key);
 
   /*
    * Which of this conversation's messages the daemon is still holding.
@@ -930,6 +992,14 @@ function Transcript({
    * `404`; both land in the row's own sentence rather than a toast — the row is
    * what somebody pressed.
    */
+  /*
+   * ⚠ **The ids are an argument rather than a closure over `background`.** That is
+   * a fresh array off every snapshot, so a `[key, background]` dependency would
+   * rebuild this callback on every four-second poll for no gain — and the panel
+   * already holds the list, so the caller is where it is free to read.
+   */
+  const onClearFinished = useCallback((ids: readonly string[]) => hideFinished(key, ids), [key]);
+
   const onStopTask = useCallback(
     async (task: BackgroundTask): Promise<void> => {
       const daemon = store.daemonFor(sessionRef.machineId);
@@ -1281,11 +1351,13 @@ function Transcript({
               stale={stale}
               turnElapsedMs={turnElapsedMs}
               background={background}
-              reportsTasks={snapshot?.reportsBackgroundTasks ?? false}
+              reportsTasks={backgroundReporting(snapshot)}
               tasksOpen={tasksOpen}
               onOpenTasks={onOpenTasks}
               onCloseTasks={onCloseTasks}
               onStopTask={onStopTask}
+              hiddenFinished={hiddenFinishedIds}
+              onClearFinished={onClearFinished}
               onResized={remeasure}
             />
           </FileAccessContext.Provider>

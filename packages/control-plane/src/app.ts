@@ -10,8 +10,11 @@ import {
   RELAY_PROTOCOL_MIN_VERSION,
   RELAY_PROTOCOL_VERSION,
   parseAgentClis,
+  parseMachineKey,
 } from "../../../src/relay/protocol.js";
-import { signToken, type TokenClaims } from "../../../src/token.js";
+import { jwkThumbprint, signToken, x25519Jwk, type TokenClaims } from "../../../src/token.js";
+import { deviceKeyFor } from "./devices.js";
+import { machineKeyFor, setMachineKey } from "./machinekeys.js";
 import {
   activePublicKeys,
   activeSigningKeys,
@@ -124,6 +127,15 @@ import {
   verifyAgainstDecoy,
   verifyPassword,
 } from "./password.js";
+import {
+  DeviceLimitError,
+  MAX_DEVICES_PER_USER,
+  adoptDevice,
+  listDevices,
+  readDeviceId,
+  readDeviceInput,
+  revokeDevice,
+} from "./devices.js";
 import { listSessions, mintSession, resolveSession, revokeAllSessions, revokeSession, touchSession } from "./sessions.js";
 import {
   addressKey,
@@ -171,7 +183,7 @@ import {
  * against `package.json` instead, so the two cannot drift silently.
  */
 const SOURCE_URL = "https://github.com/rends-east/reemoat";
-const VERSION = "0.9.0";
+const VERSION = "0.10.0";
 
 /**
  * Work a route answered before doing, still owed.
@@ -265,6 +277,39 @@ const ENROLLMENT_CODE_TTL_MS = 60 * 60 * 1000;
  * `keyPrefix`'s `slice(3, 11)`. Three facts, one length.
  */
 const API_KEY_PREFIX = "rk_";
+/**
+ * Which addresses a browser may be served a page at — a **hand mirror** of the
+ * client's own two tables.
+ *
+ * ⚠ **Copied rather than imported, and it cannot be otherwise.** These are
+ * `GATE_SCREENS` in `packages/web/src/gate.ts` and `LEGAL_DOCS` in
+ * `packages/web/src/legal.ts`. This package may not import from `packages/web` —
+ * they are two packages with two tsconfigs, and the runtime image carries no web
+ * `src` at all — which is exactly the situation `packages/web/src/wire.ts` is in
+ * pointing the other way, and it is solved the same way: copy by hand, and have a
+ * driver read both sides off disk. `relaycheck` asserts these three lists against
+ * their originals.
+ *
+ * **What a mismatch costs, in each direction.** A path here that the bundle does
+ * not route to a real screen is somebody landing on the handoff for an address
+ * they typed — harmless. A path *missing* here is a dead link in an email: the
+ * server answers the JSON envelope, and the person who clicked "confirm your
+ * account" sees `{"error":…}`. The second is why this is checked rather than
+ * commented.
+ */
+const GATE_SCREEN_PATHS = ["register", "confirm", "forgot", "reset", "verify"] as const;
+const LEGAL_DOC_PATHS = ["terms", "acceptable-use", "privacy"] as const;
+
+/**
+ * Where somebody is sent after doing the one thing a browser is for here.
+ *
+ * Not a gate screen and not a document: it is the page that says the product is
+ * an app and, where this instance names one, offers the build. It has an address
+ * of its own so the gate screens can navigate to it and so a person can be linked
+ * straight to it.
+ */
+const APP_HANDOFF_PATH = "app";
+
 const SESSION_PREFIX = "rs_";
 
 /**
@@ -428,6 +473,27 @@ export interface ControlPlaneOptions {
   pluginCatalogueUrl?: string | null;
   machineOfferUrl?: string | null;
   /**
+   * Where this instance publishes a build of the app, or `null`.
+   *
+   * `machineOfferUrl`'s shape and its argument. Read in `main.ts`, validated
+   * there, and published on `GET /v1/instance` as an **address rather than a
+   * boolean** for `machines.offer`'s reason: a client that renders a link cannot
+   * be told "there is one" and left to invent where it goes.
+   */
+  appDownloadUrl?: string | null;
+  /**
+   * The built **gate** bundle — the five sign-up and recovery screens, the legal
+   * documents, and the handoff page. `null` or absent serves no HTML at all.
+   *
+   * ⚠ **The only bundle this service serves.** It used to be the smaller of two:
+   * a second option named a built copy of the whole *app*, off by default and
+   * pointed at a checkout. That is deleted — a browser holds no device key, so it cannot open
+   * an encrypted channel to a daemon, and an app it can load but cannot use is
+   * worse than no app. The gate stays because every flow it carries begins in a
+   * **mail client** and has nowhere else to land.
+   */
+  gateRoot?: string | null;
+  /**
    * Whether this deployment publishes the built-in legal documents as its own.
    *
    * Environment-only and with no compiled-in default, for
@@ -439,22 +505,14 @@ export interface ControlPlaneOptions {
   /** Live tunnel state, or `null` when the relay is switched off. */
   relay?: RelayView | null;
   /**
-   * Absolute path to the built web client, or `null`/missing to serve no UI.
-   *
-   * A missing directory is not an error: `pnpm cp` has to start in a checkout
-   * that has never run a frontend build, and refusing to would make the API
-   * depend on a bundler.
-   */
-  webRoot?: string | null;
-  /**
    * Absolute path to `deploy/bootstrap.sh`, or `null`/missing to serve no
    * installer.
    *
    * `null` by default so `relaycheck`, which builds apps directly, needs no
    * change and no fixture: an option nobody passes registers no route. `main.ts`
-   * resolves the real path the same way it resolves `webRoot` — from its own
-   * file URL rather than the working directory — and `REEMOAT_CP_INSTALL=0`
-   * switches it off.
+   * resolves the real path from its own file URL rather than from the working
+   * directory, so it is the same in a checkout and in the image, and
+   * `REEMOAT_CP_INSTALL=0` switches it off.
    */
   bootstrapScript?: string | null;
   /**
@@ -496,6 +554,17 @@ interface Caller {
   via: "api_key" | "session";
   /** The session row, or `null` under an API key. */
   sessionId: string | null;
+  /**
+   * The installation this session belongs to, or `null`.
+   *
+   * `null` under an API key by construction — a key has no session, so it can
+   * have no device — and `null` for a browser or an older session that never
+   * registered one. **Nothing authorizes on it**: it is resolved after the
+   * credential has, and the only decision it takes part in is whether that
+   * installation has since been revoked, which `resolveSession` has already made
+   * by the time this is set.
+   */
+  deviceId: string | null;
 }
 
 type AppEnv = { Variables: { caller: Caller } };
@@ -506,6 +575,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   const relayUrls = options.relayUrls ?? null;
   const pluginCatalogueUrl = options.pluginCatalogueUrl ?? null;
   const machineOfferUrl = options.machineOfferUrl ?? null;
+  const appDownloadUrl = options.appDownloadUrl ?? null;
   const legalDocuments = options.legalDocuments ?? false;
   const relay = options.relay ?? null;
   const trustedProxyHops = options.trustedProxyHops ?? DEFAULT_TRUSTED_PROXY_HOPS;
@@ -528,15 +598,15 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   /*
    * Response headers, second, and **unconditionally**.
    *
-   * ⚠ **This sat inside `if (webRoot !== null && existsSync(webRoot))`, at the
-   * bottom of the file, and both halves of that were wrong.** An instance with
-   * `REEMOAT_CP_WEB=0` — the deployed shape whenever the bundle is served by
-   * something else — registered no header middleware at all. And registration
+   * ⚠ **This sat inside a guard on whether an app bundle was being served, at
+   * the bottom of the file, and both halves of that were wrong.** An instance
+   * serving no bundle — which is now every instance — registered no header
+   * middleware at all. And registration
    * order decides more than the guard did: Hono composes the handlers that match
    * a request in the order they were added and a route handler returns without
    * calling `next()`, so an `app.use("*")` registered *below* every `/v1` route
-   * never ran for one. The policy reached `serveStatic` and the SPA fallback and
-   * nothing else, which is why `/v1/*` JSON went out bare in **both**
+   * never ran for one. The policy reached the static mount and the page fallback
+   * below it and nothing else, which is why `/v1/*` JSON went out bare in **both**
    * configurations. Up here it wraps everything, the same argument
    * `gzipResponses` above it already makes about itself.
    *
@@ -583,11 +653,14 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    *
    * `/assets/` was tested first and returned, so *anything* answered 200 under
    * that prefix took the immutable arm whatever had actually been served. And
-   * something is: `looksLikeAsset` only refuses paths whose last segment has a
-   * dot, so an extensionless `/assets/foo` missed `serveStatic`, missed that
-   * refusal, and was answered by the SPA fallback with `index.html` — which
-   * then received a one-year immutable *public* directive on the exact file
-   * this middleware exists to keep fresh, poisoning any shared cache in front.
+   * something was: the fallback's asset test only refused paths whose last
+   * segment had a dot, so an extensionless `/assets/foo` missed `serveStatic`,
+   * missed that refusal, and was answered with `index.html` — which then received
+   * a one-year immutable *public* directive on the exact file this middleware
+   * exists to keep fresh, poisoning any shared cache in front. ⚠ **That fallback
+   * is deleted with the app bundle it served**, and this middleware is kept
+   * unchanged: it asks what was *served* rather than what was asked for, which is
+   * the half that was structural rather than a patch.
    *
    * Asking what was served rather than what was asked for makes that
    * structurally impossible instead of merely unlikely: an HTML body can never
@@ -871,7 +944,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * constantly — `GET /v1/machines` every wake, `GET /v1/me`. Call sites that say
    * why they are there is the smaller thing to keep true.
    *
-   * There are **twelve**, and there were two. `POST /v1/machines` and
+   * There are **fourteen**, and there were two. `POST /v1/machines` and
    * `POST /v1/machines/:id/revoke` are a loop that costs three fsync'd
    * transactions a turn under `PRAGMA synchronous = FULL`, on the file the relay
    * shares, and leaves permanent rows behind either way; `POST /v1/me/keys` and
@@ -911,6 +984,18 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * on the same shared file, reachable by every signed-in account, and unlike the
    * two above it takes no ownership lookup ahead of the write — so the throttle is
    * the only thing standing between it and a loop.
+   *
+   * ⚠ **The thirteenth and fourteenth are `POST /v1/me/devices` and
+   * `DELETE /v1/me/devices/:id`, and the first of them is the only entry here
+   * that is budgeted against a *person* rather than against a disk.** Registering
+   * writes one row and is called on every app start, which is unremarkable; what
+   * earns it a counter is that the device cap is a **refusal** rather than an
+   * eviction precisely so that somebody holding one live session cannot spend
+   * another account's device slots — and the loop that would try is exactly the
+   * shape this throttle catches. The revoke is counted for
+   * `DELETE /v1/machines/:id/grants/me`'s reason and one more: it takes a
+   * transaction and a second `UPDATE` across `user_sessions`, so it is the more
+   * expensive of the pair despite being the rarer act.
    */
   const spendWrite = (c: Context, what: string): Response | null => {
     const caller = c.get("caller");
@@ -1301,18 +1386,65 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         }
       }
 
-      const session = mintSession(db, String(user["id"]), {
-        ip: address,
-        // Recorded verbatim and clamped in `mintSession`. Not parsed here: what a
-        // string of it *means* is a question with no server-side answer that
-        // stays right, so the raw value crosses the wire and the client turns it
-        // into words it can also change its mind about.
-        userAgent: c.req.header("user-agent") ?? null,
-      });
+      /*
+       * The installation, where the client named one.
+       *
+       * **Resolved here rather than before any of the above**, and the ordering
+       * is the rule this route already keeps for everything else: nothing an
+       * anonymous caller submits does work ahead of the KDF, so a device block
+       * cannot change what a wrong password costs or become a way to probe the
+       * `devices` table without one.
+       *
+       * ⚠ **An id we will not adopt registers a fresh device rather than
+       * refusing**, which is `adoptDevice`'s own rule and is what stops a
+       * sign-in loop: a client holding a retired id that was answered with an
+       * error would sign in, be refused on its next request, sign out, and
+       * arrive back here with the same id, for ever. It is scoped to the account
+       * that has *just this moment* authenticated, so a caller cannot name
+       * somebody else's row.
+       *
+       * The cap is swallowed on this route alone. Somebody at twenty devices
+       * must still be able to sign in — that is the whole argument for the cap
+       * being a refusal rather than an eviction — so they get a session with no
+       * device bound and the Devices screen tells them to retire one.
+       * `POST /v1/me/devices` is where the 409 is visible.
+       */
+      const offered = readDeviceInput(body["device"]);
+      let deviceId: string | null = null;
+      if (offered !== null) {
+        try {
+          deviceId = adoptDevice(db, String(user["id"]), readDeviceId((body["device"] as Record<string, unknown>)["id"]), offered);
+        } catch (error) {
+          if (!(error instanceof DeviceLimitError)) throw error;
+        }
+      }
+
+      const session = mintSession(
+        db,
+        String(user["id"]),
+        {
+          ip: address,
+          // Recorded verbatim and clamped in `mintSession`. Not parsed here: what a
+          // string of it *means* is a question with no server-side answer that
+          // stays right, so the raw value crosses the wire and the client turns it
+          // into words it can also change its mind about.
+          userAgent: c.req.header("user-agent") ?? null,
+        },
+        deviceId,
+      );
       return c.json({
         token: session.token,
         sessionId: session.id,
         expiresAt: session.expiresAt,
+        /*
+         * What the client should store, or `null` where it named no device.
+         *
+         * Answered even when it equals what was sent, because the adopt-or-
+         * register rule above means the caller cannot know which it got — and a
+         * client that assumed its own id survived would keep presenting a
+         * retired one for ever.
+         */
+        deviceId,
         user: {
           id: String(user["id"]),
           name: String(user["name"]),
@@ -1338,6 +1470,21 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     const body = await readJsonObject(c);
     if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
     const code = body["code"];
+    /*
+     * The daemon's own X25519 static, optional and additive.
+     *
+     * This is the **strongest** of the two ways a machine key reaches this
+     * service: it is handled here, in the API process, against a single-use code,
+     * so it never passes through the relay at all. The other way — announced on
+     * the tunnel dial — is what lets a machine enrolled before any of this existed
+     * migrate without anybody touching the host, and it is pinned on first use
+     * rather than trusted outright.
+     *
+     * Refused to `null` rather than refusing the enrollment: a daemon older than
+     * this sends nothing, and a daemon that sent something unreadable has a bug
+     * that must not cost it the one control-plane request it will ever make.
+     */
+    const announcedKey = parseMachineKey(body["machineKey"]);
     if (typeof code !== "string" || code.length === 0) {
       return jsonError(c, 400, "bad_request", "code is required");
     }
@@ -1454,6 +1601,17 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
      */
     const tunnelKey = issueTunnelKey(db, machineId);
 
+    /*
+     * Recorded unconditionally, and this is the one place a pin is replaced.
+     *
+     * Redeeming a code already retires the machine's live tunnel key, so this is
+     * the act that means *this machine is starting again* — which makes it the
+     * natural home for the rotation story rather than a second mechanism beside
+     * it. A daemon whose key is gone generates a fresh one and its owner redeems
+     * a fresh code; there is no third thing to run.
+     */
+    if (announcedKey !== null) setMachineKey(db, machineId, announcedKey, now);
+
     // Every active key, not just the signing one: a daemon never comes back for
     // more, so a rotation in flight has to be handed over in full or the daemon
     // will reject tokens signed by the key it was not told about.
@@ -1554,6 +1712,7 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
        * know one for.
        */
       machines: { offer: machineOfferUrl },
+      app: { download: appDownloadUrl },
       legal: { documents: legalDocuments },
       /*
        * Where the plugin market's catalogue lives, or `null`.
@@ -1722,10 +1881,20 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         if (isUniqueViolation(error)) return jsonError(c, 409, "name_taken", "somebody already has that name");
         throw error;
       }
-      const session = mintSession(db, userId, {
-        ip: address,
-        userAgent: c.req.header("user-agent") ?? null,
-      });
+      const session = mintSession(
+        db,
+        userId,
+        {
+          ip: address,
+          userAgent: c.req.header("user-agent") ?? null,
+        },
+        // No device, and this is the parameter being required rather than
+        // defaulted: this route is reached from a mailed link, which is a
+        // browser rather than an installation somebody registered. The session
+        // is listed under Signed in and ended there. The app's own
+        // `POST /v1/me/devices` binds one on its next start.
+        null,
+      );
       return c.json(
         {
           pending: false,
@@ -2401,10 +2570,17 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       ] ?? 0,
     );
 
-    const session = mintSession(db, held.userId, {
-      ip: address,
-      userAgent: c.req.header("user-agent") ?? null,
-    });
+    const session = mintSession(
+      db,
+      held.userId,
+      {
+        ip: address,
+        userAgent: c.req.header("user-agent") ?? null,
+      },
+      // No device, for `/v1/register/confirm`'s reason one route up: a mailed
+      // reset link is opened by a browser, not by a registered installation.
+      null,
+    );
     return c.json({
       token: session.token,
       sessionId: session.id,
@@ -3020,6 +3196,84 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     return c.json({ revokedCount: revokeAllSessions(db, caller.userId, keep) });
   });
 
+  /**
+   * Register this installation, or adopt the one the caller already has.
+   *
+   * ⚠ **Registered above THE SECOND LINE, and the placement is load-bearing.**
+   * An account an admin created owes a password and is refused everything below
+   * that line. The app calls this on every start, so below it the call would
+   * `403`, and the client's own start-up would land on a spinner and an outage
+   * banner while `ForcedPasswordChange` — the one screen that clears the
+   * obligation — never rendered. That is the regression `GET /v1/machines`'
+   * `password_change_required` tolerance was written to fix, arriving one call
+   * along. Both halves are kept: the route is up here *and* the client tolerates
+   * the code, because a route moved back down by somebody tidying would
+   * otherwise be silent.
+   *
+   * **It refuses an API key**, and that is a fact about what a device is rather
+   * than a permission check: a device is a *signed-in installation*, an API key
+   * has no session for one to hang off, and `cpctl` — the thing that holds keys
+   * — has no installation to register. A 409 rather than a 403 because nothing
+   * is forbidden; the credential is simply the wrong shape for the question.
+   */
+  app.post("/v1/me/devices", async (c) => {
+    const writeGuard = spendWrite(c, "device");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    if (caller.via !== "session") {
+      return jsonError(c, 409, "device_needs_session", "an API key has no device — sign in to register one");
+    }
+    const body = await readJsonObject(c);
+    if (!body) return jsonError(c, 400, "bad_request", "expected a JSON object body");
+    const input = readDeviceInput(body);
+    if (input === null) {
+      return jsonError(c, 400, "bad_request", "name and platform are required");
+    }
+
+    let deviceId: string;
+    try {
+      deviceId = adoptDevice(db, caller.userId, readDeviceId(body["id"]), input);
+    } catch (error) {
+      if (error instanceof DeviceLimitError) {
+        return jsonError(
+          c,
+          409,
+          "device_limit",
+          `you have ${String(MAX_DEVICES_PER_USER)} devices registered, which is the most allowed — ` +
+            "retire one under Settings → Devices and nothing else changes",
+        );
+      }
+      throw error;
+    }
+
+    /*
+     * Bound to the session that is asking, which is the half that makes a
+     * device mean anything: without it the row would exist and no sign-in
+     * would belong to it, so revoking it would end nothing.
+     *
+     * `user_id` is in the clause as well as `id`, which is belt over braces —
+     * `caller.sessionId` is this service's own value — and costs nothing.
+     */
+    db.prepare("UPDATE user_sessions SET device_id = ? WHERE id = ? AND user_id = ?").run(
+      deviceId,
+      caller.sessionId,
+      caller.userId,
+    );
+    /*
+     * `hasKey` rather than the key: the caller just sent it, so echoing it back
+     * says nothing — what it cannot otherwise know is whether this service kept
+     * it, which is exactly what a client that has just re-keyed needs to hear
+     * before it tries to mint.
+     */
+    return c.json({
+      id: deviceId,
+      name: input.name,
+      platform: input.platform,
+      hasKey: deviceKeyFor(db, deviceId) !== null,
+    });
+  });
+
   /* ---------------------------------------------------------------- *
    * ⚠ THE SECOND LINE. Below it, an account that owes a password change is
    *   refused.
@@ -3070,11 +3324,84 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         // rather than as a device called "unknown".
         ip: row.ip,
         userAgent: row.userAgent,
+        // The installation this sign-in belongs to, where there is one. The
+        // client prefers this name over its own reading of the `User-Agent`:
+        // one was typed by the person, the other is a guess at a header.
+        deviceId: row.deviceId,
+        deviceName: row.deviceName,
         // Which row is the one asking. Without it a client cannot label "this
         // device", and signing out of the wrong one is the mistake to prevent.
         current: row.id === caller.sessionId,
       })),
     });
+  });
+
+  /**
+   * The installations registered on this account — live, and recently retired.
+   *
+   * The retired rows are deliberate. See `listDevices`: the question this list
+   * exists to answer is usually asked *after* something has gone wrong, and a
+   * list that had simply lost a row cannot say whether a laptop was retired or
+   * was never registered.
+   */
+  app.get("/v1/me/devices", (c) => {
+    const caller = c.get("caller");
+    return c.json({
+      devices: listDevices(db, caller.userId).map((row) => ({
+        id: row.id,
+        name: row.name,
+        platform: row.platform,
+        createdAt: row.createdAt,
+        revokedAt: row.revokedAt,
+        lastSeenAt: row.lastSeenAt,
+        /*
+         * Whether this installation can reach a machine at all, as one word.
+         *
+         * ⚠ **Not the key.** The screen's question is *can this one connect*, and
+         * answering it with 43 characters of base64url would put a value on a row
+         * for somebody to copy, compare, or paste into a support conversation —
+         * none of which is a thing to do with a key. `false` covers a row from
+         * before keys existed and one whose credential store lost the key, and
+         * both draw the same sentence because both have the same remedy.
+         */
+        hasKey: row.hasKey,
+        keySetAt: row.keySetAt,
+        // Which row this request came through, so the client can label it and
+        // warn before somebody retires the thing they are holding.
+        current: caller.deviceId !== null && row.id === caller.deviceId,
+      })),
+      limit: MAX_DEVICES_PER_USER,
+    });
+  });
+
+  /**
+   * Retire one installation, and end every sign-in it holds.
+   *
+   * **Scoped to the caller inside `revokeDevice`, on both statements**, which is
+   * what keeps this from being a cross-account revocation primitive: an id is a
+   * short opaque string a client is handed, and without the owner clause anybody
+   * with one live session could walk them and sign strangers out.
+   *
+   * `404` for "no such device" and for "not yours" alike — `DELETE
+   * /v1/me/sessions/:id` two routes up states the rule, and it matters more here
+   * because the difference would otherwise tell an unrelated account which
+   * device ids exist.
+   *
+   * ⚠ **Retiring the device you are holding is allowed**, and not an oversight:
+   * it is what somebody reaching for it on a machine they are about to give away
+   * wants, and refusing would mean the last device an account has can never be
+   * retired. The client confirms first — the row says *this device* — and the
+   * caller's own session ends with it, which is the honest outcome rather than a
+   * surprise.
+   */
+  app.delete("/v1/me/devices/:id", (c) => {
+    const writeGuard = spendWrite(c, "device_revoke");
+    if (writeGuard !== null) return writeGuard;
+
+    const caller = c.get("caller");
+    const revoked = revokeDevice(db, caller.userId, c.req.param("id"));
+    if (revoked === null) return jsonError(c, 404, "device_not_found", "no such device");
+    return c.json({ revoked: true, sessionsRevoked: revoked.sessionsRevoked });
   });
 
   /** Sign out one other device. */
@@ -4296,6 +4623,33 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       return jsonError(c, 403, "no_scopes", "this grant carries no usable scopes");
     }
 
+    /*
+     * The key this capability is bound to, and the only way to be sure it is a
+     * capability rather than a bearer token.
+     *
+     * ⚠ **A capability is minted without one only for a caller that has no
+     * installation to bind to**, which is an API key — a key is not a sign-in, so
+     * there is no device, which is the same reason `POST /v1/me/devices` refuses
+     * one. Such a capability works over loopback and is refused by any daemon it
+     * reaches over an encrypted channel, which is the honest shape: the binding
+     * is a property of the channel, so a caller with no channel is not being let
+     * off anything.
+     *
+     * For a signed-in installation that has registered no key, the answer is a
+     * **refusal with a remedy** rather than an unbound capability. Minting one
+     * would hand somebody a credential that cannot open a session and a message
+     * about the wrong thing when it fails.
+     */
+    const deviceKey = caller.deviceId === null ? null : deviceKeyFor(db, caller.deviceId);
+    if (caller.deviceId !== null && deviceKey === null) {
+      return jsonError(
+        c,
+        409,
+        "device_key_required",
+        "this installation has not registered a device key, so no capability can be bound to it",
+      );
+    }
+
     const nowSeconds = Math.floor(Date.now() / 1000);
     const claims: TokenClaims = {
       iss: issuer,
@@ -4308,6 +4662,20 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
       nbf: nowSeconds,
       exp: nowSeconds + tokenTtlSeconds,
       scp: scopes,
+      /*
+       * RFC 7800's confirmation claim. The daemon compares this against the static
+       * key the encrypted handshake authenticated, so a copy of this capability is
+       * worth nothing to whoever copied it.
+       *
+       * The thumbprint is computed here from the same function the daemon uses —
+       * one implementation in `src/token.ts`, which this service is allowed to
+       * reach — because two spellings of one key's name is the way a right device
+       * comes to read as a wrong one.
+       */
+      ...(deviceKey === null ? {} : { cnf: { jkt: jwkThumbprint(x25519Jwk(Buffer.from(deviceKey, "base64url"))) } }),
+      // Advisory, never a decision, and only so a refusal can name an
+      // installation somebody can go and look at.
+      ...(caller.deviceId === null ? {} : { dev: caller.deviceId }),
     };
 
     return c.json({
@@ -4326,6 +4694,21 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
         // The one that decides whether the browser reaches this machine at all.
         relayUrl: relayUrlFor(machineId),
         relayOnline: relayOnline(machineId),
+        /*
+         * The static the app must see this machine answer on.
+         *
+         * Here rather than on `GET /v1/machines`, and in the same answer as the
+         * route, for the reason the route itself is here: minting is also how a
+         * client learns where a machine is, and splitting the two would create two
+         * facts that can disagree about one machine. A key and a route are the
+         * same kind of fact — both are *how to reach this thing* — so they are
+         * kept in step by construction rather than by a second fetch.
+         *
+         * `null` for a machine that has not dialled since it learned to announce
+         * one. The client turns that into a sentence about updating that machine,
+         * never into a session without it: there is no mode to fall back to.
+         */
+        key: machineKeyFor(db, machineId),
       },
       // So a client can tell "my clock is wrong" from "the token was refused".
       serverTime: Date.now(),
@@ -4806,7 +5189,26 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    */
   app.get("/v1/admin/settings", requireAdmin, (c) => {
     // Named apart from the `mail` sender bound above, which this used to shadow.
-    const mailSettings = mailConfigured(db);
+    /*
+     * The one caller that can ask about `mail.public_url` pointing at a service
+     * with nothing to render.
+     *
+     * Both halves of that question live in different places — whether a bundle is
+     * served is a property of this *process*, and what address it answers on is a
+     * property of this *request* — so this route is the only place they meet.
+     * `installOrigin` is the same reader `GET /install.sh` uses, which is what
+     * makes the comparison honest behind a TLS proxy: `publicUrl` alone answers
+     * `http://` for a service running plain HTTP behind Traefik, and would then
+     * decide a correctly configured `https://` value was a different origin.
+     */
+    /*
+     * ⚠ **The condition is gone because it had one answer.** It read *"if this
+     * process serves no app bundle, tell the caller which address to reach the
+     * gate on"* — and no process serves one any more, so the address is always
+     * wanted. `installOrigin` rather than `publicUrl` is what keeps the
+     * comparison honest behind a TLS proxy.
+     */
+    const mailSettings = mailConfigured(db, installOrigin(c, trustedProxyHops));
     return c.json({
       settings: SETTING_KEYS.map((key) => {
         const resolved = readSetting(db, key);
@@ -5454,6 +5856,17 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
        * it by joining `users`, which no longer has a row to join.
        */
       db.prepare("DELETE FROM user_machine_limits WHERE user_id = ?").run(userId);
+      /*
+       * Their registered installations, for that same reason once more.
+       *
+       * A row left behind here is worse than a stale limit: it carries a name
+       * somebody chose for their own computer, so it is a record *about a person*
+       * outliving the deletion of that person — and it is invisible everywhere,
+       * because both listings key on `user_id` and no `users` row joins it any
+       * more. `pruneDevices` collects such orphans as a backstop; this is the
+       * statement that means it never has to.
+       */
+      db.prepare("DELETE FROM devices WHERE user_id = ?").run(userId);
       // Synchronous, like everything else in this block, so it is safe inside the
       // transaction — there is no await anywhere between BEGIN and COMMIT, on a
       // connection every other writer shares.
@@ -6034,6 +6447,77 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
   });
 
   /**
+   * Forget the encryption key pinned for a machine, so its next dial pins the one
+   * it announces.
+   *
+   * **The escape hatch `machinekeys.ts` argues trust-on-first-use from, made
+   * reachable.** That module refuses a dial announcing a key that disagrees with
+   * the pinned one, and justifies refusing rather than adopting by saying the way
+   * back is re-enrollment. That is now true — `POST /v1/enroll` replaces the pin
+   * when the daemon sends its key with the code — but it is true only for a daemon
+   * new enough to *send* one. Every daemon already in the field announces its key
+   * on the dial alone, so re-enrolling one of those leaves the stale pin exactly
+   * where it was and the 409 repeating on its backoff for ever. For those machines
+   * this route is the whole remedy, and the alternative it replaces is editing this
+   * service's SQLite by hand.
+   *
+   * ⚠ **It re-opens the first-use window for one machine, and that is the cost.**
+   * Whatever dials next is pinned. What bounds it is the credential that dial
+   * already had to present: `resolveTunnelKey` derives the machine id **from** the
+   * tunnel key rather than from any field the caller sends, so the only party that
+   * can pin a key here is one that can already hold this machine's tunnel — which
+   * is what "being this machine" means. Clearing widens *when* a key may be pinned,
+   * never *who* may pin one.
+   *
+   * ⚠ **And it makes the machine unreachable until that dial.** `POST /v1/tokens`
+   * answers `machine.key: null` for an unpinned machine, and the app has no
+   * unencrypted mode to fall back to — it draws a sentence about that machine
+   * rather than opening a session. Sessions already running are untouched: the pin
+   * is read when a capability is minted and never again. `cpctl` says both halves
+   * out loud, because the operator running this is the one who has to know the
+   * order.
+   *
+   * Idempotent, for `DELETE /v1/admin/users/:id/machine-limit`'s reason: an
+   * operator asking for this machine to have no pin got what they asked for
+   * whether or not a row changed, and `cleared` says which it was rather than
+   * turning the second attempt into an error.
+   *
+   * `previousKey` is returned deliberately. It is a public key, this route is
+   * admin-only, and this is the only moment anybody can write down what *was*
+   * pinned — nothing else in this service ever reports it, so refusing it here
+   * would mean the act of repairing a mismatch also destroys the evidence of what
+   * the mismatch was.
+   *
+   * Refused for a revoked machine, mirroring the enrollment mint above: a revoked
+   * machine dials nothing, so there is no pin for it to repair and the honest
+   * answer names the state rather than quietly succeeding at nothing.
+   */
+  app.delete("/v1/admin/machines/:id/machine-key", requireAdmin, (c) => {
+    const machineId = c.req.param("id");
+    const machine = db.prepare("SELECT id, revoked_at FROM machines WHERE id = ?").get(machineId);
+    if (!machine) return jsonError(c, 404, "machine_not_found", "no such machine");
+    if (machine["revoked_at"] !== null) {
+      return jsonError(c, 403, "machine_revoked", "this machine has been revoked");
+    }
+
+    /*
+     * Read before the write, and this is the one statement outside
+     * `machinekeys.ts` that touches the column.
+     *
+     * That module holds the *policy* — pin the first, accept the same, refuse a
+     * different one — which is a rule about what a dial may do. This is an
+     * operator undoing the result of that rule, which is not a fourth outcome of
+     * the policy and does not belong inside it. The read is `machineKeyFor`, so
+     * what is reported here cannot come to disagree with what `POST /v1/tokens`
+     * would have handed an app one request earlier.
+     */
+    const previousKey = machineKeyFor(db, machineId);
+    db.prepare("UPDATE machines SET machine_key = NULL, machine_key_set_at = NULL WHERE id = ?").run(machineId);
+
+    return c.json({ machineId, cleared: previousKey !== null, previousKey });
+  });
+
+  /**
    * The admin's revoke, and it is the owner's route's twin — same three writes,
    * same transaction, same `burnMachineCodes`. See `POST /v1/machines/:id/revoke`
    * for why the ownership row has to go with the other two.
@@ -6441,9 +6925,9 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * `callerAuth` is mounted on `/v1/*`, so nothing outside that prefix has ever
    * reached it. What decides this route's placement is the two handlers *below*
    * it. It must come before `serveStatic`, or a stray `install.sh` in `dist`
-   * would answer first with an unsubstituted copy; and before the SPA fallback,
-   * which refuses it anyway — `looksLikeAsset` matches a trailing `.sh`, which
-   * is exactly what makes `/install.sh` a free path.
+   * would answer first with an unsubstituted copy. (The SPA fallback it also had
+   * to precede is gone with the app bundle; the gate's closed list never claimed
+   * this path.)
    *
    * ⚠ **The substituted value is caller-influenced, and unquoted it is remote
    * code execution in a script people pipe into `sh`.** `publicUrl` is
@@ -6510,74 +6994,78 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
     });
   }
 
-  const webRoot = options.webRoot ?? null;
-  if (webRoot !== null && existsSync(webRoot)) {
-    app.use("*", serveStatic({ root: webRoot, precompressed: true }));
+  /*
+   * ------------------------------------------------------------------ *
+   * What a browser is served, which is the gate and never the app
+   * ------------------------------------------------------------------ *
+   *
+   * **Two roots, two jobs.**
+   *
+   * `gateRoot` is `packages/web/dist-gate` — signing up, spending a mailed link,
+   * the legal documents, and the page that hands somebody over to the app. It is
+   * in the image, it is served unconditionally, and it is the reason this service
+   * answers HTML at all. Every one of those flows begins in a *mail client*, so
+   * "do it in the app instead" is not available to them: `POST /v1/forgot` is the
+   * only remedy this service has for a forgotten password, and with SMTP
+   * configured an account does not exist until `/confirm` is opened.
+   *
+   * ⚠ **There is one bundle now.** A second option named a built copy of the
+   * whole app for a checkout to serve; it is deleted, because a browser cannot
+   * reach a daemon at all any more — no device key, no encrypted channel — so
+   * what it could load it could not use. The Reemoat app compiles its own copy of
+   * the interface into its binary and never downloads one.
+   *
+   * ⚠ **The gate is a separate *build*, not a second entry point in the app's.**
+   * `vite.gate.config.ts` carries the argument: two inputs to one build share
+   * chunks, so shipping only the gate would mean computing its reachable chunk
+   * set from Vite's manifest and keeping that walk correct. Two builds have no
+   * shared chunks to separate, which is what lets this service carry one
+   * directory and be structurally unable to serve the other.
+   * ------------------------------------------------------------------ */
+  const gateRoot = options.gateRoot ?? null;
+  if (gateRoot !== null && existsSync(gateRoot)) {
+    app.use("*", serveStatic({ root: gateRoot, precompressed: true }));
 
     /*
-     * The SPA fallback serves the *same file from disk* that `/` does.
+     * The gate's own fallback, over a **closed list of paths**.
      *
-     * It used to hold a `readFileSync` copy taken once at registration, on the
-     * reasoning that the bundle is immutable per build and a rebuild restarts the
-     * process. The first half is true and the second is not: `pnpm web:build`
-     * rewrites `dist/` under a running control plane, and nothing restarts it.
+     * Unlike the app's SPA fallback below, this does not answer every unrouted
+     * path with a page: what a browser may reach here is five gate screens, three
+     * legal documents and the handoff, and nothing else. A path outside that list
+     * answers the error envelope — so `/`, `/settings`, `/m/…/s/…` and every other
+     * address belonging to the *app* are refused rather than drawing a shell that
+     * would then have nowhere to go.
      *
-     * What that produced is the worst shape a bug can have — the two ways of
-     * getting the same page disagreed. `/` goes through `serveStatic`, which stats
-     * and streams from disk, so it returned the *new* HTML with the new hashed
-     * chunk names. Every client-side route (`/m/:machine/s/:session`, `/settings`)
-     * fell through to here and returned the *old* HTML, naming chunks Vite had
-     * already deleted. Measured 2026-08-01 against a running instance: `/` served
-     * `index-BnlrEjly.js` while `/m/…/s/…` served `index-0vnvikLW.js`, and that
-     * file answered `404`. So the home screen worked and reloading on a session
-     * gave a blank white page with an empty `<div id="root">` — no error, nothing
-     * to read, on a phone with no console. Restarting the process "fixed" it,
-     * which is exactly what makes it a trap rather than a bug somebody finds.
-     *
-     * One mechanism for both, so they cannot drift apart again. It also costs no
-     * synchronous I/O in the handler, which was the real point of caching: this
-     * process carries every relay tunnel, and `serveStatic` stats and streams
-     * asynchronously.
-     *
-     * `/v1` and `/health` are excluded explicitly. They reach here only when they
-     * name nothing — a typo, or a route from a newer client — and answering that
-     * with 200 and a page of HTML would turn "this endpoint does not exist" into
-     * a JSON parse error somewhere much further away.
-     *
-     * So are paths that look like an asset. A stale `index.html` in a phone's
-     * cache asks for a hashed chunk that a rebuild has removed; answering that
-     * with a page of HTML makes the browser report a MIME type error instead of
-     * the 404 that would tell it to reload.
+     * The list is built from the client's own two tables so it cannot drift from
+     * what `GateApp` will actually render: a path served here that the bundle
+     * routes to its fallback is a person landing on the handoff for an address
+     * they typed, and a path refused here that the bundle *could* have rendered
+     * is a dead link in an email.
      */
-    const serveIndex = serveStatic<AppEnv>({ root: webRoot, path: "index.html" });
+    const serveGate = serveStatic<AppEnv>({ root: gateRoot, path: "gate.html" });
+    const GATE_PATHS = new Set(
+      [...GATE_SCREEN_PATHS, ...LEGAL_DOC_PATHS, APP_HANDOFF_PATH].map((name) => `/${name}`),
+    );
 
     app.get("*", async (c) => {
       const path = c.req.path;
-      if (path === "/health" || path === "/v1" || path.startsWith("/v1/")) {
+      if (!GATE_PATHS.has(path)) {
+        /*
+         * ⚠ **This deferred to a second bundle and now cannot, because there is
+         * not one.** `REEMOAT_CP_WEB` named a built copy of the *app* that this
+         * service would mount beside the gate; it is deleted, because a browser
+         * holds no device key and therefore cannot open an encrypted channel to
+         * any daemon — serving it the app means serving a machine list that opens
+         * nothing.
+         *
+         * So the 404 is unconditional, which is what the deployed shape always
+         * did anyway. The registration-order trap this block recorded is gone
+         * with the second bundle rather than fixed: there is one static mount, so
+         * there is nothing for the gate's closed list to shadow.
+         */
         return jsonError(c, 404, "not_found", "no such endpoint");
       }
-      /*
-       * The whole `/assets/` namespace, not only the paths that look like files.
-       *
-       * That directory belongs to the bundle: `serveStatic` has already answered
-       * everything really in it, so reaching here under that prefix means the
-       * file is gone — and a client-side route never lives there (they are `/`,
-       * `/new`, `/new/:machine`, `/m/:machine/s/:session` and `/settings`).
-       *
-       * `looksLikeAsset` alone let an extensionless `/assets/foo` through to a
-       * page of HTML at 200, which the cache middleware above then stamped
-       * immutable for a year. Refusing the prefix outright is the honest answer
-       * to "that chunk is not here" and removes the case rather than handling it.
-       */
-      if (path.startsWith("/assets/") || looksLikeAsset(path)) {
-        return jsonError(c, 404, "not_found", "no such endpoint");
-      }
-      // `serveStatic` answers with the file or calls `next` — and its `next` here
-      // is a no-op, so "it returned nothing" means there is no `index.html` behind
-      // an otherwise present web root. That stays a JSON 404 rather than becoming
-      // a confusing blank page, which is what the old `indexHtml === null` arm did.
-      const served = await serveIndex(c, async () => {});
-      return served ?? jsonError(c, 404, "not_found", "no such endpoint");
+      return serveGate(c, async () => undefined);
     });
   }
 
@@ -6585,10 +7073,11 @@ export function createControlPlaneApp(options: ControlPlaneOptions): Hono<AppEnv
    * **Every unmatched path answers in this service's own envelope, whatever the
    * method.**
    *
-   * The `/v1/` arm above is inside `app.get("*")` and inside the `webRoot`
-   * branch, so it covered exactly one method on one deployment shape. Everything
-   * else — a `PUT` or `DELETE` to a path this build does not serve, or any
-   * method at all when no web root is configured — fell through to Hono's
+   * The `/v1/` arm it replaced was inside an `app.get("*")` that only existed
+   * when an app bundle was served, so it covered exactly one method on one
+   * deployment shape — and that shape no longer exists at all. Everything else —
+   * a `PUT` or `DELETE` to a path this build does not serve, or any
+   * method at all — fell through to Hono's
    * default plain-text `404 Not Found`, against `docs/API.md`'s *every non-2xx
    * answers one envelope* and its *read the code, never the status*.
    *
@@ -6671,23 +7160,6 @@ function adminMachineProjection(
     owner: ownerFor(id),
     lastSeenAt: lastSeen(id),
   };
-}
-
-/**
- * A request for a file, rather than for a client-side route.
- *
- * `serveStatic` runs first and answers anything that exists, so reaching the SPA
- * fallback with an extension means the file is *gone* — the usual cause being a
- * phone holding a cached `index.html` that references a hashed chunk a rebuild
- * replaced. Serving HTML there produces a MIME type error in the console; a 404
- * tells the browser what actually happened.
- *
- * The last path segment, because a client-side route may well contain a dot
- * (`/sessions/some.host`) while an asset's dot is in its filename.
- */
-function looksLikeAsset(path: string): boolean {
-  const last = path.slice(path.lastIndexOf("/") + 1);
-  return /\.[a-zA-Z0-9]{1,8}$/.test(last);
 }
 
 /**
@@ -6775,6 +7247,19 @@ function callerAuth(db: DatabaseSync): MiddlewareHandler<AppEnv> {
         if (resolved.reason === "expired") {
           return jsonError(c, 401, "session_expired", "this session has expired — sign in again");
         }
+        /*
+         * The installation was retired, which is a different instruction from
+         * every refusal above it.
+         *
+         * A client meeting `session_revoked` signs in again and keeps the device
+         * it had; a client meeting this one has to **give up its stored device
+         * id** as well, or the next sign-in binds the same retired row and lands
+         * straight back here. `packages/web/src/account.ts` reads the code and
+         * splits on exactly that, which is why the two are not folded.
+         */
+        if (resolved.reason === "device_revoked") {
+          return jsonError(c, 401, "device_revoked", "this device has been signed out and retired");
+        }
         return jsonError(c, 401, "invalid_api_key", "invalid API key");
       }
 
@@ -6794,6 +7279,7 @@ function callerAuth(db: DatabaseSync): MiddlewareHandler<AppEnv> {
         isAdmin: Number(user["is_admin"]) === 1,
         via: "session",
         sessionId: resolved.session.id,
+        deviceId: resolved.session.deviceId,
       });
       return next();
     }
@@ -6834,6 +7320,9 @@ function callerAuth(db: DatabaseSync): MiddlewareHandler<AppEnv> {
         isAdmin: Number(row["is_admin"]) === 1,
         via: "api_key",
         sessionId: null,
+        // No session, therefore no device. Said here rather than left to the
+        // type, because it is also why `POST /v1/me/devices` refuses a key.
+        deviceId: null,
       });
       return next();
     }

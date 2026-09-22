@@ -233,7 +233,7 @@ the `reading` gate that `step === "llm"` has (with no model chosen
 `harnessRowRefusal` answers `null` for every row). So answering the free question is
 what the wait runs under. ⚠ **The harness list stopped being `AGENT_IDS` and still
 does not wait**: a machine may offer harnesses a plugin added, so the list comes from
-the cheap `GET /agents` — and `harnessRows` *falls back* to the four this product
+the cheap `GET /agents` — and `harnessRows` *falls back* to the five this product
 ships while that is in flight rather than gating the row on it. Q3.528's own
 assertion is a string-index comparison and cannot see that, which is why the
 fall-back is pinned separately. It is also
@@ -250,7 +250,7 @@ ships, and the client floats over it.**
 ⚠ **A machine may hold more, and the rule rather than the list is what is true.**
 Providers a plugin added are appended **after every built-in**, sorted by plugin id
 so the order does not depend on what somebody happened to install when. Naming the
-seven in order below is therefore a description of the built-in half; a plugin's row
+eight in order below is therefore a description of the built-in half; a plugin's row
 is a group *appearing* at the end, which is what makes it safe, where one inserted in
 the middle would move every heading below it under a thumb. `plugin-contributions.md`.
 
@@ -258,9 +258,9 @@ the middle would move every heading below it under a thumb. `plugin-contribution
 every provider it cannot; that array orders each of the two halves and is still the
 only place the default is written down. Anthropic and OpenAI — the two vendors
 most choices are between, each serving a harness that ships by default — then
-OpenRouter, widest catalogue and commonest reason to scroll, then Moonshot, Z.ai,
-MiniMax, then OpenCode Zen. (Five of the seven carry a `nativeHarness`, so "reached
-natively" is not what puts the first two in front.) Q3.535.
+OpenRouter, widest catalogue and commonest reason to scroll, then xAI, Moonshot,
+Z.ai, MiniMax, then OpenCode Zen. (**Six** of the eight carry a `nativeHarness`, so
+"reached natively" is not what puts the first two in front.) Q3.535.
 
 ⭐ **"Ready" is `keyMissing`'s own answer, which is the function that greys the
 rows.** A provider floats exactly when the picker will *not* write "No <provider>
@@ -360,6 +360,22 @@ other 289 over it is the failure this app avoids everywhere else.
 separate arms. Neither names a remedy — nobody in this product configures that
 address — and neither carries the browser's own words for the failure, because a
 refused `connect-src` arrives as a bare `TypeError` a person cannot act on.
+
+⚠ **And the same distinction is owed to every provider whose list comes from a
+harness, which is where it was missing entirely.** A group with no rows is not
+drawn — there is no heading for an empty one — and **five of the eight** systems
+carry an empty `models` table on purpose because their CLI publishes the real list
+(four harnesses covering five providers: opencode is the native side of two). So a
+harness the daemon could not spawn took its provider off the picker in
+silence, and the reader's only available conclusion was that the product had
+dropped it. `unreadSystemsNotice` in `agents.ts` is the sentence, drawn in
+`notice`'s slot beside OpenRouter's; it reads `AgentCapabilities.error` — the
+field that is set *only* when the ask itself failed — so a harness that honestly
+published nothing says nothing, and `AgentBuilder`'s harness rows, which already
+draw `COULD_NOT_ASK` off the same field, cannot disagree with it about what
+happened. ⚠ **`notice` is a list for this**: OpenRouter's failure is a fetch *this
+browser* made and the other is a spawn *the daemon* could not make, so joining
+them would claim one cause for two, and choosing between them would silence one.
 
 ⚠ **`noJargon` may never be handed a live model name.** It forbids `anthropic`
 and `openai` as words, and 74 of the kept names contain one — `Anthropic: Claude

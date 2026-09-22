@@ -5,12 +5,15 @@ import { enrollmentExpiryText, enrollmentLines } from "../../enrollment";
 import { errorText } from "../../http";
 import type { MachineId } from "../../ids";
 import { daemonRead } from "../../machine";
+import { localAnnouncedFor, localOff, setLocalOff } from "../../localRoute";
+import { inNativeShell } from "../../native";
 import { MACHINE_GONE } from "../../plugins";
 import { navigate } from "../../router";
 import { agentStripPath, settingsPath } from "../../settings";
 import { store, type AppState } from "../../store";
 import { enrolledByText, type MachineSettingsView } from "../../wire";
 import {
+  Badge,
   Button,
   ChoiceRow,
   DangerButton,
@@ -478,6 +481,33 @@ export function MachineSection({
         </section>
       )}
 
+      {/*
+        * ⚠ **Outside the `listable` gate, and that is the whole placement.** It sat
+        * inside it for one revision, beside Idle sessions, which reads as the natural
+        * home — every other block up there is a fact read *from* the daemon. This one
+        * is not: it is a routing preference held in this client's own storage, and the
+        * moment somebody needs it is precisely the moment those sections cannot be
+        * drawn. A machine whose tunnel is down, whose relay is down, or whose control
+        * plane is unreachable reads `offline` — and is still running three feet away,
+        * still reachable over loopback. Gated, the one control that repairs that
+        * disappears exactly when it would have worked, and the docblock on
+        * {@link LocalPath} claimed it did not. A rule stated in prose that the
+        * placement quietly stopped holding.
+        *
+        * So it sits with Name and Retire: the acts belonging to the registry and to
+        * this client rather than to the daemon, which survive the daemon being gone.
+        * Above Retire, because Retire is deliberately last and heaviest.
+        *
+        * Not gated on `owned` either. A grant is full access to the machine, the
+        * daemon accepts a grantee's token on loopback exactly as it does through the
+        * tunnel, and somebody sharing a build box has the same reason to want this as
+        * its owner.
+        */}
+      <section className={SETTINGS_SECTION}>
+        <h2 className={SETTINGS_HEADING}>This device</h2>
+        <LocalPath machineId={machineId} name={machine.name} />
+      </section>
+
       {owned && (
         /*
          * ⚠ **The one section here that is not another field, drawn so that it is
@@ -632,6 +662,130 @@ function RenameMachine({ machine }: { machine: AppState["machines"][number] }): 
  * cut it. The word for the state is absent for the same kind of reason: a name
  * would make invisible housekeeping into something to interpret.
  */
+/**
+ * Whether this computer talks to this machine's daemon directly.
+ *
+ * **The only row on this screen that is about the device rather than the host.**
+ * Everything above is read from the daemon and is the same answer on a phone; this
+ * is a routing preference held in this client's own storage, which is why it is
+ * last and under a heading that says so.
+ *
+ * ⚠ **The heading's two words are also a badge one screen back, and they are not
+ * the same claim.** `MachinesSection`'s `this device` badge marks the *one* row
+ * that is the computer the app runs on. This heading is on *every* machine's page
+ * and means "this section is about your client, not about that host" — which is
+ * why it is drawn for a machine on the other side of the world. They are never on
+ * screen together, and neither may be renamed on the assumption it is the other.
+ *
+ * ⚠ **Drawn in a browser too, where it can only ever refuse.** The arm is
+ * structurally dead there — a page served over `https:` cannot reach
+ * `http://127.0.0.1` at all — and the easy thing would be to render nothing. That
+ * is worse twice over: somebody who has read the release notes on their phone gets
+ * a screen with no trace of the feature and no way to tell whether their fleet has
+ * it, and `pnpm web` stops being able to exercise the row at all. One sentence
+ * naming the app is cheaper than both.
+ *
+ * ⚠ **And not gated on reachability.** The state this control most needs to be
+ * usable in is the one where the row above says the machine is not reachable —
+ * because a laptop whose tunnel is down is exactly the machine a local path still
+ * reaches. Nothing here asks the daemon anything.
+ */
+function LocalPath({ machineId, name }: { machineId: MachineId; name: string }): ReactNode {
+  const native = inNativeShell();
+  const [announced, setAnnounced] = useState<string | null>(null);
+  const [reading, setReading] = useState(native);
+  const [off, setOff] = useState(() => localOff(machineId));
+
+  useEffect(() => {
+    if (!native) return;
+    let cancelled = false;
+    setReading(true);
+    void localAnnouncedFor(machineId)
+      .then((base) => {
+        if (!cancelled) setAnnounced(base);
+      })
+      .finally(() => {
+        if (!cancelled) setReading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [machineId, native]);
+
+  if (!native) {
+    return (
+      <p className="mt-3 text-sm text-muted">
+        The Reemoat app can reach a daemon running on the same computer without going out to the
+        relay and back. A browser cannot, so there is nothing to set here.
+      </p>
+    );
+  }
+
+  if (reading) return <Empty>Looking for a daemon on this computer…</Empty>;
+
+  /*
+   * The three states are three sentences, and the middle one is the one that would
+   * otherwise be missing: "no daemon announced itself" and "you switched it off"
+   * are the same absence to the router and must never be the same sentence here.
+   */
+  if (announced === null) {
+    return (
+      <p className="mt-3 text-sm text-muted">
+        No daemon on this computer has announced itself as {name}, so this app reaches it through
+        the relay. A daemon announces itself when it starts, and only once it has been enrolled.
+      </p>
+    );
+  }
+
+  const on = !off;
+  return (
+    <>
+      <div className="mt-2 flex min-h-11 flex-wrap items-center gap-2">
+        <Badge tone="strong">{on ? "Direct" : "Through the relay"}</Badge>
+        <Button
+          size="sm"
+          onClick={() => {
+            const next = on;
+            setLocalOff(machineId, next);
+            setOff(next);
+            /*
+             * The route memo is dropped rather than left to expire, so the switch
+             * takes effect on the next request instead of on the next wake. Nothing
+             * in flight is disturbed: `SessionStream` re-resolves per connection and
+             * an open socket keeps running until it rotates.
+             */
+            store.forgetMachineRoute(machineId);
+          }}
+        >
+          {on ? "Use the relay" : "Connect directly"}
+        </Button>
+      </div>
+      {/* Two facts, in the order somebody weighs them: what it does, then what it
+          costs. The second is the honest half of Q7.137 and the reason this control
+          exists at all rather than the path being on unconditionally. */}
+      <p className="mt-2 text-sm text-muted">
+        {name} is running on this computer, so this app can reach it over a loopback connection
+        instead of out to the relay and back.
+      </p>
+      {/*
+        * ⚠ **The closing clause was "Everywhere else it stops at once" and it had
+        * to go.** It was true of the two causes named in front of it — a grant and
+        * a machine being switched off are both read live by the relay before each
+        * request. Retiring a *device* is a third cause and behaves the same way on
+        * **both** paths, because `relay/authorize.ts` reads no device row by
+        * design, so the old sentence would have been a promise this feature
+        * quietly broke. Rewritten as what is true of all three rather than
+        * enumerated, which is also what stops the next cause invalidating it.
+        */}
+      <p className="mt-2 text-sm text-muted">
+        While it does, the relay is not checking each request — so if the owner takes your access
+        away, or switches the machine off, this app can keep reaching it from here for up to about
+        six minutes. Retiring this device has the same delay, here and everywhere else.
+      </p>
+    </>
+  );
+}
+
 function IdleRelease({ machineId }: { machineId: MachineId }): ReactNode {
   const [settings, setSettings] = useState<MachineSettingsView | null>(null);
   const [value, setValue] = useState("");

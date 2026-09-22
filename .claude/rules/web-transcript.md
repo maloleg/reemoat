@@ -83,9 +83,13 @@ stays off, because it is untrusted text quoting an untrusted repository.
     that numbers nothing keeps `null` and joins exactly as it does today — that
     arm is what the driver protects. Q3.604.
 
-- **Background work is drawn on one surface, and the transcript's foot is a way
-  in rather than a copy.** `WaitingFoot` counts both sources and opens
-  `TaskPanel`; it holds no list of its own and claims no region under it
+- **Background work is drawn on one surface, and there are two ways in.**
+  `WaitingFoot` counts both sources and opens `TaskPanel` — but it is drawn only
+  while something is **outstanding**, so the moment the last task ended the record
+  the panel keeps became unreachable. The session header's kebab is the other door
+  and is why that kebab now exists at every width: `Background tasks` is on no rail
+  row, unlike every other row in it. Q3.631.
+  `WaitingFoot` counts both sources and opens `TaskPanel`; it holds no list of its own and claims no region under it
   (`aria-haspopup="dialog"`, never `aria-expanded`). The panel's own decisions —
   the section order and labels, the chip table over the five states, the duration
   and token formatters, the four-cell meter — are `tasks.ts`, so `webcheck` drives
@@ -94,24 +98,69 @@ stays off, because it is untrusted text quoting an untrusted repository.
   departs it is because the wire has no such field**, and each departure is named
   at the code. Q3.603.
   - **Two placements, one element, and the breakpoint is answered only in CSS.**
-    A bottom sheet below `xl`, docked right at `xl` with `SessionView` taking
-    `TASK_PANEL_GUTTER` — the other half of `TASK_PANEL_WIDTH`, declared beside it
-    so `webcheck` can assert the two are one length, which nothing could do while
-    each was a literal in its own file. It **portals** — `fixed` only means the
-    viewport where no ancestor carries a `transform` or `backdrop-filter`, and the header and
-    composer here are one hop from one — and it is **`menu`** in `overlay.ts`,
-    never `sheet`: `sheet` puts `inert` on `#root`, which at `xl` would switch off
-    the conversation it is docked *beside*, and making that conditional is
-    breakpoint state in JavaScript.
+    A bottom sheet below `md`, docked right from `md` with `SessionView` taking
+    `TASK_PANEL_GUTTER` — `calc` of the same custom property the panel's own width
+    is, so the two cannot drift and neither is a literal a reader can drag away
+    from. **It is resizable there, on the rail's own separator**; the widths, the
+    exit animation and every measurement behind both are `docked-panels.md`. It
+    **portals** — `fixed` only means the viewport where no ancestor carries a
+    `transform` or `backdrop-filter`, and the header and composer here are one hop
+    from one — and it is **`menu`** in `overlay.ts`, never `sheet`: `sheet` puts
+    `inert` on `#root`, which from `md` would switch off the conversation it is
+    docked *beside*, and making that conditional is breakpoint state in
+    JavaScript.
+  - **The finished band folds, and it stands at zero.** `taskSections` moved a
+    completed row to `Completed` all along — but a section is named only when
+    something else is populated, so one workflow finishing alone kept its card in
+    place at the same size with only its chip changed, and nothing said the word.
+    `FinishedSection` is that band, and **`taskSections` no longer emits it** —
+    the owner's rule is that Finished is reachable even when nothing exists, and a
+    function returning a section per thing that exists cannot return one for a
+    thing that does not. So `sections` means *how many live kinds* and the band is
+    the panel's, which is what that function's docblock always claimed. One `bands`
+    count replaced the two `sections.length` proxies the headings were gated on, or
+    a lone live kind would have lost its label in silence. ⚠ **The band is gated on
+    `reports`**: `Completed (0)` is a count, and a count of finished work is an
+    *answer* — on the three agents that report no lifecycle it would assert exactly
+    what the sentence beside it disclaims. And nothing to show is a **heading, not
+    a fold**: a disclosure over an empty body is a control that lies, which was
+    already reachable by clearing the list. It is seeded closed **in the section
+    rather than in `TaskPanel`**, because the panel renders nothing while `!shown` and everything
+    below it unmounts on every close — which is the whole of "collapsed by default"
+    with no state to store — while `TaskPanel` itself is rendered unconditionally
+    and would keep it. The clear **hides, and destroys nothing**: the daemon has one
+    background-task route and it is *stop*; it keeps terminal rows on purpose so
+    this panel can answer *did that build finish*. So `finishedTasks.ts` is a module
+    `Map` in memory, never `localStorage` — it is a claim about rows on a remote
+    machine, and a restart, the agent's `/clear` and eviction at the cap each
+    destroy those with nothing to tell the browser. It **replaces** rather than
+    unions, which is the prune that keeps it a subset of the wire. And the hidden
+    set never reaches `tasks.ts`: pushed in there the band would vanish when
+    emptied, which is the owner's rule reversed by a change that reads as a
+    simplification. ⚠ **The count is not Claude Code's.** Theirs is a lifetime list;
+    ours is how many finished rows the daemon still holds — capped with live rows at
+    `MAX_TRACKED_ASYNC_TASKS`, lossy oldest-finished-first, and gone on a restart.
   - **⚠ A workflow's agents are not on this wire and the panel says nothing about
     them.** The adapter marks every `local_agent` task `ignored` before publishing,
     and no payload carries a phase, a fraction, a model or a count. So `Phases` is
     one phase titled `Agents` — Claude Code's own fallback — with no fraction
     (their rule for a zero total) and **no rows**. An empty table under a heading
     would be a claim about ten agents that are running.
-  - **⚠ `No tasks currently running` is gated on `reportsBackgroundTasks`.** It is
-    true for claude and false for the other three, and an ungated copy is a
-    sentence about kimi's backgrounded shells that is simply wrong.
+  - **⚠ The empty state is a three-valued partition, and it was a boolean.**
+    `No tasks currently running` is true for claude and false for the other three,
+    so it is gated — but `reportsBackgroundTasks: false` is **two** facts. The
+    daemon's own docblock calls it *"nobody asked"*, and `doStop` sets it, which a
+    restart reaches for every session. So with no agent attached the panel asserted
+    *"This agent doesn't report background work"* about claude. `backgroundReporting`
+    in `tasks.ts` splits it on `hasLiveAgent` — the predicate that already existed
+    for *"the statuses in which an agent process exists and can be asked
+    something"*, `stopping` excluded on a measured argument — and a missing row
+    lands in the same arm, whose sentence is worded to be true of both and to name
+    no agent at all. The sentences are a `Record` over the union, so a fourth state
+    is a compile error and the partition is swept rather than the shape of an
+    expression. The finished band is barred there with `silent`, for one reason:
+    the daemon's rows are gone after a restart, so a zero would say *nothing
+    finished* about a session that may have finished ten things. Q3.633.
   - **⚠ Elapsed time comes from `startedAt`/`endedAt`, never `usage.durationMs`.**
     The agent's duration rides a *progress* frame and the adapter drops both the
     final `usage` and `end_time`, so a finished task's own number is stale and a
@@ -216,6 +265,55 @@ stays off, because it is untrusted text quoting an untrusted repository.
   surviving card already contains everything every absorbed update said. ⚠ The row
   is keyed on the newest plan's seq, so an update remounts it — safe only while the
   plan arm holds no component state. Q3.455.
+- **Only the text is selected**, and it is one property in `index.css`:
+  `column-span: all` on the markdown body, the user bubble and the transcript
+  column, plus `pre`, `td` and `th` inside them. WebKit paints *selection gaps* —
+  a line's end to the block's content edge, and the space between two blocks — and
+  a block its `isSelectionRoot` answers for paints none. ⚠ **Three placements
+  because a `flex` container between the root and the text puts the fill back**,
+  measured: depth, padding and `w-fit` change nothing, flex alone restores it, and
+  the bubble hangs in a flex row. ⚠ **Not a transform**, which is the other
+  trigger and is identical in WebKit: it also makes a stacking context, and a `td`
+  in one moved a 1px table border in Chromium. `pre`/`td`/`th` are an ablation —
+  nothing above the cells substitutes. What it cannot reach is the **anonymous**
+  block a tight list item wraps its sentence in; `remarkListItemBlocks` marks such
+  an item `spread` so the paragraph comes back, costing no pixels. The zero-width
+  `::after` this replaced is **gone**, not kept beside it. Blink is byte-identical
+  either way, paint and copy. Q3.638.
+- **A person's own line breaks survive**, `remarkHardBreaks` on the **user tone
+  only** — an agent writes CommonMark and keeps it. The break is never lost on the
+  way out: the composer trims ends, the daemon stores verbatim; a soft newline is
+  collapsed at *render*. ⚠ Not `white-space: pre-wrap`, measured: `mdast-util-to-hast`
+  writes a `\n` after every `<br>`, so a hard break draws as two. The plugin list
+  varies, never `COMPONENTS` — a second map is declined by Q3.636 and Q7.86.
+  Q3.639.
+- **A bubble is sized to the text it ended up holding**, `ui/hug.ts`. CSS cannot:
+  `fit-content` is `min(max-content, available)` and wrapped text has a max-content
+  wider than available, so the box sits at its `max-w` however short its longest
+  line falls — 31px of grey past the sentence. ⚠ It was *reported* through the
+  selection and that half is now the rule above's; what keeps this is the 31px
+  with nothing selected at all. ⚠ Three properties are
+  asserted rather than assumed, each measured: reset-then-read-then-write, never
+  interleaved (1.6ms against 25.7ms for 300 bubbles); **one** shared
+  `ResizeObserver` watching each *row*, because a conversation is drawn whole here
+  and per-message would be hundreds; and lines walked as **text nodes**, since
+  `getClientRects()` answers a rect per element too and one range over the wrapper
+  hands the box its own width back. It declines attachments, images, `pre` and
+  `table`. It writes a layout value from JS, which `AppShell` forbids — the
+  exception and its three bounds are Q3.637.
+- **What is selectable in a user's message is a wrapper *inside* the padding**, with
+  `select-none` on both the row and the padded box. WebKit fills the selection gap
+  to the bottom of the block a selection ends in, so a padded selectable block
+  paints its own padding. ⚠ `select-text` on the box was the first repair and was
+  measured — in a real `WKWebView`, driving `NSEvent` drags, since a programmatic
+  `Range` ignores `user-select` and paints the same either way — to change
+  **nothing**: 255×31 with it and without it, against 248×20 once the class moved
+  inside. `display: inline` on the paragraph painted 31 too; the property is where
+  the selectable block's edges are. One trailing `\n` stays, and it is WebKit's
+  block boundary rather than the two breaks a browser writes. Nothing on the write
+  side is implicated — the composer trims and the stored event is clean. ⚠ The
+  *fill* this bullet reasons from is gone — the rule above stops it — so read this
+  as which element is selectable and not as where the painting ends. Q3.636.
 - **A run of consecutive tool rows is one row.** `foldRuns` folds it into a
   `GroupNode` carrying a mechanical sentence — clauses from ACP's `kind`, in the
   order each first appeared, with `+N −M` beside it — that opens to the rows it
@@ -224,7 +322,12 @@ stays off, because it is untrusted text quoting an untrusted repository.
   whether it has finished, and a tap outranks that for good. A failure deliberately
   does **not** open it — `override` is component state while `failed > 0` is
   permanent — so `1 failed` rides the collapsed row instead, a bare `ToolCall`
-  opening itself on failure only because it has no badge. The re-measure is an
+  opening itself on failure only because it has no count of its own. ⚠ That last
+  clause said *"no badge"* while `1 failed` was one; it is a bare `text-muted` run
+  of text now, because `Badge`'s plain tone is `bg-raised` — the fill a user's
+  message is drawn in — so a machinery count was painting the conversation's own
+  rectangle. What the rule rests on is that the collapsed row **says the number**,
+  never what shape it says it in. The re-measure is an
   effect on `open` and not a call in the tap handler, because tool calls interleave
   and only one of the two triggers is a tap. Q3.105.
   **What a run may never swallow**: a **refusal** or an answer nothing can classify,

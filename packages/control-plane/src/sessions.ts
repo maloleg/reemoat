@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { deviceRevoked } from "./devices.js";
 import { credentialMatches, keyPrefix, newId, newSessionToken } from "./keys.js";
 import { MAX_ADDRESS_CHARS } from "./net.js";
 
@@ -87,8 +88,19 @@ function statements(db: DatabaseSync): AuthStatements {
   let held = authStatements.get(db);
   if (held === undefined) {
     held = {
+      /*
+       * ⚠ **Unqualified, and it stays a single-table statement.** Joining
+       * `devices` on here is the obvious way to check a device on the
+       * authentication path and it is refused: that table shares `id` and
+       * `revoked_at` with this one, and the reads below take the row by bare
+       * key — so a join makes `row["revoked_at"]` the *device's*, NULL for a
+       * live device and NULL for a session with no device at all, and session
+       * revocation silently stops working for every caller. `devices.ts`'
+       * `deviceRevoked` is the second statement that answers it instead, run
+       * only where there is a device to ask about.
+       */
       byPrefix: db.prepare(
-        "SELECT id, user_id, token_hash, revoked_at, expires_at, last_seen_at FROM user_sessions WHERE prefix = ?",
+        "SELECT id, user_id, token_hash, revoked_at, expires_at, last_seen_at, device_id FROM user_sessions WHERE prefix = ?",
       ),
       touch: db.prepare("UPDATE user_sessions SET last_seen_at = ? WHERE id = ? AND last_seen_at < ?"),
     };
@@ -121,6 +133,20 @@ export interface SessionRow {
    */
   ip: string | null;
   userAgent: string | null;
+  /**
+   * The installation this sign-in belongs to, and what its owner calls it.
+   *
+   * ⚠ **This is the one field on this row that is *not* caller-supplied in the
+   * `user_session_origins` sense, and the difference is worth knowing.** `ip` and
+   * `userAgent` are a claim a request made about itself; a device name was typed
+   * (or read off the computer) by somebody who had already authenticated, and the
+   * row is one this account owns. It is still not evidence — a stolen session can
+   * register a device and call it anything — but it is the field a person can
+   * actually recognise, so the list prefers it and falls back to `device.ts`'s
+   * reading of the `User-Agent` when there is none.
+   */
+  deviceId: string | null;
+  deviceName: string | null;
 }
 
 /** What a sign-in said about itself. Recorded, never trusted. */
@@ -153,6 +179,20 @@ export function mintSession(
    * decision somebody made.
    */
   origin: SessionOrigin,
+  /**
+   * Which installation this sign-in belongs to, or `null`.
+   *
+   * **Required with no default, for the reason directly above and for a sharper
+   * version of it.** There are three routes that mint a session — `/v1/login`,
+   * `/v1/register/confirm` and `/v1/reset` — and only the first of them can
+   * carry a device today. An optional parameter would let the other two, and
+   * every sign-in path added later, silently produce sessions outside
+   * per-device revocation: invisible on the Devices screen, unreachable by
+   * `DELETE /v1/me/devices/:id`, and surviving the revocation of every device
+   * the account has. Two call sites legitimately pass `null`; the point is that
+   * they are made to say so.
+   */
+  deviceId: string | null,
   now = Date.now(),
 ): MintedSession {
   const minted = newSessionToken();
@@ -172,9 +212,9 @@ export function mintSession(
       db.prepare("UPDATE user_sessions SET revoked_at = ? WHERE id = ?").run(now, String(row["id"]));
     }
     db.prepare(
-      "INSERT INTO user_sessions (id, user_id, prefix, token_hash, created_at, expires_at, last_seen_at) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ).run(id, userId, minted.prefix, minted.hash, now, expiresAt, now);
+      "INSERT INTO user_sessions (id, user_id, prefix, token_hash, created_at, expires_at, last_seen_at, device_id) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(id, userId, minted.prefix, minted.hash, now, expiresAt, now, deviceId);
     // In the same transaction as the session it describes: a row in one table and
     // not the other is a session the list draws as a device that never existed,
     // or a device belonging to no session.
@@ -203,21 +243,31 @@ function clamp(value: string | null, max: number): string | null {
   return trimmed.length === 0 ? null : trimmed.slice(0, max);
 }
 
-export type SessionRefusal = "unknown" | "revoked" | "expired";
+export type SessionRefusal = "unknown" | "revoked" | "expired" | "device_revoked";
 
 export interface ResolvedSession {
   id: string;
   userId: string;
+  /** The installation this sign-in belongs to, or `null`. See `devices.ts`. */
+  deviceId: string | null;
 }
 
 /**
  * Which session a presented token is, or why it is not one.
  *
- * Three refusals rather than one, and unlike the login route this distinction is
+ * Four refusals rather than one, and unlike the login route this distinction is
  * safe to report: to reach any of them you had to present a real 256-bit token.
  * The client needs it — "expired" means show the sign-in form, "unknown" means the
  * stored credential is garbage — and `apiKeyAuth` already draws the same line
  * between `api_key_revoked` and `invalid_api_key`.
+ *
+ * ⚠ **`device_revoked` and `revoked` are separate answers because the client must
+ * do different things about them.** A session retired by the per-user cap leaves
+ * its device perfectly valid, so the app signs in again and re-binds the same
+ * row; a revoked *device* means that installation's stored id is finished and has
+ * to be given up, or the next sign-in binds it again and the refusal repeats for
+ * ever. Folding the two would pick one of those behaviours and be wrong about the
+ * other half the time.
  */
 export function resolveSession(
   db: DatabaseSync,
@@ -231,10 +281,39 @@ export function resolveSession(
 
   for (const row of rows) {
     if (!credentialMatches(token, String(row["token_hash"]))) continue;
+    /*
+     * The device, **only where there is one, and before the session's own
+     * refusals**.
+     *
+     * NULL covers a browser, an API key, an older session and every caller that
+     * never registered an installation, so the common case costs no statement at
+     * all and a native one costs a single primary-key lookup. That conditional
+     * is what makes a second read affordable on the path every relay tunnel
+     * shares — and a second read is what keeps `byPrefix` a single-table
+     * statement, which its own docblock argues at length.
+     *
+     * ⚠ **Asked first, and asking it last made `device_revoked` unreachable.**
+     * `revokeDevice` retires the device *and* its sessions in one transaction,
+     * so by the time anything looks at this row `revoked_at` is already set —
+     * and a check placed below that one answers `revoked` every time, for a
+     * refusal code nothing could then ever produce. The session's revocation is
+     * the *consequence* here and the device is the *cause*, so reporting the
+     * consequence leaves the client signing in again while still holding a dead
+     * device id, which is the one thing the extra code exists to prevent.
+     *
+     * What it costs is that an expired session on a retired device reports the
+     * device rather than the expiry. That is the better answer of the two: both
+     * mean "sign in again", and only one of them also says "and give up the id
+     * you stored".
+     */
+    const deviceId = row["device_id"] === null || row["device_id"] === undefined ? null : String(row["device_id"]);
+    if (deviceId !== null && deviceRevoked(db, deviceId)) {
+      return { ok: false, reason: "device_revoked" };
+    }
     if (row["revoked_at"] !== null) return { ok: false, reason: "revoked" };
     if (Number(row["expires_at"]) <= now) return { ok: false, reason: "expired" };
     if (now - Number(row["last_seen_at"]) > SESSION_IDLE_MS) return { ok: false, reason: "expired" };
-    return { ok: true, session: { id: String(row["id"]), userId: String(row["user_id"]) } };
+    return { ok: true, session: { id: String(row["id"]), userId: String(row["user_id"]), deviceId } };
   }
   return { ok: false, reason: "unknown" };
 }
@@ -292,11 +371,19 @@ export function revokeAllSessions(
 export function listSessions(db: DatabaseSync, userId: string, now = Date.now()): SessionRow[] {
   const rows = db
     .prepare(
-      "SELECT s.id, s.created_at, s.expires_at, s.last_seen_at, o.ip, o.user_agent FROM user_sessions s " +
+      // Every column qualified, which on this statement is the rule rather than
+      // the habit: `devices` shares `id`, `created_at` and `revoked_at` with
+      // `user_sessions`, so a bare name here would silently answer about the
+      // wrong table — the same trap `byPrefix`'s docblock refuses a join over.
+      "SELECT s.id, s.created_at, s.expires_at, s.last_seen_at, o.ip, o.user_agent, " +
+        "s.device_id, d.name AS device_name FROM user_sessions s " +
         // LEFT, because a session that predates `user_session_origins` has no row
         // there and must still be listed — it is the one you are most likely to
         // want to end.
         "LEFT JOIN user_session_origins o ON o.session_id = s.id " +
+        // LEFT for the same reason one table over: a session with no device is
+        // an ordinary state (a browser, an older row), not a missing join.
+        "LEFT JOIN devices d ON d.id = s.device_id " +
         "WHERE s.user_id = ? AND s.revoked_at IS NULL AND s.expires_at > ? ORDER BY s.created_at DESC",
     )
     .all(userId, now);
@@ -308,6 +395,8 @@ export function listSessions(db: DatabaseSync, userId: string, now = Date.now())
       lastSeenAt: Number(row["last_seen_at"]),
       ip: row["ip"] === null || row["ip"] === undefined ? null : String(row["ip"]),
       userAgent: row["user_agent"] === null || row["user_agent"] === undefined ? null : String(row["user_agent"]),
+      deviceId: row["device_id"] === null || row["device_id"] === undefined ? null : String(row["device_id"]),
+      deviceName: row["device_name"] === null || row["device_name"] === undefined ? null : String(row["device_name"]),
     }))
     .filter((row) => now - row.lastSeenAt <= SESSION_IDLE_MS);
 }

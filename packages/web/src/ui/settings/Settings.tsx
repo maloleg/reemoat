@@ -14,7 +14,9 @@ import { navigate, useOrigin } from "../../router";
 import { IconButton } from "../bits";
 import { AccountSection, EmailScreen, PasswordScreen } from "./AccountSection";
 import { EmailSection } from "./EmailSection";
+import { DevicesSection } from "./DevicesSection";
 import { KeysSection, NewKeyScreen } from "./KeysSection";
+import { LogsSection } from "./LogsSection";
 import { MachineAgentsSection } from "./MachineAgentsSection";
 import { MachineSystemsSection } from "./MachineSystemsSection";
 import { MachineSection } from "./MachineSection";
@@ -319,10 +321,10 @@ export function Settings({ state, route }: { state: AppState; route: SettingsRou
 /**
  * One section, and the whole of the mapping from a section id to a screen.
  *
- * ⚠ **A `switch` over the union rather than six `&&`s in the pane, because there
- * are two call sites now** — the section a URL names, and `DEFAULT_SECTION` where
- * it names none. A seventh member of `SettingsSection` has to be a compile error
- * here rather than a pane that silently renders nothing at one of the two.
+ * ⚠ **A `switch` over the union rather than seven `&&`s in the pane, because
+ * there are two call sites now** — the section a URL names, and `DEFAULT_SECTION`
+ * where it names none. An eighth member of `SettingsSection` has to be a compile
+ * error here rather than a pane that silently renders nothing at one of the two.
  *
  * `config` is passed to two of them for the reason `UsersSection` states: what this
  * instance can do is not on `Me`, and the Email block promises a password reset an
@@ -338,6 +340,23 @@ function SectionBody({ state, section }: { state: AppState; section: SettingsSec
       return <AccountSection me={state.me} config={state.config} />;
     case "keys":
       return <KeysSection me={state.me} />;
+    /*
+     * The second section that takes nothing, and for a different reason from
+     * `LogsSection` below: everything it draws is one listing it fetches itself,
+     * and the store holds no copy of it — a device list changes when somebody
+     * retires one, not on the four-second poll, so putting it in the store would
+     * be state with no reader keeping it fresh.
+     */
+    case "devices":
+      return <DevicesSection />;
+    /*
+     * The one section that takes nothing. Everything it draws comes from the host
+     * bridge — which is a fact about *this computer* rather than about this
+     * account — so there is no prop the store could pass it that would not be a
+     * second, staler copy of a read it has to make anyway.
+     */
+    case "logs":
+      return <LogsSection />;
     case "server":
       return <ServerSection />;
     case "email":

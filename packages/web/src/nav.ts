@@ -249,25 +249,28 @@ export function navMove(from: Route, to: Route): NavMove | null {
 /**
  * Where "up" goes from here, or `null` at the root.
  *
- * **One rule for two controls**, which is the whole reason it is a function
- * rather than a `switch` inside a component. The app already draws its own
- * leading control on every screen — `Header`'s chevron, a sheet's ✕, a section's
- * ◀ — and Telegram draws a *second* one over the top of it when this runs as a
- * mini app. Two back affordances that disagree is worse than one, so both read
- * this.
+ * **One rule for every control that draws it**, which is the whole reason it is a
+ * function rather than a `switch` inside a component. `App` computes it once above
+ * its branching and hands the answer to both readers — the panel head's ◀ over a
+ * pop-up, and a legal document's way out — so the way up is one derivation from
+ * the URL rather than a copy per screen, which is what `Header.tsx` states as the
+ * rule for every leading control in this app.
  *
- * `null` is what makes Telegram show **Close** rather than Back: the client has
- * one control and hiding the back button is how the other appears. So the root
- * having no "up" is not an absence handled somewhere else, it is the answer.
+ * ⚠ **The reader this was written for is deleted.** Telegram drew a *second* back
+ * control over the app's own when this ran as a mini app, and `null` was precisely
+ * what made that one say **Close** rather than Back. The mini app is gone
+ * (Q1.649) and the rule survives it: `null` is still the answer rather than an
+ * absence handled somewhere else, and `LegalScreen` draws a way out only where
+ * there is one to draw.
  *
  * `under` is the path a pop-up was opened over, which `router.ts` keeps in
  * `history.state` — passed in rather than read, so this stays pure and
  * `webcheck` can walk it.
  *
  * Deliberately **not** `history.back()`, for the reason `Header.tsx` gives at
- * length: on a cold deep link there is one history entry and Back leaves the app
- * altogether — which in Telegram means closing the mini app from a conversation,
- * i.e. exactly the thing this exists to stop.
+ * length: on a cold deep link there is one history entry, so Back leaves the app
+ * altogether instead of going up one level — i.e. exactly the thing this exists
+ * to stop.
  */
 /**
  * `/new`, `/new/:machineId`, `/new/:machineId/:cwd`.
@@ -526,11 +529,13 @@ export function upFrom(route: Route, under: string, origin: string | null = null
     case "session":
       return "/";
     /*
-     * ⚠ **A destination, and never `null`.** `App` hands this value straight to
-     * `setTelegramBack`, which draws **✕ Close** on `null` — so a document opened
-     * from the sign-up form inside the mini app would have no way back to it that
-     * was not closing the whole app. `"/"` rather than a history entry, which is
-     * this file's standing rule for every leading control.
+     * ⚠ **A destination, and never `null`.** `App` hands this value to
+     * `LegalScreen`, which draws its way out only where there is one — so `null`
+     * is a document with nothing on it pointing back off it. The rule was stated
+     * against the mini app's own back control, which drew **✕ Close** on `null`;
+     * that control is deleted and the rule is not, because the reader left treats
+     * `null` the same way. `"/"` rather than a history entry, which is this file's
+     * standing rule for every leading control.
      */
     case "legal":
       return "/";

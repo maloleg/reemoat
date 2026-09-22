@@ -228,10 +228,10 @@ round trip.
   `truncate` at 96px, and deriving the letter from `agent` alone is what keeps the
   element at two props, which is what `webcheck`'s two pinned JSX call sites need.
 - ⚠ **A label is never the daemon's `displayName`.** That field is a log line and
-  carries the program — `Claude (claude-agent-acp)`, `Kimi Code CLI` — and two of the
-  four built-ins would fail this client's own rule against a label naming a package or
-  ending in `CLI`. `harnessName` is the pair: this product's table, then the manifest's
-  `label` **bounded**, then the id.
+  carries the program — `Claude (claude-agent-acp)`, `Kimi Code CLI`, `Grok Build
+  CLI` — and three of the five built-ins would fail this client's own rule against a
+  label naming a package or ending in `CLI`. `harnessName` is the pair: this
+  product's table, then the manifest's `label` **bounded**, then the id.
 - ⚠ **A failed listing leaves `null`, never `[]`.** `harnessRows` is
   `agents ?? AGENT_IDS`, so an empty array defeats the fallback rather than being it:
   the picker drew its "this machine named no agents" arm with no rows and no way out,

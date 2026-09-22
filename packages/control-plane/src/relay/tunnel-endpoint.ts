@@ -10,6 +10,7 @@ import {
   CONNECTION_WINDOW_BYTES,
   AGENT_CLIS_HEADER,
   DAEMON_VERSION_HEADER,
+  MACHINE_KEY_HEADER,
   MAX_CONCURRENT_STREAMS,
   MAX_TUNNEL_BUFFERED_BYTES,
   MAX_TUNNEL_MESSAGE_BYTES,
@@ -22,9 +23,11 @@ import {
   TUNNEL_PING_MAX_MISSES,
   TUNNEL_AUTH_HEADER,
   TUNNEL_VERSION_HEADER,
+  parseMachineKey,
   negotiateProtocolVersion,
 } from "../../../../src/relay/protocol.js";
 import { recordDaemonBuild, readAgentClisHeader, readDaemonVersionHeader } from "../machines.js";
+import { pinMachineKey, type MachineKeyPin } from "../machinekeys.js";
 import { resolveTunnelKey } from "../keys.js";
 import { machineStanding } from "../quota.js";
 import { RelayTunnel, type TunnelRegistry } from "./registry.js";
@@ -197,6 +200,37 @@ export function createTunnelEndpoint(options: TunnelEndpointOptions): TunnelEndp
        * written here — after the credential resolved a machine id, before the
        * handshake completes — so a refused dial records nothing.
        */
+      /*
+       * The machine's own static, pinned on the first dial that announces one.
+       *
+       * ⚠ **A disagreement refuses the dial, and every other outcome must not.**
+       * The pin is what an app is told to expect, so a silent adoption would make
+       * the app's check decorative. But a database that will not answer is not a
+       * disagreement: `SQLITE_BUSY` against the 250 ms timeout these two processes
+       * share must cost one stale row rather than a machine's reachability, which
+       * is the rule the writes below already follow. So the refusal is reached
+       * only by an announcement this service can prove is different — never by a
+       * failure to look.
+       *
+       * Failing open here is safe rather than merely convenient: a stale pin makes
+       * the *app's* handshake fail visibly, because it holds a key the daemon
+       * cannot answer on. What it cannot do is let somebody read a session.
+       */
+      const announcedKey = parseMachineKey(req.headers[MACHINE_KEY_HEADER]);
+      if (announcedKey !== null) {
+        let pin: MachineKeyPin = "unchanged";
+        try {
+          pin = pinMachineKey(db, machineId, announcedKey);
+        } catch {
+          // A write that would not land. One stale row, never a refused dial.
+        }
+        if (pin === "mismatch") {
+          onEvent("tunnel_refused", `${machineId} announced a machine key that is not the one pinned for it`);
+          refuse(socket, 409, "Conflict");
+          return;
+        }
+      }
+
       recordDaemonBuild(db, machineId, {
         daemonVersion: readDaemonVersionHeader(req.headers[DAEMON_VERSION_HEADER]),
         protocolVersion: agreed,

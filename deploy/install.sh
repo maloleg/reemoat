@@ -31,7 +31,7 @@ usage() {
   echo "usage: deploy/install.sh <daemon|control-plane> [--non-interactive]" >&2
   echo >&2
   echo "  daemon         owns agent sessions on this host; runs them as you" >&2
-  echo "  control-plane  identity, relay and the web UI; one per fleet" >&2
+  echo "  control-plane  identity and the relay; one per fleet" >&2
   exit 2
 }
 
@@ -251,11 +251,12 @@ something else — type it (an address that is not up on this host yet)"
 }
 
 ask_control_plane() {
-  # **The web UI is not a question any more.** It is built inside the image, on
-  # every build, unconditionally — which removes the longest step of this
-  # interview, removes pnpm from a control-plane host's requirements, and removes
-  # the entire class of "it serves the API alone and from a phone that looks
-  # broken" report this block existed to prevent.
+  # **The web UI is not a question any more, and it is not a thing any more
+  # either.** It was built inside the image unconditionally, which removed the
+  # longest step of this interview; the image now carries none at all, because the
+  # Reemoat app has its own and never downloads one. So the class of report this
+  # block existed to prevent — "it serves the API alone and from a phone that
+  # looks broken" — is answered by there being an app rather than a page.
 
   echo
   echo "the control plane holds the key that signs every token in the fleet,"
@@ -628,11 +629,14 @@ ask_daemon() {
           echo "  Shown once — only hashes are stored."
           # **How they get in, said rather than implied.** `admin adduser` stopped
           # minting an API key by default, so this person has exactly one
-          # credential and it is the line above: a name and a password, at the web
-          # UI the control plane serves at `/`. That is the whole sign-in story,
-          # and leaving it implied here is what made the old wording plausible.
-          echo "  They sign in at ${_cp_url} as '$_person' with that password,"
-          echo "  and change it there under Settings → Account."
+          # credential and it is the line above: a name and a password, in the
+          # Reemoat app. ⚠ **The address is what they type into the app, not a
+          # page they open** — this control plane serves no browser UI, which is
+          # the supported shape and is why the wording names the app rather than
+          # a URL to visit.
+          echo "  They install the Reemoat app and point it at ${_cp_url},"
+          echo "  then sign in as '$_person' with that password and change it"
+          echo "  under Settings → Account."
           echo "  If they want a key for cpctl or a terminal, they mint their own:"
           echo "    pnpm cpctl key"
           echo
@@ -717,16 +721,16 @@ else
   ENV_ANSWERED=0
 fi
 
-# The "the web UI is not built" warning that used to sit here is gone with the
-# question that produced it: the bundle is built inside the image, on every
-# build, so there is no state in which this service starts without one.
+# The "the web UI is not built" warning that used to sit here is gone twice over:
+# first with the question that produced it, and now with the bundle itself. This
+# service serves the API and the relay; the client is the Reemoat app.
 
 # **Carried forward, because the interview only runs on a file that is still the
 # example.** An environment file written by an older wizard says
 # `REEMOAT_CP_HOST=<lan address>` and knows nothing of `REEMOAT_CP_PUBLISH`.
 # Under the container the first key is inert — compose pins the bind — so the
-# publish address falls back to its `127.0.0.1` default and the API and web UI
-# quietly become reachable from this host only. The health probe reads the same
+# publish address falls back to its `127.0.0.1` default and the API quietly
+# becomes reachable from this host only. The health probe reads the same
 # defaulted key, so it probes loopback, gets a 200 and prints `health: ok`: the
 # mistake is agreed with rather than caught, and the operator's phone simply
 # stops connecting.
@@ -1130,8 +1134,8 @@ if [ "$SERVICE" = control-plane ] && [ ! -f "$CPCTL_ENV" ] && [ "$START_FAILED" 
     # version of this file, cannot scrape a sentence and call it a credential.
     if [ -n "$_pw" ]; then
       echo "  admin password: $_pw"
-      echo "    Written nowhere. Sign in at ${_cp_ui:-the control plane} as"
-      echo "    '$_admin_name' and change it under Settings → Account."
+      echo "    Written nowhere. Point the Reemoat app at ${_cp_ui:-this control plane},"
+      echo "    sign in as '$_admin_name', and change it under Settings → Account."
       echo "    Lost it? Add an address under Settings → Account first — a"
       echo "    forgotten password is recovered by mail and by nothing else."
       echo "    No admin, including this one, can set somebody's password."
@@ -1139,7 +1143,7 @@ if [ "$SERVICE" = control-plane ] && [ ! -f "$CPCTL_ENV" ] && [ "$START_FAILED" 
     elif [ -n "$_pw_src" ]; then
       echo "  admin password source: REEMOAT_CP_BOOTSTRAP_ADMIN_PASSWORD — the"
       echo "    value you set there. It was not printed and is not shown here."
-      echo "    Sign in at ${_cp_ui:-the control plane} as '$_admin_name'."
+      echo "    Point the Reemoat app at ${_cp_ui:-this control plane} and sign in as '$_admin_name'."
       echo "    It is only read on the very first start, and compose reads"
       echo "    $ENV_FILE on every command — remove that line once you are in."
       echo
@@ -1263,7 +1267,7 @@ if [ "$SERVICE" = control-plane ] && interactive && [ -f "$CPCTL_ENV" ]; then
     # key never enters this script's environment or that of anything it spawns.
     # One call, two fields. The API key is the half that matters and the half
     # that is unrecoverable: like the admin key above, it is returned once and
-    # only its hash is kept, and it is what this person pastes into the web UI.
+    # only its hash is kept, and it is what this person pastes into the app.
     # Guarded like every other command substitution on this path: a bare
     # assignment under `set -e` would skip the deliberate diagnosis block at the
     # end of this file, which exists to say that everything above still happened
@@ -1283,11 +1287,11 @@ if [ "$SERVICE" = control-plane ] && interactive && [ -f "$CPCTL_ENV" ]; then
       echo "  user:     $_uid"
       echo "  password: $_upw"
       echo "  Shown once — only hashes are stored."
-      echo "  They sign in at the web UI with the name '$_person' and that password,"
-      echo "  and change it there under Settings → Account."
+      echo "  They sign in in the Reemoat app with the name '$_person' and that"
+      echo "  password, and change it under Settings → Account."
       echo
       # No grant hint any more, and its absence is the feature: they add their own
-      # machine from the web UI, which mints the enrollment code with it. The old
+      # machine from the app, which mints the enrollment code with it. The old
       # two-line hint named a command nobody ran, which is why a daemon could
       # enroll and appear in nobody's list.
       echo "  They add their own machines from Settings → Machines."
@@ -1302,7 +1306,7 @@ echo "logs: $(log_hint "$SERVICE")"
 if [ "$SERVICE" = daemon ] && [ -n "${MACHINE_ID:-}" ]; then
   echo
   echo "this machine is $MACHINE_ID, and it already belongs to the person you picked."
-  echo "they will see it in the web UI as soon as this daemon dials the relay."
+  echo "they will see it in the app as soon as this daemon dials the relay."
   echo
   # ⚠ **This shell holds the *admin's* `REEMOAT_CP_KEY`** — it just ran `cpctl
   # admin adduser` and `cpctl admin addmachine` with it — and `cpctl share`

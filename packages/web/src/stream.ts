@@ -1,3 +1,4 @@
+import type { StreamSocket } from "./e2ee";
 import type { SessionId, SessionRef } from "./ids";
 import { SOCKET_ROTATE_MARGIN_MS, describe, type MachineConnection, type Route } from "./machine";
 import type { LaggedFrame, SessionSnapshot, StoredEvent, StreamFrame } from "./wire";
@@ -63,9 +64,19 @@ export interface StreamSink {
 export class SessionStream {
   readonly ref: SessionRef;
 
-  private socket: WebSocket | null = null;
+  /*
+   * ⚠ **`StreamSocket`, not `WebSocket`, and nothing else in this class changed
+   * for it.** Over the relay this socket is a frame inside an encrypted channel
+   * and over loopback it is a real `WebSocket` — which satisfies the interface
+   * structurally, so the direct path needs no wrapper at all. The four members
+   * this class uses are the whole of the interface, which is what made the swap
+   * one line: rotation, the `Math.max` cursor, the `seq <= lastAppliedSeq` dedup,
+   * the hole check and the close-code table are all untouched and none of them
+   * can tell which transport it is on.
+   */
+  private socket: StreamSocket | null = null;
   /** The make-before-break replacement, live until its `hello` arrives. */
-  private successor: WebSocket | null = null;
+  private successor: StreamSocket | null = null;
   private rotateTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -218,9 +229,8 @@ export class SessionStream {
    * `isSuccessor` marks the make-before-break replacement: it does not become the
    * live socket until its `hello` arrives, at which point the old one is closed.
    */
-  private open(token: string, route: Route, generation: number, isSuccessor: boolean): WebSocket {
-    const url = this.machine.streamUrl(this.ref.sessionId as SessionId, this.lastAppliedSeq, token, route);
-    const socket = new WebSocket(url);
+  private open(token: string, route: Route, generation: number, isSuccessor: boolean): StreamSocket {
+    const socket = this.machine.openStream(this.ref.sessionId as SessionId, this.lastAppliedSeq, token, route);
 
     socket.onmessage = (message): void => {
       if (generation !== this.generation) return;
@@ -258,7 +268,7 @@ export class SessionStream {
     return socket;
   }
 
-  private apply(frame: StreamFrame, socket: WebSocket, isSuccessor: boolean): void {
+  private apply(frame: StreamFrame, socket: StreamSocket, isSuccessor: boolean): void {
     switch (frame.type) {
       case "hello": {
         if (isSuccessor) {
@@ -499,7 +509,7 @@ export class SessionStream {
   }
 }
 
-function closeQuietly(socket: WebSocket | null): void {
+function closeQuietly(socket: StreamSocket | null): void {
   if (socket === null) return;
   socket.onmessage = null;
   socket.onclose = null;

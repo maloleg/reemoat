@@ -201,11 +201,65 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
       new URL("../../../src/acp/asynctasks.ts", import.meta.url),
       "utf8",
     );
+    /*
+     * ⚠ **`src/acp/agents.ts`, added for the same reason `asynctasks.ts` was.**
+     * `ClaudeSettingsMode` is declared there and mirrored in `wire.ts`; a file not
+     * in this list falls through the `continue` below however correctly its
+     * interface is named on both sides, which is the failure the paragraph above
+     * measured at 52-against-54.
+     */
+    const agentsSrc = readFileSync(new URL("../../../src/acp/agents.ts", import.meta.url), "utf8");
+    /*
+     * ⚠ **`src/agentauth.ts`, and this is the *fifth* time the paragraphs above
+     * describe.** `LoginRunView` and `LoginChunk` are declared there and mirrored
+     * in `wire.ts`, and they have never once been compared — the `continue` below
+     * skips any interface no source in this list declares, and this file was not
+     * in it. The login flow has had a cursor, a `dropped` count and a `gap` flag
+     * on the wire for releases, guarded by nothing. Found while adding an install
+     * run whose types are the same shape, which would have landed in the same
+     * hole.
+     */
+    const authSrc = readFileSync(new URL("../../../src/agentauth.ts", import.meta.url), "utf8");
+    /*
+     * And the install run's, added **before** anything in `packages/web` read
+     * them — which is the lesson the paragraph above finally states as a rule.
+     * `InstallRunView` and `InstallChunk` are the same shape as the login pair
+     * one file over, so they would have fallen into the same hole for the same
+     * reason.
+     */
+    const installSrc = readFileSync(new URL("../../../src/agentinstall.ts", import.meta.url), "utf8");
+    /*
+     * ⚠ **`src/runtime/types.ts`, the *sixth*, and it is the one this list was
+     * edited beside without being fixed.** `AgentLoginSupport` is declared there
+     * and mirrored in `wire.ts` under the identical name, so the name rule was
+     * already satisfied and bought nothing — the file was simply absent, and the
+     * pair has never been compared. `AgentAvailability.installable` was added to
+     * the same source 59 lines below it in the change that added installs.
+     */
+    const runtimeTypesSrc = readFileSync(new URL("../../../src/runtime/types.ts", import.meta.url), "utf8");
+    /*
+     * And the *seventh*: `DirEntry` and `DirListing`, declared in `src/browse.ts`
+     * and mirrored under the same names. Pre-existing rather than new, found by
+     * the same sweep that found the one above.
+     */
+    const browseSrc = readFileSync(new URL("../../../src/browse.ts", import.meta.url), "utf8");
     const mirrored = [...new Set([...clientSrc.matchAll(/export interface (\w+)/g)].map((one) => one[1] ?? ""))];
     const behind: string[] = [];
     let compared = 0;
     for (const name of mirrored) {
-      const theirs = [registrySrc, eventsSrc, daemonSrc, systemsSrc, askSrc, asyncTasksSrc]
+      const theirs = [
+        registrySrc,
+        eventsSrc,
+        daemonSrc,
+        systemsSrc,
+        askSrc,
+        asyncTasksSrc,
+        agentsSrc,
+        authSrc,
+        installSrc,
+        runtimeTypesSrc,
+        browseSrc,
+      ]
         .map((src) => fieldsOf(src, name))
         .find((one) => one !== null);
       if (theirs === undefined || theirs === null) continue;
@@ -386,14 +440,33 @@ process.stdout.write("\nwhat a plugin may make this client draw\n");
      * one fewer than it should". The half that needs asserting is upstream, in the
      * naming, and `wire.ts` now states it where the interface is declared.
      *
+     * ⚠ **And the raise to 58 is a *third* kind: a source file that was never
+     * read.** `LoginRunView` and `LoginChunk` are declared in `src/agentauth.ts`,
+     * correctly named on both sides the whole time, and compared never — because
+     * the array below did not hold that file. The naming rule the paragraph above
+     * added catches a pair that is misnamed; nothing caught a pair whose
+     * *declaring file* was absent, and the floor cannot, for the reason it cannot
+     * catch the `continue`: a source nobody reads does not lower `compared`
+     * either. Adding `agentauth.ts` moved it 56 → 58. The lesson is the one
+     * already stated and now measured a fourth time — **when a mirrored type is
+     * added, the file declaring it goes in this list first, before anything
+     * depends on the mirror.** Followed immediately: `src/agentinstall.ts` went
+     * in before `packages/web` read a line of it, 58 → 60, and the install pair
+     * has been compared since it existed.
+     *
      * ⚠ **The number and the sentence above it move together or neither means
      * anything.** This is the second time a raise has been owed and the first time
      * one was nearly missed: a corpus that grows while its floor stands still looks
      * healthier every release. The sibling driver in the catalogue service hit the
      * sharper version of it in the same week — its corpus tripled against an
      * unmoved floor, which would have passed with an entire check group removed.
+     *
+     * 52 → 56 when `src/acp/agents.ts` joined the list above, which is the third
+     * raise and the second owed to a *file* rather than to a new interface: the
+     * corpus is bounded by what this sweep reads, so adding a source is the one
+     * change that moves it without anybody writing an interface.
      */
-    report("there are mirrored interfaces to compare at all", compared >= 52, `${compared} interfaces`);
+    report("there are mirrored interfaces to compare at all", compared >= 64, `${compared} interfaces`);
     check("and the session snapshot is one of them", fieldsOf(registrySrc, "SessionSnapshot") !== null, true);
     check("no interface this client mirrors knows less than the daemon's own", behind, []);
 

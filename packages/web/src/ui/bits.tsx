@@ -86,6 +86,24 @@ import { toast } from "./Toast";
  * height is paid for out of the transcript, and because `gap-1.5` neighbours mean
  * a symmetric inset would put one control's target on another's face. Both are
  * 44px; only one of them reflows.
+ *
+ * ⚠ **Both are now `[@media(pointer:coarse)]:`, and the second one had to become
+ * so because a grown target grows *hover* with it.** A generated box is rendered
+ * as a child of its originating element, so `:hover` matches the element while
+ * the pointer is anywhere in the pad — hit-testing reach and hover reach are one
+ * rectangle by construction, and no CSS separates them. Reported off the ✕ in the
+ * background-tasks head, where `sm`'s 10px pad fills a `min-h-11` band: the
+ * pointer entered the row and the glyph lit up 10px before it was reached, faded
+ * in over `.tap`'s 120ms so that it read as *already* highlighted rather than as
+ * a mis-aim. The old docblocks priced this growth as costing "no layout anywhere"
+ * and stopped there; its hover cost was written down nowhere in this repository.
+ *
+ * What makes the repair free rather than a trade is that the two needs never
+ * coexist: Tailwind wraps every `hover:` utility in `@media (hover: hover)`, so
+ * the leak exists only where a mouse does, and the pad is only ever needed where
+ * a thumb does. A fine pointer now gets exactly the ink — 24px for `sm`, which is
+ * still above WCAG 2.5.8's 24×24 minimum — and a hover that starts at the edge of
+ * what is drawn. A coarse pointer is untouched at 44px.
  */
 
 /**
@@ -107,9 +125,17 @@ import { toast } from "./Toast";
  * Vertical only, and that is the whole reason it is not `-inset-2.5`: these sit
  * `gap-1.5` apart, so a symmetric inset would put one control's target over its
  * neighbour's *face* — and the neighbour changes the model.
+ *
+ * ⚠ **Every class here carries `[@media(pointer:coarse)]:`, and dropping the
+ * prefix from any one of them puts the hover leak back.** The argument is in this
+ * file's own top docblock: the pad and the hover ground are one rectangle, so the
+ * pad may only exist where hover does not. It is written out five times rather
+ * than composed from a constant because Tailwind scans source for whole class
+ * names — a prefix built by interpolation emits nothing at all, silently, and the
+ * target simply stops existing on a phone.
  */
 export const TAP_GROW_Y =
-  "after:absolute after:inset-x-0 after:-top-1 after:-bottom-2 after:content-['']";
+  "[@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-x-0 [@media(pointer:coarse)]:after:-top-1 [@media(pointer:coarse)]:after:-bottom-2 [@media(pointer:coarse)]:after:content-['']";
 
 /**
  * The conversation's own column: centred, with room either side.
@@ -609,15 +635,115 @@ export function Badge({
 }
 
 /**
+ * The twelve faces this app draws, and why they are a list rather than one glyph.
+ *
+ * There is no avatar anywhere on this wire — `Me` is `{id, name, isAdmin, via,
+ * hasPassword}` — so the account has no picture and never will. A single letter in
+ * a box was the honest answer and it read as a placeholder; a face reads as a
+ * person, which is what the box is standing in for.
+ *
+ * ⚠ **Deterministic, never `Math.random()`.** The face is derived from the name,
+ * so it is the same on every render, every reload and every device — a picture that
+ * changed when the list polled would be the one thing on this screen that moves for
+ * no reason, and it would make the avatar useless as a thing to recognise. Pure and
+ * exported so `webcheck` can assert exactly that.
+ *
+ * **No zero-width-joiner sequences and no variation selectors in the list.** Those
+ * render as two glyphs, or as a black-and-white silhouette, on whichever platform
+ * has not shipped the pair — and a broken face is worse than a letter. Every entry
+ * here is a single code point.
+ */
+const FACES = ["🧑", "👩", "👨", "🧔", "👱", "🧓", "🤠", "🦸", "🧙", "🧚", "👮", "👷"] as const;
+
+export function personEmoji(name: string | null): string {
+  const seed = name?.trim() ?? "";
+  if (seed === "") return FACES[0];
+  // A plain sum of code points. It does not need to be a good hash — it needs to
+  // be the *same* hash next time, and to spread a dozen names over a dozen faces.
+  let total = 0;
+  for (const ch of seed) total += ch.codePointAt(0) ?? 0;
+  return FACES[total % FACES.length] ?? FACES[0];
+}
+
+/**
+ * A rounded square with a mark in it, standing in for a picture that does not exist.
+ *
+ * Two callers want two different marks and two different sizes, which is why both
+ * are props rather than two components: the shape, the radius and the centring are
+ * the thing being shared, and a second copy of them is how the account's box and a
+ * machine's box drift apart by two pixels.
+ *
+ * The **account** takes `glyph` — a face from `personEmoji` — at `md`, because it is
+ * the one picture on the screen and Telegram-shaped drawers open with a real avatar
+ * rather than a chip. A **machine** takes the default at `sm`: a machine is not a
+ * person, so it keeps its initial, and `sm` is the size the rail's tiles were built
+ * around.
+ *
+ * The first *grapheme*, not the first char: a name starting with an emoji or a
+ * combining pair renders half a character under `name[0]`, and `[...name]` is the
+ * one spelling that iterates code points rather than UTF-16 units.
+ *
+ * **The geometry is the primitive's and the tone is the caller's.** Neither caller
+ * wants the same fill — identity is at rest, while a machine tile spends `raised` at
+ * two strengths to say which one is selected — so the fill arrives as `className`.
+ */
+export function Monogram({
+  name,
+  glyph,
+  size = "sm",
+  className = "",
+}: {
+  name: string | null;
+  /** Drawn instead of the initial. The account's face; a machine has none. */
+  glyph?: string;
+  size?: "sm" | "md";
+  className?: string;
+}): ReactNode {
+  const letter = name === null ? "" : [...name.trim()][0]?.toUpperCase() ?? "";
+  /*
+   * The radius travels with the size because it is really travelling with the
+   * *subject*: `md` is a person and is round, the way an avatar is everywhere;
+   * `sm` is a machine and keeps the rounded square, which is the shape the rail's
+   * folders are drawn in. One prop rather than two, because there is no caller
+   * that wants a round machine or a square person.
+   */
+  const box = size === "md" ? "h-10 w-10 rounded-full text-lg" : "h-7 w-7 rounded-md text-2xs font-semibold";
+  return (
+    <span
+      aria-hidden="true"
+      className={`inline-flex shrink-0 items-center justify-center ${box} ${className}`}
+    >
+      {glyph ?? letter}
+    </span>
+  );
+}
+
+/**
  * Why a machine has no route, in the words shown to a person.
  *
  * This used to name which of two paths a machine was reached on, because "direct
  * stays primary" was a claim worth making visible. There is one path now, so what
- * is left is the four ways it can fail — and they are genuinely different things
- * to do about: a daemon that is not dialling in, a token this client could not
- * mint, a machine nobody enrolled, and a control plane that is itself down.
+ * is left is the ways it can fail — and the property this table is held to is the
+ * one that survives every addition: **every member of `OfflineReason` has an
+ * entry here, and each entry names a different thing to do about it.** The type
+ * is the census, `Record<NonNullable<OfflineReason>, string>` is what makes a new
+ * member a compile error rather than a blank badge, and `webcheck` sweeps
+ * `Object.keys` over this object so that a member which is merely *spelled* is
+ * not mistaken for one that says something.
+ *
+ * ⚠ **No count and no list in this sentence, and that is a correction rather than
+ * a style.** It first said "the four ways it can fail" while the table held
+ * seven. The repair replaced the number with an enumeration — "a daemon that is
+ * not dialling in, a token this client could not mint, a machine nobody enrolled,
+ * a control plane that is itself down, and the two key states below" — which was
+ * stale again one entry later, naming six of eight and silently dropping
+ * `over_limit` and `owner_disabled`. Both failures are the same failure: a
+ * restatement of the table's contents sitting above the table has to be re-read
+ * on every addition, and nothing fails when it is not. `docs/DECISIONS.md`'s
+ * entry count is asserted rather than written down for this reason; a number — or
+ * a list — in prose is the one kind of claim nothing checks.
  */
-const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
+export const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   no_route: "unreachable",
   no_token: "no token",
   not_enrolled: "not enrolled",
@@ -628,6 +754,63 @@ const OFFLINE_TEXT: Record<NonNullable<OfflineReason>, string> = {
   // either, which is what this table is for.
   over_limit: "over the machine limit",
   owner_disabled: "its owner is disabled",
+  /*
+   * The one entry that is not about the network, and it has to read as an
+   * instruction rather than as a fault. Everything else in this table is a state
+   * somebody waits out; this one is a daemon that has never announced the key an
+   * encrypted channel is opened to, and it is cleared by updating that machine —
+   * on the next dial, with no re-enrollment.
+   */
+  no_machine_key: "needs a newer daemon",
+  /*
+   * ⚠ **The twin of the line above, pointed at this computer instead — and the
+   * only entry in this table whose subject is not the machine the row names.**
+   * The daemon is fine and the tunnel is up; what is missing is the device key
+   * *this installation* is supposed to hold, so every machine on the account
+   * draws this sentence at once and none of them is at fault. It says *this
+   * device* for that reason, and carrying its own subject is the whole of what a
+   * substituted phrase can do about the repetition: the sentence is drawn per
+   * machine row and by {@link NotReachable} on four screens, and a phrase naming
+   * the row it sits on would read as an accusation against a machine that is
+   * working.
+   *
+   * It is an instruction for `no_machine_key`'s reason, and a sharper one: the
+   * state it replaces read "no token", which sends somebody to look at a sign-in
+   * that is working.
+   *
+   * ⚠ **And it read "sign in again on this device", which named an act that
+   * cannot terminate.** A sign-in re-sends the key this shell already holds —
+   * `POST /v1/login` carries `boot.devicePublicKey`, exactly as `registerDevice`
+   * does — and the Authority's `readDeviceInput` nulls a `publicKey` it cannot
+   * parse while **keeping** the registration, so the row goes on reporting
+   * `hasKey: false` and the same refused bytes arrive again on every attempt.
+   * What leaves the state is a *new* key, which only the shell can make: the
+   * Re-key control `DevicesSection` draws on the row wearing the `no key` badge.
+   *
+   * ⚠ **This is never drawn in a browser, and the paragraph here used to concede
+   * that it was** — *"a tab holds no keyring, so it finds the screen and no
+   * control on it"* — and then argue the dead end was worth it. There is no dead
+   * end to trade against: two independent guards each close it on their own.
+   *
+   * `POST /v1/tokens` raises `device_key_required` only where `caller.deviceId
+   * !== null`, and a browser sign-in carries no device at all — `cp.ts`'s
+   * `describeDevice()` answers `null` outside the shell, so `POST /v1/login`
+   * sends none and no session is ever bound to a row. A tab is therefore minted
+   * an *unbound* capability rather than refused, and `machine.ts` keys this
+   * reason on that one code and nothing else. The page-side miss does not arrive
+   * either: `e2ee.ts`'s `dial()` throws a plain `Error` for a missing static,
+   * which `probe` swallows, so a browser's permanent state is `no_route`.
+   * (Reachable only by moving a shell's device-bound session token into a tab's
+   * storage by hand — the shell reads its credential from the boot payload and
+   * never from `localStorage`, and no screen in this app offers the paste.)
+   *
+   * So the only *client* that ever draws it — on any of the screens named above —
+   * is a shell whose own row is keyless, which is exactly where `DevicesSection`
+   * draws the Re-key control this sentence sends somebody to. That is what lets
+   * one entry serve, in the one table whose rule is that each entry names a
+   * different thing to do.
+   */
+  no_device_key: "re-key this device under Settings → Devices",
 };
 
 /**
@@ -1811,8 +1994,15 @@ export const SHEET_SCROLL =
 export const POPOVER = "rounded-lg border border-edge bg-surface p-1.5 shadow-lg";
 
 /**
- * Three sizes, and **every one of them reaches 44px**. That is the property this
- * table now has and did not.
+ * Three sizes, and **every one of them reaches 44px under a finger**. That is the
+ * property this table now has and did not.
+ *
+ * ⚠ *Under a finger* is the half of that sentence this table did not use to have
+ * to say. `sm` and `nav` grow with a pseudo-element and `chip` with
+ * {@link TAP_GROW_Y}, and all three are `[@media(pointer:coarse)]:` now, because a
+ * pad that extends hit-testing extends `:hover` with it and there is no CSS that
+ * separates the two. A mouse gets the ink and nothing more; the top of this file
+ * carries the measurement and the reason it costs nothing.
  *
  * They get there by three different mechanisms because the neighbours differ, and
  * the argument for which is right where is in the file's own docblock at the top
@@ -1849,8 +2039,16 @@ const ICON_BUTTON_SIZE = {
    * a positioned pseudo-element it costs no layout anywhere, so nothing reflows
    * and the alternative (a coarse-pointer size bump) does not have to be right
    * in three different row densities.
+   *
+   * ⚠ **The pad is a thumb's, and this entry is where that was found out.** It
+   * was unconditional, and the ✕ in the background-tasks head sits in a
+   * `min-h-11` band where 24px of ink centred leaves exactly 10px above and
+   * below — so the pad filled the head's whole height and the glyph lit while the
+   * pointer was still on the title beside it. `[@media(pointer:coarse)]:` is what
+   * keeps the 44px for the thumb it was measured for and gives a mouse the 24px
+   * it can actually aim at. The top of this file has the mechanism.
    */
-  sm: "relative h-6 w-6 after:absolute after:-inset-2.5 after:content-['']",
+  sm: "relative h-6 w-6 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-2.5 [@media(pointer:coarse)]:after:content-['']",
   /**
    * 32px of ink, 44px of target — the whole of the composer's control row.
    *
@@ -1895,7 +2093,7 @@ const ICON_BUTTON_SIZE = {
    * ⚠ **One per row edge.** Two of these adjacent at zero gap overlap by 12px of
    * invisible target, which is a mis-tap with nothing on screen explaining it.
    */
-  nav: "relative h-8 w-8 after:absolute after:-inset-1.5 after:content-['']",
+  nav: "relative h-8 w-8 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-1.5 [@media(pointer:coarse)]:after:content-['']",
   /**
    * 44px of box — the platform tap minimum reached the plain way.
    *
@@ -2148,7 +2346,7 @@ export function Disclosure({
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         aria-controls={id}
-        className="tap flex min-h-11 w-full items-center gap-1.5 text-left text-xs text-muted hover:text-fg"
+        className="tap flex w-full items-center gap-1.5 text-left text-xs text-muted hover:text-fg"
       >
         <Icon
           as={ChevronRight}
@@ -2190,6 +2388,66 @@ export function Disclosure({
  * describes had already happened underneath it.
  */
 export const MENU_PANEL = `${LAYER.menu} max-h-72 overflow-y-auto overscroll-contain rounded-lg border border-edge bg-surface p-1.5 shadow-lg`;
+
+/**
+ * The tallest a menu panel can be, stated once and read rather than guessed.
+ *
+ * `max-h-72` above is 18rem. Everything that decides whether a menu fits has to
+ * agree with the class that actually caps it, and the two ways this went wrong are
+ * both live in this repository's history: a constant somebody picked by eye (240,
+ * which was neither the cap nor any real panel's height), and the same question
+ * answered twice in two files.
+ */
+export const MENU_MAX_PX = 288;
+
+/**
+ * Which way a menu anchored to this trigger should open.
+ *
+ * ⚠ **The bound is the nearest *scrolling* ancestor, not the viewport, and that is
+ * the whole of why this exists.** A menu panel is absolutely positioned, and
+ * `SessionBrowser`'s own scroller comment already states the fact this rests on:
+ * *a positioned descendant is part of the scrollable overflow region*. So a panel
+ * that overflows the box it is inside does not merely hang out of it — it grows
+ * that box's scroll extent, and a scrollbar appears down the side of the rail the
+ * moment somebody taps a kebab. Measured against `window.innerHeight` instead, the
+ * answer is "plenty of room" while the scroller it is actually inside ends two
+ * hundred pixels higher up. That was the bug: the rail's list and the settings
+ * pane are both `overflow-y-auto`, and both grew a bar on open.
+ *
+ * Upward has no such failure and that asymmetry is not luck: scrollable overflow
+ * extends only past the block-end edge, so a panel above its trigger is clipped at
+ * worst and never scrolled to. Which is why the answer is a direction rather than a
+ * size, and why "does it fit below" is the only question asked.
+ *
+ * **One-shot, read at the tap and discarded.** Not a layout effect measuring the
+ * panel after it mounts — that is exact and costs a second pass on every open — and
+ * emphatically not a breakpoint held in state, which `AppShell` forbids because a
+ * resized window cannot correct one. A measurement that is wrong is wrong for one
+ * open. {@link MENU_MAX_PX} is deliberately the *cap* rather than a panel's real
+ * height, so a two-item menu near the bottom opens upward when it would have fitted
+ * — the cheaper of the two errors by a long way.
+ */
+export function menuPlacement(trigger: Element | null, needed: number = MENU_MAX_PX): "up" | "down" {
+  if (trigger === null) return "down";
+  const rect = trigger.getBoundingClientRect();
+  let floor = window.innerHeight;
+  for (let node = trigger.parentElement; node !== null; node = node.parentElement) {
+    // `documentElement` and `body` are the viewport's own scrollers and are
+    // already what the fallback means; walking into them would answer the same
+    // thing twice and, for `body`, with a rect that is the content height rather
+    // than the window.
+    if (node === document.body || node === document.documentElement) break;
+    const overflow = window.getComputedStyle(node).overflowY;
+    // `overlay` is WebKit's, and it scrolls exactly like `auto` — it only paints
+    // differently. Leaving it out would miss the one engine this app runs in
+    // inside the native shell.
+    if (overflow === "auto" || overflow === "scroll" || overflow === "overlay") {
+      floor = Math.min(floor, node.getBoundingClientRect().bottom);
+      break;
+    }
+  }
+  return floor - rect.bottom < needed ? "up" : "down";
+}
 /**
  * One row in a menu: 44px, and its cross-axis alignment stated rather than
  * defaulted.

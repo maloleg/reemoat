@@ -287,8 +287,8 @@ const MAX_COMMAND_HINT_CHARS = 100;
  * option's `value` is refused for the reason a command's name is: it round-trips
  * to the agent, and a clipped one is a value the agent will not recognise.
  *
- * ⚠ **`message`, `title` and `description` used to be clipped here — by
- * `MAX_ELICITATION_MESSAGE_CHARS` at 512, `MAX_ELICITATION_TITLE_CHARS` at 100 and
+ * ⚠ **`title` and `description` used to be clipped here — by
+ * `MAX_ELICITATION_TITLE_CHARS` at 100 and
  * `MAX_ELICITATION_DESCRIPTION_CHARS` at 300 — and are not any more.** They are the *question*: with
  * several questions on one form the adapter puts each one in a field's
  * `description` and leaves `message` as a preamble, so a 300-character cap was a
@@ -300,9 +300,13 @@ const MAX_COMMAND_HINT_CHARS = 100;
  * field along — so the split now runs between *structure* and *prose* rather than
  * between refusing and clipping.
  *
- * What still bounds it is `MAX_ELICITATION_FORM_BYTES` alone, and that is the
- * point of the paragraph below: one whole-object number instead of five per-string
- * ones, refused rather than silently altered.
+ * What bounds every string *on the form* is `MAX_ELICITATION_FORM_BYTES` alone,
+ * and that is the point of the paragraph below: one whole-object number instead of
+ * four per-string ones, refused rather than silently altered.
+ *
+ * ⚠ **`message` is the exception, because it is not on the form**, and its clip
+ * came back in 0.9.1 after it was measured to reopen a permanent stall — see
+ * {@link MAX_ELICITATION_MESSAGE_CHARS}, which is where that argument lives.
  *
  * `MAX_ELICITATION_FORM_BYTES` is the backstop the per-item caps cannot be: they
  * stop one enormous string, this stops a thousand small ones. It is deliberately
@@ -333,6 +337,58 @@ const MAX_ELICITATION_FIELDS = 24;
 const MAX_ELICITATION_OPTIONS = 24;
 const MAX_ELICITATION_FORM_BYTES = 32 * 1024;
 const MAX_ELICITATION_VALUE_CHARS = 512;
+
+/**
+ * The agent's preamble to a question, and the one prose string on this path that
+ * is bounded rather than carried whole.
+ *
+ * ⚠ **This is a restoration, and what forced it is a permanent stall rather than
+ * a byte budget.** `MAX_ELICITATION_MESSAGE_CHARS` was retired at 512 with the
+ * rest of the prose clips (see the section above, whose argument still stands —
+ * 512 really did cut real questions), on the understanding that
+ * `MAX_ELICITATION_FORM_BYTES` was left holding the total. It is not: that number
+ * is weighed over the projected {@link ElicitationForm}, and `message` is **not a
+ * field of it** — `onElicitation` carries it beside the form and `registry.ts`
+ * puts it on both the event and the snapshot. So between 0.3.0 and here, one
+ * agent-minted string was the only value on this path bounded by nothing at all,
+ * and it rides the two places that cannot afford one:
+ *
+ * - **`elicitation_request` as an event.** `truncateEvent` returns that arm
+ *   unchanged — deliberately, a truncated question is an unanswerable question —
+ *   and `StreamConnection.flush` takes the first event of a batch *whatever it
+ *   weighs*, so one ~1 MiB question is one WebSocket message past
+ *   `MAX_SOCKET_MESSAGE_BYTES`. `MessageAssembler` refuses it, the channel fails,
+ *   and `stream.ts` reconnects with the cursor unchanged onto the same batch, for
+ *   ever. That is the identical stall `BATCH_MAX_BYTES` was repaired to remove,
+ *   on a different trigger.
+ * - **`PendingElicitationSnapshot` as state.** It rides `GET /sessions` for sixty
+ *   sessions every four seconds and every `hello` frame, and it is one of the
+ *   residues {@link fitSnapshotFrame}'s ladder concedes it cannot cut: the
+ *   halving rung floors at one row, so a single enormous question defeats every
+ *   rung and the oversized control frame goes out anyway.
+ *
+ * **Why 4096 and not the 512 that was taken out.** The cap has to sit above every
+ * honest question and below anything that costs a frame, and both ends are
+ * measured. Above: the largest real prose string this machine's log has ever
+ * carried on an elicitation is the **318**-character option description that got
+ * 512 retired, and the `message` claude's adapter actually sends is its own
+ * 38-character "Please answer the following questions." — so 4096 is an order of
+ * magnitude clear of the case that broke the old number, which 512 was not.
+ * Below: 4096 code units is at most 16 KiB of UTF-8, half of the form's own 32
+ * KiB backstop and twice a permission's whole 8 KiB `MAX_PERMISSION_SNAPSHOT_BYTES`
+ * — so even at `refusalReason()`'s unbounded parked count the messages contribute
+ * the same order as the permissions beside them, and no single one of them can be
+ * a frame by itself.
+ *
+ * **A clip rather than a refusal, which is the opposite of everything else in
+ * this section, and the asymmetry is the point.** A form is refused because a
+ * form missing a question has an answer that means something else. A `message` is
+ * a preamble: `clip` leaves its truncation *visible* in the string, the fields
+ * are untouched, and the form is still answerable. Refusing the whole elicitation
+ * over a long preamble would lose a question somebody could have answered — which
+ * is the harm the 0.3.0 retirement was about.
+ */
+const MAX_ELICITATION_MESSAGE_CHARS = 4 * 1024;
 /** Cap on events buffered for a turn iterator that is not currently running. */
 const MAX_BUFFERED_EVENTS = 2_000;
 /**
@@ -683,6 +739,26 @@ export class Session {
   private unregister: (() => void) | null = null;
   private unsubscribeLogs: (() => void) | null = null;
   private turnActive = false;
+  /**
+   * Which `session/prompt` owns this session right now, as a number that only
+   * goes up.
+   *
+   * ⚠ **It exists because an RPC this daemon has stopped waiting for is still
+   * outstanding, and its `.then` still fires.** {@link abandonTurn} closes a turn
+   * locally — nothing is sent to the agent — so the request stays pending for as
+   * long as the adapter keeps it, and may settle in an hour, or after a *second*
+   * turn has started on this session. Both of those are live hazards rather than
+   * theory: the late `.then` would push a second `turn_end` for one prompt, which
+   * the log's own rule forbids, and if a new turn holds the queue by then it would
+   * end **that** turn instead — a reply cut off by an answer to a message from an
+   * hour ago.
+   *
+   * So every callback the request installs is fenced on the epoch it was fired
+   * under, and `abandonTurn` bumps it. A stale callback does nothing at all: it
+   * does not push, and it does not clear {@link turnActive}, which by then belongs
+   * to somebody else.
+   */
+  private promptEpoch = 0;
   private disposed: Promise<void> | null = null;
   /**
    * The agent's current mode/model/effort state.
@@ -729,7 +805,7 @@ export class Session {
    * nothing. The guard has to be a clause about the set, not a side effect of
    * writing to a log, and keeping this out of band is what makes that true.
    *
-   * Empty until the agent says, and empty for ever on three of the four agents.
+   * Empty until the agent says, and empty for ever on four of the five agents.
    * `AcpClient.supportsAsyncTasks` is what tells those two states apart.
    */
   private readonly asyncTasks = new Map<string, BackgroundTask>();
@@ -1128,13 +1204,31 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options), routedPairing(options.agent, options.system ?? null, options.machine ?? BUILTIN_CATALOGUE)), {
-      fileIo: runtime.clientFileIo,
-      // Derived rather than configured: a question with nobody to answer it has
-      // no default, so "no resolver" and "do not tell the agent it can ask" are
-      // one fact. See `SessionOptions.elicitations`.
-      elicitation: options.elicitations != null,
-    });
+    /*
+     * Hoisted because two calls below need the *same* answer, and computing it
+     * twice is how they come to differ. `launch` spends it by withholding this
+     * harness's pasted credentials; `authMethod` spends it by refusing to name an
+     * id for a key that will not be in the environment. A pairing that was routed
+     * for one and not the other would send `authenticate` for a variable
+     * `launch` had just left out.
+     */
+    const pairing = routedPairing(
+      options.agent,
+      options.system ?? null,
+      options.machine ?? BUILTIN_CATALOGUE,
+    );
+    const client = await AcpClient.launch(
+      config,
+      await runtime.launch(options.agent, spawnEnvOf(options), pairing),
+      {
+        fileIo: runtime.clientFileIo,
+        // Derived rather than configured: a question with nobody to answer it has
+        // no default, so "no resolver" and "do not tell the agent it can ask" are
+        // one fact. See `SessionOptions.elicitations`.
+        elicitation: options.elicitations != null,
+        authMethod: runtime.authMethod(options.agent, pairing),
+      },
+    );
 
     let routed: boolean;
     try {
@@ -1251,10 +1345,21 @@ export class Session {
 
     const runtime = options.runtime ?? new LocalRuntime();
     const config = runtime.describe(options.agent);
-    const client = await AcpClient.launch(config, await runtime.launch(options.agent, spawnEnvOf(options), routedPairing(options.agent, options.system ?? null, options.machine ?? BUILTIN_CATALOGUE)), {
-      fileIo,
-      elicitation: options.elicitations != null,
-    });
+    // Hoisted for `Session.start`'s reason: two calls, one answer.
+    const pairing = routedPairing(
+      options.agent,
+      options.system ?? null,
+      options.machine ?? BUILTIN_CATALOGUE,
+    );
+    const client = await AcpClient.launch(
+      config,
+      await runtime.launch(options.agent, spawnEnvOf(options), pairing),
+      {
+        fileIo,
+        elicitation: options.elicitations != null,
+        authMethod: runtime.authMethod(options.agent, pairing),
+      },
+    );
 
     // Re-applied on every resume, and it has to be: routing lives in the agent
     // *process*, and a resume is a new one. A session that came back unrouted
@@ -1568,6 +1673,33 @@ export class Session {
 
     if (change.currentModeId !== undefined) {
       const modeId = change.currentModeId;
+      /*
+       * ⚠ **The third door onto `modes.current`, and the only one `toModes` does
+       * not stand in front of.** `session/new` and `session/resume` both build
+       * their mode state through {@link toModes}, which refuses a
+       * `currentModeId` over {@link MAX_CONFIG_ID_CHARS} outright. A
+       * `current_mode_update` notification arrives here instead and used to be
+       * written through unconditionally — so the bound one screen down held on
+       * two paths of three, and the third is the one an agent can send at any
+       * moment, repeatedly, outside a turn.
+       *
+       * Measured through a real registry and a stub ACP agent over real streams:
+       * a 2 MB `currentModeId` produced a logged `agent_config` of **2,000,126
+       * bytes after `truncateEvent`**, against a `MAX_SOCKET_MESSAGE_BYTES` of
+       * 1,048,576. `truncateEvent`'s `agent_config` arm spreads `...event.modes`
+       * and only nulls `available[].description`, so it never touches this field;
+       * `estimateBytes` charged only `available`'s ids and names, so `flush` did
+       * not see it either and took the event as the unconditional first of a
+       * batch. Past the ceiling `MessageAssembler` refuses, the channel fails,
+       * and `stream.ts` reconnects onto the same `seq` — the permanent stall.
+       *
+       * **Ignored rather than clipped, which is {@link toModes}' own call**: a
+       * clipped id selects nothing, and this id round-trips to the agent in
+       * `session/set_mode`. Ignoring keeps the mode that was already current,
+       * which is also the honest answer — every id in `available` is filtered to
+       * this same bound, so an id longer than it names no mode this session has.
+       */
+      if (modeId.length > MAX_CONFIG_ID_CHARS) return;
       if (modes !== null) modes = { ...modes, current: modeId };
       // Keep the mode-category option in step, so the two ways of expressing the
       // same fact cannot disagree on screen.
@@ -1683,7 +1815,7 @@ export class Session {
    * `messageId` indicates a new message has started."* Everything else about a
    * streamed fragment and a whole message is identical on the wire.
    *
-   * ⚠ **Two of the four agents send nothing here, and one of them sends nothing
+   * ⚠ **Two of the four agents measured for it send nothing here, and one of them sends nothing
    * on some of its messages, which is the case this function exists for.**
    * Measured in `claude-agent-acp` 0.73.0 and recorded at Q3.604, which quotes
    * the output: every path through `toAcpNotifications` calls `applyMessageId`,
@@ -1936,6 +2068,10 @@ export class Session {
      */
     const claim = this.queue.claimForTurn();
 
+    // The epoch this request answers under. See the field: it is what makes a
+    // late answer to an abandoned turn harmless rather than a second ending.
+    const epoch = (this.promptEpoch += 1);
+
     void this.client.agent
       .request(acp.methods.agent.session.prompt, {
         sessionId: this.sessionId,
@@ -1952,6 +2088,11 @@ export class Session {
       })
       .then(
         (response) => {
+          // The daemon gave up on this turn and said so; the answer is late and
+          // there is nothing left for it to end. Dropped rather than recorded,
+          // because a second `turn_end` for one prompt is the shape the log
+          // refuses — and because the turn it would reach now may not be this one.
+          if (this.promptEpoch !== epoch) return;
           // A run that the turn's own end interrupts still owes its final block —
           // `onUpdate` cannot flush it, because there is no next update.
           this.flushToolDraft();
@@ -1962,6 +2103,7 @@ export class Session {
           });
         },
         (error: unknown) => {
+          if (this.promptEpoch !== epoch) return;
           this.flushToolDraft();
           this.queue.push({
             type: "error",
@@ -1971,7 +2113,11 @@ export class Session {
         },
       )
       .finally(() => {
-        this.turnActive = false;
+        // ⚠ Fenced too, and this is the half that would break a *live* turn
+        // rather than merely duplicate a dead one: after an abandonment a second
+        // prompt may already hold `turnActive`, and clearing it here would let a
+        // third prompt fire into a session the agent is still answering.
+        if (this.promptEpoch === epoch) this.turnActive = false;
       });
 
     /*
@@ -2224,6 +2370,62 @@ export class Session {
   }
 
   /**
+   * Stop waiting for a turn the agent has never answered, and say so.
+   *
+   * **This is not a third stopping verb, and the difference is the whole design.**
+   * Stopping the agent and stopping the session are two things this daemon keeps
+   * apart (Q2.42), and nothing here sends either: no `session/cancel`, no
+   * `$/cancel_request`, no abort signal on the request. The agent is not told
+   * anything, does not stop, and is free to answer whenever it gets there. What
+   * ends is **this daemon's claim that a turn is in flight** — which is all
+   * `status === "running"` ever meant, and all that was stuck.
+   *
+   * ⚠ **`withAbandonableDeadline` is deliberately not used, though it is sitting
+   * right there and looks like the answer.** Two measurements say otherwise. Its
+   * own docblock records that against a peer which never answers, the cancellation
+   * reclaimed nothing — `pendingResponses` stayed at 20 of 20 — so it does not
+   * solve the residual it exists for in exactly this case. And it names
+   * `session/prompt` as the one method whose `ctx.signal` an installed adapter
+   * actually honours (codex-acp 1.8.0 threads it into the model call), so on that
+   * adapter the "deadline" would abort the agent's work. That is the third
+   * stopping verb, arrived at by accident, and it is what "the agent must never
+   * notice a client leaving" forbids.
+   *
+   * ⚠ **`turnActive` is cleared here rather than left to the RPC's `.finally`.**
+   * It is the flag {@link prompt} refuses a second prompt on, and it is *only*
+   * ever cleared inside the outstanding request's own callbacks — so a turn closed
+   * without those callbacks running would read as idle, open the composer, accept
+   * the next message, and then throw *"a prompt is already in flight"* into the
+   * transcript for the rest of the session. Every message after the wedge would be
+   * recorded and then errored. The epoch bump on the line above is what keeps the
+   * late `.finally` from taking the *next* turn's flag back down with it.
+   *
+   * Answers whether there was anything to abandon, so a sweep can report honestly
+   * rather than counting the sessions it looked at.
+   */
+  abandonTurn(): boolean {
+    if (!this.turnActive) return false;
+    // Before the push, so the still-pending request's callbacks are already dead
+    // by the time anything downstream can react to the ending.
+    this.promptEpoch += 1;
+    this.turnActive = false;
+    // The same debt the real ending pays: a tool block half-built when the turn
+    // stops is owed to the transcript, and `onUpdate` cannot flush it because
+    // there is no next update coming.
+    this.flushToolDraft();
+    /*
+     * Into the queue rather than straight into the log, because the queue is what
+     * the turn's generator is parked on: this is the event that makes `for await`
+     * return, which runs `pump`'s `finally`, which clears `ManagedSession.turn`,
+     * sweeps the pending permissions, starts the idle drain and delivers anything
+     * queued. Every one of those comes free from ending the turn the ordinary way
+     * — which is the reason this writes an event rather than a status.
+     */
+    this.queue.push({ type: "turn_end", stopReason: "abandoned", usage: null });
+    return true;
+  }
+
+  /**
    * Cancels any in-flight turn, closes the session if the agent supports it, and
    * shuts the process down.
    */
@@ -2329,7 +2531,11 @@ export class Session {
     return this.elicitations(
       {
         toolCallId: request.toolCallId ?? null,
-        message: request.message,
+        // Bounded here and nowhere else: the form's byte backstop does not weigh
+        // this field, and everything downstream of this call — the event, the
+        // snapshot, the `hello` frame — carries it verbatim. See
+        // {@link MAX_ELICITATION_MESSAGE_CHARS} for what an unbounded one costs.
+        message: clipElicitationMessage(request.message),
         form,
       },
       signal,
@@ -3544,15 +3750,226 @@ function metaParam(meta: Record<string, unknown> | undefined): { _meta?: Record<
   return meta === undefined ? {} : { _meta: meta };
 }
 
+/**
+ * What an agent's configuration controls may be, in this daemon's units.
+ *
+ * ⭐ **`agent_config` was a door past `MAX_SOCKET_MESSAGE_BYTES` until these
+ * numbers existed, and a nearer one than the door that had been written down as
+ * "the one".** Measured 2026-09-19 by
+ * replaying `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES` and weighing
+ * `JSON.stringify` in UTF-8 — the way `StreamConnection.flush` weighs a batch —
+ * over one select option built from a stub agent:
+ *
+ * - 20 000 choices named `m<i>` → **1 318 159 bytes after truncation**
+ * - 5 000 choices at a 100-character value and name → **1 275 255**
+ * - one choice carrying a 2 MB `value` → **4 000 214**
+ * - at a realistic 40-character value and name the cliff is **7 766 choices**,
+ *   which is *below* `plan.entries`' ~9 500 — so this was the nearest door, not a
+ *   fourth one out at the edge
+ * - one option with a 500 000-character `id` and `name` → 1 000 212, which is past
+ *   `BATCH_MAX_BYTES` and just *under* the socket ceiling. Named because it is the
+ *   shape that had no bound, not because that particular number stalls
+ * - a 2 MB `currentModeId` on a `current_mode_update` → **2 098 061 bytes logged**,
+ *   and 916 with the bound. That one is not on this path at all: see below
+ *
+ * Past the socket ceiling `MessageAssembler` refuses the message, `src/e2ee.ts`
+ * fails the whole channel, and `stream.ts` reconnects with its cursor unchanged
+ * onto the same event, for ever — {@link MAX_ELICITATION_MESSAGE_CHARS}'s
+ * permanent stall on a third trigger.
+ *
+ * **Reachable rather than hostile-only**, which is why this is a bound and not a
+ * note filed under "an agent runs as you anyway": opencode publishes **362 models
+ * on one control**, and a plugin may now contribute an agent and an inference
+ * provider this repository does not vendor and cannot measure. Nothing above needs
+ * a malicious binary, only a large one.
+ *
+ * ⚠ **Why `truncateEvent`'s own arm cannot do this, and why its argument is right
+ * anyway.** That arm nulls descriptions and deliberately leaves ids, names and
+ * values alone, on the ground that *"a picker missing a choice would silently
+ * offer the agent less than it supports"*. That is correct and is kept — a dropped
+ * choice is a wrong answer where a clipped description is only a shorter one — and
+ * what it means is that the arm cannot shrink the large part at all. So the bound
+ * has to be here, at ingest, where {@link toCommands}, `toElicitationForm` and the
+ * permission caps already put theirs. The *silently* is what is addressed rather
+ * than accepted: every cut below sets `truncated` on the option, which is already
+ * on the wire and already sends a picker to `GET /sessions/:id`.
+ *
+ * ⚠ **"At ingest" is three doors for this event, and the functions below are two
+ * of them.** `toConfigOptions` and `toModes` are reached from `session/new` and
+ * `session/resume`; a `current_mode_update` notification reaches `updateConfig`
+ * directly and touches neither. That third door stayed open for a revision after
+ * these two were written and read as complete, and its own guard is in
+ * `updateConfig` with the measurement beside it. A fourth would be invisible from
+ * here too — so what actually watches for one is the label census in
+ * `scripts/daemoncheck.after-the-turn-and-config.ts`, which replays every
+ * `truncateEvent` arm and reports which still exceed one WebSocket message.
+ *
+ * **Refusals and clips split the way they do everywhere else on this path:
+ * structure that round-trips is refused, prose is clipped.** `option.id` and a
+ * choice's `value` are sent back to the agent verbatim by `sendConfigOption`
+ * above, so an over-long one is *dropped* — a clipped
+ * id names no control and a clipped value is one the agent will not recognise,
+ * which is `MAX_ASYNC_TASK_ID_CHARS`'s call rather than
+ * {@link MAX_MESSAGE_ID_CHARS}'s. `name`, `category` and `description` are a label
+ * and prose that never leave this fleet, so they are clipped and stay legible.
+ *
+ * **Both ends of each number, and the ends that are not measured are said to be
+ * not measured.**
+ *
+ * - `MAX_CONFIG_ID_CHARS` (256) is a *refusal*, so it has to clear anything real
+ *   by a wide margin. ⚠ **No id or value on this path has been measured in this
+ *   tree** — the one measured number here is opencode's *count*, 362 — so this is
+ *   a ceiling picked for consistency with the two agent-chosen ids that already
+ *   exist at 256, `MAX_ASYNC_TASK_ID_CHARS` and {@link MAX_MESSAGE_ID_CHARS}, and
+ *   not a headroom figure anybody checked. The same caveat that constant states
+ *   about itself, for the same reason.
+ * - `MAX_CONFIG_NAME_CHARS` (256) and `MAX_CONFIG_DESCRIPTION_CHARS` (512) are
+ *   clips. Below: `registry.ts` already cuts a choice description to
+ *   `MAX_CHOICE_DESCRIPTION_CHARS` (120) before it rides a snapshot, so these bite
+ *   only on prose no screen shows whole. Above: ⚠ **no description on a *config*
+ *   control has been measured in this tree.** The nearest measured figure is the
+ *   **318**-character option description on this machine's log that retired
+ *   {@link MAX_ELICITATION_MESSAGE_CHARS}'s 512 — a different path, borrowed as the
+ *   only real number anybody has for "how long an agent's explanatory sentence
+ *   gets", and 512 clears it. Somebody who wants the real one should log
+ *   `option.description.length` off a live `session/new`.
+ * - `MAX_CONFIG_OPTIONS` (32) and `MAX_CONFIG_MODES` (32). The agents in this tree
+ *   publish a handful of each — `model` and `effort` on claude, `thinking` on kimi,
+ *   and a permission/plan mode list of the same order of size — so 32 is roughly an
+ *   order of magnitude clear of anything this repository has seen, and it is what
+ *   bounds the residue the byte backstop below cannot cut. ⚠ It is a *refusal* for
+ *   options past it, so if an agent ever does publish more than 32 controls the
+ *   ones past 32 vanish with nothing said: unlike a cut choice list there is no
+ *   `truncated` at option level to say so, and that is a known gap rather than a
+ *   decision — it is left because no agent has come close and a flag here would be
+ *   a wire change nothing yet draws.
+ * - `MAX_CONFIG_CHOICES` (2048) is 5.6× opencode's measured 362. It exists to stop
+ *   the backstop halving 20 000 rows one at a time rather than to bind on its own.
+ * - `MAX_CONFIG_BYTES` (256 KiB) is the backstop, and it is the one number here
+ *   weighed in bytes that actually exist: `jsonBytes` serializes, so escaping is
+ *   already counted and this bounds the wire cost of `options` directly rather
+ *   than through a code-unit estimate. ⚠ **It was 128 KiB for an afternoon and
+ *   that was wrong**, on an "above" argument that counted a model row at ~60
+ *   bytes: 362 rows *with prose on each* is ~163 KiB, so 128 KiB cut the largest
+ *   real list this repository knows of down to 256 rows. The measurement that caught it is in
+ *   `daemoncheck.after-the-turn-and-config`, which now drives 362 models each
+ *   carrying a 400-character description and asserts the list comes through
+ *   **whole and unflagged** — so the "does not bite on anything real" half of this
+ *   number is checked rather than asserted. Below: 256 KiB is a quarter of
+ *   `MAX_SOCKET_MESSAGE_BYTES`, which leaves `modes` its room beside `options` and
+ *   three quarters of the ceiling as headroom.
+ *
+ * ⚠ **What this deliberately does not claim.** The per-string and per-count caps
+ * do **not** on their own bound the product: JSON escaping can cost six bytes for
+ * one code unit, so 2048 rows of capped strings is megabytes either way.
+ * `MAX_CONFIG_BYTES` is what holds the total, and it holds it by *cutting* rather
+ * than by arithmetic — so the honest statement is that a config leaves here at
+ * most `MAX_CONFIG_BYTES` **whenever some option still has more than one choice to
+ * give up**, and otherwise at whatever the caps above leave, which is bounded but
+ * larger. No single figure for that residue is asserted in prose. What is asserted
+ * is the number that actually matters, and it is asserted in a driver rather than
+ * here: `daemoncheck.after-the-turn-and-config` replays **every** arm of
+ * `truncateEvent` at `DEFAULT_MAX_EVENT_BYTES` and reports which exceed
+ * `MAX_SOCKET_MESSAGE_BYTES`, so a claim about how many doors there are is checked
+ * instead of counted by hand. Counting them by hand is how "the one door" got
+ * written down over this one.
+ *
+ * ⚠ **`estimateBytes`'s `agent_config` case under-charges and is left alone.** It
+ * charges an option's `id`, `name` and `description` and a choice's `value`, `name`
+ * and `description`, and charges neither `category` nor a choice's `group` nor the
+ * option's current `value`. That was a live hazard while the fields were unbounded
+ * and is not one now — every uncharged field is capped above, so the under-report is
+ * bounded by construction rather than by the agent. Widening the charge would move
+ * the per-session byte budget and `MAX_QUEUE_BYTES` for every session, which is a
+ * change with its own measurement to do and nothing to do with this stall.
+ */
+const MAX_CONFIG_OPTIONS = 32;
+const MAX_CONFIG_MODES = 32;
+const MAX_CONFIG_CHOICES = 2048;
+const MAX_CONFIG_ID_CHARS = 256;
+const MAX_CONFIG_NAME_CHARS = 256;
+const MAX_CONFIG_DESCRIPTION_CHARS = 512;
+const MAX_CONFIG_BYTES = 256 * 1024;
+
+/**
+ * One option's choices cut to `keep`, with the selected one kept and the cut said.
+ *
+ * A near-copy of `clipChoices` in `registry.ts` and deliberately not shared with
+ * it: that one is the *snapshot's* cut, at a fixed 40 rows, and it runs on the way
+ * out of a poll; this one is the *ingest* backstop and runs once, on the way in.
+ * Merging them would tie a display budget to a wire bound, and the two move for
+ * different reasons.
+ */
+function headChoices(option: AgentConfigOption, keep: number): AgentConfigOption {
+  const head = option.choices.slice(0, keep);
+  // The selected choice may sit past the cut and is the one a client cannot do
+  // without — every screen that names the session reads it from here. Swapped into
+  // the last slot rather than prepended, so the order of what survives is still the
+  // agent's own; `clipChoices` takes the same care for the same reason.
+  if (head.length > 0 && !head.some((choice) => choice.value === option.value)) {
+    const selected = option.choices.find((choice) => choice.value === option.value);
+    if (selected !== undefined) head[head.length - 1] = selected;
+  }
+  return { ...option, choices: head, truncated: true };
+}
+
+/**
+ * The whole option list brought under {@link MAX_CONFIG_BYTES}, or as near as the
+ * choices can bring it.
+ *
+ * Halving the widest option each turn rather than cutting flat to one, for
+ * `fitSnapshotFrame`'s reason one file over: a list that would nearly have fitted
+ * keeps nearly all of it, at a cost of at most ⌈log2 n⌉ weighings over a payload
+ * that halves as it goes. Widest first so a single enormous control is what pays,
+ * rather than the three short ones beside it.
+ *
+ * ⚠ **It terminates by giving up, not by reaching the budget.** Once no option has
+ * more than one choice left there is nothing here able to cut, and what comes back
+ * is over budget — bounded only by the per-string and per-count caps above. That is
+ * the honest shape of this function and the reason the docblock on the constants
+ * refuses to state a single residue figure.
+ */
+function fitConfigBytes(options: AgentConfigOption[]): AgentConfigOption[] {
+  let out = options;
+  while (jsonBytes(out) > MAX_CONFIG_BYTES) {
+    let widest: AgentConfigOption | null = null;
+    for (const option of out) {
+      if (option.choices.length > 1 && (widest === null || option.choices.length > widest.choices.length)) {
+        widest = option;
+      }
+    }
+    if (widest === null) return out;
+    const target = widest;
+    out = out.map((option) => (option === target ? headChoices(option, option.choices.length >> 1) : option));
+  }
+  return out;
+}
+
+/**
+ * The agent's mode state, bounded the way the config options below it are.
+ *
+ * ⚠ **`currentModeId` refuses the whole state rather than being clipped.** It
+ * names a row in `available` and `AgentConfigBar` matches the two by identity, so a
+ * clipped one selects nothing — and a mode state with nothing selected is not a
+ * smaller mode state, it is a control that draws blank. `null` here is the same
+ * thing an agent that publishes no modes produces, which every reader already
+ * handles; see {@link AgentConfigEvent} on why `modes` being absent is ordinary.
+ */
 function toModes(modes: acp.SessionModeState | null | undefined): AgentModes | null {
   if (modes == null) return null;
+  if (modes.currentModeId.length > MAX_CONFIG_ID_CHARS) return null;
   return {
     current: modes.currentModeId,
-    available: modes.availableModes.map((mode) => ({
-      id: mode.id,
-      name: mode.name,
-      description: mode.description ?? null,
-    })),
+    available: modes.availableModes
+      // Dropped rather than clipped, for the reason `MAX_CONFIG_ID_CHARS` gives:
+      // a mode id round-trips in `session/set_mode`.
+      .filter((mode) => mode.id.length <= MAX_CONFIG_ID_CHARS)
+      .slice(0, MAX_CONFIG_MODES)
+      .map((mode) => ({
+        id: mode.id,
+        name: clip(mode.name, MAX_CONFIG_NAME_CHARS),
+        description: mode.description == null ? null : clip(mode.description, MAX_CONFIG_DESCRIPTION_CHARS),
+      })),
   };
 }
 
@@ -3570,15 +3987,49 @@ function toModes(modes: acp.SessionModeState | null | undefined): AgentModes | n
  * these faster than a hardcoded list could follow.
  */
 function toConfigOptions(options: acp.SessionConfigOption[] | null | undefined): AgentConfigOption[] {
-  return (options ?? []).map((option) => ({
-    id: option.id,
-    name: option.name,
-    description: option.description ?? null,
-    category: option.category ?? null,
-    kind: option.type,
-    value: option.currentValue,
-    choices: option.type === "select" ? toChoices(option.options) : [],
-  }));
+  const bounded: AgentConfigOption[] = [];
+  for (const option of options ?? []) {
+    if (bounded.length >= MAX_CONFIG_OPTIONS) break;
+    // Dropped rather than clipped: both of these are sent back to the agent
+    // verbatim by `sendConfigOption`, so a clipped one names nothing the agent
+    // will answer to. See {@link MAX_CONFIG_ID_CHARS}.
+    if (option.id.length > MAX_CONFIG_ID_CHARS) continue;
+    if (typeof option.currentValue === "string" && option.currentValue.length > MAX_CONFIG_ID_CHARS) continue;
+    const all = option.type === "select" ? toChoices(option.options) : [];
+    const kept = all.filter((choice) => choice.value.length <= MAX_CONFIG_ID_CHARS);
+    const flat: AgentConfigOption = {
+      id: option.id,
+      name: clip(option.name, MAX_CONFIG_NAME_CHARS),
+      description: option.description == null ? null : clip(option.description, MAX_CONFIG_DESCRIPTION_CHARS),
+      category: option.category == null ? null : clip(option.category, MAX_CONFIG_NAME_CHARS),
+      kind: option.type,
+      value: option.currentValue,
+      choices: kept,
+    };
+    /*
+     * ⚠ **The count cap goes through {@link headChoices} rather than through a
+     * bare `slice`, and the first draft of this did not.** A `slice(0, n)` drops
+     * whatever sits past `n`, and the selected choice is exactly the row most
+     * likely to be there — the agent's current model is often the newest and last
+     * published. The session then reported a model it was not on, which is the one
+     * failure the snapshot's own cut in `registry.ts` was built to avoid and which
+     * `daemoncheck.after-the-turn-and-config` already asserted one section over.
+     *
+     * Either way the cut is *said* rather than swallowed, which is the whole of
+     * what makes cutting here legitimate: `truncated` is already on the wire and
+     * already sends a picker to `GET /sessions/:id` for the rest. ⚠ On this path
+     * that route answers from the same bounded record, so it has no more to give —
+     * see the constants above.
+     */
+    bounded.push(
+      kept.length > MAX_CONFIG_CHOICES
+        ? headChoices(flat, MAX_CONFIG_CHOICES)
+        : kept.length === all.length
+          ? flat
+          : { ...flat, truncated: true },
+    );
+  }
+  return fitConfigBytes(bounded);
 }
 
 /**
@@ -3662,6 +4113,28 @@ export function toCommands(list: acp.AvailableCommand[] | null | undefined): Age
 
 /** Raised when a form is one this daemon will not put in front of anybody. */
 export class ElicitationRefusedError extends Error {}
+
+/**
+ * The agent's preamble, bounded at ingest.
+ *
+ * Its own function rather than a `clip` call inlined at {@link
+ * Session.onElicitation}, for two reasons. **Exported so `daemoncheck` can drive
+ * it** — `onElicitation` is private, reachable only through a live ACP round trip,
+ * and a bound nothing exercises is the shape this repository keeps shipping
+ * (`fitSnapshotFrame` is the precedent and says so at its own docblock). And the
+ * `typeof` guard belongs somewhere it can be read: `ElicitationRequest.message` is
+ * typed `string` by the SDK and is *agent-supplied JSON at runtime*, so an agent
+ * that omits it used to put `undefined` on a `PendingElicitationSnapshot.message`
+ * that declares itself "always present — ACP requires it". An absent preamble is
+ * an empty one; it is never a hole in a declared type.
+ *
+ * {@link clip} appends `…[truncated N bytes]`, so a cut says so on screen rather
+ * than ending mid-sentence — which is what makes a clip tolerable here at all.
+ */
+export function clipElicitationMessage(message: string): string {
+  if (typeof message !== "string") return "";
+  return clip(message, MAX_ELICITATION_MESSAGE_CHARS);
+}
 
 /**
  * Projects ACP's elicitation schema into the fixed shape this system carries.
@@ -3984,12 +4457,18 @@ function toChoices(options: acp.SessionConfigSelectOptions): AgentConfigChoice[]
   return choices;
 }
 
+/*
+ * `value` is carried whole here and filtered by length in {@link toConfigOptions}
+ * rather than clipped, because it round-trips to the agent — the split
+ * {@link MAX_CONFIG_ID_CHARS} describes. The rest is a label and prose, so it is
+ * clipped and stays legible.
+ */
 function toChoice(option: acp.SessionConfigSelectOption, group: string | null): AgentConfigChoice {
   return {
     value: option.value,
-    name: option.name,
-    description: option.description ?? null,
-    group,
+    name: clip(option.name, MAX_CONFIG_NAME_CHARS),
+    description: option.description == null ? null : clip(option.description, MAX_CONFIG_DESCRIPTION_CHARS),
+    group: group === null ? null : clip(group, MAX_CONFIG_NAME_CHARS),
   };
 }
 
