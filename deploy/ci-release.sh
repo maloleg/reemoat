@@ -118,13 +118,13 @@ RELEASE_LATEST=${RELEASE_LATEST:-1}
 # `--no-bundle` link check that job used to be, because a weaker build standing
 # behind a published artifact is the thing this rule exists to stop.
 #
-# ⚠ **`android` is absent, and its leg is not what is missing.** `android-apk` in
-# `check.yml` assembles a signed APK on every push, so the build half is covered.
-# What is missing is the four repository secrets the `app` verb refuses by name
-# further down — an unsigned APK installs on nothing, and a throwaway key can
-# never be replaced on a device that took it. It joins this list the day those
-# secrets exist, which is one word here and nothing else.
-RELEASE_APP_TARGETS=${RELEASE_APP_TARGETS-macos-arm64 macos-x64 linux-x64 windows-x64}
+# `android` is here on the same terms: `android-apk` in `check.yml` assembles a
+# signed APK on every push, and the four repository secrets the `app` verb
+# refuses by name further down are set. An unsigned APK installs on nothing, and
+# a throwaway key can never be replaced on a device that took it — so those
+# secrets are the other half of this word, and removing them is how it comes
+# back out.
+RELEASE_APP_TARGETS=${RELEASE_APP_TARGETS-macos-arm64 macos-x64 linux-x64 windows-x64 android}
 RELEASE_APP_TARGET=${RELEASE_APP_TARGET:-}
 
 # The Android release key, base64 in and never written inside the checkout.

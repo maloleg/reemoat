@@ -28,18 +28,24 @@ const root = fileURLToPath(new URL("../../../", import.meta.url));
 const dist = join(root, "packages/web/dist");
 
 /*
- * ⚠ **`pnpm.cmd` on Windows, and without it this exits 1 with nothing printed.**
- * `spawnSync` with no shell resolves the name against `PATH` the way `execvp`
- * would, and on Windows a pnpm install is `pnpm.cmd` — a batch file, not an
- * executable — so the lookup fails with `ENOENT`, `status` is `null`, and the
- * `?? 1` below is the only thing anybody sees. Measured on `windows-latest`:
- * `tauri build` reported `beforeBuildCommand ... failed with exit code 1` and no
- * other line. `shell: true` would also work and is worse: it would put the
- * arguments through `cmd.exe`'s quoting rules for no gain on any platform.
+ * ⚠ **`shell: true` on Windows, and nothing less than that works.** A pnpm
+ * install there is `pnpm.cmd` — a batch file rather than an executable — and
+ * since the fix for CVE-2024-27980 Node **refuses** to spawn a `.cmd` or `.bat`
+ * without a shell: the call comes back with `status: null` and an `error`, so the
+ * `?? 1` below is the only thing anybody sees. Measured twice on
+ * `windows-latest`, and the first repair is what proved it — naming `pnpm.cmd`
+ * explicitly failed identically and in 56ms, which is the tell that no process
+ * was ever started. `tauri build` reports `beforeBuildCommand ... failed with
+ * exit code 1` and not one line more, on either.
+ *
+ * Windows only, so nothing on a POSIX host starts going through a shell's
+ * quoting rules for a defect it does not have. The three arguments are literals,
+ * which is what makes the Windows arm safe.
  */
-const built = spawnSync(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["--filter", "@reemoat/web", "build"], {
+const built = spawnSync("pnpm", ["--filter", "@reemoat/web", "build"], {
   cwd: root,
   stdio: "inherit",
+  shell: process.platform === "win32",
 });
 if (built.status !== 0) process.exit(built.status ?? 1);
 
