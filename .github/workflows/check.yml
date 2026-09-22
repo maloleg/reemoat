@@ -412,15 +412,25 @@ jobs:
       # Keyed on the pinned version rather than on the script's hash: the file
       # changes far more often than `NODE_VERSION` does, and a key that churns is
       # a cache that never hits.
+      #
+      # ⚠ **Both of these belong to the payload legs alone**, and the reason is
+      # not only that a client build has no payload to cache: this step is a bash
+      # heredoc, and `windows-latest` runs `pwsh` by default, so on a client leg
+      # it failed before `tauri build` was ever reached.
       - id: node-runtime
+        if: matrix.payload == 'yes'
         run: |
           version=$(grep -oE 'const NODE_VERSION = "v[0-9.]+"' packages/native/scripts/build-daemon.mjs | grep -oE 'v[0-9.]+')
           test -n "$version" || { echo "build-daemon.mjs pins no NODE_VERSION this can read"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
+        if: matrix.payload == 'yes'
         with:
           path: packages/native/src-tauri/.node-cache
-          key: node-runtime-${{ runner.os }}-${{ runner.arch }}-${{ steps.node-runtime.outputs.version }}
+          # ⚠ **Keyed on the target rather than on `runner.arch`.** Both macOS
+          # legs run on the same arm64 runner and stage *different* Node builds,
+          # so an arch key hands the x64 leg the arm64 payload back.
+          key: node-runtime-${{ matrix.target }}-${{ steps.node-runtime.outputs.version }}
 
       # And the daemon payload, for the sharper version of the same reason.
       #
@@ -441,7 +451,14 @@ jobs:
       # `tauri-build` reads that overlay at compile time — so staging on a Linux
       # or Windows leg would build a payload nothing copies and hide the very
       # refusal `ci-release.sh app` makes about a leftover one.
-      - run: pnpm native:stage
+      #
+      # ⚠ **The triple is an argument and is not optional on a cross leg.**
+      # `build-daemon.mjs` defaults to the host, and `tauri-build` resolves
+      # `binaries/node-<target-triple>` — so `macos-x64` staged without it fails
+      # inside the build script with *"resource path
+      # `binaries/node-x86_64-apple-darwin` doesn't exist"*, which names neither
+      # this step nor the leg. `ci-release.sh app` passes it the same way.
+      - run: node packages/native/scripts/build-daemon.mjs ${{ matrix.triple }}
         if: matrix.payload == 'yes'
 
       - name: cargo fmt

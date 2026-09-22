@@ -27,7 +27,17 @@ import { join } from "node:path";
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const dist = join(root, "packages/web/dist");
 
-const built = spawnSync("pnpm", ["--filter", "@reemoat/web", "build"], {
+/*
+ * ⚠ **`pnpm.cmd` on Windows, and without it this exits 1 with nothing printed.**
+ * `spawnSync` with no shell resolves the name against `PATH` the way `execvp`
+ * would, and on Windows a pnpm install is `pnpm.cmd` — a batch file, not an
+ * executable — so the lookup fails with `ENOENT`, `status` is `null`, and the
+ * `?? 1` below is the only thing anybody sees. Measured on `windows-latest`:
+ * `tauri build` reported `beforeBuildCommand ... failed with exit code 1` and no
+ * other line. `shell: true` would also work and is worse: it would put the
+ * arguments through `cmd.exe`'s quoting rules for no gain on any platform.
+ */
+const built = spawnSync(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["--filter", "@reemoat/web", "build"], {
   cwd: root,
   stdio: "inherit",
 });
