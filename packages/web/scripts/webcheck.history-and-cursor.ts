@@ -10,6 +10,7 @@ import {
 import {
   ATTACH_REPLAY_MAX,
   HISTORY_PAGE,
+  hugWidth,
   MAX_AUTO_HISTORY,
   MAX_HELD_TRANSCRIPTS,
   MAX_TRANSCRIPT_BYTES,
@@ -1155,6 +1156,156 @@ process.stdout.write("\nhistory loads itself, and nothing asks the reader to ret
   check("the marker draws the command that caused it", /<UserBubble text="\/clear" \/>/.test(eventList), true);
   check("and says the context was cleared", /Context cleared/.test(eventList), true);
   check("and no longer claims anything is above it", /forgotten everything above/.test(eventList), false);
+
+  /*
+   * ⭐ **What a person may select in their own message, and where the selectable
+   * block's edges are — which is the whole property and is not where it was
+   * first put.**
+   *
+   * The row is full-column-width so that a `w-fit` bubble can be right-aligned,
+   * which leaves empty column either side that a drag can reach, and the bubble
+   * is padded. WebKit fills the selection gap to the bottom of the block the
+   * selection ends in, so a selectable block with padding paints that padding.
+   *
+   * ⚠ **The first repair put `select-text` on the padded bubble and did nothing
+   * at all.** Measured in a real `WKWebView` — the engine `packages/native`
+   * ships, and the one the report came from — driving actual `NSEvent` drags
+   * rather than a `Range`, because a programmatic range ignores `user-select` by
+   * specification and paints identically either way:
+   *
+   *   gesture              no classes    select-text on the box    on the inner content
+   *   drag past the end    255x31        255x31                    248x20
+   *   triple-click         255x31        255x31                    255x20
+   *
+   * 20px is the line box and nothing more. `display: inline` on the paragraph was
+   * measured too and painted 31 — so the property is where the selectable block's
+   * edges are, never what the paragraph is.
+   *
+   * Hence the three rows below: the row and the padded box are both out, and the
+   * selectable region is inside the padding. ⚠ The middle one is the load-bearing
+   * one — putting `select-text` back on the box is the repair that looks right,
+   * reads right and was measured to do nothing.
+   */
+  const bubble = strip(readFileSync(new URL("../src/ui/Bubble.tsx", import.meta.url), "utf8"));
+  const bubbleRow = /className="my-4 flex justify-end[^"]*"/.exec(bubble)?.[0] ?? "";
+  const bubbleBox = /className="[^"]*\bml-auto w-fit[^"]*"/.exec(bubble)?.[0] ?? "";
+  check("the user's bubble and the row it sits on were both found", [bubbleRow !== "", bubbleBox !== ""], [true, true]);
+  check(
+    "neither the row nor the padded box is selectable",
+    [/\bselect-none\b/.test(bubbleRow), /\bselect-none\b/.test(bubbleBox)],
+    [true, true],
+  );
+  check("and the padding is not inside what is selectable", /\bselect-text\b/.test(bubbleBox), false);
+  check("while something inside it is", /className="select-text"/.test(bubble), true);
+
+  /*
+   * ⭐ **Only the text is painted, and it is one property in three places.**
+   *
+   * WebKit paints *selection gaps* — the run from a selected line's end to the
+   * block's content edge, and the vertical space between two selected blocks — so
+   * a drag through a conversation painted one solid rectangle: the empty half of
+   * every short line, the margin between paragraphs, and the whole blank column
+   * beside a right-aligned bubble. A block WebKit treats as a **selection root**
+   * paints none of them. Measured with real `NSEvent` drags in WKWebView over a
+   * page carrying every markdown shape this app draws: `748px@900w` before, and
+   * after it per-line bands with `-1w` — nothing painted at all — in every gap.
+   * Chromium is byte-identical either way, idle *and* selected, and so is the
+   * copied string. Q3.638.
+   *
+   * ⚠ **Three placements, because a flex container between the root and the text
+   * puts the fill back.** Measured against controls on one DOM: nesting depth,
+   * horizontal padding and `w-fit` change nothing, `display: flex` alone
+   * re-introduced it — `46px@199w` against `22px@199w 24px@51w`. So the markdown
+   * body, the bubble (which hangs in a flex row) and the transcript column each
+   * name it, and all three are asserted against the one rule that reads them.
+   */
+  const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+  const selRoot = /\n\.sel-root[^{]*\{[^}]*\}/.exec(css)?.[0] ?? "";
+  check("a rule makes a block its own selection root", selRoot !== "", true);
+  /*
+   * ⚠ **`column-span`, and not the transform that was found first.** Both make
+   * the root, and in WebKit the two measure identically — same band profile, same
+   * byte-identical idle page. But a transform also makes a *stacking context*,
+   * and a `td` inside one composites its `border-edge/60` against a different
+   * backdrop: one 1px row under a markdown table's header moved `#E6E4E0` →
+   * `#ECEAE7` in Chromium 153. Named here because "just use a transform" is
+   * exactly the simplification this would attract.
+   */
+  check("with a property that makes no stacking context", /column-span:\s*all/.test(selRoot), true);
+  check("and not with a transform", /transform/.test(selRoot), false);
+  /*
+   * ⚠ **The descendants are an ablation rather than a guess.** Without them the
+   * code fence painted `60px@863w` and the table `65px@855w` instead of their
+   * lines — and nothing *above* the cells substitutes: `table`, `thead`, `tbody`
+   * and `tr` each leave the whole table filled. `li` and `blockquote` were in the
+   * list and came back out, their profiles unchanged band for band.
+   */
+  check(
+    "and the three shapes it cannot reach from above name themselves",
+    ["pre", "td", "th"].filter((tag) => !new RegExp(`\\.sel-root ${tag}\\b`).test(selRoot)),
+    [],
+  );
+  const markdown = strip(readFileSync(new URL("../src/ui/Markdown.tsx", import.meta.url), "utf8"));
+  check("every markdown body is one", /className=\{`sel-root text-sm wrap-anywhere/.test(markdown), true);
+  check("so is the bubble, which hangs in a flex row", /\bsel-root\b/.test(bubbleBox), true);
+  check("and so is the column, which owns the space between messages", /className=\{`sel-root \$\{COLUMN\}/.test(eventList), true);
+  /*
+   * ⚠ **And the rule it replaced is gone rather than kept beside it.** A trailing
+   * `::after { content: "\200B" }` ended the *last* line of a block and nothing
+   * else; it needed a `:not(:has(…))` guard that had already grown three real
+   * shapes by 24px each, and every case it covered this one covers. Asserted as
+   * an absence so the two cannot end up stacked.
+   */
+  check("and the zero-width space it replaced is not still there", /content: "\\200B"/.test(strip(css)), false);
+
+  /*
+   * ⭐ **The box is sized to the text it ended up holding, and CSS cannot do it.**
+   *
+   * `fit-content` is `min(max-content, available)`, and wrapped text has a
+   * max-content wider than available — so the bubble sits at its `max-w` however
+   * far short of it the longest line falls. Measured in WebKit on the DOM this
+   * ships: the selection's intermediate line filled `584w` against a longest line
+   * of 545, and `554w` once the box was trimmed. The arithmetic is asserted here;
+   * the reads around it are asserted as placement, below, because `webcheck` has
+   * no DOM.
+   */
+  check("a bubble is as wide as its longest line plus its chrome", hugWidth([120, 300.2, 80], 28), 329);
+  check("and the rounding is up, never down", hugWidth([300.05], 0), 301);
+  /*
+   * ⚠ **Rounding down is a box that walks itself narrower one pass at a time**:
+   * a width a sub-pixel under what the line needs re-wraps the text, which
+   * measures narrower again. Both `null`s are "leave the box alone", which is the
+   * rendering that shipped before this existed — a hidden element answers zero
+   * rects, and a negative chrome is not a width anybody should write.
+   */
+  check("nothing to measure leaves the box alone", [hugWidth([], 28), hugWidth([0, 0], 28), hugWidth([100], -1)], [null, null, null]);
+
+  const hug = strip(readFileSync(new URL("../src/ui/hug.ts", import.meta.url), "utf8"));
+  /*
+   * ⚠ **The three passes may not interleave, and that is the performance
+   * property rather than a tidiness one**: read-then-write per bubble forces a
+   * layout between every pair, measured at 33.6ms for 300 bubbles against 2.8ms
+   * batched. Asserted as the shape — every box is reset, then a `map` produces
+   * every width, then a `forEach` writes them — because a driver with no DOM
+   * cannot time it.
+   */
+  check("every box is reset before any is measured", /bubble\.style\.width = "";[\s\S]*boxes\.push/.test(hug), true);
+  check("and every width is computed before any is written", /const widths = boxes\.map[\s\S]*boxes\.forEach/.test(hug), true);
+  /*
+   * ⚠ **One observer for the transcript, not one per message.** A conversation is
+   * drawn whole here, so per-message would be hundreds of them on a screen.
+   */
+  check("there is one observer and it is shared", (hug.match(/new ResizeObserver/g) ?? []).length, 1);
+  check("and it watches the row rather than the bubble", /observer\.observe\(row\)/.test(hug), true);
+  /*
+   * ⚠ **The lines are measured per text node.** `getClientRects()` answers a rect
+   * for every *element* in a range as well as for every line box, so one range
+   * over the wrapper returns the wrapper's own border box — which is the number
+   * being replaced. Measured: it wrote the box its own width back and nothing
+   * moved.
+   */
+  check("lines are walked as text nodes", /SHOW_TEXT/.test(hug), true);
+  check("and no range is taken over the wrapper itself", /selectNodeContents\(inner\)/.test(hug), false);
 
   // The skeleton is what replaced the empty screen; without it the reader is back
   // to a lone `working…` over a conversation that has not arrived.

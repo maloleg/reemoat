@@ -25,6 +25,8 @@ it — so a citation here would be the one kind nothing checks.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-22
+
 ### Added
 
 - **Grok, as a fifth harness and an eighth provider.** `grok agent stdio` is xAI's
@@ -49,37 +51,6 @@ it — so a citation here would be the one kind nothing checks.
   Settings → Agents, press **Install**, and watch it go; signing in comes after.
   A machine set up by a script can still name what it wants up front, with
   `--install-agents claude,codex`.
-
-### Fixed
-
-- **A new agent appeared on machines that did not have it, offering to sign you
-  in.** Adding a coding agent to Reemoat put it on every machine in a fleet on the
-  next daemon update, and the button under it led to a screen that could only
-  report that the program was missing. Nothing installs an agent by itself any
-  more, and where one is genuinely absent the screen offers to install it rather
-  than to sign in to it.
-- **Grok could not run a turn on a machine signed in with `grok login`.** The
-  first message came back as a bare `Internal error`. The `authenticate` above was
-  being sent unconditionally, and with no API key behind it that call does not
-  fail — it *selects* an API-key sign-in, after which Grok stops consulting the
-  credential it already has and calls its own service as nobody. It is now sent
-  only when there is a key to spend, so a machine signed in the ordinary way uses
-  the credential it has.
-- **Grok's tile offered "Sign in" on a machine that was already signed in.** The
-  daemon had no way to ask Grok about its own sign-in, so every machine answered
-  "cannot check". It asks now, and tells the three states apart: signed in through
-  the browser flow, running on a saved key, or signed in nowhere.
-- **A greyed *Mode* control on Grok said the agent was "not offering this control
-  at the moment".** Grok has no modes at all and never will, so the sentence was
-  describing a permanent fact in words that promised a temporary one. The slot
-  still holds its place — the control row is the same shape on every agent, which
-  is deliberate — and now says the agent has none.
-- **A provider whose models come from a coding CLI vanished from the model picker
-  in silence when that CLI could not be reached.** Five of the eight providers get
-  their model list from the harness that ships for them, so a CLI that is missing
-  or will not start took its whole provider off the screen with nothing said, and
-  the only available conclusion was that the product had dropped it. The picker
-  now says which providers it could not read, and why.
 
 ### Changed
 
@@ -114,6 +85,35 @@ it — so a citation here would be the one kind nothing checks.
   otherwise carry neither a licence nor an offer.
 
 ### Fixed
+
+- **A new agent appeared on machines that did not have it, offering to sign you
+  in.** Adding a coding agent to Reemoat put it on every machine in a fleet on the
+  next daemon update, and the button under it led to a screen that could only
+  report that the program was missing. Nothing installs an agent by itself any
+  more, and where one is genuinely absent the screen offers to install it rather
+  than to sign in to it.
+- **Grok could not run a turn on a machine signed in with `grok login`.** The
+  first message came back as a bare `Internal error`. The `authenticate` above was
+  being sent unconditionally, and with no API key behind it that call does not
+  fail — it *selects* an API-key sign-in, after which Grok stops consulting the
+  credential it already has and calls its own service as nobody. It is now sent
+  only when there is a key to spend, so a machine signed in the ordinary way uses
+  the credential it has.
+- **Grok's tile offered "Sign in" on a machine that was already signed in.** The
+  daemon had no way to ask Grok about its own sign-in, so every machine answered
+  "cannot check". It asks now, and tells the three states apart: signed in through
+  the browser flow, running on a saved key, or signed in nowhere.
+- **A greyed *Mode* control on Grok said the agent was "not offering this control
+  at the moment".** Grok has no modes at all and never will, so the sentence was
+  describing a permanent fact in words that promised a temporary one. The slot
+  still holds its place — the control row is the same shape on every agent, which
+  is deliberate — and now says the agent has none.
+- **A provider whose models come from a coding CLI vanished from the model picker
+  in silence when that CLI could not be reached.** Five of the eight providers get
+  their model list from the harness that ships for them, so a CLI that is missing
+  or will not start took its whole provider off the screen with nothing said, and
+  the only available conclusion was that the product had dropped it. The picker
+  now says which providers it could not read, and why.
 
 - **Android is compiled and assembled by CI now, and both halves were dark.**
   `check.yml` grows `native-android`, which compiles the Rust for
@@ -157,6 +157,31 @@ it — so a citation here would be the one kind nothing checks.
   lookup for `node` found the shim again. It says what happened and exits 127
   now. Reachable on a `.deb` or an AppImage, where it would have read as a
   daemon that never starts.
+
+- **Selecting a message selected the empty space around it too.** Dragging through
+  a conversation painted one solid rectangle: the unused half of every short line,
+  the gap between paragraphs, and the whole blank column beside your own message.
+  Only the text is painted now — every line, every gap, both sides of the
+  conversation — and what gets copied is unchanged to the byte.
+- **A line break you typed was thrown away when the message was sent.** It was
+  never lost on the way out; a single newline is a *soft* break in the markdown
+  everything here is rendered as, so it was collapsed into a space when the
+  message was drawn. Your own messages keep their breaks now, and every message
+  already in a conversation gets its breaks back on the next draw. An agent still
+  gets CommonMark, which is what it writes.
+- **The ✕ in the background-tasks panel lit up before the pointer reached it.**
+  Several controls grew an invisible margin so a finger could hit them, and that
+  margin was there on a desktop too — where it is not a bigger target but a
+  control that reacts to the wrong place. It is now added only where the pointer
+  is coarse.
+- **A failure count sat in the same fill as the message above it.** `1 failed`
+  was drawn as a pill in exactly the colour a person's own message uses, so it
+  read as part of it. It is quiet text aligned to the message now.
+- **A session could say "working" for hours after its agent had finished.**
+  `claude-agent-acp` can start a turn on its own coming back from background work,
+  and a turn nobody asked for has nothing to end it — so the daemon sat on a
+  request that would never be answered. Three hours of silence from the agent now
+  ends such a turn, and a message you send does not reset that clock.
 
 ## [0.9.1] - 2026-09-18
 

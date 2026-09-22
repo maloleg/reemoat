@@ -502,6 +502,11 @@ const FOREIGN = new Set([
   // tree while the shell gets a panel, so the name has to be quotable.
   "FileSystemDirectoryHandle",
   "translateY", // CSS
+  // WebKit's own predicate, cited in Q3.638 for the one branch of it this app spends:
+  // a block whose `column-span` is `all` is a selection root, and a selection root
+  // paints no selection gaps. It is the engine's name for the mechanism, so it has
+  // to be quotable; nothing in this tree declares it.
+  "isSelectionRoot",
   "recvBuf", // `yamux-js` internals, in the entry about its broken flow control
   "resOnFinish", // likewise
   "sendWindowUpdate", // likewise

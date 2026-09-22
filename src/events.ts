@@ -719,7 +719,7 @@ export interface StatusEvent {
 }
 
 /**
- * ACP's five reasons, plus one of this daemon's own.
+ * ACP's five reasons, plus two of this daemon's own.
  *
  * ⚠ **`agent_error` is the turn that ended in an {@link ErrorEvent}**, which ACP
  * has no reason for because ACP never got that far: `session/prompt` rejected, so
@@ -732,8 +732,25 @@ export interface StatusEvent {
  * agent never gets to send one, and **a prompt with no turn end at all is the
  * shape this codebase calls a message that reached no model**. What it cost while
  * it was missing is Q2.218.
+ *
+ * ⚠ **`abandoned` is the turn the agent never answered at all**, and it is the
+ * third arrival of that same argument. `session/prompt` is the one RPC in
+ * `session.ts` fired with no deadline — deliberately, since a turn may legitimately
+ * run for hours — and `status === "running"` is *exactly* "a `session/prompt` this
+ * daemon issued has not settled". So an adapter that simply never answers pins a
+ * session at `running` for the life of the process: `cancelTurn` observes the same
+ * unsettled promise and cannot close it, and `parkable`'s first line refuses a
+ * session that is not `idle`, so the sweep cannot see it at any age. Reported as a
+ * panel reading *working* hours after the agent had finished.
+ *
+ * It is a reason of this daemon's own for the reason `agent_error` is: nothing in
+ * ACP's five fits. `cancelled` is something a person did, `refusal` is the model
+ * declining, `end_turn` is a reply ending — and this is none of those. It is the
+ * daemon saying, in the one row a reader trusts, *we stopped waiting*. What decides
+ * when is `TURN_SILENCE_MS` and `ManagedSession.wedged`; what writes it is
+ * `Session.abandonTurn`, locally, with nothing sent to the agent.
  */
-export type TurnStopReason = StopReason | "agent_error";
+export type TurnStopReason = StopReason | "agent_error" | "abandoned";
 
 export interface TurnEndEvent {
   type: "turn_end";

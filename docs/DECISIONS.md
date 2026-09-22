@@ -57,19 +57,19 @@ bug in the file.
 | Group | Covers | Entries | Heading |
 |---|---|---:|---|
 | [**Q1**](#identity-reachability-and-trust) | Identity, reachability, and what is deliberately not confined | 142 | `###` |
-| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 88 | `###` |
-| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 380 | `####` |
+| [**Q2**](#session-lifecycle-questions-and-attachments) | Session lifecycle, restart and resume, questions the agent asks, attachments | 89 | `###` |
+| [**Q3**](#the-web-client) | The web client — the list, the transcript, the composer, the ask card | 386 | `####` |
 | [**Q4**](#deployment-packaging-and-code-layout) | Deployment, packaging, and code layout | 65 | `###` |
-| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 113 | `####` |
+| [**Q5**](#invariants--rules-that-were-defects-first) | Invariants — rules that were defects first — and every bound in one table | 114 | `####` |
 | [**Q6**](#measured-behaviour-of-the-agents-and-the-tools) | Measured behaviour of the agents and of git, node and HTTP/2 | 71 | `###` |
 | [**Q7**](#open-questions-and-deliberate-non-goals) | Open questions and deliberate non-goals | 147 | `###` |
-| | | **1006** | |
+| | | **1014** | |
 
 **The two largest groups are one level deeper, and counting only `###` is how the
 number comes out wrong.** Q3 and Q5 sit at `####` because each subdivides further
 with `###` dividers of its own (`### The relay`, `### Tokens and authentication`,
 and five more); promoting their entries would make them siblings of their own
-dividers. So the count is over **both** depths, and it says 1006 rather than the 513
+dividers. So the count is over **both** depths, and it says 1014 rather than the 514
 that reading one depth gives — a number that had been restated, and drifted, fifteen
 times before `docscheck` started asserting it against the real headings. It asserts
 this sentence too, both halves of it, for the same reason.
@@ -7778,6 +7778,140 @@ work is about from the other side.
 **Status.** Fixed (the tap) and decided (the boot replay), 2026-09-19.
 
 
+### Q2.231 — a turn the agent never answers, and the only thing in the process that can end one
+
+**Question.** Reported from a live machine: the panel reads *working* hours after
+the agent had finished. The owner's reading was that claude-agent-acp can start a
+turn by itself on returning from background work, and that such a turn has no
+`session/prompt` to produce a `turn_end` from.
+
+**Decision.** A second sweep on `idlepark.ts`'s existing clock —
+`SessionRegistry.abandonWedgedTurns`, the predicate `ManagedSession.wedged`,
+`TURN_SILENCE_MS` at an hour, `REEMOAT_TURN_SILENCE_MINUTES` to move it and `0` to
+switch it off. It calls `Session.abandonTurn`, which ends the turn **locally** with
+`turn_end{stopReason: "abandoned"}` and sends the agent nothing at all.
+
+**The reported mechanism is inverted, and that matters for anyone chasing this
+again.** Nothing but `armTurn` writes `ManagedSession.turn`, and `armTurn` is
+reached only from the three prompt paths — so a turn the agent starts by itself
+leaves `turn === null`, and `status` reads **`idle`**, not `running`. Its events are
+not lost; `startIdleDrain` records them. That produces the *opposite* defect, which
+`sendMidTurn`'s `started_new_turn` arm already warns about.
+
+**What actually pins `running`.** `status` is derived and `running` is
+`this.turn !== null` and nothing else. `turn` is cleared in exactly one place,
+`pump`'s `finally`, reached only when the turn's generator returns, which happens
+only on a `turn_end` or an `error` — both produced only by the `session/prompt`
+request settling. And that request is the one RPC in `session.ts` fired with **no
+deadline**, deliberately, because a turn may legitimately run for hours. So
+`status === "running"` is exactly *"a `session/prompt` this daemon issued has not
+settled"*, and an adapter that stops answering pins it for the life of the process:
+`POST /cancel` observes the same unsettled promise through `waitForTurnToSettle`,
+and `parkable`'s first line refuses anything that is not `idle`, so the sweep, the
+ceiling's eviction and a wake all skip it at any age — while it holds one of
+`MAX_LIVE_SESSIONS` and its agent's ~397 MB. Only `DELETE /sessions/:id` or a
+restart cleared it.
+
+⚠ **`withAbandonableDeadline` is the obvious fix and it is the wrong one, twice
+over.** Its own docblock records that against a peer which never answers the
+cancellation reclaimed nothing — `pendingResponses` stayed at 20 of 20 — so it does
+not solve the residual it exists for in exactly this case. And it names
+`session/prompt` as the one method whose `ctx.signal` an installed adapter honours:
+across codex-acp 1.8.0's whole bundle `ctx.signal` appears once, on that method. So
+the "deadline" would abort the agent's work — a third stopping verb arrived at by
+accident, against *"stopping the agent and stopping the session are two verbs"*
+(Q2.42) and against *"the agent must never notice a client leaving"*.
+
+⚠ **`turnActive` has to be cleared by hand, and missing that would have been worse
+than the bug.** It is `Session`'s guard against two prompts in flight and it is
+cleared *only* inside the outstanding request's callbacks. A turn closed without
+those running reads as idle, opens the composer, accepts the next message and then
+throws *"a prompt is already in flight for this session"* into the transcript — for
+every message, for the rest of the session. `abandonTurn` clears it itself.
+
+⚠ **And the late answer had to be fenced, or it would cut a *live* turn short.**
+The request stays outstanding and may settle at any time, including after a second
+turn has started. Every callback it installs is now fenced on a `promptEpoch`
+`abandonTurn` bumps, so a stale answer pushes no second `turn_end` for the prompt it
+belonged to and — the sharper half — cannot end the turn running now. The driver
+walks exactly that: abandon, then answer the stalled request, then assert the live
+turn is still live.
+
+**Why silence rather than duration.** A turn running for three hours while the
+agent narrates is working; a turn that has produced nothing is not distinguishable
+from a dead one. A session waiting on a person reads `blocked`, which the predicate
+refuses through `status` rather than through a clause; `hasLiveBackgroundWork` is
+Q2.228 applied to the other threshold.
+
+⚠ **The threshold was an hour and both halves of that were wrong — the number and
+the clock it measured.** It was reasoned rather than measured: what goes quiet
+inside a turn is one long tool call, a build or a test suite, and an hour is past
+all of those. That is a fact about the wrong kind of turn. The correction came from
+the machine that filed the report, whose store still held the session
+(`s_89d35945`, 2 203 events): a prompt at 03:11:07 answered by a **real**
+`turn_end{end_turn}` from the agent at 04:39:26 — 88 minutes, working the whole
+time — and inside it a single silence of **51.7 minutes**, seq 426 → 427, with 21.8
+minutes the next largest. An hour cleared that by 8.3 minutes, which is a
+coincidence and not a margin. ⚠ Both gaps are between *agent* events, the series
+the predicate measures; swept over every event the second reads 21.5 minutes
+instead, because a person's prompt landed inside it (seq 1509 → 1510). The largest
+is 51.7 either way.
+
+So the number is now a multiple of the one measured silence rather than a margin
+over it: **three hours**, ~3.5×. The multiple comes from the asymmetry, which is
+one-sided. Ending a turn that was not over is not recoverable the way the other
+mistake is — the transcript says the agent stopped answering where it had not, the
+real end's `stopReason` and `usage` are dropped, and the next message reaches an
+agent still answering the last one. Waiting too long is the status quo this fixes,
+bounded instead of infinite. ⚠ It is no longer derived from `IDLE_PARK_MS`: "twice
+the park threshold" was arithmetic dressed as an argument, and the two answer
+different questions on different evidence.
+
+⚠ **And the clock had to become the agent's own.** `wedged` measured
+`lastActivityAt`, which every write moves — `status` events, the daemon's errors,
+and the *person's* messages, since `recordPrompt` appends through `safeAppend`. So
+somebody typing into a session that says *working* reset the silence clock on every
+message, and the one state this daemon cannot otherwise escape was kept alive by
+the person trying to escape it. The same measured session shows three such prompts
+inside the open turn (04:28:35, 04:32:16, 04:38:44). `lastAgentEventAt` is set only
+from `record` — the pump's loop and the idle drain, i.e. what came out of the agent
+— and from the drain's early return for the `agent_log`/`other` it drops, because
+those are the agent speaking even when they are not worth logging. The two clocks
+stay separate rather than becoming one field: for *parking*, a person typing **is**
+activity and is the reason not to take the agent away.
+
+⚠ **The driver row for that clock passed with either field, and the reason is
+worth keeping.** The two clocks are milliseconds apart in a test, so no `now` handed
+to `abandonWedgedTurns` discriminates them — the row was written, the wrong field
+was restored to check it, and it printed `ok`. It is a pair now: the mechanism
+asserted with no clock at all (a person's message moves one field and not the
+other) and the outcome asserted at *exactly* the threshold, with 200 ms of declared
+margin either side of the instant it is measured from. A minute of slack — which is
+what the row carried at first — swallows the difference and asserts nothing.
+
+⚠ **Two of the driver rows written for this passed for the wrong reason, and both
+are the same class of mistake as the bug.** *"Nothing was sent to the agent"* was
+asserted as `stalledCount() === 1` — which says only that the outstanding prompt is
+still outstanding, and is true however much traffic goes the other way: adding a
+`session/cancel` to `abandonTurn`, the third stopping verb this entry exists to
+avoid, left the whole section green, because the rig dispatches on the method, a
+notification carries no id, and its `default:` arm drops one without a word. The rig
+records every inbound method now and the property is a list rather than a count. And
+the 61-minute row measured against the fixture's `now`, stamped when module 1 of 23
+was imported, while `wedged` measures the real `turnStartedAt` — an undeclared
+60-second wall-clock budget on a driver that has no other one, which a slower runner
+or one more section inserted above would have turned red, reading as the feature
+being broken rather than the clock. The instant is taken in the section now.
+
+**What this deliberately does not do.** It adds no `SessionStatus` member and holds
+no turn open. It does not stop the session, which would have read as `parked` or
+`stopped` for a conversation nobody ended. After the ending the session is `idle`,
+so the ordinary sweep releases the wedged agent half an hour later — the code that
+could not see it before — and the pending request goes with the process. The wire
+change is one `TurnStopReason` member and the daemon ships first: `wire.ts` types
+`stopReason` as `string` and `stopReasonText` already falls through for a value it
+has never heard of.
+
 ## The web client
 
 ### What the client is
@@ -12101,7 +12235,11 @@ every single refresh, with nothing they could do about it. Reported from a real
 session. Nothing needed opening: `1 failed` is drawn on the collapsed row, the same
 "the number survives collapse" idiom as a folder's waiting count and a card's step
 badge. A bare `ToolCall` still opens itself on failure, and the difference is exactly
-that — it has no badge. `webcheck` pins the derived expression by reading the file,
+that — it has no count of its own. (⚠ Amended: `1 failed` is no longer a badge —
+`Badge`'s plain tone is `bg-raised`, the fill `UserBubble` paints, so the count was
+drawing the conversation's own rectangle on a machinery row and was reported as
+blending with the message. It is a bare `text-muted` run of text now. The property
+here is that the collapsed row states the number, not that it wears a pill.) `webcheck` pins the derived expression by reading the file,
 because the rule is one line of JSX.
 The three-valued state is the shape and the argument of the nullable `ultracode`
 column: a boolean would make "I closed this" and "nobody has looked" one thing, so
@@ -12161,8 +12299,10 @@ bare row was the one this same change had to teach to say anything at all. Repor
 "why isn't this folded, and what is that `exec-…`?", which is the honest reading of it.
 
 What replaces it is the arrangement `failed` already uses: the number survives the
-collapse. `N approved` is on the row, quieter than the failure badge because being asked
-and having answered is not a thing that needs anybody's attention again. So "an approval
+collapse. `N approved` is on the row, quieter than the failure count because being asked
+and having answered is not a thing that needs anybody's attention again — a ranking
+that outlived the badge it was written about: `N approved` is `text-faint` and the
+failure count is `text-muted`, with neither of them filled. So "an approval
 cannot be hidden" is kept by *counting* rather than by a row of its own, and the
 transcript is one line where it was three.
 
@@ -22754,6 +22894,459 @@ check green over a message about something else entirely.
 **Status.** Current.
 
 
+#### Q3.634 — a target grown with a pseudo-element grows hover with it, and the ✕ lit up 10px early
+
+**Question.** Reported off the background-tasks panel: *the ✕ clearly has a bigger
+trigger zone than itself — the mouse is not on the ✕ yet and it is already
+highlighted.*
+
+**Decision.** Every hit-target `::after` in `packages/web` is gated on
+`[@media(pointer:coarse)]:` — `ICON_BUTTON_SIZE.sm`, `.nav`, the shared
+`TAP_GROW_Y`, and the three hand-rolled copies in `EventList.tsx` and `Toast.tsx`.
+
+**The mechanism, and why no CSS separates the two.** A generated box is rendered as
+a child box of its originating element and takes part in hit testing; `:hover`
+matches an element while the pointer designates *any* of its boxes, generated ones
+included. So the pad's reach and the hover trigger's reach are one rectangle by
+construction. `ICON_BUTTON_SIZE.sm` is 24px of ink inside `after:-inset-2.5`, and
+its docblock priced that growth as *"it costs no layout anywhere"* and stopped
+there — the hover cost was written down nowhere in this repository. In
+`TaskPanel`'s `min-h-11` head a 24px box centred leaves exactly 10px above and
+below, so the pad filled the band's whole height and the glyph lit while the
+pointer was still over the title beside it, faded in over `.tap`'s 120ms so that it
+read as *already* highlighted rather than as a mis-aim.
+
+**Why the repair is free rather than a trade.** Tailwind wraps every `hover:`
+utility in `@media (hover: hover)`, verified in the shipped sheet. So the leak
+exists only where a mouse exists and the pad is only needed where a thumb does; the
+two conditions are complementary and both were unconditional. A fine pointer now
+gets the ink and nothing more — 24px for `sm`, still above WCAG 2.5.8's 24×24 — and
+a hover that starts at the edge of what is drawn. A coarse pointer is untouched.
+
+⚠ **The spelling is the raw `[@media(pointer:coarse)]:`, not a `@custom-variant`.**
+`BUTTON_SIZE.sm` already ships that escape one table up in the same file and about
+twenty call sites use it; a declared variant would be a second spelling of one idea.
+It is written out per class rather than composed from a constant because Tailwind
+scans source for whole class names — a prefix built by interpolation emits nothing
+at all, silently, and the target simply stops existing on a phone.
+
+⚠ **The three assertions this needed were all green over the change.**
+`NAMES_ITS_44`, `GROWS_TO_44` and `REACHES_44` are substring matches, and
+`after:-inset-2.5` is still a substring of the gated spelling — so all three would
+have gone on passing while asserting nothing. They are anchored on the prefix now,
+and a fourth check reads `TAP_GROW_Y`'s own value class by class, since three table
+entries and five call sites reach 44px through that one string. The widest leak was
+the one no sweep could see: the transcript's outstanding-tasks row is `h-5 w-full`,
+so it fails the square pattern `GROWS_TO_44` is applied through, and it was lighting
+`hover:bg-raised` from 24px below itself.
+
+⚠ **And the first repair made the same mistake one layer down.** The new check over
+`TAP_GROW_Y`'s own value tested `!token.includes("]:after:")` — the *shape* of an
+arbitrary variant rather than the gate. Respelling the media query
+`[@media(pointer:fine)]:`, the exact inversion of the property the check is named
+for, left every assertion green while the pad stopped existing under a thumb on the
+composer's Send and Stop, the config bar's chips and drag handle, the sheet's grab
+bar and the transcript's download button. Found by mutating the constant and
+re-running the driver's own logic — a plain variant (`lg:`, `hover:`) *was* caught,
+which is what made the hole look closed. The gate is spelled once now and both
+halves of the section spend that literal.
+
+#### Q3.635 — the failure count was drawn in the fill reserved for the message you wrote
+
+**Question.** Reported off a screenshot of the transcript: *`1 failed` needs to be
+dimmer, it blends with the message.*
+
+**Decision.** It is not a `Badge` any more — `text-2xs text-muted`, no fill, no
+radius, no padding, no `font-medium`.
+
+**It was literally the message bubble's rectangle, shrunk.** `Badge`'s plain tone is
+`bg-raised text-muted`; `UserBubble` is `bg-raised px-3.5 py-2.5`; the transcript
+pane is `bg-surface`. Same token, same strength, same ground, three inches apart. It
+also contradicted the rule written 400 lines further down its own file —
+`ToolCall`'s frame note says machinery is unfilled and that what a failure keeps is
+*"two signals, neither of them a rectangle"* — and it survived the pass that took
+the border off that row and the semibold off its title by being the one element
+nobody looked at.
+
+**`text-muted` rather than `text-faint`, and that is a ranking rather than a
+preference.** Q3.106 records that `N approved` is *"quieter than the failure badge
+because being asked and having answered is not a thing that needs anybody's
+attention again"*, and `N approved` is `text-faint`. Landing the failure count on
+the same token would erase an argued ordering while fixing a fill. `text-muted` is
+dimmer than the row's own `text-fg/85`, which is what was asked for, and still
+strictly louder than the settled fact one fold down.
+
+**The alignment half needed no change and is recorded so it is not re-reported.**
+The run row is `w-full` inside the same `${COLUMN} px-4` container the bubble is in,
+so both boxes end at the same pixel. What was 4px inboard was the row's *content*,
+from the `px-1` every machinery row carries so `hover:bg-raised` has room inside a
+`rounded-md` corner. Removing the fill takes the visible offset from 10px to 4px,
+and 4px between two runs of text is invisible where 4px between two painted greys is
+not. `-mr-1` on the trailing span was considered and refused: the live `Dot` takes
+that slot whenever a run is running, so the fix would have to be applied twice and
+would look wrong on hover.
+
+⚠ **Three prose sites moved with it**, because two of them asserted the badge by
+name: Q3.105's *"a bare `ToolCall` still opens itself on failure, and the difference
+is exactly that — it has no badge"*, its copy in `.claude/rules/web-transcript.md`,
+and Q3.106 above. What those rules rest on is that the collapsed row **states the
+number**, never what shape it states it in.
+
+#### Q3.636 — the bubble owns the selection, and its row does not
+
+**Question.** Reported off a screenshot of a one-line message: *the text selects
+crookedly, and there are two line breaks in it for some reason.*
+
+**Decision.** `select-none` on `UserBubble`'s row **and** on the bubble box, with
+`select-text` on a wrapper *inside* the padding. The edges of the selectable block
+are the whole property.
+
+⚠ **The first decision here was `select-text` on the bubble box, and it was
+measured — afterwards — to do nothing at all.** It shipped, the owner looked at it
+and asked why the selection still looked the same, and the answer was that it did.
+What was missing was an engine: the reasoning was checked against Chromium, where
+there is no band to remove, and the report came from WebKit.
+
+**What WebKit actually does.** It fills the selection gap down to the bottom of the
+block the selection ends in. The row is full-column-width — it has to be, since
+`justify-end` on a full-width box is what right-aligns a `w-fit` bubble — and the
+bubble is padded, so with the selectable block being the padded box the fill took
+the bubble's own `py-2.5` with it. That is the band, and it is ~11px rather than the
+whole conversation's width.
+
+**Measured in a real `WKWebView`, driving `NSEvent` drags rather than a `Range`**,
+because a programmatic range ignores `user-select` by specification and paints
+identically with the fix and without it — which is why the first repair looked
+verified and was not. A small AppKit harness snapshots the view before and after,
+diffs the pixels, and reports the bounding box of what changed:
+
+| gesture | no classes | `select-text` on the box | on the inner content |
+|---|---|---|---|
+| drag past the end of the text | 255×31 | 255×31 | **248×20** |
+| triple-click | 255×31 | 255×31 | **255×20** |
+
+20px is the line box and nothing more. `display: inline` on the paragraph was
+measured too and painted 31 — so what decides this is where the selectable block's
+edges are, never what the paragraph is.
+
+⚠ **What is left is the engine's, and it was chased to the end before being left.**
+Asked why a two-line message still highlights "empty space", the same harness was
+given a per-line fill profile (rows with the same right edge collapsed into bands)
+and run over the real gestures. The block is 584 wide where its longest line is
+553, because a `w-fit` box whose text *wraps* takes the available width, not the
+longest line.
+
+| gesture | bands |
+|---|---|
+| drag ending inside the message | `20px@584w 22px@40w` — last line tight, copy clean |
+| triple-click | `42px@584w` — every line to the block edge |
+| drag continuing into the next message | `42px@584w` |
+
+So the shipped arrangement is already right for an ordinary drag: the last line
+stops at the text. The other two select the paragraph's *block end*, and filling a
+line to the block edge is what every engine does with an intermediate line — it is
+how the line break shows as included. Eight CSS arrangements were measured against
+it (`select-text` on the box, on the wrapper, on the `<p>`; `w-fit` on the wrapper;
+`display: inline` on the paragraph and on the wrapper; none) and every one painted
+`42px@584w`. A JS clamp was measured too — narrowing the range to the last text
+node, guarded so a selection reaching another message is untouched — and the log
+shows it applying and then WebKit **putting it back**: `fire clamped fire
+end-outside:P`. On `mouseup` rather than `selectionchange` it survives for the drag
+that was already tight and loses to the engine for the triple-click. It is not
+shipped: it buys nothing the engine allows to stand.
+
+⚠ **And the last of it is the engine, measured across both.** Shown a screenshot of
+Claude Code's own transcript, where every line stops at its own text, the same page
+was rendered in Chromium and the pixels diffed the same way:
+
+| engine | intermediate line | last line |
+|---|---|---|
+| Blink (Chromium, and Electron apps) | `22px@549w` — tight to the text | `22px@40w` tight |
+| WebKit (`packages/native`, iOS) | `20px@584w` — to the block's content edge | `22px@40w` tight |
+
+LayoutNG dropped selection-gap painting; WebKit still fills an intermediate line to
+the block edge, which is how a soft wrap shows as included. The screenshot it was
+compared against was `claude.ai` in Chrome — no Claude desktop app is installed on
+that machine and `LSHandlers` gives `com.google.chrome` for `https` — so the client
+it is being measured against is **not solving this**: it is on the engine that does
+not have it. Opened in that same Chrome, this app's own bubble measures `22px@549w`,
+i.e. the thing being asked for, already. **The comparison is
+between two engines, not between two stylesheets** — one DOM, one selection, 35px
+of difference. Eleven arrangements were measured against it in WebKit (`select-text`
+on the box / the wrapper / the `<p>`, `w-fit`, `display: inline` on either,
+`white-space: pre-wrap`, `width: fit-content`, `width: max-content`, no classes, and
+the JS clamp) and every one painted `@584w`.
+
+**What is left to spend is layout, and it is declined here.** The gap is 31px
+because the bubble sits at its `max-w` rather than at its longest wrapped line — a
+fact visible with nothing selected. Hugging it would remove most of the fill in
+WebKit, and there is no CSS that does it for wrapped text: it needs measuring the
+line box in JavaScript, per message, on a transcript holding hundreds. That is the
+thing `AppShell` refuses by name — *"a resized window must not be able to render a
+layout that is not there"* — so it is written down here rather than built.
+
+⚠ **The copy keeps one `\n` in WebKit under both gestures**, and that is the block
+boundary the serializer writes. It is not the *two* breaks the report named: those
+were measured in Chromium, where the serializer writes `\n\n` for the same
+paragraph. Two engines, two answers, one DOM — and the report was read against the
+wrong one. Removing the last newline would mean a message being a single inline
+chain, which a message with two paragraphs cannot be, so it stays.
+
+**What was ruled out.** Nothing on the write side is implicated: `Composer` sends
+`text.trim()`, `recordPrompt` appends it verbatim, the stored event for the reported
+message carries no newline at all, and remark drops trailing blank lines anyway — so
+a `trim()` anywhere would have fixed nothing. Swapping the `<p>` for a `<div>` was
+proposed and declined twice over: the measurement says block-ness rather than the
+tag is what produces the second break, so it would not work, and a second component
+map would leave Q7.86's `img`/anchor guard asserting a map that no longer renders
+one of the two tones — the untrusted one.
+
+⚠ **`select-text` is not belt and braces.** Without it the bubble is not selectable
+at all, which is worse than the bug. `webcheck` reads the class strings off
+`Bubble.tsx` with a floor — the two elements have to be found before anything is
+judged — and asserts three things rather than two: that neither the row nor the
+padded box is selectable, that `select-text` is **not** on the padded box, and that
+something inside it carries it. The middle row is the load-bearing one: putting the
+class back on the box is the repair that looks right, reads right, and was measured
+to do nothing.
+
+**The only prior judgement here refuses a static `select-none`** — `SessionBrowser`'s
+drag row carries one *only while a row is moving*, because *"putting it on the list
+unconditionally would take selection away from the rail permanently to fix a state
+that lasts a second"*. This is the other case, and the docblock says so at the code:
+what loses selection is a gutter with nothing in it, the content is handed straight
+back one element down, and the state it fixes is every selection anybody makes.
+
+⚠ **The half of this that read "the fill is the engine's and the page cannot move
+it" is wrong, and Q3.638 is where it was disproved.** What no `select-*` placement
+changes, one property does: a block WebKit treats as a *selection root* paints no
+gaps at all. The three assertions above still stand and are still asserted — they
+are about which element is selectable, which is a different question from where
+the painting stops — but nothing here should be read as saying the fill had to be
+lived with.
+
+#### Q3.637 — the bubble is sized to the text it ended up holding, and that is a layout value written from JavaScript
+
+**Question.** A message bubble sits 31px wider than its longest line. Asked as
+*"why is empty space selected too"*, because that is where it is loudest — WebKit
+fills a selection's intermediate line to the block's content edge, so those pixels
+paint blue. Q3.636 established the fill is the engine's. This is the 31px.
+
+**Decision.** `ui/hug.ts`: measure the lines a bubble drew and set its width to the
+widest of them plus its chrome. One shared `ResizeObserver`, one batched pass a
+frame. Measured in WebKit on the shipped DOM, the selection's intermediate line
+goes from `584w` to `554w` against a longest line of 545.
+
+**There is no CSS for it, and that was checked rather than assumed.**
+`width: fit-content` is `min(max-content, available)`, and text that *wraps* has a
+max-content wider than available — so the box takes the available width and stays
+there. `max-content`, `min-content`, `white-space: pre-wrap` and `text-wrap: pretty`
+were each measured and changed nothing. `text-wrap: balance` was the only one that
+moved anything and moved it the wrong way: it evens the lines (`22px@309w` in place
+of `40w`) while the first line still fills to `584w`, and engines only balance short
+blocks.
+
+**The cost is measured, and the shape of the code is the cost.** 300 bubbles, the
+same code both ways:
+
+| | batched | interleaved |
+|---|---|---|
+| first pass | **1.6ms** | 25.7ms |
+| after a width change | **3.1ms** | 29.5ms |
+| a pass where nothing moved | **0.8ms** | — |
+
+Interleaving — read a bubble, write it, read the next — costs sixteen times as much
+for the same answer, because each write forces a layout before the next read. The
+frame budget is 16.7ms, which is what makes this affordable while somebody drags the
+rail rather than only at rest. So the three passes are an asserted property: every
+box is reset, then every width is computed, then every width is written.
+
+⚠ **The reset is half of that and not a tidiness.** A bubble still carrying last
+pass's width is measured *at* that width, so its text re-wraps inside it and the
+next answer is narrower again — a box that walks itself down to one word. Clearing
+first puts every box back on the width its `max-w-*` gives it, which is the only
+width the measurement means anything at. `hugWidth` rounds **up** for the same
+reason at sub-pixel scale.
+
+⚠ **`getClientRects()` answers a rect per *element* as well as per line box**, so
+one range over the wrapper returns the wrapper's own border box — `584x44` beside
+the `545x17` and `40x17` that are the lines. Taking the widest of that set hands
+the box its own width back: measured, the first attempt wrote 612 and nothing
+moved. `lineWidths` walks text nodes, which cannot pick up an element box whatever
+the markdown turned into.
+
+**What it refuses to touch.** `huggable` declines a bubble holding an attachment
+list or an image — those are laid out to the box rather than to a line, so trimming
+would clip them — and one holding a `pre` or a `table`, which scroll horizontally
+and therefore report the width they are *allowed* rather than the width they want,
+which would feed the box its own cap back.
+
+⚠ **It writes a layout value from JavaScript, which `AppShell` refuses by name** —
+*"a resized window must not be able to render a layout that is not there"*. The
+exception is taken deliberately and is narrow on three counts, and it is recorded
+here rather than argued at the code. There is no CSS that does it. It **degrades to
+the rendering that shipped before**: a bubble this never reaches keeps its `max-w-*`
+width, which is exactly today. And it decides no *layout* — which columns exist, at
+what width, and whether a rail is drawn are all still CSS's; this trims one box
+inside a layout CSS has already chosen. What would break the rule is the opposite
+direction — reading a width in JavaScript to decide *which* arrangement to draw —
+and nothing here does that.
+
+⚠ **The reason this was *asked* has since been answered elsewhere, and the module
+is kept anyway.** It was reported through the selection, and Q3.638 now stops the
+engine painting any gap at all — so no width here decides anything a selection can
+see. What is left is the 31px themselves: a grey box 31px wider than the sentence
+inside it, with nothing selected. That is a typographic judgement rather than a
+workaround, and it is the one this entry should be read as making from here on.
+
+#### Q3.638 — only the text is selected, and one property is the whole of it
+
+**Question.** Reported four times, the last one *after* the zero-width `::after`
+below had shipped: *"выделяется не ровно текст, а пробелы между ним"*, with a
+screenshot of a three-line bubble whose middle line painted to the box edge.
+Q3.636 established that WebKit fills a selection's line to the block's content
+edge and that no `select-*` placement changes it; Q3.637 removed that for a bubble
+by sizing the box to its longest line; the `::after` ended the *last* line of a
+block. What none of the three touched is everything else: every line that is
+neither the longest nor the last, the vertical margin between two blocks, and the
+whole empty column beside a right-aligned bubble. A drag from the top of a
+conversation to the bottom painted one solid rectangle, `748px@900w`.
+
+**Decision.** `column-span: all`, on the markdown body, the user bubble and the
+transcript column — and on `pre`, `td` and `th` inside them. WebKit's
+`RenderBlock::isSelectionRoot` answers yes to a block whose `column-span` is
+`all`, and a **selection root paints no gaps at all**. Measured with real
+`NSEvent` drags in WKWebView on the shipped bundle, over a page carrying every
+markdown shape this app draws: one band before, and after it per-line bands with
+`-1w` — nothing painted — in every gap between them. The unselected page is
+byte-identical.
+
+**What the fill depends on, measured against controls rather than reasoned.** One
+DOM, one drag, one thing changed at a time between a selection root and the text:
+
+| between the root and the text | result |
+|---|---|
+| three more levels of plain `div` | no fill |
+| a block with horizontal padding | no fill |
+| a `w-fit` block narrower than the column | no fill |
+| a `display: flex` container | **fill is back** — `46px@199w` against `22px@199w 24px@51w` |
+
+So one placement could not do it. `UserBubble` hangs in a `flex justify-end` row,
+which is why it carries its own; the column carries one for the space *between*
+messages, which no message can reach; and the markdown body carries one so agent
+prose is covered wherever it is drawn, which is inside several flex rows.
+
+**`column-span` rather than the transform that was found first, and the difference
+is in another engine.** `isSelectionRoot` also answers yes to any transformed
+block, and in WebKit the two are indistinguishable — same band profile, same
+byte-identical idle page. But a transform also makes a **stacking context**, and a
+`td` inside one composites its `border-edge/60` against a different backdrop: one
+1px row under a markdown table's header moved `#E6E4E0` → `#ECEAE7` in Chromium
+153. `column-span: all` makes no stacking context and no containing block, and
+outside a multi-column container it lays nothing out differently — Chromium is
+byte-identical under it, idle *and* selected, and so is the copied string. Neither
+trigger is specified behaviour; this one costs nothing where it is ignored, which
+is the whole argument for preferring it. `webcheck` asserts the property by name,
+because "just use a transform" is the simplification this would attract.
+
+**The three descendants are an ablation.** Without them the code fence painted
+`60px@863w` and the table `65px@855w` instead of their lines. Nothing *above* the
+cells substitutes: `table`, `thead`, `tbody` and `tr` each leave the whole table
+filled. `li` and `blockquote` were in the list and came back out — with them
+removed the profile is unchanged, band for band.
+
+⚠ **What it cannot reach is an *anonymous* block.** `mdast-util-to-hast` unwraps a
+tight list item's paragraph, so a bullet with sub-bullets renders as
+`<li>text<ul>…</ul></li>` and the engine wraps the sentence in a box no selector
+names — `transform`, `overflow`, `contain`, `flow-root`, `display: inline-block`
+and `display: table` on the `li` were each measured and not one moved it, that
+line painting `22px@530w` where its text is 67px wide. `remarkListItemBlocks` is
+the other half of that one shape and fixes it in the parse instead: marking such
+an item `spread` puts the paragraph back, and the line paints `20px@67w`. It costs
+no pixels — `mdast-util-to-hast` reads looseness off the *list*, so every sibling
+item gains a `<p>` too, and `COMPONENTS.p` is `my-1.5 first:mt-0 last:mb-0`, which
+on a lone paragraph in a list item is no margin at all; two WKWebView renders of a
+page holding a tight list, a nested list and an ordered list compare byte for
+byte.
+
+**The zero-width `::after` is superseded rather than kept beside this.** It was one
+rule, `content: "\200B"` on every inline-level block inside the bubble's
+`select-text` wrapper, and it worked: `42px@554w` before, `20px@554w 22px@40w`
+after. What it could not do is any of the three cases above. The two agree
+everywhere it applied, so keeping both would be a second mechanism for a subset —
+and it was not free: it needed `> div` to stay off the attachment chips (an
+`li::after` on the bare class grows every chip 28px → 52px) and a
+`:not(:has(…))` to exclude an `li` whose last child is a block, which gains a whole
+line box from an `::after` — +24px on a nested list, a `<p>`, a heading and an
+`<hr>`, three of which the first version of that guard missed.
+
+⚠ **Its measurement table is kept, because it is what rules out the obvious
+repairs.** What that rule needed was a trailing inline box that *renders* and is
+*not in the selection*, and both halves were measured against controls:
+
+| trailing thing | result |
+|---|---|
+| a real, selectable zero-width space text node | `42px@554w` — not fixed |
+| a word joiner, selectable | `42px@554w` — not fixed |
+| `::after { content: "" }` | `42px@554w` — not fixed |
+| an empty `<span user-select:none>` | `42px@554w` — not fixed |
+| `<wbr>` | `42px@554w` — not fixed |
+| `<span user-select:none>` holding a real space | `42px@554w` — not fixed |
+| `<span user-select:none>` holding a zero-width space | **fixed** |
+| `::after { content: "\200B" }` | **fixed** |
+
+Neither "a zero-width box" nor "an unselectable pseudo-element" on its own — both
+at once. Anybody reaching for one of the first six is reaching for something
+measured and refuted.
+
+**Blink never had the defect** — it dropped selection-gap painting with LayoutNG —
+and is asserted untouched rather than assumed: the page renders byte-identically
+under this rule, idle and selected, and `getSelection().toString()` is the same
+string, measured with a real CDP drag on Chromium 153.
+
+#### Q3.639 — a person's own line breaks, and why the fix is at the parse
+
+**Question.** *"A line break in a message is erased on send."*
+
+**Decision.** It is not erased on send — nothing between the textarea and SQLite
+touches it. `remarkHardBreaks` in `ui/mdlist.ts`, applied to the **user's tone
+only**, turns a soft break into a `break` node.
+
+**The write path is clean and that is measured**, because it decides where the fix
+belongs. `Composer.tsx` sends `text.trim()`, which is ends-only; the prompt route
+validates and passes the string through; `recordPrompt` appends it verbatim. A real
+`prompt` row in `~/.reemoat/reemoat.db` still carries its newlines. What loses them
+is CommonMark: a single newline is a *soft* break, it survives into the HTML inside
+one `<p>`, and `white-space: normal` collapses it. Measured in WKWebView on the
+shipped bubble DOM: `"a\nb"` draws one 22px line box whose `innerText` is `"a b"`.
+
+**Why the user's tone only.** An agent writes CommonMark and is entitled to it;
+turning its soft wraps into hard breaks would rewrite prose this app has no
+business rewriting — the same rule `remarkListDelimiter` exists for, one node type
+over. ⚠ It does reach text an *adapter* emitted, since `session.ts` maps ACP's
+`user_message_chunk` to `role: "user"` and `EventList` draws it in this same
+bubble; that is the person's own sentence relayed back, and the two are required to
+look alike.
+
+⚠ **`white-space: pre-wrap` is the cheaper-looking fix and it is wrong, measured.**
+`mdast-util-to-hast` writes a `\n` text node after every `<br>`, so a *hard* break
+— what somebody who typed a space before Enter produces — draws as **two**: a 66px
+box reading `"a\n\nb"` against this fix's 44px and `"a\nb"`.
+
+⚠ **A second `COMPONENTS` map was declined again**, for the reason Q3.636 already
+gave: it would leave Q7.86's `img`/anchor guard asserting a map that no longer
+renders one of the two tones, and the tone it would stop covering is the untrusted
+one. What varies here is the *plugin list*, hoisted to module scope beside the
+existing one for the identity reason its own docblock gives, and passed down — so
+`COMPONENTS` is untouched and there is still exactly one of it.
+
+**What is deliberately unchanged.** A newline inside backticks still renders as a
+space: mdast's `code` and `inlineCode` carry a `value` and no `children`, so the
+walk cannot enter them, and that is CommonMark's own behaviour. Asserted rather
+than trusted, because it is the property that decides whether this plugin may be
+pointed at markdown at all. It is also a **render** fix rather than a send fix —
+every message already in the log gains its breaks back on the next paint.
+
 ## Deployment, packaging and code layout
 
 ### Q4.1 — Is this one deployment or two, and why can the two services not be checked out separately?
@@ -27615,6 +28208,49 @@ live one down on a clock.
 
 **Status.** Current. `.claude/rules/e2ee.md` is the area.
 
+
+#### Q5.119 — an offline driver is offline in what it *runs*, not in what it asserts
+
+**Question.** Reported from the development machine: *a node terminal keeps popping
+up in my Dock for a second and disappearing — are we comparing node wrongly
+somewhere?*
+
+**Decision.** `daemoncheck`'s one `POST /sessions` with a real agent id now goes to
+an app whose runtime reports every harness uninstalled, so nothing is spawned on any
+machine.
+
+**It is not a version comparison, and the measurement says what it is.** Every exec
+on the machine was logged for the length of one `pnpm daemoncheck`: `kimi --version`,
+`claude auth status`, about forty `grok --no-auto-update models`, and one
+`node /opt/homebrew/bin/kimi acp` — followed one second later by a LaunchServices
+registration named `kimi-code`. That registration is the Dock tile. A plain child
+process gets none; kimi's ACP entry point registers as an application, so it gets one,
+labelled from the node binary that is executing it. `firstVersion` is report-only by
+its own docblock and decides nothing, and `agentCli` caches no miss — there is no
+comparison anywhere that re-arms work.
+
+⚠ **The defect was written down and then not fixed.** The line's own docblock
+already said the assertion *"passed on a developer machine only by really spawning
+`kimi` and completing an ACP handshake, inside the driver whose own header promises
+no agent is involved, leaving a session and a worktree behind"*. Only the assertion
+moved — from `201` to *"not refused for being outside the roots"* — while the request
+still went to the shared fixture app, whose registry was built with no runtime and
+therefore holds a real `LocalRuntime`. So it went on spawning, and on leaving a
+worktree, for releases. **A driver that promises no agent may not be judged by what
+it asserts; what it runs is the promise.**
+
+**The assertion got stronger rather than weaker.** `create` resolves the cwd before
+it asks whether the agent exists, so `503 agent_unavailable` is a *positive*
+statement that the path was accepted and the request went on — where "not
+`outside_roots`" was satisfied by every other way of failing too, including the ways
+that have nothing to do with the roots. It is also the same answer in CI and on a
+developer machine, which the old shape never was.
+
+**What is left, and why it stays.** `availability()` still runs the real login
+probes in the sections that build a bare `LocalRuntime` — `claude auth status`,
+`grok models`. Those are Mach-O binaries that register nothing and draw no tile, and
+one of those sections exists precisely to `report` what this machine answers. The
+spawn that mattered was the ACP handshake, and it is gone.
 
 ## Measured behaviour of the agents and the tools
 

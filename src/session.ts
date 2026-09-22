@@ -739,6 +739,26 @@ export class Session {
   private unregister: (() => void) | null = null;
   private unsubscribeLogs: (() => void) | null = null;
   private turnActive = false;
+  /**
+   * Which `session/prompt` owns this session right now, as a number that only
+   * goes up.
+   *
+   * ⚠ **It exists because an RPC this daemon has stopped waiting for is still
+   * outstanding, and its `.then` still fires.** {@link abandonTurn} closes a turn
+   * locally — nothing is sent to the agent — so the request stays pending for as
+   * long as the adapter keeps it, and may settle in an hour, or after a *second*
+   * turn has started on this session. Both of those are live hazards rather than
+   * theory: the late `.then` would push a second `turn_end` for one prompt, which
+   * the log's own rule forbids, and if a new turn holds the queue by then it would
+   * end **that** turn instead — a reply cut off by an answer to a message from an
+   * hour ago.
+   *
+   * So every callback the request installs is fenced on the epoch it was fired
+   * under, and `abandonTurn` bumps it. A stale callback does nothing at all: it
+   * does not push, and it does not clear {@link turnActive}, which by then belongs
+   * to somebody else.
+   */
+  private promptEpoch = 0;
   private disposed: Promise<void> | null = null;
   /**
    * The agent's current mode/model/effort state.
@@ -2048,6 +2068,10 @@ export class Session {
      */
     const claim = this.queue.claimForTurn();
 
+    // The epoch this request answers under. See the field: it is what makes a
+    // late answer to an abandoned turn harmless rather than a second ending.
+    const epoch = (this.promptEpoch += 1);
+
     void this.client.agent
       .request(acp.methods.agent.session.prompt, {
         sessionId: this.sessionId,
@@ -2064,6 +2088,11 @@ export class Session {
       })
       .then(
         (response) => {
+          // The daemon gave up on this turn and said so; the answer is late and
+          // there is nothing left for it to end. Dropped rather than recorded,
+          // because a second `turn_end` for one prompt is the shape the log
+          // refuses — and because the turn it would reach now may not be this one.
+          if (this.promptEpoch !== epoch) return;
           // A run that the turn's own end interrupts still owes its final block —
           // `onUpdate` cannot flush it, because there is no next update.
           this.flushToolDraft();
@@ -2074,6 +2103,7 @@ export class Session {
           });
         },
         (error: unknown) => {
+          if (this.promptEpoch !== epoch) return;
           this.flushToolDraft();
           this.queue.push({
             type: "error",
@@ -2083,7 +2113,11 @@ export class Session {
         },
       )
       .finally(() => {
-        this.turnActive = false;
+        // ⚠ Fenced too, and this is the half that would break a *live* turn
+        // rather than merely duplicate a dead one: after an abandonment a second
+        // prompt may already hold `turnActive`, and clearing it here would let a
+        // third prompt fire into a session the agent is still answering.
+        if (this.promptEpoch === epoch) this.turnActive = false;
       });
 
     /*
@@ -2333,6 +2367,62 @@ export class Session {
       }),
       CANCEL_SEND_TIMEOUT_MS,
     );
+  }
+
+  /**
+   * Stop waiting for a turn the agent has never answered, and say so.
+   *
+   * **This is not a third stopping verb, and the difference is the whole design.**
+   * Stopping the agent and stopping the session are two things this daemon keeps
+   * apart (Q2.42), and nothing here sends either: no `session/cancel`, no
+   * `$/cancel_request`, no abort signal on the request. The agent is not told
+   * anything, does not stop, and is free to answer whenever it gets there. What
+   * ends is **this daemon's claim that a turn is in flight** — which is all
+   * `status === "running"` ever meant, and all that was stuck.
+   *
+   * ⚠ **`withAbandonableDeadline` is deliberately not used, though it is sitting
+   * right there and looks like the answer.** Two measurements say otherwise. Its
+   * own docblock records that against a peer which never answers, the cancellation
+   * reclaimed nothing — `pendingResponses` stayed at 20 of 20 — so it does not
+   * solve the residual it exists for in exactly this case. And it names
+   * `session/prompt` as the one method whose `ctx.signal` an installed adapter
+   * actually honours (codex-acp 1.8.0 threads it into the model call), so on that
+   * adapter the "deadline" would abort the agent's work. That is the third
+   * stopping verb, arrived at by accident, and it is what "the agent must never
+   * notice a client leaving" forbids.
+   *
+   * ⚠ **`turnActive` is cleared here rather than left to the RPC's `.finally`.**
+   * It is the flag {@link prompt} refuses a second prompt on, and it is *only*
+   * ever cleared inside the outstanding request's own callbacks — so a turn closed
+   * without those callbacks running would read as idle, open the composer, accept
+   * the next message, and then throw *"a prompt is already in flight"* into the
+   * transcript for the rest of the session. Every message after the wedge would be
+   * recorded and then errored. The epoch bump on the line above is what keeps the
+   * late `.finally` from taking the *next* turn's flag back down with it.
+   *
+   * Answers whether there was anything to abandon, so a sweep can report honestly
+   * rather than counting the sessions it looked at.
+   */
+  abandonTurn(): boolean {
+    if (!this.turnActive) return false;
+    // Before the push, so the still-pending request's callbacks are already dead
+    // by the time anything downstream can react to the ending.
+    this.promptEpoch += 1;
+    this.turnActive = false;
+    // The same debt the real ending pays: a tool block half-built when the turn
+    // stops is owed to the transcript, and `onUpdate` cannot flush it because
+    // there is no next update coming.
+    this.flushToolDraft();
+    /*
+     * Into the queue rather than straight into the log, because the queue is what
+     * the turn's generator is parked on: this is the event that makes `for await`
+     * return, which runs `pump`'s `finally`, which clears `ManagedSession.turn`,
+     * sweeps the pending permissions, starts the idle drain and delivers anything
+     * queued. Every one of those comes free from ending the turn the ordinary way
+     * — which is the reason this writes an event rather than a status.
+     */
+    this.queue.push({ type: "turn_end", stopReason: "abandoned", usage: null });
+    return true;
   }
 
   /**

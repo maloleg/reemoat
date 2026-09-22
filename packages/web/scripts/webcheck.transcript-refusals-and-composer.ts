@@ -102,10 +102,17 @@ process.stdout.write("\nwhat the transcript refuses to draw\n");
   // The divider that landed after every single agent reply, saying only that the
   // paragraph you had just finished reading had finished.
   check("an ordinary turn ending is not news", drawn({ type: "turn_end", stopReason: "end_turn" }), false);
+  /*
+   * ⚠ **`abandoned` is in this list and not in the silent one below**, which is
+   * the asymmetry between the daemon's two reasons of its own. `agent_error` is
+   * silent because the `error` it ends sits immediately above it saying the same
+   * thing; a turn nobody answered leaves no row at all, so this is the only thing
+   * in the conversation that accounts for the gap. Q2.231.
+   */
   check(
     "but a turn that did not finish is",
-    ["max_tokens", "refusal", "cancelled"].map((reason) => drawn({ type: "turn_end", stopReason: reason })),
-    [true, true, true],
+    ["max_tokens", "refusal", "cancelled", "abandoned"].map((reason) => drawn({ type: "turn_end", stopReason: reason })),
+    [true, true, true, true],
   );
   /*
    * ⭐ The **second** reason with no row, and silent for the opposite argument to

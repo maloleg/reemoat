@@ -117,7 +117,8 @@ have to enter. These are the rules a change here must not break:
   `ICON_BUTTON_TONE.ghost`, and the composer's box, whose own rule argues it.
   The exceptions are the two values you must read once — the one-time secret and
   the device code — which take a real fill. **`nav` is the size of a head row's
-  own leading control**, alone at its edge and 32px reaching 44.
+  own leading control**, alone at its edge and 32px reaching 44 under a finger
+  (Q3.634).
 - **What belongs to the row above it hangs off `border-l-2 border-edge`, and that
   is the transcript's only nesting idiom** — a subagent's steps, a folded run's
   children, an expanded tool call's own detail. A failure keeps neither a border

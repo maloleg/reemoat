@@ -48,6 +48,127 @@ process.stdout.write("\nwhich lists keep their delimiter\n");
   // CommonMark's own ceiling is nine digits. Ten is not a list at all, and the
   // pattern must not match one anyway.
   check("nine digits is still a list marker", classOf(run("123456789) a", list(0))), [PAREN_LIST]);
+
+  /* ------------------------------------------------------------------ *
+   * the line breaks a person typed
+   *
+   * Driven against hand-built trees for the reason the list plugin above is:
+   * what this plugin *is* is a rule about `text` nodes, and a tree it did not
+   * parse is what makes the rule a claim rather than a coincidence. What it does
+   * to a real parse — an agent's markdown byte-identical, a fence untouched — is
+   * asserted in `Markdown.tsx`'s own rendering, which no offline driver reaches.
+   * ------------------------------------------------------------------ */
+  const { remarkHardBreaks } = await import("../src/ui/mdlist.js");
+  const para = (...children: unknown[]): Record<string, unknown> => ({ type: "paragraph", children });
+  const text = (value: string): Record<string, unknown> => ({ type: "text", value });
+  const kids = (tree: Record<string, unknown>): unknown[] => {
+    remarkHardBreaks()(tree);
+    return (tree["children"] as { children?: unknown[] }[])[0]?.children ?? [];
+  };
+  const types = (nodes: unknown[]): unknown[] => nodes.map((n) => (n as { type?: string }).type);
+
+  const root = (...children: unknown[]): Record<string, unknown> => ({ type: "root", children });
+  check(
+    "a newline becomes a break, with the text either side of it",
+    kids(root(para(text("a\nb")))),
+    [{ type: "text", value: "a" }, { type: "break" }, { type: "text", value: "b" }],
+  );
+  // The blanks around it go with it: a hard break already eats them, and keeping
+  // them draws a stray space at the end of the line.
+  check("and the blanks around it go with it", kids(root(para(text("a  \n  b")))), [
+    { type: "text", value: "a" },
+    { type: "break" },
+    { type: "text", value: "b" },
+  ]);
+  check("a stray carriage return goes too", kids(root(para(text("a\r\nb")))), [
+    { type: "text", value: "a" },
+    { type: "break" },
+    { type: "text", value: "b" },
+  ]);
+  check("two newlines are two breaks", types(kids(root(para(text("a\nb\nc"))))), ["text", "break", "text", "break", "text"]);
+  /*
+   * ⚠ **Identity, and it has to be about the *node* rather than the array.**
+   * The honest claim is that text with nothing to split comes through untouched;
+   * an earlier draft assigned `children` unconditionally, which left the nodes
+   * identical and the array fresh — true for a reader, false for this assertion,
+   * and the kind of thing that passes for the wrong reason.
+   */
+  const kept = text("nothing to split here");
+  const tree = root(para(kept));
+  check("a text with no newline is the same node afterwards", kids(tree)[0] === kept, true);
+  /*
+   * A fence and a backtick span are unreachable by construction: mdast's `code`
+   * and `inlineCode` carry a `value` and no `children`, so the walk cannot enter
+   * them. Asserted rather than trusted, because it is the one property that
+   * decides whether this plugin may be pointed at markdown at all.
+   */
+  const fence = { type: "code", value: "a\nb" };
+  const withFence = root(para(text("x")), fence);
+  remarkHardBreaks()(withFence);
+  check(
+    "a fence is not walked into",
+    [(withFence["children"] as unknown[])[1] === fence, fence.value],
+    [true, "a\nb"],
+  );
+  check(
+    "and neither is inline code",
+    types(kids(root(para({ type: "inlineCode", value: "a\nb" }, text("y"))))),
+    ["inlineCode", "text"],
+  );
+
+  /* ------------------------------------------------------------------ *
+   * the list item that holds a block under its sentence
+   *
+   * The one shape `index.css`'s selection root cannot reach, because the box it
+   * would have to name is an **anonymous** one: `mdast-util-to-hast` unwraps a
+   * tight item's paragraph, so a bullet with sub-bullets renders as
+   * `<li>text<ul>…</ul></li>` and the engine wraps `text` itself. Six properties
+   * on the `li` were measured and not one moved it — that line painted
+   * `22px@530w` where its text is 67px wide. `spread` puts the paragraph back and
+   * it paints `20px@67w`.
+   *
+   * Hand-built trees again, for the reason the two plugins above use them: the
+   * claim is a rule about `listItem` nodes, and a tree this plugin did not parse
+   * is what makes it a rule rather than a coincidence. That it costs no pixels is
+   * a WKWebView measurement and lives in the plugin's own docblock — two renders
+   * of a page holding a tight list, a nested list and an ordered list compare
+   * byte for byte.
+   * ------------------------------------------------------------------ */
+  const { remarkListItemBlocks } = await import("../src/ui/mdlist.js");
+  const item = (...children: unknown[]): Record<string, unknown> => ({ type: "listItem", children });
+  const bullets = (...children: unknown[]): Record<string, unknown> => ({ type: "list", ordered: false, children });
+  const inner = item(para(text("вложенный")), bullets(item(para(text("глубже")))));
+  const mixed = item(para(text("третий")), bullets(inner));
+  const plain = item(para(text("первый")));
+  const blocksOnly = item(bullets(item(para(text("только блок")))));
+  /*
+   * ⚠ **Shaped so that dropping the `listItem` test would fail this**, which a
+   * paragraph would not: a blockquote holding a sentence and a list satisfies
+   * both halves of the guard and is marked the moment the node type stops being
+   * checked. A `spread` on anything but a list item is read by nothing, so this
+   * is the assertion that the plugin stays a rule about one node type.
+   */
+  const quoted: Record<string, unknown> = {
+    type: "blockquote",
+    children: [para(text("цитата")), bullets(item(para(text("пункт"))))],
+  };
+  remarkListItemBlocks()(root(bullets(plain, mixed, blocksOnly), quoted));
+  check("an item holding a block under its sentence is made loose", mixed["spread"], true);
+  /*
+   * ⚠ The walk is over `children` rather than the root's own arms, and a bullet
+   * with sub-bullets *inside* a bullet with sub-bullets is the ordinary way an
+   * agent writes an outline — so the recursion is the assertion, not a detail.
+   */
+  check("and so is one nested inside it", inner["spread"], true);
+  /*
+   * Both halves of the guard. An item that is only a sentence has no anonymous
+   * box to give an element to, and an item that is only blocks has no sentence —
+   * marking either would wrap every sibling in the list in a paragraph for
+   * nothing, since `mdast-util-to-hast` reads looseness off the list.
+   */
+  check("an item that is only a sentence is left alone", plain["spread"], undefined);
+  check("and so is one that is only blocks", blocksOnly["spread"], undefined);
+  check("and nothing that is not a list item is touched", quoted["spread"], undefined);
   check("ten is not", classOf(run("1234567890) a", list(0))), undefined);
 
   // Nested lists are reached: the walk is over `children`, not over the root's
@@ -446,11 +567,18 @@ process.stdout.write("\nwhat a turn says when it stops\n");
 
   /*
    * `end_turn` is filtered by `showsInTranscript` and never reaches this, so the
-   * three that do are all turns that did not get where they were going — plus
+   * four that do are all turns that did not get where they were going — plus
    * `cancelled`, which is the only one somebody *did* and the only one drawn red.
+   *
+   * ⚠ **`abandoned` is the fourth and it is this daemon's own**, the turn nothing
+   * ever answered (Q2.231). It is in the list rather than trusted to the fallback
+   * because the fallback is precisely what this block exists to keep off the
+   * screen: a missing row here draws `turn ended: abandoned`, a raw wire enum, in
+   * the one place a reader is told what happened. Nothing else in the transcript
+   * accounts for the silent hour, so this is the row that has to be a sentence.
    */
   check("a cancelled turn says one word", stopReasonText("cancelled"), "cancelled");
-  const others = ["max_tokens", "max_turn_requests", "refusal"] as const;
+  const others = ["max_tokens", "max_turn_requests", "refusal", "abandoned"] as const;
   check(
     "and the rest say what happened rather than naming a constant",
     others.filter((reason) => stopReasonText(reason).includes(reason)),

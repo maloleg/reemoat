@@ -265,6 +265,55 @@ stays off, because it is untrusted text quoting an untrusted repository.
   surviving card already contains everything every absorbed update said. ⚠ The row
   is keyed on the newest plan's seq, so an update remounts it — safe only while the
   plan arm holds no component state. Q3.455.
+- **Only the text is selected**, and it is one property in `index.css`:
+  `column-span: all` on the markdown body, the user bubble and the transcript
+  column, plus `pre`, `td` and `th` inside them. WebKit paints *selection gaps* —
+  a line's end to the block's content edge, and the space between two blocks — and
+  a block its `isSelectionRoot` answers for paints none. ⚠ **Three placements
+  because a `flex` container between the root and the text puts the fill back**,
+  measured: depth, padding and `w-fit` change nothing, flex alone restores it, and
+  the bubble hangs in a flex row. ⚠ **Not a transform**, which is the other
+  trigger and is identical in WebKit: it also makes a stacking context, and a `td`
+  in one moved a 1px table border in Chromium. `pre`/`td`/`th` are an ablation —
+  nothing above the cells substitutes. What it cannot reach is the **anonymous**
+  block a tight list item wraps its sentence in; `remarkListItemBlocks` marks such
+  an item `spread` so the paragraph comes back, costing no pixels. The zero-width
+  `::after` this replaced is **gone**, not kept beside it. Blink is byte-identical
+  either way, paint and copy. Q3.638.
+- **A person's own line breaks survive**, `remarkHardBreaks` on the **user tone
+  only** — an agent writes CommonMark and keeps it. The break is never lost on the
+  way out: the composer trims ends, the daemon stores verbatim; a soft newline is
+  collapsed at *render*. ⚠ Not `white-space: pre-wrap`, measured: `mdast-util-to-hast`
+  writes a `\n` after every `<br>`, so a hard break draws as two. The plugin list
+  varies, never `COMPONENTS` — a second map is declined by Q3.636 and Q7.86.
+  Q3.639.
+- **A bubble is sized to the text it ended up holding**, `ui/hug.ts`. CSS cannot:
+  `fit-content` is `min(max-content, available)` and wrapped text has a max-content
+  wider than available, so the box sits at its `max-w` however short its longest
+  line falls — 31px of grey past the sentence. ⚠ It was *reported* through the
+  selection and that half is now the rule above's; what keeps this is the 31px
+  with nothing selected at all. ⚠ Three properties are
+  asserted rather than assumed, each measured: reset-then-read-then-write, never
+  interleaved (1.6ms against 25.7ms for 300 bubbles); **one** shared
+  `ResizeObserver` watching each *row*, because a conversation is drawn whole here
+  and per-message would be hundreds; and lines walked as **text nodes**, since
+  `getClientRects()` answers a rect per element too and one range over the wrapper
+  hands the box its own width back. It declines attachments, images, `pre` and
+  `table`. It writes a layout value from JS, which `AppShell` forbids — the
+  exception and its three bounds are Q3.637.
+- **What is selectable in a user's message is a wrapper *inside* the padding**, with
+  `select-none` on both the row and the padded box. WebKit fills the selection gap
+  to the bottom of the block a selection ends in, so a padded selectable block
+  paints its own padding. ⚠ `select-text` on the box was the first repair and was
+  measured — in a real `WKWebView`, driving `NSEvent` drags, since a programmatic
+  `Range` ignores `user-select` and paints the same either way — to change
+  **nothing**: 255×31 with it and without it, against 248×20 once the class moved
+  inside. `display: inline` on the paragraph painted 31 too; the property is where
+  the selectable block's edges are. One trailing `\n` stays, and it is WebKit's
+  block boundary rather than the two breaks a browser writes. Nothing on the write
+  side is implicated — the composer trims and the stored event is clean. ⚠ The
+  *fill* this bullet reasons from is gone — the rule above stops it — so read this
+  as which element is selectable and not as where the painting ends. Q3.636.
 - **A run of consecutive tool rows is one row.** `foldRuns` folds it into a
   `GroupNode` carrying a mechanical sentence — clauses from ACP's `kind`, in the
   order each first appeared, with `+N −M` beside it — that opens to the rows it
@@ -273,7 +322,12 @@ stays off, because it is untrusted text quoting an untrusted repository.
   whether it has finished, and a tap outranks that for good. A failure deliberately
   does **not** open it — `override` is component state while `failed > 0` is
   permanent — so `1 failed` rides the collapsed row instead, a bare `ToolCall`
-  opening itself on failure only because it has no badge. The re-measure is an
+  opening itself on failure only because it has no count of its own. ⚠ That last
+  clause said *"no badge"* while `1 failed` was one; it is a bare `text-muted` run
+  of text now, because `Badge`'s plain tone is `bg-raised` — the fill a user's
+  message is drawn in — so a machinery count was painting the conversation's own
+  rectangle. What the rule rests on is that the collapsed row **says the number**,
+  never what shape it says it in. The re-measure is an
   effect on `open` and not a call in the tap handler, because tool calls interleave
   and only one of the two triggers is a tap. Q3.105.
   **What a run may never swallow**: a **refusal** or an answer nothing can classify,

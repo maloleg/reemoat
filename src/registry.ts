@@ -227,6 +227,75 @@ export const IDLE_PARK_MS = 30 * 60_000;
 export const IDLE_PARK_SWEEP_MS = 60_000;
 
 /**
+ * How long a turn may go without one byte from the agent before this daemon
+ * stops waiting for it.
+ *
+ * **What this bounds is the one RPC that has no bound.** `session/prompt` is
+ * fired with no deadline in `session.ts`, deliberately — a turn may legitimately
+ * run for hours — and `status === "running"` derives from nothing else: it is
+ * `this.turn !== null`, and `this.turn` is cleared only by the pump's `finally`,
+ * which is reached only when the generator returns, which happens only on a
+ * `turn_end` or an `error`, both of which are produced only by that request
+ * settling. An adapter that simply never answers therefore pins a session at
+ * `running` for the life of the process. Reported that way: a panel reading
+ * *working* hours after the agent had finished. `POST /cancel` cannot help —
+ * `waitForTurnToSettle` polls the same flag the same request clears — and the
+ * idle sweep cannot see it, because `parkable`'s first line refuses anything that
+ * is not `idle`. Only `DELETE /sessions/:id` or a restart cleared it.
+ *
+ * **Silence rather than duration, and that is the whole of why this is safe.** The
+ * measured turn above ran 88 minutes and was working the whole time; what says a
+ * turn is dead is not how long it has run but that nothing has come out of it.
+ *
+ * ⚠ **And it is the *agent's* silence**, `ManagedSession.lastAgentEventAt` rather
+ * than the `lastEventAt` `parkable` uses. Every write moves that one, the person's
+ * own messages included — so somebody typing into a session that says *working*
+ * reset the clock on every message and kept the wedge alive. The same measured
+ * session shows three such prompts inside the open turn. The two clocks are
+ * deliberately separate rather than one field: for parking, a person typing **is**
+ * activity, and it is the reason not to take the agent away.
+ *
+ * **Three hours, and the number is measured rather than chosen.** It was an hour,
+ * on the reasoning that what goes quiet inside a turn is a single long tool call —
+ * a build, a test suite — and that an hour is past all of those. That reasoning
+ * was about the wrong kind of turn. Read out of the reporting machine's own store,
+ * over the 2 203 events of the session that produced the bug report
+ * (`s_89d35945`, prompt 03:11:07 → a **real** `turn_end{end_turn}` from the agent
+ * at 04:39:26): the largest silence inside that live turn was **51.7 minutes**,
+ * seq 426 → 427, with 21.8 minutes the next largest. An hour would have cleared
+ * that by 8.3 minutes, which is a coincidence and not a margin.
+ *
+ * ⚠ **Both figures are gaps between *agent* events**, which is the series the
+ * predicate measures. Swept over every event the second one reads 21.5 minutes
+ * instead, because a person's prompt landed inside it (seq 1509 → 1510); the
+ * largest is 51.7 either way. Written down because these numbers get re-derived —
+ * they already have been, from the other end — and the two series disagree in
+ * exactly the place this entry is about.
+ *
+ * So the threshold is set as a multiple of the one measured silence rather than as
+ * a margin over it, and the multiple is chosen from the asymmetry. Ending a turn
+ * that was not over is **not** recoverable in the way the other mistake is: the
+ * transcript says the agent stopped answering where it had not, the real end's
+ * `stopReason` and `usage` are dropped, and the next message reaches an agent
+ * still answering the last one. Waiting too long is the status quo this fixes,
+ * bounded instead of infinite. One of those errs into a corrupted conversation and
+ * the other into a slower repair, so the number errs large: ~3.5× the measured
+ * gap. ⚠ It is no longer derived from {@link IDLE_PARK_MS} at all — the old "twice
+ * the park threshold" was arithmetic dressed as an argument, and the two answer
+ * different questions on different evidence.
+ *
+ * ⚠ **Nothing is sent to the agent when this fires.** See
+ * {@link Session.abandonTurn}: the turn ends locally, the request stays pending,
+ * and anything the agent says afterwards still reaches the transcript through the
+ * idle drain. The session becomes `idle`, which is what puts it back under the
+ * ordinary sweep — so the wedged agent is released thirty minutes later by the
+ * code that could not see it before, and the pending request goes with the process.
+ *
+ * `REEMOAT_TURN_SILENCE_MINUTES` moves it and `0` switches it off.
+ */
+export const TURN_SILENCE_MS = 3 * 60 * 60_000;
+
+/**
  * The largest value `PATCH /settings` will accept, in minutes.
  *
  * A week. Not a limit anybody is expected to meet — it is there so a typed field
@@ -2344,6 +2413,27 @@ export class ManagedSession {
    */
   private midTurnAccepted = 0;
   private lastEventAt: number | null = null;
+  /**
+   * When the **agent** last said something, as distinct from when anything last
+   * happened here.
+   *
+   * ⚠ **The distinction is the whole of what {@link wedged} measures, and reading
+   * `lastEventAt` there was a defect.** Every write moves that one — `status`
+   * events, the daemon's own errors, and above all the *person's* messages, which
+   * `recordPrompt` appends through `safeAppend`. So somebody typing into a session
+   * that says *working* reset the silence clock on every message, and the one
+   * state this daemon cannot otherwise escape was kept alive by the person trying
+   * to escape it. Measured on the reporting machine's own store: the session that
+   * produced the bug report took three prompts (04:28:35, 04:32:16, 04:38:44)
+   * while its turn was open, each one a reset.
+   *
+   * Set only from {@link record} — the pump's loop and the idle drain, i.e. events
+   * that came out of the agent — and from the drain's early return for the
+   * `agent_log`/`other` it drops, because those are the agent speaking even when
+   * they are not worth logging. In memory, like `turn` itself: after a restart
+   * there is no live turn for it to be about.
+   */
+  private lastAgentEventAt: number | null = null;
 
   /**
    * A `/clear` that has been sent and not yet come back.
@@ -2991,6 +3081,20 @@ export class ManagedSession {
   }
 
   /**
+   * When the **agent** last said something. `null` until it has.
+   *
+   * Exported beside {@link lastActivityAt} rather than left private because the
+   * difference between the two is the whole of what {@link wedged} rests on, and
+   * a driver that can only observe the *outcome* of a clock cannot tell which
+   * clock produced it — the two differ by milliseconds in a test, so no choice of
+   * `now` discriminates them. The property is therefore asserted directly: a
+   * message from a person moves one and not the other.
+   */
+  get lastAgentActivityAt(): number | null {
+    return this.lastAgentEventAt;
+  }
+
+  /**
    * Whether the daemon may let this session's agent go and keep the conversation.
    *
    * **`status === "idle"` is doing almost all of the work here, and that is the
@@ -3129,6 +3233,79 @@ export class ManagedSession {
     if (this.agentSessionId === null) return false;
     if (this.resumeGivenUp !== null) return false;
     return now - (this.lastActivityAt ?? this.createdAt) >= idleMs;
+  }
+
+  /**
+   * Whether the daemon should stop waiting for a turn nothing has come out of.
+   *
+   * **The mirror image of {@link parkable}, and the two are deliberately not one
+   * predicate.** That one asks whether an agent may be let go while `status`
+   * reads `idle`; this one asks whether a `running` that nothing can clear should
+   * be ended. They share a clock — `lastActivityAt`, which every event moves —
+   * and nothing else: a session cannot satisfy both, since the first line of each
+   * is the other's opposite.
+   *
+   * `status === "running"` rather than `this.turn !== null`, and the difference is
+   * the whole safety of this. The derivation puts `blocked` **above** `running`, so
+   * a session parked on a permission or a question reads `blocked` however long
+   * nobody answers — and a person who walked away from an approval is the single
+   * most likely source of an hour's silence in this product. Reading the field
+   * directly would reap exactly them. `stopping`, `starting`, `parked` and every
+   * terminal state fall out the same way, each for its own reason and none of them
+   * needing a clause here.
+   *
+   * The three clauses that are not free:
+   *
+   * - `clearing || restarting` is the boundary rule {@link parkable} states as
+   *   "one process boundary at a time", and it is the same rule from the same
+   *   direction: both replace the agent under a session, and a turn ended in the
+   *   middle of one is a turn ended against a process that no longer exists.
+   * - `hasLiveBackgroundWork` is Q2.228 applied to the other threshold. claude
+   *   holds `session/prompt` open while it drives work it has spawned, so the
+   *   silence is real and the turn is not wedged. ⚠ It is exactly as narrow here
+   *   as it is there — claude only, shells and workflows and monitors only — and
+   *   the hour above is what stands for everything it cannot see.
+   * - `queuedPrompts` is **not** a clause, unlike in `parkable`, and the asymmetry
+   *   is the point: a queue is drained by `deliverQueued` from the pump's
+   *   `finally`, so ending the turn is what *delivers* it. Refusing here would
+   *   strand the very message the queue is holding.
+   *
+   * Takes `now` for `parkCandidates`' reason — the sweep and its driver see one
+   * instant — and `silenceMs` rather than reading the threshold, so `0` switching
+   * this off has exactly one home.
+   */
+  wedged(now: number, silenceMs: number): boolean {
+    if (silenceMs <= 0) return false;
+    if (this.status !== "running") return false;
+    if (this.clearing || this.restarting) return false;
+    if (this.hasLiveBackgroundWork) return false;
+    /*
+     * ⚠ **`lastAgentEventAt`, never `lastActivityAt`** — see that field. The one
+     * this could not use is moved by the *person's* messages, so typing into a
+     * session that says *working* reset the clock and the wedge outlived every
+     * attempt to escape it.
+     *
+     * `turnStartedAt` as the floor rather than `createdAt`, and it matters here in
+     * a way it does not in `parkable`. A turn always has one, and a turn whose
+     * agent has not spoken yet has no agent clock of its own — the field still
+     * holds the *previous* turn's last word, which is older. Taking the later of
+     * the two is what stops a fresh turn being reaped on a stale timestamp.
+     */
+    const quietSince = Math.max(this.lastAgentEventAt ?? 0, this.turnStartedAt ?? 0);
+    return now - quietSince >= silenceMs;
+  }
+
+  /**
+   * End a turn this daemon has given up waiting for, and say whether there was
+   * one.
+   *
+   * A delegate and nothing else: the decision is {@link wedged}, the mechanism is
+   * `Session.abandonTurn`, and what happens next is `pump`'s ordinary `finally`
+   * reached through the queue. `false` for a session with no agent — a wedged turn
+   * implies a live one, so this is the unreachable arm rather than a case.
+   */
+  abandonTurn(): boolean {
+    return this.session?.abandonTurn() ?? false;
   }
 
   /**
@@ -4239,7 +4416,7 @@ export class ManagedSession {
          * for the clause above rather than against this line: it is a floor under
          * the worst case, not a defence.
          */
-        this.lastEventAt = Date.now();
+        this.lastEventAt = this.lastAgentEventAt = Date.now();
         return;
       }
 
@@ -6150,7 +6327,7 @@ export class ManagedSession {
   }
 
   private record(event: SessionEvent): void {
-    this.lastEventAt = Date.now();
+    this.lastEventAt = this.lastAgentEventAt = Date.now();
     // While stopping, the generator's synthetic "session closed" error is
     // indistinguishable from a real one. Drop errors rather than report a
     // deliberate shutdown as a failure; the terminal status event says what
@@ -7027,6 +7204,18 @@ export class SessionRegistry {
    */
   private idleParkMs = IDLE_PARK_MS;
   /**
+   * How long a turn may say nothing before this daemon stops waiting for it.
+   *
+   * ⚠ **Env only, and unlike {@link idleParkMs} there is no stored override.**
+   * The machine settings screen owns the park threshold because releasing an idle
+   * agent is a trade the person using the machine makes every day — memory
+   * against ~1.3 s. This is not that: it is a backstop against an adapter that has
+   * stopped answering, the honest value for it is a property of the agents rather
+   * than of the machine, and a number somebody can lower from a phone is a number
+   * that can cut live turns short. {@link TURN_SILENCE_MS} carries the argument.
+   */
+  private turnSilenceMs = TURN_SILENCE_MS;
+  /**
    * See {@link CEILING_PARK_FLOOR_MS}. Injectable for the reason
    * `IDLE_PARK_SWEEP_MS` is: it is a policy about *when*, and a driver has to be
    * able to fake it — the offline cases build a session and reach the ceiling in
@@ -7169,6 +7358,7 @@ export class SessionRegistry {
     refillMs?: number;
     idleParkMs?: number;
     ceilingFloorMs?: number;
+    turnSilenceMs?: number;
   }): void {
     if (limits.live !== undefined) this.maxLiveSessions = Math.max(1, limits.live);
     // Not clamped to a floor the way the others are: `0` is the documented way to
@@ -7177,6 +7367,10 @@ export class SessionRegistry {
     // `0` is meaningful here too — it is what the drivers use to reach the
     // pre-floor behaviour deliberately — so this is clamped at zero, not at one.
     if (limits.ceilingFloorMs !== undefined) this.ceilingParkFloorMs = Math.max(0, limits.ceilingFloorMs);
+    // `0` is the documented way off here too, for `idleParkMs`' reason and with
+    // the sharper consequence: clamping to a floor would turn a typo into a daemon
+    // that ends every turn the instant it starts.
+    if (limits.turnSilenceMs !== undefined) this.turnSilenceMs = Math.max(0, limits.turnSilenceMs);
     if (limits.burst !== undefined) {
       this.createBurst = Math.max(1, limits.burst);
       // Raising the burst must not leave the bucket below the new ceiling for a
@@ -7215,6 +7409,49 @@ export class SessionRegistry {
    */
   get idleParkEnabled(): boolean {
     return this.effectiveIdleParkMs > 0;
+  }
+
+  /**
+   * Whether this daemon gives up on turns the agent never answers.
+   *
+   * Its own switch rather than a clause on {@link idleParkEnabled}, because they
+   * are two policies that happen to share a clock. Somebody who has switched
+   * parking off has said *keep my agents resident*; they have not said *keep a
+   * session claiming to be working for ever*, and reading one answer for both
+   * questions is how a switch comes to mean something nobody chose.
+   */
+  get turnSilenceEnabled(): boolean {
+    return this.turnSilenceMs > 0;
+  }
+
+  /**
+   * End every turn nothing has come out of for long enough, and say which.
+   *
+   * **Sequential and synchronous, unlike {@link parkIdleSessions}, and both halves
+   * of that follow from what this does.** Parking stops an agent — a
+   * `session/close`, a SIGTERM and a confirmed SIGKILL — so it has to be awaited
+   * and paced. This sends nothing anywhere: it pushes one event into a queue the
+   * turn's own generator is already parked on. There is no await to interleave
+   * with, so the list cannot go stale between building it and acting on it, which
+   * is the re-check that sweep needs and this one does not.
+   *
+   * ⚠ **`shuttingDown` is still a reason not to, for the reason parking has one.**
+   * A daemon on its way out is about to end every one of these anyway, and a
+   * `turn_end{abandoned}` written a moment before a `daemon_shutdown` would put a
+   * second, misleading ending in a transcript somebody reads later.
+   *
+   * Reports ids rather than a count, so the operator line names the sessions —
+   * this is the one thing about a wedged turn a person can act on, and "1 turn
+   * abandoned" is a sentence you cannot follow up.
+   */
+  abandonWedgedTurns(now = Date.now()): string[] {
+    if (this.turnSilenceMs <= 0 || this.shuttingDown) return [];
+    const abandoned: string[] = [];
+    for (const session of this.sessions.values()) {
+      if (!session.wedged(now, this.turnSilenceMs)) continue;
+      if (session.abandonTurn()) abandoned.push(session.id);
+    }
+    return abandoned;
   }
 
   /**

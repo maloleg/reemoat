@@ -10,7 +10,7 @@ import {
   type SessionExit,
   type SessionStore,
 } from "../src/events.js";
-import { SessionRegistry, autoResumable, revivableByPrompt, reduceAgentState, resumeBackoffMs, MAX_IDLE_RELEASE_MINUTES, SessionLimitError, stoppedWithBackgroundWork, clearedWithBackgroundWork } from "../src/registry.js";
+import { SessionRegistry, autoResumable, revivableByPrompt, reduceAgentState, resumeBackoffMs, MAX_IDLE_RELEASE_MINUTES, SessionLimitError, TURN_SILENCE_MS, stoppedWithBackgroundWork, clearedWithBackgroundWork } from "../src/registry.js";
 import {
   MAX_ASYNC_TASK_ID_CHARS,
   MAX_ASYNC_TASK_NAME_CHARS,
@@ -222,6 +222,28 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
 
   interface Rig {
     runtime: LocalRuntime;
+    /**
+     * Answer the oldest prompt `stallPrompt` made this rig sit on, and say
+     * whether there was one to answer.
+     *
+     * The turn-silence sweep ends a turn *locally* — nothing is sent to the agent
+     * and the request stays outstanding — so "the agent replies to a turn this
+     * daemon already gave up on" is a real state rather than a hypothetical, and
+     * it is the one that decides whether the ending is written twice. There is no
+     * other way to reach it: every other rig here answers immediately.
+     */
+    answerStalled: () => boolean;
+    /** How many prompts this rig is still sitting on. */
+    stalledCount: () => number;
+    /**
+     * Every method this rig has been sent, in order, notifications included.
+     *
+     * The only observable that can say what was **not** sent. `resumes`,
+     * `configSets` and `stops` each record one method, and `default:` answers a
+     * request and drops a notification without a word — so a rig that is asked to
+     * cancel a turn looks exactly like one that was not.
+     */
+    inbound: () => readonly string[];
     launches: () => number;
     resumes: () => { sessionId: string; cwd: string; mcpServers: unknown }[];
     fileIoAtResume: () => boolean[];
@@ -344,6 +366,11 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     const resumes: { sessionId: string; cwd: string; mcpServers: unknown }[] = [];
     const configSets: { id: string; value: unknown }[] = [];
     const stops: { sessionId: string; asyncTaskId: string }[] = [];
+    // Prompts this rig was told to sit on, each as the reply that would end it.
+    // See `answerStalled` on the returned handle.
+    const stalled: (() => void)[] = [];
+    // Every method this rig has been sent, in order. See the push site.
+    const inbound: string[] = [];
     let caps: Record<string, unknown> = {};
     /*
      * How to push into each agent, keyed by the conversation it holds.
@@ -401,6 +428,18 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
             if (line.trim().length === 0) continue;
             const message = JSON.parse(line) as Record<string, any>;
             const id = message["id"];
+            /*
+             * Every method, before the dispatch and including the ones that fall
+             * to `default:`.
+             *
+             * ⚠ **A notification leaves no other trace here.** `default:` answers
+             * only when there is an `id`, so a `session/cancel` — the exact thing
+             * the turn-silence sweep must never send — arrived, was dropped, and
+             * was invisible to every observable this rig had. The check that
+             * claimed "nothing was sent to the agent" was counting *unanswered
+             * prompts*, which is true however much traffic goes the other way.
+             */
+            inbound.push(String(message["method"] ?? ""));
             switch (message["method"]) {
               case acp.methods.agent.initialize:
                 caps = ((message["params"] as any)?.clientCapabilities ?? {}) as Record<string, unknown>;
@@ -502,7 +541,18 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
                 break;
               }
               case acp.methods.agent.session.prompt:
-                if (options.stallPrompt === true) break;
+                if (options.stallPrompt === true) {
+                  /*
+                   * Kept rather than dropped, so a driver can answer it *later*.
+                   * The turn-silence sweep closes a turn locally and leaves the
+                   * request outstanding on purpose, so "what happens when the
+                   * agent finally replies" is a real state of this daemon and not
+                   * a hypothetical — and it is unreachable without a rig that can
+                   * be made to reply on command.
+                   */
+                  stalled.push(() => send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } }));
+                  break;
+                }
                 send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } });
                 break;
               // Written out rather than left to `default`, which answers `{}` —
@@ -546,6 +596,17 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
 
     return {
       runtime: new ResumeRig(),
+      /**
+       * Answer the oldest prompt this rig was told to sit on, and say whether
+       * there was one.
+       */
+      answerStalled: (): boolean => {
+        const reply = stalled.shift();
+        reply?.();
+        return reply !== undefined;
+      },
+      stalledCount: () => stalled.length,
+      inbound: () => inbound,
       launches: () => launched,
       resumes: () => resumes,
       fileIoAtResume: () => fileIoAtResume,
@@ -1088,6 +1149,293 @@ process.stdout.write("\nputting agents back on interrupted sessions\n");
     // here because the label above used to claim the opposite.
     check("but a message does bring it back, which is the other half of that arm", autoResumable(quiet?.exit ?? null, quiet?.agentSessionId ?? null, "prompt"), true);
 
+    await own.shutdown();
+  }
+
+  /*
+   * ⭐ **A turn the agent never answers, and the only thing in this process that
+   * can end one.**
+   *
+   * The failure this closes was reported as a panel reading *working* hours after
+   * the agent had finished, and the mechanism is three facts that only bite
+   * together. `status` is derived, and `running` is `this.turn !== null` and
+   * nothing else. `this.turn` is cleared in exactly one place — `pump`'s `finally`
+   * — reached only when the turn's generator returns, which happens only on a
+   * `turn_end` or an `error`, both of which are produced only by the
+   * `session/prompt` request settling. And that request is the one RPC in
+   * `session.ts` fired with **no deadline**, deliberately, because a real turn may
+   * run for hours.
+   *
+   * So an adapter that stops answering pins a session at `running` for the life of
+   * the daemon. Everything a person could reach for is powerless: `POST /cancel`
+   * waits on `waitForTurnToSettle`, which polls the flag that same request clears;
+   * the idle sweep asks `parkable`, whose first line refuses anything that is not
+   * `idle`; the ceiling's eviction asks the same predicate. The session also holds
+   * one of `MAX_LIVE_SESSIONS` and its agent's ~397 MB for ever.
+   *
+   * Driven through the real registry with a rig that takes prompts and sits on
+   * them, for the reason the parking section above gives: the precondition is a
+   * *derived* status, and a fixture that sets one is a fixture asserting against
+   * the thing under test.
+   */
+  {
+    const rig = rigWith({ resume: true, stallPrompt: true });
+    const store = storeOf([
+      interruptedRow("s_wedged", "daemon_restarted", "a_wedged"),
+      interruptedRow("s_awake", "daemon_restarted", "a_awake"),
+    ]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+
+    const wedged = own.get("s_wedged");
+    const awake = own.get("s_awake");
+    const endsOf = (id: string) =>
+      (own.get(id)?.log.read(0, 1000, 1 << 20) ?? [])
+        .map((stored) => stored.event)
+        .filter((event) => event.type === "turn_end")
+        .map((event) => (event.type === "turn_end" ? event.stopReason : null));
+
+    const sent = await wedged?.prompt("say something");
+    await settle();
+    /*
+     * ⚠ **The clock is taken here rather than from `now`, and that is a real
+     * defect this section shipped with for an afternoon.** `now` is stamped when
+     * `daemoncheck.fixtures.ts` is first imported — module 1 of 23 — while
+     * `wedged` measures against the *real* `turnStartedAt`. So
+     * `abandonWedgedTurns(now + TURN_SILENCE_MS)` only fires while the eight modules
+     * ahead of this one have taken under 60 seconds, which is an undeclared
+     * wall-clock budget on a driver that has no other one. A slower runner, a cold
+     * `tmp`, or one more section inserted above would have turned it red — and the
+     * failure would have read as `abandonWedgedTurns` being broken, since the two
+     * floor rows above it stay green. Taken after the prompt, so the margin is the
+     * margin and nothing else can spend it.
+     */
+    const started = Date.now();
+    check("a prompt nobody answers leaves the session running", [sent?.kind, wedged?.status], ["accepted", "running"]);
+    check("and the rig really is sitting on it", rig.stalledCount(), 1);
+
+    /*
+     * The floor, and it is asserted before every "was given up on" below for the
+     * reason the park sweep's own floor is: a reaper that took everything would
+     * satisfy all of them. Two rows rather than one, because the interesting
+     * boundary is not *zero* — it is a turn that has been going a long time and
+     * is still inside the hour.
+     */
+    check("a turn that has just started is left alone", own.abandonWedgedTurns(started), []);
+    check("and so is one still inside the window", own.abandonWedgedTurns(started + 179 * 60_000), []);
+
+    /*
+     * ⚠ **Both sessions have now been quiet for the same hour, and only one of
+     * them is taken** — which is the whole of "nothing that is not running is a
+     * candidate", asserted as the sweep's *answer* rather than by asking the
+     * predicate. `s_awake` is idle at exactly the same age; a reaper keyed on
+     * silence alone rather than on a turn would return both.
+     */
+    const later = started + 181 * 60_000;
+    check("past it the daemon stops waiting, and only on the turn", own.abandonWedgedTurns(later), ["s_wedged"]);
+    check("the idle conversation beside it is untouched at the same age", [awake?.status, awake?.exit], ["idle", null]);
+
+    /*
+     * The ending goes through the queue the turn's generator is parked on, so
+     * `pump`'s `finally` — and everything downstream of it — lands a tick later.
+     * Asserting before this is asserting against the mechanism rather than the
+     * outcome, which is what the first run of this section did.
+     */
+    await settle();
+
+    /*
+     * What "gave up" means, stated as the facts a person would check — and the
+     * first two are the whole point of doing this locally rather than by stopping
+     * anything. The conversation is **usable**, not ended: no exit record, no
+     * `parked`, no `stopping`. That is the difference between this and the two
+     * verbs that already existed.
+     */
+    check("and the session is idle rather than ended", [wedged?.status, wedged?.exit], ["idle", null]);
+    check("the conversation is still there, with its agent", [own.get("s_wedged") !== undefined, wedged?.agentSessionId], [true, "a_wedged"]);
+    check("the turn is closed in the transcript, once, and says why", endsOf("s_wedged"), ["abandoned"]);
+    /*
+     * ⚠ **What the agent was sent, not what it failed to answer.** This read
+     * `stalledCount() === 1`, which says only that the outstanding prompt is still
+     * outstanding — true however much traffic goes the other way. Adding a
+     * `session/cancel` to `abandonTurn`, which is the third stopping verb Q2.42
+     * forbids and the whole reason this ends the turn locally, would have left
+     * every row in this section green: the rig dispatches on `method`, a
+     * notification has no `id`, and `default:` drops it without a word. So the
+     * property is asserted against the methods themselves, as a list rather than a
+     * count — `session/prompt` twice for the two turns, and nothing else after the
+     * handshake.
+     */
+    check(
+      "and nothing was sent to the agent to make it happen",
+      rig.inbound().filter((method) => method.startsWith("session/") && method !== "session/prompt"),
+      ["session/resume", "session/resume"],
+    );
+    check("a turn already given up on is not given up on twice", own.abandonWedgedTurns(later), []);
+
+    /*
+     * ⚠ **The half that would have made this a worse bug than the one it fixes.**
+     *
+     * `turnActive` is `Session`'s own guard against two prompts in flight, and it
+     * is cleared **only** inside the outstanding request's callbacks. A turn
+     * closed without those running would read as idle, open the composer, accept
+     * the next message — and then throw *"a prompt is already in flight for this
+     * session"* into the transcript, for every message, for the rest of the
+     * session. `abandonTurn` clears it itself; this is the row that says so.
+     */
+    const again = await wedged?.prompt("are you there");
+    await settle();
+    check("and the next message really does start a turn", [again?.kind, wedged?.status], ["accepted", "running"]);
+    check("rather than being refused as one already in flight", rig.stalledCount(), 2);
+    const errors = (wedged?.log.read(0, 1000, 1 << 20) ?? [])
+      .map((stored) => stored.event)
+      .filter((event) => event.type === "error");
+    check("with nothing recorded about a prompt in flight", errors.length, 0);
+
+    /*
+     * ⚠ **And the half that would have cut a live turn short.** The abandoned
+     * request is still outstanding and may settle at any time — here, an hour
+     * later, with a second turn already running. Its `.then` is fenced on the
+     * epoch it was fired under, so it ends nothing: not the turn it belonged to,
+     * which is already closed and may be written only once, and above all not the
+     * turn that is running now.
+     */
+    check("the agent's late answer is accepted by the rig", rig.answerStalled(), true);
+    await settle();
+    check("but it does not end the turn it no longer belongs to", endsOf("s_wedged"), ["abandoned"]);
+    check("and the live turn is still live", wedged?.status, "running");
+
+    // And the ordinary ending still works afterwards, which is what says the
+    // epoch fence closed one door rather than the corridor.
+    check("the second turn's own answer is the rig's", rig.answerStalled(), true);
+    await settle();
+    check("and it ends the turn it belongs to", endsOf("s_wedged"), ["abandoned", "end_turn"]);
+    check("leaving the session idle and ordinary", wedged?.status, "idle");
+
+    await own.shutdown();
+  }
+
+  /*
+   * ⭐ **A message typed into a stuck session does not hide the wedge — and the
+   * clock this is about was the wrong one for an afternoon.**
+   *
+   * `wedged` measured `lastActivityAt`, which every write moves, the person's own
+   * messages included: `recordPrompt` appends through `safeAppend`, which stamps
+   * it. So somebody typing into a session that says *working* reset the silence
+   * clock on every message, and the one state this daemon cannot otherwise escape
+   * was kept alive by the person trying to escape it. It is not hypothetical —
+   * the session that produced the bug report took three prompts inside its open
+   * turn (04:28:35, 04:32:16, 04:38:44), each one a reset.
+   *
+   * Driven with a real mid-turn send rather than by calling the predicate,
+   * because the whole point is *which field the append moves*, and a fixture that
+   * sets a field is a fixture asserting against the thing under test.
+   *
+   * The second half is what the wedge predicate deliberately does **not** refuse
+   * on, stated as an outcome: `parkable` bails on a non-empty queue and this one
+   * does not, because ending the turn is what runs `deliverQueued` from `pump`'s
+   * `finally`. Refusing would strand the very message the queue is holding.
+   */
+  {
+    const rig = rigWith({ resume: true, stallPrompt: true });
+    const store = storeOf([interruptedRow("s_poked", "daemon_restarted", "a_poked")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 25));
+
+    const poked = own.get("s_poked");
+    await poked?.prompt("go and think about it");
+    /*
+     * ⚠ **The one declared wall-clock budget in this section: 200ms either side of
+     * `started`, and both halves are load-bearing.** The outcome row below fires
+     * only if `turnStartedAt` sits measurably *before* `started`, and fails to
+     * fire under the wrong clock only if the person's append sits measurably
+     * *after* it. Written as two explicit waits because the first attempt used
+     * `settle()` on one side and nothing on the other: `Date.now()` has
+     * millisecond resolution and the statements between `started` and the send
+     * take less than one, so the two clocks landed on the same number and the row
+     * passed with either of them. Nothing else in this block depends on how long
+     * anything took — this is a 400ms budget with a 200ms margin, not the
+     * invisible sixty seconds the section above this one used to carry.
+     */
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const started = Date.now();
+    check("a turn is open and nothing has answered it", [poked?.status, rig.stalledCount()], ["running", 1]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    /*
+     * The message, and it is asserted as *recorded* rather than merely accepted:
+     * a send that never reached the log could not have moved any clock, which
+     * would make the row below pass for the wrong reason.
+     */
+    const agentClockBefore = poked?.lastAgentActivityAt ?? 0;
+    const poke = await poked?.sendMidTurn("are you working?");
+    await settle();
+    check(
+      "a message sent mid-turn is queued and written down",
+      [poke?.kind, poke?.kind === "queued" && poke.seq > 0],
+      ["queued", true],
+    );
+    check("and the agent was not sent it", rig.stalledCount(), 1);
+
+    /*
+     * ⚠ **The mechanism first, and it needs no clock at all.** One field moved and
+     * the other did not — that is the whole property, and it is the half a sweep
+     * cannot show: the two clocks are milliseconds apart in a driver, so a row
+     * that only watched `abandonWedgedTurns`'s answer passed identically with the
+     * wrong field restored. Found exactly that way.
+     */
+    check(
+      "the person's message moves the session's clock but not the agent's",
+      [(poked?.lastActivityAt ?? 0) > (poked?.lastAgentActivityAt ?? 0), poked?.lastAgentActivityAt ?? 0],
+      [true, agentClockBefore],
+    );
+    /*
+     * Then the outcome, at exactly the threshold rather than a minute past it —
+     * which is what makes it discriminate. Measuring the agent's clock the gap is
+     * `silence + 200ms` and the sweep fires; measuring the session's it is
+     * `silence - 200ms` and it does not. A minute of slack, which is what this
+     * row carried at first, swallows the difference and the check means nothing.
+     */
+    check(
+      "so the sweep still sees the silence it is measuring",
+      own.abandonWedgedTurns(started + TURN_SILENCE_MS),
+      ["s_poked"],
+    );
+    await settle();
+
+    /*
+     * And the queue drains into a turn of its own rather than being stranded,
+     * which is `pump`'s `finally` reached the ordinary way. The rig is sitting on
+     * two prompts now: the abandoned one, still outstanding at the agent, and this.
+     */
+    check("and the message it was holding is delivered rather than stranded", rig.stalledCount(), 2);
+    check("as a turn of its own", poked?.status, "running");
+
+    await own.shutdown();
+  }
+
+  /*
+   * Zero switches it off, which is the documented way and therefore the one that
+   * has to be pinned. It is a separate registry because `setSessionLimits` is
+   * per-registry, and a separate section because what it asserts is the *absence*
+   * of the sweep rather than another of its refusals.
+   */
+  {
+    const rig = rigWith({ resume: true, stallPrompt: true });
+    const store = storeOf([interruptedRow("s_forever", "daemon_restarted", "a_forever")]);
+    const own = new SessionRegistry(new MemoryEventStore(), store, undefined, rig.runtime);
+    own.setSessionLimits({ turnSilenceMs: 0 });
+    own.restore({ reapOrphans: false });
+    await own.autoResume({ ...options, concurrency: 1 });
+    const forever = own.get("s_forever");
+    await forever?.prompt("say something");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    check("with the sweep off the switch says so", own.turnSilenceEnabled, false);
+    check("and a wedged turn stays wedged, however long", own.abandonWedgedTurns(now + 365 * 24 * 60 * 60_000), []);
+    check("which is the old behaviour, kept reachable on purpose", forever?.status, "running");
     await own.shutdown();
   }
 

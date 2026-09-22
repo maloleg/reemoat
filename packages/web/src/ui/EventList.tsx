@@ -469,8 +469,16 @@ export function EventList({
      * `ASK_CLEARANCE - 8` — the card frame's own `pb-2` is the other 8 — which is
      * 12px of air rather than a band.
      */
+    /*
+     * `sel-root` is one property in `index.css`, and the space it owns is the
+     * space **between** messages — the margin between two rows, and the empty
+     * column beside a right-aligned bubble. No message can own that, because no
+     * message is drawn in it. Each markdown body and each bubble carries its own
+     * for the text inside them; this one is the only element above all of them
+     * that is still a plain block, which is what the property needs.
+     */
     <div
-      className={`${COLUMN} px-4 pt-2`}
+      className={`sel-root ${COLUMN} px-4 pt-2`}
       style={{ paddingBottom: Math.max(TRANSCRIPT_FOOT_PX, askHeight + ASK_CLEARANCE) }}
     >
       {/*
@@ -1259,8 +1267,16 @@ function WaitingFoot({
          box and reaches 32px from this one — and growing symmetrically would put
          this target 12px into a `space-y-1.5` gap and onto the card above, which
          is itself a disclosure somebody aims at. The box stays `h-5`, so the row
-         is the same height whether or not a task is outstanding. */
-      className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint after:absolute after:inset-x-0 after:top-0 after:-bottom-6 after:content-[''] hover:bg-raised hover:text-fg"
+         is the same height whether or not a task is outstanding.
+
+         ⚠ **And it is a thumb's 24px, which is why every class carries
+         `[@media(pointer:coarse)]:`.** A pad extends `:hover` exactly as far as
+         it extends hit-testing, and this row's `hover:bg-raised hover:text-fg`
+         was lighting from 24px *below* itself — a caption in the transcript
+         answering a pointer that was nowhere near it. `bits.tsx`'s top docblock
+         has the mechanism; this is the widest of the leaks it names, because
+         `h-5 w-full` is the one shape that driver's square sweep cannot see. */
+      className="tap relative -mx-1 flex h-5 w-full items-center gap-2 rounded-md px-1 text-left text-2xs text-faint [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-x-0 [@media(pointer:coarse)]:after:top-0 [@media(pointer:coarse)]:after:-bottom-6 [@media(pointer:coarse)]:after:content-[''] hover:bg-raised hover:text-fg"
     >
       {/* Three marks for three claims, and the third is the new one. `Dot
           tone="off"` is the hollow **static** dot, which is what this app already
@@ -1864,7 +1880,11 @@ function renderEvent(node: EventNode, files: FileAccess | null): ReactNode {
  * `1 failed` is on the collapsed row already, which is the same "the number survives
  * collapse" idiom as a folder's waiting count and a card's step badge. A bare
  * `ToolCall` still opens itself on failure, and the difference is exactly that — it
- * has no badge to say so.
+ * has no count of its own to say so. ⚠ **That clause read "no badge" until the
+ * count stopped being one**: the run's own `1 failed` is a bare `text-muted` run
+ * of text now (the fill was `UserBubble`'s, and it read as one), and the property
+ * this paragraph rests on is that the collapsed row *says* how many — never what
+ * shape the saying takes.
  *
  * The re-measure stays an **effect on `open`** rather than moving into the click
  * handler like `ToolCall`'s, and the reason it used to give is gone: the height no
@@ -1945,16 +1965,31 @@ function GroupRow({ node, files }: { node: GroupNode; files: FileAccess | null }
             This one went rather than the others because of what its own note
             already said about it: it says you were asked and you answered, "which
             is not a thing that needs anybody's attention again". `N failed` and the
-            counts are unresolved facts; this is a settled one. "An approval cannot
+            counts are unresolved facts; this is a settled one — and the ranking
+            survives the badge that used to carry it, `text-muted` against this
+            line's `text-faint`. "An approval cannot
             be hidden" is untouched — that property rests on `tail.ts` refusing to
             fold a *refusal* at all, which is the asymmetry that carries it, and the
             count is still on screen the moment the run is open. */}
+        {/* ⚠ **Not a `Badge`, and that was the last thing on this row still
+            arguing with the paragraph below it.** `Badge`'s plain tone is
+            `bg-raised` — the token `UserBubble` paints, at the same strength, on
+            the same `bg-surface` pane — so a count on a machinery row was drawn
+            in the fill reserved for the message somebody wrote, three inches
+            under one. Reported as *it blends with the message*, which is
+            literally what it was: the bubble's own rectangle, shrunk.
+            `ToolCall`'s frame note below already says machinery is unfilled and
+            that what a failure keeps is "two signals, neither of them a
+            rectangle"; this was the rectangle, and it survived the pass that took
+            the border off this row and the semibold off its title.
+
+            `text-muted` rather than the row's own `text-fg/85`, because the ask
+            was for something quieter — and rather than `text-faint`, which is
+            `N approved`'s tone one fold down and is spent on a *settled* fact.
+            The ranking Q3.106 records is the thing that may not invert: a
+            failure outranks an approval, and it still does. */}
         {node.failed > 0 && (
-          <span className="shrink-0">
-            <Badge>
-              {node.failed} failed
-            </Badge>
-          </span>
+          <span className="shrink-0 text-2xs text-muted">{node.failed} failed</span>
         )}
         {/* What the run being open used to say, now that it never is. The hollow
             pulse rather than `WorkingMark`'s blink, deliberately: the loud one is
@@ -2642,13 +2677,22 @@ function DownloadButton({ label, run }: { label: string; run: () => Promise<void
         setBusy(true);
         void run().finally(() => setBusy(false));
       }}
-      /* 15px of ink, 44px of target. This is the smallest control in the app and it
-         sits 6px from `ChangeRow`'s expander — the adjacency `ICON_BUTTON_SIZE.sm`
-         names, and the one where the mis-tap *does* something rather than merely
-         opening a card. `TAP_GROW_Y` is vertical only for its documented reason;
-         `-right-2` is added because this is the last child of its row, so growing
-         outward on that side lands in the row's own padding and overlaps nothing. */
-      className={`tap relative shrink-0 rounded p-0.5 text-faint after:-right-2 hover:text-fg disabled:opacity-50 ${TAP_GROW_Y}`}
+      /* 15px of ink, 44px of target **under a finger**. This is the smallest control
+         in the app and it sits 6px from `ChangeRow`'s expander — the adjacency
+         `ICON_BUTTON_SIZE.sm` names, and the one where the mis-tap *does* something
+         rather than merely opening a card. `TAP_GROW_Y` is vertical only for its
+         documented reason; `-right-2` is added because this is the last child of its
+         row, so growing outward on that side lands in the row's own padding and
+         overlaps nothing.
+
+         ⚠ **Both are `[@media(pointer:coarse)]:`, so a mouse gets the 15px box.**
+         That is the trade `bits.tsx` argues at the top: a pad extends `:hover` as
+         far as it extends hit-testing, and there is no CSS that separates them.
+         What it costs here is bounded by what the pad was over — nothing. The
+         growth was vertical plus `-right-2`, and every direction it reached is row
+         padding or an unclickable container, so the adjacency this note is about is
+         the same 6px before and after. */
+      className={`tap relative shrink-0 rounded p-0.5 text-faint [@media(pointer:coarse)]:after:-right-2 hover:text-fg disabled:opacity-50 ${TAP_GROW_Y}`}
     >
       <Icon as={busy ? Loader : Download} size={11} className={busy ? "animate-spin" : ""} />
     </button>

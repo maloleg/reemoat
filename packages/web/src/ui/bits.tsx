@@ -86,6 +86,24 @@ import { toast } from "./Toast";
  * height is paid for out of the transcript, and because `gap-1.5` neighbours mean
  * a symmetric inset would put one control's target on another's face. Both are
  * 44px; only one of them reflows.
+ *
+ * ⚠ **Both are now `[@media(pointer:coarse)]:`, and the second one had to become
+ * so because a grown target grows *hover* with it.** A generated box is rendered
+ * as a child of its originating element, so `:hover` matches the element while
+ * the pointer is anywhere in the pad — hit-testing reach and hover reach are one
+ * rectangle by construction, and no CSS separates them. Reported off the ✕ in the
+ * background-tasks head, where `sm`'s 10px pad fills a `min-h-11` band: the
+ * pointer entered the row and the glyph lit up 10px before it was reached, faded
+ * in over `.tap`'s 120ms so that it read as *already* highlighted rather than as
+ * a mis-aim. The old docblocks priced this growth as costing "no layout anywhere"
+ * and stopped there; its hover cost was written down nowhere in this repository.
+ *
+ * What makes the repair free rather than a trade is that the two needs never
+ * coexist: Tailwind wraps every `hover:` utility in `@media (hover: hover)`, so
+ * the leak exists only where a mouse does, and the pad is only ever needed where
+ * a thumb does. A fine pointer now gets exactly the ink — 24px for `sm`, which is
+ * still above WCAG 2.5.8's 24×24 minimum — and a hover that starts at the edge of
+ * what is drawn. A coarse pointer is untouched at 44px.
  */
 
 /**
@@ -107,9 +125,17 @@ import { toast } from "./Toast";
  * Vertical only, and that is the whole reason it is not `-inset-2.5`: these sit
  * `gap-1.5` apart, so a symmetric inset would put one control's target over its
  * neighbour's *face* — and the neighbour changes the model.
+ *
+ * ⚠ **Every class here carries `[@media(pointer:coarse)]:`, and dropping the
+ * prefix from any one of them puts the hover leak back.** The argument is in this
+ * file's own top docblock: the pad and the hover ground are one rectangle, so the
+ * pad may only exist where hover does not. It is written out five times rather
+ * than composed from a constant because Tailwind scans source for whole class
+ * names — a prefix built by interpolation emits nothing at all, silently, and the
+ * target simply stops existing on a phone.
  */
 export const TAP_GROW_Y =
-  "after:absolute after:inset-x-0 after:-top-1 after:-bottom-2 after:content-['']";
+  "[@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:inset-x-0 [@media(pointer:coarse)]:after:-top-1 [@media(pointer:coarse)]:after:-bottom-2 [@media(pointer:coarse)]:after:content-['']";
 
 /**
  * The conversation's own column: centred, with room either side.
@@ -1968,8 +1994,15 @@ export const SHEET_SCROLL =
 export const POPOVER = "rounded-lg border border-edge bg-surface p-1.5 shadow-lg";
 
 /**
- * Three sizes, and **every one of them reaches 44px**. That is the property this
- * table now has and did not.
+ * Three sizes, and **every one of them reaches 44px under a finger**. That is the
+ * property this table now has and did not.
+ *
+ * ⚠ *Under a finger* is the half of that sentence this table did not use to have
+ * to say. `sm` and `nav` grow with a pseudo-element and `chip` with
+ * {@link TAP_GROW_Y}, and all three are `[@media(pointer:coarse)]:` now, because a
+ * pad that extends hit-testing extends `:hover` with it and there is no CSS that
+ * separates the two. A mouse gets the ink and nothing more; the top of this file
+ * carries the measurement and the reason it costs nothing.
  *
  * They get there by three different mechanisms because the neighbours differ, and
  * the argument for which is right where is in the file's own docblock at the top
@@ -2006,8 +2039,16 @@ const ICON_BUTTON_SIZE = {
    * a positioned pseudo-element it costs no layout anywhere, so nothing reflows
    * and the alternative (a coarse-pointer size bump) does not have to be right
    * in three different row densities.
+   *
+   * ⚠ **The pad is a thumb's, and this entry is where that was found out.** It
+   * was unconditional, and the ✕ in the background-tasks head sits in a
+   * `min-h-11` band where 24px of ink centred leaves exactly 10px above and
+   * below — so the pad filled the head's whole height and the glyph lit while the
+   * pointer was still on the title beside it. `[@media(pointer:coarse)]:` is what
+   * keeps the 44px for the thumb it was measured for and gives a mouse the 24px
+   * it can actually aim at. The top of this file has the mechanism.
    */
-  sm: "relative h-6 w-6 after:absolute after:-inset-2.5 after:content-['']",
+  sm: "relative h-6 w-6 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-2.5 [@media(pointer:coarse)]:after:content-['']",
   /**
    * 32px of ink, 44px of target — the whole of the composer's control row.
    *
@@ -2052,7 +2093,7 @@ const ICON_BUTTON_SIZE = {
    * ⚠ **One per row edge.** Two of these adjacent at zero gap overlap by 12px of
    * invisible target, which is a mis-tap with nothing on screen explaining it.
    */
-  nav: "relative h-8 w-8 after:absolute after:-inset-1.5 after:content-['']",
+  nav: "relative h-8 w-8 [@media(pointer:coarse)]:after:absolute [@media(pointer:coarse)]:after:-inset-1.5 [@media(pointer:coarse)]:after:content-['']",
   /**
    * 44px of box — the platform tap minimum reached the plain way.
    *

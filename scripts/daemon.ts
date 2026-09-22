@@ -32,6 +32,7 @@ import {
   SESSION_CREATE_BURST,
   SESSION_CREATE_REFILL_MS,
   SessionRegistry,
+  TURN_SILENCE_MS,
   type WorktreePolicy,
 } from "../src/registry.js";
 import { RelayTunnel, announcedAgentClis } from "../src/relay/tunnel.js";
@@ -627,6 +628,19 @@ registry.setSessionLimits({
    */
   idleParkMs:
     boundedInt(process.env["REEMOAT_IDLE_PARK_MINUTES"], IDLE_PARK_MS / 60_000) * 60_000,
+  /*
+   * And the other threshold on the same clock: how long a turn may say nothing
+   * before this daemon stops waiting for it.
+   *
+   * Minutes on the outside for the reason above, and `0` the only way off for the
+   * reason above — sharper here, because what a typo would switch off is the only
+   * thing that can clear a `status: "running"` nothing else in the process can
+   * reach. `TURN_SILENCE_MS` carries why it is three hours, measured against a
+   * real turn on the machine that reported the bug, and why it is not derived
+   * from the park threshold.
+   */
+  turnSilenceMs:
+    boundedInt(process.env["REEMOAT_TURN_SILENCE_MINUTES"], TURN_SILENCE_MS / 60_000) * 60_000,
 });
 /*
  * And what somebody set on the settings screen, which **overrides** the line
@@ -664,6 +678,18 @@ const idleParking = IdleParking.start({
   onParked: (ids) => {
     console.log(
       `parked ${ids.length} idle session(s), agent(s) released: ${ids.join(", ")}`,
+    );
+  },
+  /*
+   * The second sweep on the same clock, with its own switch for the reason
+   * `turnSilenceEnabled` states: switching parking off is not a request to leave
+   * a session claiming to be working for ever.
+   */
+  reap: () => registry.abandonWedgedTurns(),
+  reapEnabled: () => registry.turnSilenceEnabled,
+  onAbandoned: (ids) => {
+    console.log(
+      `gave up on ${ids.length} turn(s) the agent never answered: ${ids.join(", ")}`,
     );
   },
 });

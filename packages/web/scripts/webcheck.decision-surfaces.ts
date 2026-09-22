@@ -101,6 +101,14 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
   ];
   // The documented escape, spelled once: `sm` keeps the desktop density and the
   // media query puts the platform minimum back wherever there is a finger.
+  //
+  // ⚠ **`[@media(pointer:coarse)]:` is now the escape for *both* ways to reach
+  // 44px rather than for this one.** `BUTTON_SIZE` grows its box behind it and
+  // `ICON_BUTTON_SIZE` grows its pad behind it, for two different reasons that
+  // arrive at the same prefix: a taller box costs layout a mouse does not need,
+  // and a wider pad costs `:hover` a mouse *does* notice. So this pattern stays
+  // anchored on `min-h-11` — the box half — and the pad half is asserted where
+  // the size table is read, beside `NAMES_ITS_44`.
   const COARSE_FLOOR = /pointer:coarse\)\]:min-h-11/;
 
   const shortPlugin: string[] = [];
@@ -1071,11 +1079,71 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * 10px would not, and `lg` simply is 44px. A size that reaches the floor some
    * fifth way has to say so here, which is the point: the assertion is that the
    * table *states* how, not that it happens to.
+   *
+   * ⚠ **Three of the four are now "under a finger", and the pattern says so.**
+   * The three that grow do it behind `[@media(pointer:coarse)]:`; only `lg`'s
+   * `h-11` is 44px on every pointer, because it is real box rather than pad.
    */
-  const NAMES_ITS_44 = /after:-inset-2\.5|after:-inset-1\.5|\$\{TAP_GROW_Y\}|\bh-11\b/;
+  const COARSE = String.raw`\[@media\(pointer:coarse\)\]:`;
+  const NAMES_ITS_44 = new RegExp(
+    `${COARSE}after:-inset-2\\.5|${COARSE}after:-inset-1\\.5|\\$\\{TAP_GROW_Y\\}|\\bh-11\\b`,
+  );
   check(
-    "and every size a caller can name says how it reaches 44px",
+    "and every size a caller can name says how it reaches 44px under a finger",
     sizes.filter(([, classes]) => !NAMES_ITS_44.test(classes)).map(([name]) => name),
+    [],
+  );
+  /*
+   * ⭐ **And the two that grow say *where* — which is the half this driver was
+   * green over while it was false.**
+   *
+   * The pad used to be unconditional, and a pad that extends hit-testing extends
+   * `:hover` with it: a generated box is a child box of its originating element,
+   * so `:hover` matches while the pointer is anywhere in the 44px rectangle and
+   * the 24px of ink lights up 10px early. Reported off the ✕ in the
+   * background-tasks head. `[@media(pointer:coarse)]:` is the repair, and it is
+   * free because Tailwind wraps every `hover:` utility in `@media (hover: hover)`
+   * — the pad is wanted exactly where the leak is not.
+   *
+   * ⚠ **A substring match would not have noticed the repair being undone.**
+   * `after:-inset-2.5` is still a substring of the gated spelling, so the pattern
+   * above is anchored on the prefix rather than on the inset, and the same
+   * anchoring is what `GROWS_TO_44` carries for the hand-rolled sweep. An
+   * assertion that stays green through the change it is about is this
+   * repository's own named failure (Q5.114).
+   */
+  const UNGATED_PAD = /(?<!\]:)after:(?:absolute|-inset-|-top-|-bottom-|inset-x-|top-|content-)/;
+  check(
+    "and neither of them grows on a pointer that hovers",
+    sizes.filter(([, classes]) => UNGATED_PAD.test(classes)).map(([name]) => name),
+    [],
+  );
+  /*
+   * `TAP_GROW_Y` is the third mechanism and `chip` reaches it by name, so the
+   * sweep above reads `${TAP_GROW_Y}` and never the five classes behind it. Five
+   * call sites outside this table spend the same constant, which is what makes one
+   * ungated class in it five leaks rather than one.
+   *
+   * ⚠ **Keyed on the gate itself and not on the shape of one.** This tested
+   * `!token.includes("]:after:")` for one release-less afternoon, and that is
+   * satisfied by *any* arbitrary variant: respelling the media query
+   * `[@media(pointer:fine)]:` — the exact inversion of the property this check is
+   * named for — left every assertion here green while the pad stopped existing
+   * under a thumb, on the composer's Send and Stop, the config bar's chips and
+   * its drag handle, the sheet's grab bar and the transcript's download button.
+   * Measured by mutating the constant and re-running this driver's own logic. A
+   * plain variant (`lg:`, `hover:`) was caught, which is what made the hole look
+   * closed. So the literal `COARSE` above is the one spelling of the gate, and it
+   * is spent by both halves of this section.
+   */
+  const growAt = bitsCode.indexOf("export const TAP_GROW_Y");
+  const growValue = bitsCode.slice(growAt, bitsCode.indexOf(";", growAt));
+  check("the shared vertical grow was found", growValue.includes("after:"), true);
+  check(
+    "and every class in it is gated on a coarse pointer too",
+    growValue
+      .split(/\s+/)
+      .filter((token) => token.includes("after:") && !token.includes("[@media(pointer:coarse)]:after:")),
     [],
   );
   /*
@@ -1235,7 +1303,7 @@ process.stdout.write("\nthe decision surfaces, at the platform tap minimum\n");
    * counting zero of them.
    */
   const SQUARE = /\bh-(\d+)\b[^"`]*?\bw-\1\b/;
-  const GROWS_TO_44 = /after:-inset-2\.5|TAP_GROW_Y|min-h-11/;
+  const GROWS_TO_44 = /\[@media\(pointer:coarse\)\]:after:-inset-2\.5|TAP_GROW_Y|min-h-11/;
   /*
    * ⚠ **This sweep found one control the first time it was run, and it has since
    * been fixed — so what stands here is the sweep and not a list.**

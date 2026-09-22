@@ -138,4 +138,6 @@ export const {
 } = await import(
   "../src/ui/composing.js"
 );
+export const { hugWidth } = await import("../src/ui/hug.js");
+
 export type Stream = InstanceType<typeof SessionStream>;

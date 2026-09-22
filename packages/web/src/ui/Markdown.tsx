@@ -7,7 +7,7 @@ import { Icon, LINK } from "./bits";
 import { copyText } from "./clipboard";
 import { useFileAccess } from "./files";
 import { openableHref } from "./links";
-import { PAREN_LIST, remarkListDelimiter } from "./mdlist";
+import { PAREN_LIST, remarkHardBreaks, remarkListDelimiter, remarkListItemBlocks } from "./mdlist";
 
 /**
  * Agent output, rendered as what it is.
@@ -166,6 +166,29 @@ function useSettledText(text: string): string {
 const REMARK_PLUGINS: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"] = [
   remarkGfm,
   remarkListDelimiter,
+  remarkListItemBlocks,
+];
+
+/**
+ * The same list plus the one plugin an agent may not have.
+ *
+ * A person types a message in a box and presses Enter for a new line; they are
+ * not writing CommonMark, where a single newline is a *soft* break and collapses
+ * to a space. An agent **is** writing CommonMark and is entitled to it, so this
+ * is the only difference between the two tones and it is a parse-time one.
+ * {@link remarkHardBreaks} carries the measurement and the reason it is a `break`
+ * node rather than a `white-space` rule.
+ *
+ * Hoisted for {@link REMARK_PLUGINS}'s reason, restated because it is the trap
+ * this pair is most likely to fall into next: two arrays built at a call site are
+ * two fresh identities on every render, and {@link MarkdownBody}'s memo — the
+ * whole reason a run in flight is affordable — would never hit again.
+ */
+const USER_REMARK_PLUGINS: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"] = [
+  remarkGfm,
+  remarkListDelimiter,
+  remarkListItemBlocks,
+  remarkHardBreaks,
 ];
 
 /**
@@ -298,13 +321,28 @@ const COMPONENTS: Parameters<typeof ReactMarkdown>[0]["components"] = {
 const MarkdownBody = memo(function MarkdownBody({
   text,
   body,
+  plugins,
 }: {
   text: string;
   body: string;
+  /**
+   * One of the two module-scope arrays above, never a fresh one. Passed rather
+   * than chosen here so this component stays ignorant of tone — `body` is
+   * already the only other thing tone decides.
+   */
+  plugins: Parameters<typeof ReactMarkdown>[0]["remarkPlugins"];
 }): ReactNode {
   return (
-    <div className={`text-sm wrap-anywhere ${body}`}>
-      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={COMPONENTS}>
+    /*
+     * `sel-root` is one property in `index.css` and the reason it is *here* is
+     * that this is the only element every piece of markdown in the app passes
+     * through. It makes this div a WebKit selection root, which is what stops the
+     * engine painting the empty half of a short line and the margin between two
+     * paragraphs. It cannot live one level up: a flex container between the root
+     * and the text puts the fill back, and agent prose is drawn inside several.
+     */
+    <div className={`sel-root text-sm wrap-anywhere ${body}`}>
+      <ReactMarkdown remarkPlugins={plugins} components={COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>
@@ -324,7 +362,18 @@ export const Markdown = memo(function Markdown({
   // only thing marking a user message apart, and accent-on-accent inside a filled
   // bubble is close to unreadable.
   const body = tone === "dim" ? "text-muted" : "text-fg";
-  return <MarkdownBody text={useSettledText(text)} body={body} />;
+  /*
+   * The one place tone reaches the parse. Everything else tone decides is a
+   * class; this is a different *reading* of the same string, and it is the
+   * person's own message that gets it — see {@link USER_REMARK_PLUGINS}.
+   */
+  return (
+    <MarkdownBody
+      text={useSettledText(text)}
+      body={body}
+      plugins={tone === "user" ? USER_REMARK_PLUGINS : REMARK_PLUGINS}
+    />
+  );
 });
 
 /**

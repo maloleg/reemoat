@@ -1752,3 +1752,67 @@ ol.md-paren > li::marker {
     transition-duration: 0.01ms !important;
   }
 }
+
+/*
+ * ⚠ **Only the text is selected, and one property is the whole of it.**
+ *
+ * WebKit paints *selection gaps*: the run from the end of a selected line to the
+ * block's content edge, and the vertical space between two selected blocks. So a
+ * drag through a conversation painted one solid rectangle — the empty half of
+ * every short line, the margin between paragraphs, and the whole blank column
+ * beside a right-aligned bubble. Reported four times. Blink dropped gap painting
+ * with LayoutNG and never had it, which is why this reads correct in a browser
+ * and wrong in the app `packages/native` ships.
+ *
+ * A block WebKit treats as a **selection root** paints none of them, and
+ * `RenderBlock::isSelectionRoot` answers yes to a handful of unrelated things —
+ * among them any transformed block, and any block whose `column-span` is `all`.
+ *
+ * ⚠ **`column-span` rather than a transform, and the difference is measured in
+ * another engine.** Both make the root, and in WebKit the two are identical: the
+ * same band profile over a page carrying every markdown shape, and an unselected
+ * page byte-identical to no rule at all. But a transform also makes a **stacking
+ * context**, and a `td` in one composites its `border-edge/60` against a
+ * different backdrop — one 1px row under a markdown table's header moved
+ * `#E6E4E0` → `#ECEAE7` in Chromium 153. `column-span: all` makes no stacking
+ * context and no containing block, and outside a multi-column container it lays
+ * nothing out differently: Chromium is byte-identical under it, idle *and*
+ * selected, and so is the copied string. Neither trigger is specified behaviour;
+ * this one costs nothing when it is ignored, which is the whole argument for
+ * preferring it.
+ *
+ * ⚠ **A flex container between the root and the text puts the fill back**, which
+ * is why three elements name this and not one. Measured against controls on one
+ * DOM: nesting depth, horizontal padding and `w-fit` all change nothing, and
+ * `display: flex` alone re-introduced the fill — `46px@199w` against
+ * `22px@199w 24px@51w`. `UserBubble` hangs in a flex row, so the bubble carries
+ * its own; the transcript column carries one for the space *between* messages,
+ * which no message can reach; and every markdown body carries one so agent prose
+ * is covered wherever it is drawn.
+ *
+ * `pre`, `td` and `th` are the descendants that need their own, and the list is
+ * an ablation rather than a guess: drop them and the code fence paints
+ * `60px@863w` and the table `65px@855w` instead of their lines. Nothing above the
+ * cells works — `table`, `thead`/`tbody` and `tr` all leave the whole table
+ * filled. `li` and `blockquote` were in the list and came back out, their
+ * profiles unchanged band for band.
+ *
+ * ⚠ **What this cannot reach is an *anonymous* block**, which is what a tight
+ * list item holding a nested list wraps its own text in: no selector names it,
+ * so no property can be put on it. `remarkListItemBlocks` is the other half of
+ * that one shape, and it works by giving the run a real box instead.
+ *
+ * What stood here was a trailing `::after { content: "\200B" }` on every block.
+ * It ended the **last** line of a block and nothing else, and it is superseded
+ * rather than kept beside this: measured, the two agree everywhere the
+ * zero-width space worked, and only this one covers the intermediate lines, the
+ * gaps between blocks and the column beside a bubble. It also cost a
+ * `:not(:has(…))` guard that had already grown three real shapes by 24px each.
+ * Q3.638.
+ */
+.sel-root,
+.sel-root pre,
+.sel-root td,
+.sel-root th {
+  column-span: all;
+}

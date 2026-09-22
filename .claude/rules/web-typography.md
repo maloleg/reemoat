@@ -277,7 +277,11 @@ the direction that order permits — and is refused by name for that reason: it 
 a height depend on which of two numbers is larger, and hands the next person a
 revert that fails in silence. 44 rather than 40 because every `ICON_BUTTON_SIZE`
 entry reaches this app's floor through a positioned `::after`, and the panel's
-`<aside>` is `overflow-hidden`, which clips hit-testing along with paint.
+`<aside>` is `overflow-hidden`, which clips hit-testing along with paint. ⚠ That
+`::after` is `[@media(pointer:coarse)]:` now — a pad extends `:hover` exactly as far
+as it extends hit-testing, and the ✕ in this head lit up 10px early because of it
+(Q3.634) — so the clipping argument holds under a finger and there is nothing to
+clip under a mouse.
 
 **The background panel carries three heading treatments at once, and exactly one
 of them is a constant.** `PanelHeading` — `Agents (2)`, `Dynamic workflows (1)`,

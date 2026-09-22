@@ -15,6 +15,7 @@ import {
   usageWorthAnnouncing,
 } from "../src/registry.js";
 import { LocalRuntime, loginBlockedReason } from "../src/runtime/local.js";
+import type { AgentAvailability } from "../src/runtime/types.js";
 import { createApp } from "../src/server.js";
 import { tmp } from "./tmp.js";
 import { check, report } from "./daemoncheck.env.js";
@@ -314,11 +315,48 @@ check("but resolving it as a session cwd is not", await resolveCwd(outsideRoots)
  * handshake, inside the driver whose own header promises no agent is involved,
  * leaving a session and a worktree behind for a line that was never about either.
  *
- * So what is checked is the refusal that would be a regression: `outside_roots`.
- * Anything else means the path was accepted and the request went on to fail, or
- * not, for reasons that have nothing to do with the browse roots.
+ * ⚠ **That second half was written down and then not fixed, and it went on
+ * spawning for releases.** Only the assertion moved; the request still went to
+ * the shared `app`, whose registry was built with no runtime and therefore holds
+ * a real `LocalRuntime` — so on any machine with kimi installed this line still
+ * ran `kimi acp`, completed the handshake and left a session and a worktree
+ * behind. Measured 2026-09-22 on the development machine by watching every exec
+ * for the length of one `pnpm daemoncheck`: one `kimi acp`, one LaunchServices
+ * registration as `kimi-code`, and a Dock tile that appears for about a second
+ * and goes — which is how this was found, reported as *a node terminal keeps
+ * popping up in my Dock*. A driver that promises no agent may not be judged by
+ * what it asserts; what it **runs** is the promise.
+ *
+ * So the request goes to an app of its own whose runtime says kimi is not
+ * installed. Nothing is spawned on any machine, the answer is the same in CI and
+ * here, and the assertion gets *stronger* rather than weaker: `create` resolves
+ * the cwd before it asks whether the agent exists, so `agent_unavailable` is a
+ * positive statement that the path was accepted and the request went on — where
+ * "not `outside_roots`" was satisfied by every other way of failing too.
  */
-const createOutside = await app.fetch(
+class UninstalledRuntime extends LocalRuntime {
+  override async availability(): Promise<AgentAvailability[]> {
+    return AGENT_IDS.map((id) => ({
+      id,
+      displayName: id,
+      available: false,
+      installable: true,
+      loggedIn: null,
+      hint: null,
+      lastStartRefusal: null,
+    }));
+  }
+}
+const uninstalled = new SessionRegistry(new MemoryEventStore(), null, undefined, new UninstalledRuntime());
+const { app: noAgents } = createApp({
+  registry: uninstalled,
+  verifier,
+  instanceId: "i_daemoncheck_noagents",
+  startedAt: now,
+  credentials,
+  roots: [users],
+});
+const createOutside = await noAgents.fetch(
   new Request("http://d/sessions", {
     method: "POST",
     headers: { authorization: `Bearer ${tokenFor("u_alice")}` },
@@ -328,6 +366,13 @@ const createOutside = await app.fetch(
 const outsideBody = (await createOutside.json()) as { error?: { code?: string } };
 check("and the route does not refuse it for being outside them", outsideBody.error?.code === "outside_roots", false);
 check("nor with the status that refusal carries", createOutside.status === 403, false);
+/*
+ * The positive half. It is what says the cwd got through rather than merely that
+ * one particular refusal did not fire — and it is only assertable because the
+ * runtime above is a stub: on the real one the answer depends on which CLIs the
+ * person running this happens to have.
+ */
+check("it got past the path and refused for the agent instead", [createOutside.status, outsideBody.error?.code], [503, "agent_unavailable"]);
 
 process.stdout.write("\ncreating a folder\n");
 {
