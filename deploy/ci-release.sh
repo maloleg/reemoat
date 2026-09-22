@@ -111,16 +111,20 @@ RELEASE_LATEST=${RELEASE_LATEST:-1}
 # is what a control-plane-only patch release wants and what the driver needs in
 # order to exercise the notes and the installer without seven artifacts. With
 # `:-` there is no way to say it.
-# ⚠ **Empty today, and that is the rule rather than an unfinished list.**
-# `check.yml` builds no app target yet, and `deploycheck` asserts that every name
-# here is built by one — so a target joins this list in the same change that
-# gives it a check leg, never before. Until then a release publishes exactly what
-# it published before this verb existed: the installer, and nothing else.
+# ⚠ **A target joins this list in the same change that gives it a `check.yml`
+# leg, never before**, and `deploycheck` asserts that pairing by reading the two
+# files against each other. The four below arrived together with `check.yml`'s
+# `native` matrix, which builds each of them — a real bundle rather than the
+# `--no-bundle` link check that job used to be, because a weaker build standing
+# behind a published artifact is the thing this rule exists to stop.
 #
-# The machinery is here and gated rather than absent, which is the whole point:
-# the first Android build in this project's history must not happen on the
-# release path.
-RELEASE_APP_TARGETS=${RELEASE_APP_TARGETS-}
+# ⚠ **`android` is absent, and its leg is not what is missing.** `android-apk` in
+# `check.yml` assembles a signed APK on every push, so the build half is covered.
+# What is missing is the four repository secrets the `app` verb refuses by name
+# further down — an unsigned APK installs on nothing, and a throwaway key can
+# never be replaced on a device that took it. It joins this list the day those
+# secrets exist, which is one word here and nothing else.
+RELEASE_APP_TARGETS=${RELEASE_APP_TARGETS-macos-arm64 macos-x64 linux-x64 windows-x64}
 RELEASE_APP_TARGET=${RELEASE_APP_TARGET:-}
 
 # The Android release key, base64 in and never written inside the checkout.

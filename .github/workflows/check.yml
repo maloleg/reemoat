@@ -293,9 +293,55 @@ jobs:
   # identity would not belong in a workflow that runs on every push. `docs/NATIVE.md`
   # carries what a signed build takes, and `deploy.yml`'s own header carries why
   # nothing in this repository publishes on a push.
+  # ⚠ **A matrix, and the `target:` keys are load-bearing rather than labels.**
+  # `deploycheck` greps this file for `- target: <name>` to decide whether a
+  # platform may join `RELEASE_APP_TARGETS` in `deploy/ci-release.sh`, so a
+  # platform's first build never happens on the release path. Which means a leg
+  # here has to be the *same* build the release makes — hence a real bundle below
+  # rather than the `--no-bundle` link check this job used to be.
+  #
+  # `fail-fast: false` because the legs are not interchangeable: a Windows
+  # bundler regression and a Linux one are two findings, and cancelling the rest
+  # on the first would report one of them per push.
+  #
+  # Android is deliberately absent — `android-apk` below is its leg, because an
+  # APK is a Gradle run rather than a `tauri build`.
   native:
-    runs-on: macos-latest
-    timeout-minutes: 30
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both macOS legs on the same arm64 runner: `tauri build --target
+          # x86_64-apple-darwin` cross-compiles there, and `build-daemon.mjs`'s
+          # `TARGETS` already carries the x64 Node build and `@esbuild/darwin-x64`
+          # beside the arm64 pair. Same table as `ci-release.sh`'s `app_runner`.
+          - target: macos-arm64
+            runner: macos-latest
+            triple: aarch64-apple-darwin
+            # macOS is the one platform that carries a daemon inside it, so it is
+            # the one that needs the payload staged before `cargo` runs at all.
+            payload: "yes"
+            # One leg runs the whole-crate gates; they are host-independent and
+            # four copies would be four times the minutes for one answer.
+            gates: "yes"
+          - target: macos-x64
+            runner: macos-latest
+            triple: x86_64-apple-darwin
+            payload: "yes"
+            gates: "no"
+          - target: linux-x64
+            runner: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            payload: "no"
+            gates: "no"
+          - target: windows-x64
+            runner: windows-latest
+            triple: x86_64-pc-windows-msvc
+            payload: "no"
+            gates: "no"
 
     steps:
       - uses: actions/checkout@v7
@@ -313,10 +359,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: ${{ matrix.triple }}
+
+      # WebKitGTK and the bundler's own tools, which no other leg needs and the
+      # runner image does not carry. `libwebkit2gtk-4.1-dev` is what `wry` links
+      # against on Linux; `patchelf` and `librsvg2-dev` are the AppImage
+      # bundler's, and without them the build fails inside a downloaded tool with
+      # no mention of this file.
+      - name: the Linux toolchain
+        if: matrix.target == 'linux-x64'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            desktop-file-utils
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: packages/native/src-tauri
+          key: ${{ matrix.target }}
 
       # Two installs, and the second is not a mistake. `packages/native` is under
       # `packages/` and deliberately **excluded** from the workspace — the three
@@ -367,30 +435,49 @@ jobs:
       #
       # It downloads an official Node build (checksum-verified) and installs the
       # payload's dependencies, so it wants the network and roughly a minute.
+      #
+      # ⚠ **Only where the platform carries one.** Every platform but macOS ships
+      # a client build — the overlay takes `externalBin` and `resources` away, and
+      # `tauri-build` reads that overlay at compile time — so staging on a Linux
+      # or Windows leg would build a payload nothing copies and hide the very
+      # refusal `ci-release.sh app` makes about a leftover one.
       - run: pnpm native:stage
+        if: matrix.payload == 'yes'
 
       - name: cargo fmt
+        if: matrix.gates == 'yes'
         run: cargo fmt --manifest-path packages/native/src-tauri/Cargo.toml --check
 
       - name: cargo clippy
-        if: '!cancelled()'
+        if: matrix.gates == 'yes' && !cancelled()
         run: cargo clippy --manifest-path packages/native/src-tauri/Cargo.toml --all-targets -- -D warnings
 
       # The Rust unit tests: the origin-escape table `host_cp` rests on, the
       # normalization that makes one server one credential key, the keyring scope,
       # and what this window may navigate to.
       - name: cargo test
-        if: '!cancelled()'
+        if: matrix.gates == 'yes' && !cancelled()
         run: cargo test --manifest-path packages/native/src-tauri/Cargo.toml
 
-      # `--no-bundle`, because bundling a `.dmg` adds minutes and asserts nothing
-      # this does not: the binary links, the capability files compile into an ACL,
-      # the `version` path resolves, and the embedded frontend is where the
-      # configuration says it is. Unsigned, which is what a runner with no identity
-      # produces and is the same artifact a developer gets.
+      # ⚠ **A real bundle, and the missing `--bundles` is the point.** Which kinds
+      # a platform produces is `bundle.targets` in its own
+      # `tauri.<platform>.conf.json` — `app` on macOS, `deb` and `appimage` on
+      # Linux, `nsis` on Windows — and naming them here would be a second copy of
+      # that list, with the silent direction being a check leg that builds an
+      # AppImage while the checked-in configuration says `deb`. `ci-release.sh`
+      # carries no `--bundles` for the same reason, and `deploycheck` asserts its
+      # absence there.
+      #
+      # This used to be `--no-bundle`, which was right while nothing published an
+      # app: it proved the binary links, the capability files compile into an ACL
+      # and the embedded frontend is where the configuration says. It is not
+      # enough to stand behind `RELEASE_APP_TARGETS`, where the question is
+      # whether the *artifact* builds. Unsigned, which is what a runner with no
+      # identity produces and is the same artifact a developer gets.
       - name: tauri build
         if: '!cancelled()'
-        run: pnpm --dir packages/native exec tauri build --no-bundle
+        shell: bash
+        run: pnpm --dir packages/native exec tauri build --target ${{ matrix.triple }}
 
   # The Android arm of the Rust, compiled. Its own job on `ubuntu-latest` rather
   # than a step in `native`, for two reasons that are both about the runner: the
