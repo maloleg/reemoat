@@ -27,6 +27,20 @@ it — so a citation here would be the one kind nothing checks.
 
 ### Fixed
 
+- **The Android app would not install on a OnePlus 13 by tapping the APK.** The
+  phone's own installer — OxygenOS, Android 16 — answered "App not installed as
+  package appears to be invalid", while the same file installed on a Pixel, and
+  over `adb` on that very phone. The APK carried only the signature Android has
+  checked since 7.0; it now carries the older JAR signature beside it, which
+  Android ignores and which that installer *may* have wanted. That is a
+  hypothesis rather than a finding: the message is the one Android's own
+  installer shows when the platform refuses a package, and the platform never
+  reads a JAR signature beside the newer one. This release installing on a
+  OnePlus would not settle it either, since the download and the build change
+  too; the same APK signed twice with one key, with and without the JAR
+  signature, and tapped on that phone, does. A release now also refuses to
+  publish an APK missing either signature.
+
 - **Starting a session in the macOS app put blank "exec" icons in the Dock.**
   Every MCP server an agent started through `npx` appeared there as an application
   of its own — a blank tile labelled "node" — because macOS counted the Node

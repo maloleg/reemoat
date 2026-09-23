@@ -389,6 +389,54 @@ say in their banner that `nativecheck` pins the `@color` form and the colour;
 a grep for `ic_launcher` in that driver returned nothing. It is comment-stripped,
 because both files quote the strings being looked for.
 
+## The release APK carries v1 beside v2, and the v1 half is not for Android
+
+**`enableV1Signing = true` and `enableV2Signing = true` sit in
+`app/build.gradle.kts`'s release signing config, and AGP makes neither decision
+by itself.** Left unset, it signs with the JAR scheme only when `minSdk` is below
+24 — so 0.10.1, at 24, shipped an APK with no JAR signature at all: no
+`MANIFEST.MF`, `.SF` or `.RSA` in `META-INF`, and a signing block holding v2,
+AGP's dependency metadata and verity padding. Nothing else about it was
+off-spec: `targetSdk` 36, native libraries stored uncompressed and 16 KB-aligned
+under `extractNativeLibs="false"`, and no v3 block, which AGP leaves off unless
+asked.
+
+⚠ **Android accepts that APK, and one installer did not.** It installed on a
+Pixel on Android 16 and over `adb install` on a OnePlus 13; tapped on that same
+OnePlus, the phone's own installer — OxygenOS, Android 16 — refused it as
+*"package appears to be invalid"*, with no earlier `com.reemoat.app` present to
+conflict with. `adb install` hands the file to the package manager directly; a
+tapped APK goes through the OEM's installer app, which parses it first. **That
+this parse wants a JAR signature is a hypothesis and not a measurement, and a
+weak one**: the words are AOSP's `install_failed_invalid_apk`, which the stock
+installer shows when the *platform's* install session refuses the package, and
+the platform never reads a JAR signature beside a v2 one. The next release
+installing would not settle it — the download and the build change with it.
+What does is the published APK signed twice with one key, with and without v1,
+tapped on that phone: the v2-only copy has to reproduce the refusal. If the v1
+copy is refused too, the pair has cost nothing, and `adb logcat` across the
+refused install is what names the real reason.
+
+**v3 is left off on purpose.** Android 9 and later verify v3 in place of v2
+wherever both are present, so enabling it here would change what every current
+phone checks, the Pixel that already worked included, and an install that then
+succeeded would not say which half fixed it. v4 is a separate `.idsig` file for
+incremental `adb` installs and is not in the APK.
+
+⚠ **`apksigner verify --verbose` prints `v1 … false` for an APK with a valid v1
+signature, so the obvious gate refuses every correct release.** apksig consults
+the JAR signature only below API 24 or when no v2-or-newer block exists — the
+rule Android 7 applies, written out in `ApkVerifier` — and it checks from the
+manifest's `minSdk`, which is 24. So `ci-release.sh` asks again at
+`--min-sdk-version 23`, where a missing JAR signature is an error rather than
+something skipped; 23 rather than lower, because a lower floor also holds the
+signature to algorithms older platforms lack. The plain `verify` before it is
+unchanged and still answers *signed, as this app's devices check it*.
+`deploycheck`'s stub answers `false` for v1 unless it is asked below 24, which
+is what makes dropping the flag a red there rather than a pass on a stub that
+said what the script wanted. `nativecheck` pins the pair against the Gradle
+script's code.
+
 ## What a clone cannot build, and the one file that is this machine's
 
 **`gen/android` is committed and a clone still cannot build it.** Exactly one
@@ -417,7 +465,7 @@ embedded in `@tauri-apps/cli`, read out of the binary on 2026-09-19:
 | File | What a re-run takes out |
 |---|---|
 | `app/src/main/java/com/reemoat/app/MainActivity.kt` | the `Context` import, the `System.loadLibrary` companion, the `external fun initNdkContext`, and the call to it **before** `super.onCreate` |
-| `app/build.gradle.kts` | `signingConfigs` and the conditional `signingConfig`, the `repositories { maven … }` block that asks cargo for the `rustls-platform-verifier` `.aar`, and the dependency on it |
+| `app/build.gradle.kts` | `signingConfigs` and the conditional `signingConfig`, the `enableV1Signing`/`enableV2Signing` pair in that signing config, the `repositories { maven … }` block that asks cargo for the `rustls-platform-verifier` `.aar`, and the dependency on it |
 | `app/proguard-rules.pro` | the `-keep` rule for `org.rustls.platformverifier.**` |
 | `app/src/main/AndroidManifest.xml` | `networkSecurityConfig`, `dataExtractionRules`, `allowBackup="false"`, `fullBackupContent="false"` |
 | `app/src/main/res/mipmap-*` | this project's rasters, replaced by Tauri's own — the section above is the whole story |
