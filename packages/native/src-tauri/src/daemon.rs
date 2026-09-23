@@ -84,6 +84,12 @@ const PAYLOAD_OVERRIDE: &str = "REEMOAT_DAEMON_PAYLOAD";
 ///
 /// Written down in `build-daemon.mjs`, `build.rs` and `tauri.conf.json`'s
 /// `bundle.macOS.files` as well; `nativecheck` compares all four.
+///
+/// ⚠ **macOS only, like its one reader.** Only the macOS arm of
+/// {@link runtime_beside} names it, so on every other target it is dead code, and
+/// the `native-android` job's `clippy --target aarch64-linux-android -- -D warnings`
+/// refuses the crate over it — which a clippy run on a Mac cannot show.
+#[cfg(target_os = "macos")]
 pub const RUNTIME_HELPER: &str = "Reemoat Runtime.app";
 
 /// The Node binary the daemon runs under, found from this process's executable.
