@@ -5235,7 +5235,7 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
         'if [ "$floor" -lt 24 ]; then',
         apk.jar
           ? "  v1=true"
-          : '  echo "DOES NOT VERIFY" >&2; echo "ERROR: JAR_SIG_NO_MANIFEST: Missing META-INF/MANIFEST.MF" >&2; exit 1',
+          : '  echo "DOES NOT VERIFY" >&2; echo "ERROR: Missing META-INF/MANIFEST.MF" >&2; exit 1',
         "fi",
         '[ "$verbose" = 1 ] || exit 0',
         'echo "Verifies"',
@@ -5358,7 +5358,11 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
    * `adb install` on the OnePlus whose own installer then refused it — so the
    * refusal has to come from the second run, name the scheme, and not call a
    * signed file unsigned. apksigner's own output rides the refusal, because
-   * `JAR_SIG_NO_MANIFEST` is the line that says what is missing from the file.
+   * `Missing META-INF/MANIFEST.MF` is the line that says what is missing from the
+   * file. ⚠ That is the text and not apksig's name for it: the issue is
+   * `JAR_SIG_NO_MANIFEST`, and apksigner prints only its message — read off
+   * build-tools 36.0.0 against the 0.10.1 asset — so a stub quoting the name
+   * would have this assert a line no real refusal carries.
    */
   const v2Only = app("android", {
     ...androidSecrets,
@@ -5370,7 +5374,7 @@ process.stdout.write("\nwhat a release does, driven without a registry\n");
     "and the refusal names the JAR scheme, carries apksigner's reason, and does not call it unsigned",
     [
       v2Only.err.includes("does not verify using the v1 scheme (JAR signing)"),
-      v2Only.err.includes("JAR_SIG_NO_MANIFEST"),
+      v2Only.err.includes("Missing META-INF/MANIFEST.MF"),
       v2Only.err.includes("not validly signed"),
     ],
     [true, true, false],

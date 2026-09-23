@@ -348,11 +348,15 @@ OnePlus, the phone's own installer — OxygenOS, Android 16 — refused it as
 *"package appears to be invalid"*, with no earlier `com.reemoat.app` present to
 conflict with. `adb install` hands the file to the package manager directly; a
 tapped APK goes through the OEM's installer app, which parses it first. **That
-this parse wants a JAR signature is the leading hypothesis and not a
-measurement**, and the next release sideloaded on a OnePlus is what settles it.
-If that one is refused too, the pair has cost nothing — Android 7 and later never
-read a JAR signature beside a v2 one — and `adb logcat` across the refused
-install is what names the real reason.
+this parse wants a JAR signature is a hypothesis and not a measurement, and a
+weak one**: the words are AOSP's `install_failed_invalid_apk`, which the stock
+installer shows when the *platform's* install session refuses the package, and
+the platform never reads a JAR signature beside a v2 one. The next release
+installing would not settle it — the download and the build change with it.
+What does is the published APK signed twice with one key, with and without v1,
+tapped on that phone: the v2-only copy has to reproduce the refusal. If the v1
+copy is refused too, the pair has cost nothing, and `adb logcat` across the
+refused install is what names the real reason.
 
 **v3 is left off on purpose.** Android 9 and later verify v3 in place of v2
 wherever both are present, so enabling it here would change what every current

@@ -1117,9 +1117,11 @@ case "$verb" in
       # the default it prints `v1 scheme (JAR signing): false` about an APK
       # carrying a perfectly good one, and a gate reading that line would refuse
       # every correct release. At 23 the JAR signature is verified and a missing
-      # one is an error (`JAR_SIG_NO_MANIFEST`) rather than a skip. Not lower: a
-      # lower floor also holds the signature to algorithms older platforms lack,
-      # which is a question about devices this app does not install on.
+      # one is an error rather than a skip — apksig's `JAR_SIG_NO_MANIFEST`,
+      # which apksigner prints as `ERROR: Missing META-INF/MANIFEST.MF`, never
+      # by that name. Not lower: a lower floor also holds the signature to
+      # algorithms older platforms lack, which is a question about devices this
+      # app does not install on.
       #
       # A second run rather than a flag on the first, so each refusal is about one
       # thing: that one is a signature that does not verify, this one a scheme the

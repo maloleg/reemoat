@@ -32,10 +32,14 @@ it — so a citation here would be the one kind nothing checks.
   package appears to be invalid", while the same file installed on a Pixel, and
   over `adb` on that very phone. The APK carried only the signature Android has
   checked since 7.0; it now carries the older JAR signature beside it, which
-  Android ignores and which that installer most likely wanted. *Most likely*
-  rather than certainly: it is confirmed only once this release's APK is
-  installed on a OnePlus. A release now also refuses to publish an APK missing
-  either signature.
+  Android ignores and which that installer *may* have wanted. That is a
+  hypothesis rather than a finding: the message is the one Android's own
+  installer shows when the platform refuses a package, and the platform never
+  reads a JAR signature beside the newer one. This release installing on a
+  OnePlus would not settle it either, since the download and the build change
+  too; the same APK signed twice with one key, with and without the JAR
+  signature, and tapped on that phone, does. A release now also refuses to
+  publish an APK missing either signature.
 
 ## [0.10.1] - 2026-09-22
 

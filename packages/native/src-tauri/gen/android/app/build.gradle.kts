@@ -81,9 +81,13 @@ android {
                  * hands the file to the package manager directly; a downloaded
                  * APK that is tapped goes through the OEM's installer app first,
                  * which parses it on its own. **That this parse wants a JAR
-                 * signature is the leading hypothesis, not a measurement**, and
-                 * sideloading the next release on that phone is the only thing
-                 * that confirms it.
+                 * signature is a hypothesis, not a measurement** — and a weak
+                 * one: those words are what Android's own installer shows when
+                 * the platform refuses a package, and the platform never reads
+                 * v1 beside v2. The next release installing would not confirm
+                 * it, since the download and the build change with it; the
+                 * published APK signed twice with one key, with and without v1,
+                 * and tapped on that phone, would.
                  *
                  * `enableV2Signing` is AGP's default already and is written down
                  * so the pair is one decision rather than half of one leaning on
